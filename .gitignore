@@ -1,0 +1,8 @@
+.cursor
+.jupyter
+.venv
+.vscode
+*.ipynb
+__pycache__/
+*.pyc
+*.pth

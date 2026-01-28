@@ -1,0 +1,9 @@
+gymnasium
+matplotlib
+numpy
+torch
+torchvision
+torchaudio
+pillow
+ipykernel
+jupyter
