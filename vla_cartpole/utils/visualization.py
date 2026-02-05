@@ -78,3 +78,68 @@ def plot_training_progress(rewards, lengths, window=20):
 
     plt.tight_layout()
     plt.show()
+
+
+def plot_episode_summary(
+    *,
+    frames,
+    rewards,
+    actions,
+    probs_left,
+    probs_right,
+    values,
+    xs,
+    thetas,
+    title="Episode summary",
+    num_frame_samples: int = 8,
+):
+    """Plot a single episode rollout summary.
+
+    Shows a small frame strip plus time series for reward/value, policy probs/actions,
+    and environment state (x/theta).
+    """
+    T = len(rewards)
+    fig = plt.figure(figsize=(14, 8))
+    gs = fig.add_gridspec(3, 2, height_ratios=[1.0, 1.2, 1.2])
+
+    ax_frames = fig.add_subplot(gs[0, :])
+    ax_reward = fig.add_subplot(gs[1, 0])
+    ax_policy = fig.add_subplot(gs[1, 1])
+    ax_state = fig.add_subplot(gs[2, :])
+
+    ax_frames.set_title(title)
+    ax_frames.axis("off")
+
+    if frames:
+        sample_count = min(num_frame_samples, len(frames))
+        idxs = np.linspace(0, len(frames) - 1, sample_count).astype(int)
+        strip = np.concatenate([frames[i] for i in idxs], axis=1)
+        ax_frames.imshow(strip)
+
+    steps = np.arange(T)
+
+    ax_reward.plot(steps, rewards, label="reward", linewidth=1)
+    ax_reward.plot(steps, values, label="value", linewidth=1)
+    ax_reward.set_xlabel("step")
+    ax_reward.set_title("Reward / Value")
+    ax_reward.grid(True, alpha=0.3)
+    ax_reward.legend()
+
+    ax_policy.plot(steps, probs_left, label="P(left)", linewidth=1)
+    ax_policy.plot(steps, probs_right, label="P(right)", linewidth=1)
+    ax_policy.scatter(steps, actions, s=10, label="action (0/1)", alpha=0.6)
+    ax_policy.set_ylim(-0.05, 1.05)
+    ax_policy.set_xlabel("step")
+    ax_policy.set_title("Policy")
+    ax_policy.grid(True, alpha=0.3)
+    ax_policy.legend()
+
+    ax_state.plot(steps, xs, label="x", linewidth=1)
+    ax_state.plot(steps, thetas, label="theta", linewidth=1)
+    ax_state.set_xlabel("step")
+    ax_state.set_title("State")
+    ax_state.grid(True, alpha=0.3)
+    ax_state.legend()
+
+    fig.tight_layout()
+    return fig

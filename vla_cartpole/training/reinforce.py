@@ -1,5 +1,9 @@
 """Actor-Critic (A2C) training implementation."""
 
+from __future__ import annotations
+
+from pathlib import Path
+
 import numpy as np
 import torch
 import torch.optim as optim
@@ -37,10 +41,44 @@ def compute_gae(rewards, values, next_value, dones, gamma=0.99, lam=0.95):
     return advantages, returns_t
 
 
+def compute_gae_batch(rewards_t, values_t, next_value_t, dones_t, gamma=0.99, lam=0.95):
+    """Compute GAE for batched rollouts.
+
+    Args:
+        rewards_t: Tensor of shape [T, N]
+        values_t: Tensor of shape [T, N]
+        next_value_t: Tensor of shape [N]
+        dones_t: Tensor of shape [T, N] with 1.0 for terminal transitions
+    """
+    T = rewards_t.shape[0]
+    advantages = torch.zeros_like(rewards_t)
+    gae = torch.zeros_like(next_value_t)
+
+    for t in reversed(range(T)):
+        next_val = next_value_t if t == T - 1 else values_t[t + 1]
+        next_nonterminal = 1.0 - dones_t[t]
+        delta = rewards_t[t] + gamma * next_val * next_nonterminal - values_t[t]
+        gae = delta + gamma * lam * next_nonterminal * gae
+        advantages[t] = gae
+
+    returns_t = advantages + values_t
+    return advantages, returns_t
+
+
 def train_vla(env, model, instruction, num_episodes=1000, lr=3e-4, 
               gamma=0.99, max_steps=200, device='cpu', print_every=50,
               entropy_coef=0.01, value_coef=0.5, actor_lr=None, critic_lr=None,
-              gae_lambda=0.95):
+              gae_lambda=0.95,
+              num_envs: int = 1,
+              rollout_steps: int = 32,
+              checkpoint_every_steps: int | None = 1000,
+              checkpoint_dir: str | Path = "checkpoints",
+              checkpoint_latest_every_steps: int | None = None,
+              checkpoint_latest_path: str | Path | None = "model.pth",
+              eval_every_steps: int | None = 1000,
+              eval_num_episodes: int = 5,
+              eval_max_steps: int = 200,
+              eval_env_factory=None):
     """Train the VLA model using Advantage Actor-Critic (A2C).
     
     Args:
@@ -58,6 +96,16 @@ def train_vla(env, model, instruction, num_episodes=1000, lr=3e-4,
         actor_lr: Separate learning rate for actor (policy)
         critic_lr: Separate learning rate for critic (value)
         gae_lambda: Lambda for Generalized Advantage Estimation
+        num_envs: Number of parallel environments to run (uses batched model forward)
+        rollout_steps: Number of environment steps per optimization update
+        checkpoint_every_steps: Save a checkpoint every N environment steps (None to disable)
+        checkpoint_dir: Directory to write numbered checkpoints into
+        checkpoint_latest_every_steps: Save latest weights every N environment steps (defaults to checkpoint_every_steps)
+        checkpoint_latest_path: Optional path to also write the latest weights to (None to disable)
+        eval_every_steps: Run evaluation every N environment steps (None to disable)
+        eval_num_episodes: Number of evaluation episodes per eval run
+        eval_max_steps: Max steps per evaluation episode
+        eval_env_factory: Optional callable that returns a fresh eval environment
         
     Returns:
         Tuple of (episode_rewards, episode_lengths) lists
@@ -85,117 +133,208 @@ def train_vla(env, model, instruction, num_episodes=1000, lr=3e-4,
     episode_lengths = []
     
     bow = make_bow_instruction(instruction).unsqueeze(0).to(device)
-    
-    for episode in range(num_episodes):
-        # Collect episode data
-        obs, _ = env.reset()
-        
-        log_probs = []
-        values = []
-        rewards = []
-        entropies = []
-        dones = []
-        
-        last_obs = obs
-        last_terminated = False
-        last_truncated = False
 
-        for step in range(max_steps):
-            img_t = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(device)
-            
-            # Get action and value from model
-            logits, value = model.get_action_and_value(img_t, bow)
-            
-            # Sample action
+    global_step = 0
+    checkpoint_due_steps: list[int] = []
+    checkpoint_latest_due_steps: list[int] = []
+    eval_due_steps: list[int] = []
+
+    checkpoint_dir_path = Path(checkpoint_dir) if checkpoint_every_steps else None
+    latest_path = Path(checkpoint_latest_path) if checkpoint_latest_path else None
+    if checkpoint_latest_every_steps is None:
+        checkpoint_latest_every_steps = checkpoint_every_steps
+
+    next_checkpoint_step = checkpoint_every_steps if checkpoint_every_steps else None
+    next_checkpoint_latest_step = (
+        checkpoint_latest_every_steps
+        if (latest_path is not None and checkpoint_latest_every_steps)
+        else None
+    )
+    next_eval_step = eval_every_steps if eval_every_steps else None
+
+    eval_env = None
+
+    if num_envs < 1:
+        raise ValueError("num_envs must be >= 1")
+    if rollout_steps < 1:
+        raise ValueError("rollout_steps must be >= 1")
+
+    envs = [env]
+    if num_envs > 1:
+        envs.extend(env.__class__() for _ in range(num_envs - 1))
+
+    obs_list = []
+    for e in envs:
+        o, _ = e.reset()
+        obs_list.append(o)
+
+    running_rewards = [0.0 for _ in range(num_envs)]
+    running_lengths = [0 for _ in range(num_envs)]
+    episodes_completed = 0
+
+    while episodes_completed < num_episodes:
+        log_probs_steps = []
+        values_steps = []
+        rewards_steps = []
+        entropies_steps = []
+        dones_steps = []
+
+        for _ in range(rollout_steps):
+            obs_batch = np.stack(obs_list, axis=0)
+            img_t = torch.tensor(obs_batch, dtype=torch.float32, device=device)
+            bow_batch = bow.expand(num_envs, -1)
+
+            logits, value = model.get_action_and_value(img_t, bow_batch)
             action_dist = torch.distributions.Categorical(logits=logits)
             action = action_dist.sample()
-            log_prob = action_dist.log_prob(action)
-            entropy = action_dist.entropy()
-            
-            # Take action in environment
-            obs, reward, terminated, truncated, _ = env.step(action.item())
-            last_obs = obs
-            last_terminated = terminated
-            last_truncated = truncated
-            
-            # Store data
-            log_probs.append(log_prob)
-            values.append(value)
-            rewards.append(reward)
-            entropies.append(entropy)
-            dones.append(terminated)
-            
-            if terminated or truncated:
-                break
-        
-        # Skip empty episodes
-        if len(rewards) == 0:
-            continue
-        
-        # Bootstrap value for truncated episodes, zero for true terminal
-        if last_terminated:
-            next_value = torch.tensor(0.0, device=device)
-        else:
-            with torch.no_grad():
-                next_img_t = torch.tensor(last_obs, dtype=torch.float32).unsqueeze(0).to(device)
-                next_value = model.get_value(next_img_t, bow).squeeze()
 
-        # Compute GAE advantages and returns
-        advantages_t, returns_t = compute_gae(
-            rewards=rewards,
-            values=values,
-            next_value=next_value,
-            dones=dones,
+            log_probs_steps.append(action_dist.log_prob(action))
+            values_steps.append(value)
+            entropies_steps.append(action_dist.entropy())
+
+            actions_cpu = action.detach().cpu().numpy().tolist()
+
+            next_obs_list = [None for _ in range(num_envs)]
+            reward_list = [0.0 for _ in range(num_envs)]
+            done_list = [False for _ in range(num_envs)]
+
+            for i, e in enumerate(envs):
+                next_obs, reward, terminated, truncated, _ = e.step(actions_cpu[i])
+                running_rewards[i] += float(reward)
+                running_lengths[i] += 1
+
+                done = bool(terminated or truncated or (running_lengths[i] >= max_steps))
+                reward_list[i] = float(reward)
+                done_list[i] = done
+
+                if done:
+                    episode_rewards.append(running_rewards[i])
+                    episode_lengths.append(running_lengths[i])
+                    episodes_completed += 1
+
+                    running_rewards[i] = 0.0
+                    running_lengths[i] = 0
+
+                    next_obs, _ = e.reset()
+
+                next_obs_list[i] = next_obs
+
+            obs_list = next_obs_list
+
+            rewards_steps.append(torch.tensor(reward_list, dtype=torch.float32, device=device))
+            dones_steps.append(torch.tensor(done_list, dtype=torch.float32, device=device))
+
+            global_step += num_envs
+            if next_checkpoint_step is not None and checkpoint_every_steps:
+                while global_step >= next_checkpoint_step:
+                    checkpoint_due_steps.append(next_checkpoint_step)
+                    next_checkpoint_step += checkpoint_every_steps
+            if next_checkpoint_latest_step is not None and checkpoint_latest_every_steps:
+                while global_step >= next_checkpoint_latest_step:
+                    checkpoint_latest_due_steps.append(next_checkpoint_latest_step)
+                    next_checkpoint_latest_step += checkpoint_latest_every_steps
+            if next_eval_step is not None and eval_every_steps:
+                while global_step >= next_eval_step:
+                    eval_due_steps.append(next_eval_step)
+                    next_eval_step += eval_every_steps
+
+            if episodes_completed >= num_episodes:
+                break
+
+        # Bootstrap value at the end of rollout
+        with torch.no_grad():
+            obs_batch = np.stack(obs_list, axis=0)
+            next_img_t = torch.tensor(obs_batch, dtype=torch.float32, device=device)
+            bow_batch = bow.expand(num_envs, -1)
+            next_value = model.get_value(next_img_t, bow_batch)
+
+        log_probs_t = torch.stack(log_probs_steps)  # [T, N]
+        values_t = torch.stack(values_steps)         # [T, N]
+        entropies_t = torch.stack(entropies_steps)   # [T, N]
+        rewards_t = torch.stack(rewards_steps)       # [T, N]
+        dones_t = torch.stack(dones_steps)           # [T, N]
+
+        advantages_t, returns_t = compute_gae_batch(
+            rewards_t=rewards_t,
+            values_t=values_t,
+            next_value_t=next_value,
+            dones_t=dones_t,
             gamma=gamma,
             lam=gae_lambda,
         )
-        
-        log_probs_t = torch.stack(log_probs).squeeze()
-        values_t = torch.stack(values).squeeze()
-        entropies_t = torch.stack(entropies).squeeze()
-        
+
         # Normalize advantages for stability (important!)
-        if len(advantages_t) > 1:
+        if advantages_t.numel() > 1:
             advantages_t = (advantages_t - advantages_t.mean()) / (advantages_t.std() + 1e-8)
-        
-        # Actor loss: policy gradient with advantage
+
         actor_loss = -(log_probs_t * advantages_t).mean()
-        
-        # Critic loss: MSE between predicted values and returns (use Huber for stability)
         critic_loss = F.smooth_l1_loss(values_t, returns_t)
-        
-        # Entropy bonus (maximize entropy = minimize negative entropy)
         entropy_loss = -entropies_t.mean()
-        
-        # Total loss
         loss = actor_loss + value_coef * critic_loss + entropy_coef * entropy_loss
-        
-        # Update model
+
         optimizer.zero_grad()
         loss.backward()
-        
-        # Clip gradients (separately for actor to prevent catastrophic updates)
+
         torch.nn.utils.clip_grad_norm_(model.actor.parameters(), max_norm=0.5)
         torch.nn.utils.clip_grad_norm_(model.critic.parameters(), max_norm=0.5)
         torch.nn.utils.clip_grad_norm_(model.vision.parameters(), max_norm=1.0)
-        
+
         optimizer.step()
-        
-        # Track metrics
-        total_reward = sum(rewards)
-        episode_rewards.append(total_reward)
-        episode_lengths.append(len(rewards))
-        
-        if (episode + 1) % print_every == 0:
+
+        if episodes_completed > 0 and (episodes_completed % print_every == 0):
             avg_reward = np.mean(episode_rewards[-print_every:])
             avg_length = np.mean(episode_lengths[-print_every:])
             avg_entropy = entropies_t.mean().item()
             avg_value = values_t.mean().item()
-            print(f"Episode {episode+1}/{num_episodes} | "
-                  f"Reward: {avg_reward:.1f} | "
-                  f"Length: {avg_length:.1f} | "
-                  f"Entropy: {avg_entropy:.3f} | "
-                  f"Value: {avg_value:.1f}")
+            print(
+                f"Episodes {episodes_completed}/{num_episodes} | "
+                f"Reward: {avg_reward:.1f} | "
+                f"Length: {avg_length:.1f} | "
+                f"Entropy: {avg_entropy:.3f} | "
+                f"Value: {avg_value:.1f}"
+            )
+        
+        if checkpoint_due_steps and checkpoint_dir_path is not None:
+            checkpoint_dir_path.mkdir(parents=True, exist_ok=True)
+            for due_step in checkpoint_due_steps:
+                checkpoint_path = checkpoint_dir_path / f"model_step_{due_step}.pth"
+                torch.save(model.state_dict(), checkpoint_path)
+                print(f"[checkpoint step {due_step}] saved to '{checkpoint_path}'")
+            checkpoint_due_steps.clear()
+
+        if checkpoint_latest_due_steps and latest_path is not None:
+            # Only need the most recent step because this file is overwritten.
+            torch.save(model.state_dict(), latest_path)
+            checkpoint_latest_due_steps.clear()
+
+        if eval_due_steps:
+            from vla_cartpole.evaluation import evaluate_model
+
+            if eval_env is None:
+                if eval_env_factory is not None:
+                    eval_env = eval_env_factory()
+                else:
+                    eval_env = env.__class__()
+
+            was_training = model.training
+            for due_step in eval_due_steps:
+                results = evaluate_model(
+                    env=eval_env,
+                    model=model,
+                    instruction=instruction,
+                    num_episodes=eval_num_episodes,
+                    max_steps=eval_max_steps,
+                    device=device,
+                    verbose=False,
+                )
+                print(
+                    f"[eval step {due_step}] "
+                    f"avg_reward={results['avg_reward']:.2f}±{results['std_reward']:.2f} | "
+                    f"avg_length={results['avg_length']:.1f}±{results['std_length']:.1f}"
+                )
+            if was_training:
+                model.train()
+            eval_due_steps.clear()
     
     model.eval()
     return episode_rewards, episode_lengths

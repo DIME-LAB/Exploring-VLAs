@@ -6,7 +6,7 @@ import torch
 from vla_cartpole.utils.text import make_bow_instruction
 
 
-def evaluate_model(env, model, instruction, num_episodes=5, max_steps=100, device='cpu'):
+def evaluate_model(env, model, instruction, num_episodes=5, max_steps=100, device='cpu', verbose=True):
     """Evaluate a trained model on multiple episodes.
     
     Args:
@@ -16,6 +16,7 @@ def evaluate_model(env, model, instruction, num_episodes=5, max_steps=100, devic
         num_episodes: Number of evaluation episodes
         max_steps: Maximum steps per episode
         device: Device to run on ('cpu' or 'cuda')
+        verbose: If True, prints per-episode results
         
     Returns:
         Dictionary with keys: rewards, lengths, avg_reward, std_reward, avg_length, std_length
@@ -47,7 +48,8 @@ def evaluate_model(env, model, instruction, num_episodes=5, max_steps=100, devic
         
         test_rewards.append(total_reward)
         test_lengths.append(steps)
-        print(f"Episode {test_ep+1}: Reward={total_reward:.3f}, Length={steps}")
+        if verbose:
+            print(f"Episode {test_ep+1}: Reward={total_reward:.3f}, Length={steps}")
     
     return {
         'rewards': test_rewards,
