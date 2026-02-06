@@ -38,7 +38,7 @@ class MiniCartPoleVisionEnv(gym.Env):
         self.x_threshold = 0.3  # Cart position limit (for visual bounds)
         self.theta_threshold = 0.5  # ~29 degrees
 
-    def reset(self, seed=None, options=None):
+    def reset(self, *, seed=None, options=None):
         """Reset the environment to initial state.
         
         Args:
@@ -49,14 +49,13 @@ class MiniCartPoleVisionEnv(gym.Env):
             observation: Initial RGB image observation
             info: Empty info dict
         """
-        if seed is not None:
-            np.random.seed(seed)
+        super().reset(seed=seed)
         
         # Start with small random perturbations
-        self.x = np.random.uniform(-0.02, 0.02)
-        self.x_dot = np.random.uniform(-0.02, 0.02)
-        self.theta = np.random.uniform(-0.05, 0.05)
-        self.theta_dot = np.random.uniform(-0.05, 0.05)
+        self.x = self.np_random.uniform(-0.02, 0.02)
+        self.x_dot = self.np_random.uniform(-0.02, 0.02)
+        self.theta = self.np_random.uniform(-0.05, 0.05)
+        self.theta_dot = self.np_random.uniform(-0.05, 0.05)
         
         return self.render(), {}
 

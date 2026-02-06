@@ -28,6 +28,7 @@ from vla_cartpole.evaluation import evaluate_model
 
 from vla_cartpole.env import MiniCartPoleVisionEnv
 from vla_cartpole.models import MiniVLA
+from vla_cartpole.utils.runtime import pick_device
 from vla_cartpole.utils.text import make_bow_instruction
 from vla_cartpole.utils.visualization import plot_episode_summary
 
@@ -79,12 +80,7 @@ def main(argv: list[str] | None = None):
     weights_path = _resolve_weights_path(args.weights, args.checkpoint_step)
 
     # Configuration
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        device = torch.device("mps")
-    else:
-        device = torch.device("cpu")
+    device = pick_device()
     instruction = args.instruction
     
     # Create environment and model
@@ -104,7 +100,7 @@ def main(argv: list[str] | None = None):
     bow = make_bow_instruction(instruction).unsqueeze(0).to(device)
     
     # Optional quick scalar evaluation
-    print("Quick eval (deterministic):")
+    print("Quick eval:")
     results = evaluate_model(
         env=MiniCartPoleVisionEnv(),
         model=model,

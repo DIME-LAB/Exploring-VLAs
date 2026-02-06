@@ -69,6 +69,7 @@ def train_vla(env, model, instruction, num_episodes=1000, lr=3e-4,
               gamma=0.99, max_steps=200, device='cpu', print_every=50,
               entropy_coef=0.01, value_coef=0.5, actor_lr=None, critic_lr=None,
               gae_lambda=0.95,
+              seed: int | None = None,
               num_envs: int = 1,
               rollout_steps: int = 32,
               checkpoint_every_steps: int | None = 1000,
@@ -96,6 +97,7 @@ def train_vla(env, model, instruction, num_episodes=1000, lr=3e-4,
         actor_lr: Separate learning rate for actor (policy)
         critic_lr: Separate learning rate for critic (value)
         gae_lambda: Lambda for Generalized Advantage Estimation
+        seed: Optional base seed for reproducible env resets (env i gets seed+i).
         num_envs: Number of parallel environments to run (uses batched model forward)
         rollout_steps: Number of environment steps per optimization update
         checkpoint_every_steps: Save a checkpoint every N environment steps (None to disable)
@@ -164,8 +166,11 @@ def train_vla(env, model, instruction, num_episodes=1000, lr=3e-4,
         envs.extend(env.__class__() for _ in range(num_envs - 1))
 
     obs_list = []
-    for e in envs:
-        o, _ = e.reset()
+    for i, e in enumerate(envs):
+        if seed is None:
+            o, _ = e.reset()
+        else:
+            o, _ = e.reset(seed=seed + i)
         obs_list.append(o)
 
     running_rewards = [0.0 for _ in range(num_envs)]
