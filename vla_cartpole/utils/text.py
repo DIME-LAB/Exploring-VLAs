@@ -1,5 +1,6 @@
 """Text processing utilities."""
 
+import hashlib
 import torch
 
 
@@ -15,6 +16,10 @@ def make_bow_instruction(text, vocab_size=1000):
     """
     bow = torch.zeros(vocab_size)
     for w in text.lower().split():
-        idx = abs(hash(w)) % vocab_size
+        # Use a stable hash so indices are reproducible across runs/machines.
+        # (Python's built-in `hash()` is intentionally randomized unless
+        # PYTHONHASHSEED is set at interpreter startup.)
+        h = hashlib.sha256(w.encode("utf-8")).digest()
+        idx = int.from_bytes(h[:8], byteorder="little", signed=False) % vocab_size
         bow[idx] += 1
     return bow
