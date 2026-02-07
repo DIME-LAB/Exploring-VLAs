@@ -56,13 +56,13 @@ def main(num_episodes: int = 6000, seed: int | None = 0):
         value_coef=0.5,  # Balanced critic weight
         gae_lambda=0.95,
         seed=seed,
-        num_envs=50,  # More parallel environments for stable updates
+        num_envs=1000,  # More parallel environments for stable updates
         rollout_steps=32,
-        checkpoint_every_steps=100_000,
+        checkpoint_every_steps=1000_000,
         checkpoint_dir="checkpoints",
         checkpoint_latest_every_steps=1000,
         checkpoint_latest_path="model.pth",
-        eval_every_steps=100_000,
+        eval_every_steps=1000_000,
         eval_num_episodes=5,
         eval_max_steps=200,
     )
