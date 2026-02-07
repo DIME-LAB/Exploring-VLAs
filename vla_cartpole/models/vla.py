@@ -21,14 +21,16 @@ class MiniVLA(nn.Module):
 
         # Shared vision encoder
         self.vision = nn.Sequential(
-            nn.Conv2d(3, 32, 3, stride=2, padding=1),   # 64x64 -> 32x32
+            nn.Conv2d(3, 32, 3, stride=2, padding=1),   # 256x64 -> 128x32
             nn.ReLU(),
-            nn.Conv2d(32, 64, 3, stride=2, padding=1),  # 32x32 -> 16x16
+            nn.Conv2d(32, 64, 3, stride=2, padding=1),  # 128x32 -> 64x16
             nn.ReLU(),
-            nn.Conv2d(64, 64, 3, stride=2, padding=1),  # 16x16 -> 8x8
+            nn.Conv2d(64, 64, 3, stride=2, padding=1),  # 64x16 -> 32x8
+            nn.ReLU(),
+            nn.Conv2d(64, 64, (1, 3), stride=(1, 2), padding=(0, 1)),  # 32x8 -> 16x8 (shrink width only)
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(64 * 8 * 8, 256),
+            nn.Linear(64 * 16 * 8, 256),
             nn.ReLU(),
         )
 

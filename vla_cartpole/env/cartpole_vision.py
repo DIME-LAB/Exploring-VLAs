@@ -14,7 +14,7 @@ from gymnasium.utils import seeding
 class MiniCartPoleVisionEnv(gym.Env):
     """A simplified CartPole environment that renders visual observations.
     
-    The environment provides RGB image observations (64x64x3) showing
+    The environment provides RGB image observations (64x256x3) showing
     the cart position and pole angle. Actions are discrete: 0 (left) or 1 (right).
     
     Physics: Simplified inverted pendulum where cart acceleration affects pole angle.
@@ -26,7 +26,7 @@ class MiniCartPoleVisionEnv(gym.Env):
         super().__init__()
         self.action_space = gym.spaces.Discrete(2)
         self.observation_space = gym.spaces.Box(
-            0, 255, shape=(64, 64, 3), dtype=np.uint8
+            0, 255, shape=(64, 256, 3), dtype=np.uint8
         )
         self.max_episode_steps = int(max_episode_steps)
         self.render_mode = render_mode
@@ -45,12 +45,12 @@ class MiniCartPoleVisionEnv(gym.Env):
         self.dt = 0.02  # Time step
         
         # Bounds
-        self.x_threshold = 0.3  # Cart position limit (for visual bounds)
+        self.x_threshold = 1.2  # Cart position limit (for visual bounds)
         self.theta_threshold = 0.5  # ~29 degrees
         self._step_count = 0
 
         self.np_random = None
-        self._blank = np.full((64, 64, 3), 255, dtype=np.uint8)
+        self._blank = np.full((64, 256, 3), 255, dtype=np.uint8)
 
     def reset(self, *, seed=None, options=None):
         """Reset the environment to initial state.
@@ -148,30 +148,33 @@ class MiniCartPoleVisionEnv(gym.Env):
 
     def _render_rgb_array(self) -> np.ndarray:
         """Render the current state as an RGB image (rgb_array).
-        
+
         Returns:
-            numpy array of shape (64, 64, 3) with RGB values 0-255
+            numpy array of shape (64, 256, 3) with RGB values 0-255
         """
         img = self._blank.copy()
 
+        # Draw ground line across the full width for visual reference
+        img[52:54, :] = (180, 180, 180)
+
         # Scale cart position to fit in image
-        # Cart can move +/- x_threshold, map to +/- 24 pixels from center
-        x_scale = 24.0 / self.x_threshold
-        cx = int(32 + self.x * x_scale)
-        cx = int(np.clip(cx, 8, 56))  # Keep cart visible
-        
-        # Draw cart (black rectangle)
-        x0 = max(cx - 8, 0)
-        x1 = min(cx + 8, 63)
+        # Cart can move +/- x_threshold, map to +/- 96 pixels from center
+        x_scale = 96.0 / self.x_threshold
+        cx = int(128 + self.x * x_scale)
+        cx = int(np.clip(cx, 16, 240))  # Keep cart visible
+
+        # Draw cart (black rectangle) — 32px wide, 11px tall
+        x0 = max(cx - 16, 0)
+        x1 = min(cx + 16, 255)
         img[40:51, x0 : x1 + 1] = 0
 
-        # Draw pole (red line from cart top)
-        pole_length_pixels = 20
+        # Draw pole (red line from cart top) — 30px long, 4px thick
+        pole_length_pixels = 30
         px = cx + int(pole_length_pixels * np.sin(self.theta))
         py = 40 - int(pole_length_pixels * np.cos(self.theta))
-        px = int(np.clip(px, 0, 63))
+        px = int(np.clip(px, 0, 255))
         py = int(np.clip(py, 0, 63))
-        self._draw_line(img, cx, 40, px, py, color=(255, 0, 0), thickness=3)
+        self._draw_line(img, cx, 40, px, py, color=(255, 0, 0), thickness=4)
 
         return img
 
