@@ -1,6 +1,8 @@
 gymnasium
 matplotlib
 numpy
+# PyTorch on PyPI is CPU-only. This extra index lets pip pick up CUDA wheels when available.
+--extra-index-url https://download.pytorch.org/whl/cu124
 torch
 torchvision
 torchaudio
