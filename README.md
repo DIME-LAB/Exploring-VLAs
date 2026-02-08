@@ -238,7 +238,7 @@ Advantages are normalized across the entire `[T, N]` batch before computing the 
 | `gae_lambda`                 | 0.95      | GAE smoothing parameter                       |
 | `entropy_coef`               | 0.01      | Entropy regularization weight                 |
 | `value_coef`                 | 0.5       | Critic loss weight                            |
-| `max_steps`                  | 200       | Max steps per episode                         |
+| `max_steps`                  | 400       | Max steps per episode                         |
 | `checkpoint_every_steps`     | 1000      | Save numbered checkpoint every N env steps    |
 | `checkpoint_latest_every_steps`| same    | Overwrite latest weights every N env steps    |
 | `eval_every_steps`           | 1000      | Run evaluation every N env steps              |
@@ -397,7 +397,7 @@ gamma             = 0.99
 gae_lambda        = 0.95
 entropy_coef      = 0.002
 value_coef        = 0.5
-max_steps         = 200
+max_steps         = 400
 seed              = 0
 ```
 
@@ -803,7 +803,7 @@ All defaults as configured in `train.py`:
 | `gae_lambda`           | 0.95     | RL              | GAE bias-variance trade-off                      |
 | `entropy_coef`         | 0.002    | RL              | Exploration incentive weight                     |
 | `value_coef`           | 0.5      | RL              | Critic loss weight in total loss                 |
-| `max_steps`            | 200      | Environment     | Episode length cap                               |
+| `max_steps`            | 400      | Environment     | Episode length cap                               |
 | `vocab_size`           | 1000     | Model           | BoW hashing buckets                              |
 | `embed_dim`            | 32       | Model           | Text embedding dimension                         |
 | `num_actions`          | 2        | Model           | Left / Right                                     |
@@ -826,9 +826,23 @@ The project takes several steps to ensure reproducible results:
 
 4. **Limitation:** GPU non-determinism is **not** addressed. CUDA operations like `atomicAdd` in convolutions can introduce small floating-point variations. To fully eliminate this, you would need `torch.use_deterministic_algorithms(True)`, which is not enabled by default due to performance cost.
 
-## TODOs
-1. After noticing the movement of the cart it becomes evident that adding ability to move a wider cart length is going to improve reward and length of the steps/time the pole is able to stay up. Otherwise in current state the model doesnt get to learn a policy that is optimal "keep the pole upright for as long as possible"
-   a. In order to achive the wider cart length, we would need to increase the depth of vision model otherwise last layer will be too wide 4M params at size 256x64 from original 64x64.
-   b. We would also need to increase the size of cart and pole in relationship to new size 256x64 of environment because otherwise CNN will not be able to observe cart in as many patches due to it occupying a marginal space compare to whitespace 6-8% approx.
-   c. reducing the theta_threshold might make sense so go from 29deg to 45 deg before terminating the episode.
-2. Currently the language part of VLA is only getting one instruction which is "keep the pole upright". I am not sure what to change here but something to consider
+## TODOs & Lessons Learned
+
+### Completed
+1. **Wider canvas (64x64 → 256x64)** — The cart needed more horizontal room to recover from tilts. Simply widening the image without matching changes broke training:
+   - a. Added a 4th conv layer with `stride=(1,2)` to reduce the flatten size from 16,384 back to 8,192. Without this, the single Linear layer had 4.2M parameters and could not train.
+   - b. Scaled cart (16→32px) and pole (20→30px) proportionally to the wider canvas. At 6-8% of image area, the CNN could not extract useful gradients from the tiny objects in a sea of white pixels.
+   - c. Increased `x_threshold` from 0.3m to 1.2m so the cart actually uses the full canvas width. Without this, all motion was confined to the center ~40 pixels.
+   - d. Increased `theta_threshold` from 29° to 45° to give the agent more recovery room.
+
+2. **Entropy collapse fix** — `entropy_coef` raised from 0.002 to 0.01. At 0.002 the policy collapsed to near-deterministic (entropy=0.014) by episode ~250k, locking into a suboptimal strategy before learning to balance properly.
+
+3. **Angular velocity penalty** — Added `-0.1 * abs(theta_dot)` to the reward. Without this, the agent learned a bang-bang oscillation strategy (slam left then slam right) that survived ~100 steps but with growing instability. The penalty incentivizes smooth corrections over wild swings.
+
+4. **Frame stacking** — Wrapped env with `FrameStackObservation (stack_size=4)` and changed first Conv2d to accept 12 input channels (4×3 RGB). A single frame gives no velocity/acceleration information — frame stacking lets the CNN infer dynamics from temporal differences.
+   - **Lesson:** When environments use wrappers, the training loop's parallel env creation (`env.__class__()`) bypasses wrappers. Fixed by adding `env_factory` parameter to `train_vla()` so all parallel and eval envs are constructed identically.
+
+### Open
+5. Currently the language part of VLA is only getting one instruction which is "keep the pole upright". The BoW encoder is being trained but only on a single instruction — it cannot distinguish between different tasks. Something to consider for making the "L" in VLA meaningful.
+
+6. **Value estimate lag** — The critic consistently underestimates returns (value ≈ 40-50% of actual reward). The critic LR is already 2× the actor LR, but it may need a larger hidden layer or more training steps to converge. This noisy baseline limits how precisely the actor can improve.

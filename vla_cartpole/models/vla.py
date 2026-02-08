@@ -14,14 +14,15 @@ class MiniVLA(nn.Module):
         num_actions: Number of possible actions (default: 2)
         vocab_size: Size of vocabulary for bag-of-words encoding (default: 1000)
         embed_dim: Dimension of text embedding (default: 32)
+        num_stack: Number of stacked frames in the input image (default: 4)
     """
     
-    def __init__(self, num_actions=2, vocab_size=1000, embed_dim=32):
+    def __init__(self, num_actions=2, vocab_size=1000, embed_dim=32, num_stack=4):
         super().__init__()
 
         # Shared vision encoder
         self.vision = nn.Sequential(
-            nn.Conv2d(3, 32, 3, stride=2, padding=1),   # 256x64 -> 128x32
+            nn.Conv2d(3 * num_stack, 32, 3, stride=2, padding=1),   # 256x64 -> 128x32
             nn.ReLU(),
             nn.Conv2d(32, 64, 3, stride=2, padding=1),  # 128x32 -> 64x16
             nn.ReLU(),
@@ -80,6 +81,11 @@ class MiniVLA(nn.Module):
         """Forward pass - returns policy logits/probs and optionally value."""
         # Normalize and convert image to CHW format
         v = image / 255.0
+        if v.ndim == 5:
+                B, Stack, H, W, C = v.shape
+                # Flatten Stack and Channel: [B, H, W, Stack*C]
+                # We want Stack * C to be the new channel depth
+                v = v.reshape(B, H, W, Stack * C)
         v = v.permute(0, 3, 1, 2)  # NHWC -> NCHW
         features = self.vision(v)
 
@@ -102,6 +108,9 @@ class MiniVLA(nn.Module):
         """Get action distribution and value estimate."""
         # Normalize and convert image to CHW format
         v = image / 255.0
+        if v.ndim == 5:
+            B, Stack, H, W, C = v.shape
+            v = v.reshape(B, H, W, Stack * C)
         v = v.permute(0, 3, 1, 2)  # NHWC -> NCHW
         features = self.vision(v)
 
@@ -120,6 +129,9 @@ class MiniVLA(nn.Module):
     def get_value(self, image, bow_text):
         """Get value estimate only."""
         v = image / 255.0
+        if v.ndim == 5:
+            B, Stack, H, W, C = v.shape
+            v = v.reshape(B, H, W, Stack * C)
         v = v.permute(0, 3, 1, 2)
         features = self.vision(v)
         t = self.text_embed(bow_text)

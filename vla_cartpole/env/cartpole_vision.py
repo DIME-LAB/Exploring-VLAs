@@ -22,7 +22,7 @@ class MiniCartPoleVisionEnv(gym.Env):
     
     metadata = {"render_modes": ["rgb_array"], "render_fps": 50}
 
-    def __init__(self, *, max_episode_steps: int = 200, render_mode: str | None = "rgb_array"):
+    def __init__(self, *, max_episode_steps: int = 400, render_mode: str | None = "rgb_array"):
         super().__init__()
         self.action_space = gym.spaces.Discrete(2)
         self.observation_space = gym.spaces.Box(
@@ -133,7 +133,8 @@ class MiniCartPoleVisionEnv(gym.Env):
             alive_reward = 1.0
             angle_bonus = 0.5 * (1.0 - abs(self.theta) / self.theta_threshold)
             position_bonus = 0.5 * (1.0 - abs(self.x) / self.x_threshold)
-            reward = alive_reward + angle_bonus + position_bonus
+            velocity_penalty = -0.1 * abs(self.theta_dot)
+            reward = alive_reward + angle_bonus + position_bonus + velocity_penalty
         else:
             reward = 0.0  # No reward on terminal state
         
