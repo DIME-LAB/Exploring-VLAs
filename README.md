@@ -130,9 +130,9 @@ A self-contained CartPole environment that returns **256x64 RGB pixel observatio
 | Integration step   | 0.02 s |
 
 **Termination conditions:**
-- Pole angle exceeds ±0.5 rad (~29 degrees)
+- Pole angle exceeds ±0.785 rad (~45 degrees)
 - Cart position exceeds ±1.2 m
-- Episode reaches `max_episode_steps` (default 200 — truncation, not termination)
+- Episode reaches `max_episode_steps` (default 400 — truncation, not termination)
 
 **Reset:** State is initialized with small random perturbations (±0.02 for position/velocity, ±0.05 for angle/angular velocity).
 
@@ -141,7 +141,7 @@ A self-contained CartPole environment that returns **256x64 RGB pixel observatio
 **Example usage:**
 
 ```python
-env = MiniCartPoleVisionEnv(max_episode_steps=200)
+env = MiniCartPoleVisionEnv(max_episode_steps=400)
 obs, info = env.reset(seed=42)         # obs.shape == (64, 256, 3)
 obs, reward, terminated, truncated, info = env.step(1)  # push right
 # info == {'x': 0.003, 'x_dot': 0.19, 'theta': -0.04, 'theta_dot': -0.28}
@@ -233,7 +233,7 @@ Advantages are normalized across the entire `[T, N]` batch before computing the 
 | `rollout_steps`              | 32        | Steps collected before each gradient update    |
 | `lr`                         | 3e-4      | Shared encoder learning rate                  |
 | `actor_lr`                   | same as lr| Policy head learning rate                     |
-| `critic_lr`                  | same as lr| Value head learning rate                      |
+| `critic_lr`                  | 2e-3      | Value head learning rate                      |
 | `gamma`                      | 0.99      | Discount factor                               |
 | `gae_lambda`                 | 0.95      | GAE smoothing parameter                       |
 | `entropy_coef`               | 0.01      | Entropy regularization weight                 |
@@ -837,7 +837,7 @@ The project takes several steps to ensure reproducible results:
 
 2. **Entropy collapse fix** — `entropy_coef` raised from 0.002 to 0.01. At 0.002 the policy collapsed to near-deterministic (entropy=0.014) by episode ~250k, locking into a suboptimal strategy before learning to balance properly.
 
-3. **Angular velocity penalty** — Added `-0.1 * abs(theta_dot)` to the reward. Without this, the agent learned a bang-bang oscillation strategy (slam left then slam right) that survived ~100 steps but with growing instability. The penalty incentivizes smooth corrections over wild swings.
+3. **Angular velocity penalty** — Added `-0.1 * abs(theta_dot)` to the reward. Without this, the agent learned a bang-bang oscillation strategy (slam left then slam right) that survived ~150 steps but with growing instability. The penalty incentivizes smooth corrections over wild swings.
 
 4. **Frame stacking** — Wrapped env with `FrameStackObservation (stack_size=4)` and changed first Conv2d to accept 12 input channels (4×3 RGB). A single frame gives no velocity/acceleration information — frame stacking lets the CNN infer dynamics from temporal differences.
    - **Lesson:** When environments use wrappers, the training loop's parallel env creation (`env.__class__()`) bypasses wrappers. Fixed by adding `env_factory` parameter to `train_vla()` so all parallel and eval envs are constructed identically.
