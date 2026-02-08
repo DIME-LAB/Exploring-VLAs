@@ -50,7 +50,7 @@ def main(num_episodes: int = 6000, seed: int | None = 0):
         num_episodes=num_episodes,
         lr=5e-4,  # Shared feature learning rate
         actor_lr=5e-4,  # Policy learning rate
-        critic_lr=1e-3,  # Higher for faster value learning
+        critic_lr=2e-3,  # Higher for faster value learning
         gamma=0.99,
         max_steps=400,
         device=device,

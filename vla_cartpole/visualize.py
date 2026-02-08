@@ -26,6 +26,8 @@ from PIL import Image
 
 from vla_cartpole.evaluation import evaluate_model
 
+from gymnasium.wrappers import FrameStackObservation
+
 from vla_cartpole.env import MiniCartPoleVisionEnv
 from vla_cartpole.models import MiniVLA
 from vla_cartpole.utils.runtime import pick_device
@@ -84,7 +86,7 @@ def main(argv: list[str] | None = None):
     instruction = args.instruction
     
     # Create environment and model
-    env = MiniCartPoleVisionEnv()
+    env = FrameStackObservation(MiniCartPoleVisionEnv(), stack_size=4)
     model = MiniVLA().to(device)
     
     # Load trained weights (if available)
@@ -102,7 +104,7 @@ def main(argv: list[str] | None = None):
     # Optional quick scalar evaluation
     print("Quick eval:")
     results = evaluate_model(
-        env=MiniCartPoleVisionEnv(),
+        env=FrameStackObservation(MiniCartPoleVisionEnv(), stack_size=4),
         model=model,
         instruction=instruction,
         num_episodes=5,
@@ -128,8 +130,8 @@ def main(argv: list[str] | None = None):
     thetas: list[float] = []
 
     for step in range(args.max_steps):
-        frames.append(obs)
-        img_t = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+        frames.append(obs[-1])  # Latest frame only for GIF/plot (obs is stacked: [4, H, W, C])
+        img_t = torch.tensor(np.array(obs), dtype=torch.float32, device=device).unsqueeze(0)
 
         with torch.no_grad():
             logits, value_t = model.get_action_and_value(img_t, bow)
