@@ -52,7 +52,7 @@ def main(num_episodes: int = 6000, seed: int | None = 0):
         max_steps=200,
         device=device,
         print_every=50,
-        entropy_coef=0.002,  # Small entropy bonus
+        entropy_coef=0.01,  # Entropy bonus to prevent premature collapse
         value_coef=0.5,  # Balanced critic weight
         gae_lambda=0.95,
         seed=seed,

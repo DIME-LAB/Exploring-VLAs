@@ -825,3 +825,10 @@ The project takes several steps to ensure reproducible results:
 3. **Per-environment seeding** — Environment *i* in the parallel batch is seeded with `base_seed + i`, ensuring diverse but deterministic initial conditions.
 
 4. **Limitation:** GPU non-determinism is **not** addressed. CUDA operations like `atomicAdd` in convolutions can introduce small floating-point variations. To fully eliminate this, you would need `torch.use_deterministic_algorithms(True)`, which is not enabled by default due to performance cost.
+
+## TODOs
+1. After noticing the movement of the cart it becomes evident that adding ability to move a wider cart length is going to improve reward and length of the steps/time the pole is able to stay up. Otherwise in current state the model doesnt get to learn a policy that is optimal "keep the pole upright for as long as possible"
+   a. In order to achive the wider cart length, we would need to increase the depth of vision model otherwise last layer will be too wide 4M params at size 256x64 from original 64x64.
+   b. We would also need to increase the size of cart and pole in relationship to new size 256x64 of environment because otherwise CNN will not be able to observe cart in as many patches due to it occupying a marginal space compare to whitespace 6-8% approx.
+   c. reducing the theta_threshold might make sense so go from 29deg to 45 deg before terminating the episode.
+2. Currently the language part of VLA is only getting one instruction which is "keep the pole upright". I am not sure what to change here but something to consider

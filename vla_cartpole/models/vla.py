@@ -27,7 +27,7 @@ class MiniVLA(nn.Module):
             nn.ReLU(),
             nn.Conv2d(64, 64, 3, stride=2, padding=1),  # 64x16 -> 32x8
             nn.ReLU(),
-            nn.Conv2d(64, 64, (1, 3), stride=(1, 2), padding=(0, 1)),  # 32x8 -> 16x8 (shrink width only)
+            nn.Conv2d(64, 64, 3, stride=(1, 2), padding=1),  # 32x8 -> 16x8 (shrink width, keep height)
             nn.ReLU(),
             nn.Flatten(),
             nn.Linear(64 * 16 * 8, 256),

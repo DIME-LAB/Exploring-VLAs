@@ -46,7 +46,7 @@ class MiniCartPoleVisionEnv(gym.Env):
         
         # Bounds
         self.x_threshold = 1.2  # Cart position limit (for visual bounds)
-        self.theta_threshold = 0.5  # ~29 degrees
+        self.theta_threshold = 0.785  # ~45 degrees
         self._step_count = 0
 
         self.np_random = None
