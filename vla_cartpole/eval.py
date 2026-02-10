@@ -10,6 +10,7 @@ if __name__ == "__main__" and os.environ.get("PYTHONHASHSEED") is None:
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
 import torch
+from gymnasium.wrappers import FrameStackObservation
 
 from vla_cartpole.env import MiniCartPoleVisionEnv
 from vla_cartpole.evaluation import evaluate_model
@@ -24,7 +25,7 @@ def main():
     instruction = "keep the pole upright"
     
     # Create environment and model
-    env = MiniCartPoleVisionEnv()
+    env = FrameStackObservation(MiniCartPoleVisionEnv(), stack_size=4)
     model = MiniVLA().to(device)
     
     # Load trained weights (if available)
@@ -45,7 +46,7 @@ def main():
         model=model,
         instruction=instruction,
         num_episodes=5,
-        max_steps=100,
+        max_steps=400,
         device=device
     )
     

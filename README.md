@@ -25,7 +25,7 @@ A minimal, self-contained implementation of a **Vision-Language-Action (VLA)** a
 
 The goal is to train a small neural network that:
 
-1. **Sees** a 64x64 RGB image of a cart with a pole balanced on top.
+1. **Sees** a 256x64 RGB image (width x height) of a cart with a pole balanced on top.
 2. **Reads** a natural-language instruction (e.g. `"keep the pole upright"`).
 3. **Acts** by choosing to push the cart left or right at every timestep.
 
@@ -104,9 +104,9 @@ from vla_cartpole import MiniCartPoleVisionEnv, MiniVLA, make_bow_instruction
 
 **Class: `MiniCartPoleVisionEnv(gymnasium.Env)`**
 
-A self-contained CartPole environment that returns **64x64 RGB pixel observations** instead of the standard 4-element state vector. All physics and rendering are implemented in pure NumPy (no external renderer).
+A self-contained CartPole environment that returns **256x64 RGB pixel observations** (width x height) instead of the standard 4-element state vector. All physics and rendering are implemented in pure NumPy (no external renderer).
 
-**Observation space:** `Box(0, 255, shape=(64, 64, 3), dtype=uint8)`
+**Observation space:** `Box(0, 255, shape=(64, 256, 3), dtype=uint8)`
 **Action space:** `Discrete(2)` — `0` = push left, `1` = push right
 
 **Physics state (internal, not exposed as observation):**
@@ -130,19 +130,19 @@ A self-contained CartPole environment that returns **64x64 RGB pixel observation
 | Integration step   | 0.02 s |
 
 **Termination conditions:**
-- Pole angle exceeds ±0.5 rad (~29 degrees)
-- Cart position exceeds ±0.3 m
-- Episode reaches `max_episode_steps` (default 200 — truncation, not termination)
+- Pole angle exceeds ±0.785 rad (~45 degrees)
+- Cart position exceeds ±1.2 m
+- Episode reaches `max_episode_steps` (default 400 — truncation, not termination)
 
 **Reset:** State is initialized with small random perturbations (±0.02 for position/velocity, ±0.05 for angle/angular velocity).
 
-**Rendering:** A white 64x64 canvas with a black rectangle (cart) and a red line (pole). Rendering uses NumPy array operations and a custom `_draw_line` rasterizer — no PIL or OpenGL dependencies.
+**Rendering:** A white 256x64 canvas (width x height) with a black rectangle (cart) and a red line (pole). Rendering uses NumPy array operations and a custom `_draw_line` rasterizer — no PIL or OpenGL dependencies.
 
 **Example usage:**
 
 ```python
-env = MiniCartPoleVisionEnv(max_episode_steps=200)
-obs, info = env.reset(seed=42)         # obs.shape == (64, 64, 3)
+env = MiniCartPoleVisionEnv(max_episode_steps=400)
+obs, info = env.reset(seed=42)         # obs.shape == (64, 256, 3)
 obs, reward, terminated, truncated, info = env.step(1)  # push right
 # info == {'x': 0.003, 'x_dot': 0.19, 'theta': -0.04, 'theta_dot': -0.28}
 ```
@@ -167,7 +167,7 @@ The core neural network. It is a multimodal **actor-critic** model with three co
 
 | Input      | Shape              | Description                          |
 |-----------|--------------------|--------------------------------------|
-| `image`    | `[B, 64, 64, 3]`   | RGB uint8 image in HWC layout        |
+| `image`    | `[B, 64, 256, 3]`   | RGB uint8 image in HWC layout        |
 | `bow_text` | `[B, vocab_size]`   | Bag-of-words encoded instruction     |
 
 **Forward output (default):** Action probabilities, shape `[B, num_actions]`
@@ -233,12 +233,12 @@ Advantages are normalized across the entire `[T, N]` batch before computing the 
 | `rollout_steps`              | 32        | Steps collected before each gradient update    |
 | `lr`                         | 3e-4      | Shared encoder learning rate                  |
 | `actor_lr`                   | same as lr| Policy head learning rate                     |
-| `critic_lr`                  | same as lr| Value head learning rate                      |
+| `critic_lr`                  | 2e-3      | Value head learning rate                      |
 | `gamma`                      | 0.99      | Discount factor                               |
 | `gae_lambda`                 | 0.95      | GAE smoothing parameter                       |
 | `entropy_coef`               | 0.01      | Entropy regularization weight                 |
 | `value_coef`                 | 0.5       | Critic loss weight                            |
-| `max_steps`                  | 200       | Max steps per episode                         |
+| `max_steps`                  | 400       | Max steps per episode                         |
 | `checkpoint_every_steps`     | 1000      | Save numbered checkpoint every N env steps    |
 | `checkpoint_latest_every_steps`| same    | Overwrite latest weights every N env steps    |
 | `eval_every_steps`           | 1000      | Run evaluation every N env steps              |
@@ -349,7 +349,7 @@ Three plotting functions for analysis and debugging.
 
 #### `plot_observation_and_probs(obs, probs, action, reward, step_num=None)`
 
-Side-by-side view of one timestep: the 64x64 RGB frame on the left, and a bar chart of P(left) vs P(right) on the right.
+Side-by-side view of one timestep: the 256x64 RGB frame on the left, and a bar chart of P(left) vs P(right) on the right.
 
 #### `plot_training_progress(rewards, lengths, window=20)`
 
@@ -397,7 +397,7 @@ gamma             = 0.99
 gae_lambda        = 0.95
 entropy_coef      = 0.002
 value_coef        = 0.5
-max_steps         = 200
+max_steps         = 400
 seed              = 0
 ```
 
@@ -441,7 +441,7 @@ CLI tool for post-training analysis. Runs a single episode, captures per-step da
 
 | Data           | Type    | Description                             |
 |---------------|--------|-----------------------------------------|
-| Frame          | ndarray | 64x64x3 RGB observation                 |
+| Frame          | ndarray | 64x256x3 RGB observation                 |
 | Action         | int     | 0 (left) or 1 (right)                   |
 | Reward         | float   | Shaped reward for this step             |
 | Value          | float   | Critic's value estimate V(s)            |
@@ -485,20 +485,20 @@ jupyter
 
 ```
                    ┌─────────────────────────┐
-                   │    64x64x3 RGB Image     │
+                   │   256x64x3 RGB Image     │
                    └────────────┬────────────┘
                                 │
                    ┌────────────▼────────────┐
                    │     Vision Encoder       │
                    │                          │
-                   │  Conv2d(3→32, 3x3, s=2)  │  64x64 → 32x32
+                   │  Conv2d(3→32, 3x3, s=2)  │  256x64 → 128x32
                    │  ReLU                    │
-                   │  Conv2d(32→64, 3x3, s=2) │  32x32 → 16x16
+                   │  Conv2d(32→64, 3x3, s=2) │  128x32 → 64x16
                    │  ReLU                    │
-                   │  Conv2d(64→64, 3x3, s=2) │  16x16 → 8x8
+                   │  Conv2d(64→64, 3x3, s=2) │  64x16 → 32x8
                    │  ReLU                    │
-                   │  Flatten (64*8*8=4096)   │
-                   │  Linear(4096→256)        │
+                   │  Flatten (64*32*8=16384) │
+                   │  Linear(16384→256)       │
                    │  ReLU                    │
                    └────────────┬────────────┘
                                 │ 256-dim
@@ -547,9 +547,9 @@ jupyter
 
 **Forward pass detail:**
 
-1. The raw `[B, 64, 64, 3]` uint8 image is normalized to `[0, 1]` and permuted to NCHW.
-2. Three strided convolutions halve the spatial dimensions at each layer (64→32→16→8), producing 64 feature maps.
-3. The 8x8x64 feature volume is flattened to 4096 and projected to a 256-dim vector.
+1. The raw `[B, 64, 256, 3]` uint8 image is normalized to `[0, 1]` and permuted to NCHW.
+2. Three strided convolutions halve the spatial dimensions at each layer (256x64 → 128x32 → 64x16 → 32x8), producing 64 feature maps.
+3. The 32x8x64 feature volume is flattened to 16,384 and projected to a 256-dim vector.
 4. The instruction string is hashed to a 1000-dim BoW vector and projected to 32 dims.
 5. Vision and text features are concatenated into a 288-dim fused representation.
 6. The **actor head** maps 288→64→2 (with Tanh activation) to produce action logits.
@@ -588,7 +588,7 @@ Instead of collecting one trajectory at a time, the training loop runs **1,000 e
 
 ```
 For each of 32 rollout steps:
-    obs_batch  = stack observations from all 1000 envs     → [1000, 64, 64, 3]
+    obs_batch  = stack observations from all 1000 envs     → [1000, 64, 256, 3]
     logits, V  = model.get_action_and_value(obs_batch)     → [1000, 2], [1000]
     actions    = Categorical(logits).sample()               → [1000]
     step all 1000 envs with their respective actions
@@ -660,12 +660,12 @@ theta_dot += dt * theta_acc
 
 ### Rendering
 
-The 64x64 RGB observation is rendered entirely in NumPy:
+The 256x64 RGB observation (width x height) is rendered entirely in NumPy:
 
 - **Background:** white (255, 255, 255)
 - **Cart:** black rectangle, 16 pixels wide, 11 pixels tall, centered at row 40-50
 - **Pole:** red line (255, 0, 0), 20 pixels long, 3 pixels thick, drawn from the top-center of the cart at angle `theta`
-- **Cart position mapping:** the physical range `[-0.3, 0.3]` maps to pixel columns `[8, 56]`
+- **Cart position mapping:** the physical range `[-1.2, 1.2]` maps to pixel columns `[32, 224]` (±96 pixels from center 128)
 
 ---
 
@@ -676,7 +676,7 @@ The 64x64 RGB observation is rendered entirely in NumPy:
 ```
                           Per rollout step (×32 steps, ×1000 envs)
                           ─────────────────────────────────────────
-Environment   ──obs──►   obs_batch     [1000, 64, 64, 3]  uint8
+Environment   ──obs──►   obs_batch     [1000, 64, 256, 3]  uint8
                           │
                           ▼
 Model         ──────►    logits        [1000, 2]           float32
@@ -783,7 +783,7 @@ A 3-row diagnostic figure produced by `visualize.py`:
 python -m vla_cartpole.visualize --save-gif episode.gif --gif-fps 20
 ```
 
-Produces an animated GIF of the 64x64 observations at 20 frames per second, showing the cart and pole for the full episode.
+Produces an animated GIF of the 256x64 observations at 20 frames per second, showing the cart and pole for the full episode.
 
 ---
 
@@ -803,7 +803,7 @@ All defaults as configured in `train.py`:
 | `gae_lambda`           | 0.95     | RL              | GAE bias-variance trade-off                      |
 | `entropy_coef`         | 0.002    | RL              | Exploration incentive weight                     |
 | `value_coef`           | 0.5      | RL              | Critic loss weight in total loss                 |
-| `max_steps`            | 200      | Environment     | Episode length cap                               |
+| `max_steps`            | 400      | Environment     | Episode length cap                               |
 | `vocab_size`           | 1000     | Model           | BoW hashing buckets                              |
 | `embed_dim`            | 32       | Model           | Text embedding dimension                         |
 | `num_actions`          | 2        | Model           | Left / Right                                     |
@@ -825,3 +825,24 @@ The project takes several steps to ensure reproducible results:
 3. **Per-environment seeding** — Environment *i* in the parallel batch is seeded with `base_seed + i`, ensuring diverse but deterministic initial conditions.
 
 4. **Limitation:** GPU non-determinism is **not** addressed. CUDA operations like `atomicAdd` in convolutions can introduce small floating-point variations. To fully eliminate this, you would need `torch.use_deterministic_algorithms(True)`, which is not enabled by default due to performance cost.
+
+## TODOs & Lessons Learned
+
+### Completed
+1. **Wider canvas (64x64 → 256x64)** — The cart needed more horizontal room to recover from tilts. Simply widening the image without matching changes broke training:
+   - a. Added a 4th conv layer with `stride=(1,2)` to reduce the flatten size from 16,384 back to 8,192. Without this, the single Linear layer had 4.2M parameters and could not train.
+   - b. Scaled cart (16→32px) and pole (20→30px) proportionally to the wider canvas. At 6-8% of image area, the CNN could not extract useful gradients from the tiny objects in a sea of white pixels.
+   - c. Increased `x_threshold` from 0.3m to 1.2m so the cart actually uses the full canvas width. Without this, all motion was confined to the center ~40 pixels.
+   - d. Increased `theta_threshold` from 29° to 45° to give the agent more recovery room.
+
+2. **Entropy collapse fix** — `entropy_coef` raised from 0.002 to 0.01. At 0.002 the policy collapsed to near-deterministic (entropy=0.014) by episode ~250k, locking into a suboptimal strategy before learning to balance properly.
+
+3. **Angular velocity penalty** — Added `-0.1 * abs(theta_dot)` to the reward. Without this, the agent learned a bang-bang oscillation strategy (slam left then slam right) that survived ~150 steps but with growing instability. The penalty incentivizes smooth corrections over wild swings.
+
+4. **Frame stacking** — Wrapped env with `FrameStackObservation (stack_size=4)` and changed first Conv2d to accept 12 input channels (4×3 RGB). A single frame gives no velocity/acceleration information — frame stacking lets the CNN infer dynamics from temporal differences.
+   - **Lesson:** When environments use wrappers, the training loop's parallel env creation (`env.__class__()`) bypasses wrappers. Fixed by adding `env_factory` parameter to `train_vla()` so all parallel and eval envs are constructed identically.
+
+### Open
+5. Currently the language part of VLA is only getting one instruction which is "keep the pole upright". The BoW encoder is being trained but only on a single instruction — it cannot distinguish between different tasks. Something to consider for making the "L" in VLA meaningful.
+
+6. **Value estimate lag** — The critic consistently underestimates returns (value ≈ 40-50% of actual reward). The critic LR is already 2× the actor LR, but it may need a larger hidden layer or more training steps to converge. This noisy baseline limits how precisely the actor can improve.

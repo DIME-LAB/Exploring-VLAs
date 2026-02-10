@@ -65,8 +65,8 @@ def compute_gae_batch(rewards_t, values_t, next_value_t, dones_t, gamma=0.99, la
     return advantages, returns_t
 
 
-def train_vla(env, model, instruction, num_episodes=1000, lr=3e-4, 
-              gamma=0.99, max_steps=200, device='cpu', print_every=50,
+def train_vla(env, model, instruction, num_episodes=1000, lr=3e-4,
+              gamma=0.99, max_steps=400, device='cpu', print_every=50,
               entropy_coef=0.01, value_coef=0.5, actor_lr=None, critic_lr=None,
               gae_lambda=0.95,
               seed: int | None = None,
@@ -78,8 +78,9 @@ def train_vla(env, model, instruction, num_episodes=1000, lr=3e-4,
               checkpoint_latest_path: str | Path | None = "model.pth",
               eval_every_steps: int | None = 1000,
               eval_num_episodes: int = 5,
-              eval_max_steps: int = 200,
-              eval_env_factory=None):
+              eval_max_steps: int = 400,
+              eval_env_factory=None,
+              env_factory=None):
     """Train the VLA model using Advantage Actor-Critic (A2C).
     
     Args:
@@ -108,7 +109,11 @@ def train_vla(env, model, instruction, num_episodes=1000, lr=3e-4,
         eval_num_episodes: Number of evaluation episodes per eval run
         eval_max_steps: Max steps per evaluation episode
         eval_env_factory: Optional callable that returns a fresh eval environment
-        
+        env_factory: Optional callable that returns a fresh training environment.
+            Used to create parallel envs. When None, falls back to env.__class__().
+            Required when the env is wrapped (e.g. FrameStackObservation) so that parallel
+            envs get the same wrappers.
+
     Returns:
         Tuple of (episode_rewards, episode_lengths) lists
     """
@@ -161,9 +166,10 @@ def train_vla(env, model, instruction, num_episodes=1000, lr=3e-4,
     if rollout_steps < 1:
         raise ValueError("rollout_steps must be >= 1")
 
+    _make_env = env_factory if env_factory is not None else env.__class__
     envs = [env]
     if num_envs > 1:
-        envs.extend(env.__class__() for _ in range(num_envs - 1))
+        envs.extend(_make_env() for _ in range(num_envs - 1))
 
     obs_list = []
     for i, e in enumerate(envs):
@@ -319,7 +325,7 @@ def train_vla(env, model, instruction, num_episodes=1000, lr=3e-4,
                 if eval_env_factory is not None:
                     eval_env = eval_env_factory()
                 else:
-                    eval_env = env.__class__()
+                    eval_env = _make_env()
 
             was_training = model.training
             for due_step in eval_due_steps:

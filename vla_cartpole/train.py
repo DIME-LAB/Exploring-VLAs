@@ -15,7 +15,7 @@ from vla_cartpole.env import MiniCartPoleVisionEnv
 from vla_cartpole.models import MiniVLA
 from vla_cartpole.training import train_vla
 from vla_cartpole.utils.runtime import pick_device, seed_everything
-
+from gymnasium.wrappers import FrameStackObservation
 
 def main(num_episodes: int = 6000, seed: int | None = 0):
     """Train the VLA model (set seed=None for non-deterministic runs)."""
@@ -31,7 +31,10 @@ def main(num_episodes: int = 6000, seed: int | None = 0):
     print("-" * 60)
     
     # Create environment and model
-    env = MiniCartPoleVisionEnv()
+    def make_env():
+        return FrameStackObservation(MiniCartPoleVisionEnv(), stack_size=4)
+
+    env = make_env()
     model = MiniVLA().to(device)
     
     # Print model size
@@ -47,24 +50,25 @@ def main(num_episodes: int = 6000, seed: int | None = 0):
         num_episodes=num_episodes,
         lr=5e-4,  # Shared feature learning rate
         actor_lr=5e-4,  # Policy learning rate
-        critic_lr=1e-3,  # Higher for faster value learning
+        critic_lr=2e-3,  # Higher for faster value learning
         gamma=0.99,
-        max_steps=200,
+        max_steps=400,
         device=device,
         print_every=50,
-        entropy_coef=0.002,  # Small entropy bonus
+        entropy_coef=0.01,  # Entropy bonus to prevent premature collapse
         value_coef=0.5,  # Balanced critic weight
         gae_lambda=0.95,
         seed=seed,
-        num_envs=1000,  # More parallel environments for stable updates
+        num_envs=512,  # More parallel environments for stable updates
         rollout_steps=32,
-        checkpoint_every_steps=1000_000,
+        checkpoint_every_steps=2000_000,
         checkpoint_dir="checkpoints",
         checkpoint_latest_every_steps=1000,
         checkpoint_latest_path="model.pth",
-        eval_every_steps=1000_000,
+        eval_every_steps=2000_000,
         eval_num_episodes=5,
-        eval_max_steps=200,
+        eval_max_steps=400,
+        env_factory=make_env,
     )
     
     # Plot training progress
