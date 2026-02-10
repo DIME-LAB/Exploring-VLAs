@@ -14,17 +14,13 @@ import torch
 from vla_cartpole.env import MiniCartPoleVisionEnv
 from vla_cartpole.evaluation import evaluate_model
 from vla_cartpole.models import MiniVLA
+from vla_cartpole.utils.runtime import pick_device
 
 
 def main():
     """Evaluate a trained model."""
     # Configuration
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        device = torch.device("mps")
-    else:
-        device = torch.device("cpu")
+    device = pick_device()
     instruction = "keep the pole upright"
     
     # Create environment and model
