@@ -1,0 +1,125 @@
+{
+    "version": "1.0",
+    "file_records": [
+        {
+            "source_url": "omniverse://localhost/Library/robosort/Collected_robosort_lego_detect_21st_nov/red_2x4.usd",
+            "source_hash": "sha-256-flat;1048576;bd277ae6c5a9c615e2bb1dcbf4e2ba75c4767831bb349932f50df614564fa86e",
+            "target_url": "./red_2x4.usd",
+            "target_hash": "sha-256-flat;1048576;c7977326dbf1749b30c4a2240174395480b182fa6138f0db5047db2548107129"
+        },
+        {
+            "source_url": "omniverse://localhost/Library/robosort/Collected_robosort_lego_detect_21st_nov/drop_container.usd",
+            "source_hash": "sha-256-flat;1048576;0ac48ebd1eec0bba7ed5998346852be6b25e08714089988aea330a5dd13e2775",
+            "target_url": "./drop_container.usd",
+            "target_hash": "sha-256-flat;1048576;b0b6758347a62cb68a6680146851bd48fd00d2da25e7ef5669bcd3bf9ac39fe1"
+        },
+        {
+            "source_url": "omniverse://localhost/Library/robosort/Collected_robosort_lego_detect_21st_nov/home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_01.png",
+            "source_hash": "sha-256-flat;1048576;6fb4a02ce9a669511125ff4b0b77cc80c10ce267bdbab970cb1a504e3555d315",
+            "target_url": "./home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_01.png",
+            "target_hash": "sha-256-flat;1048576;6fb4a02ce9a669511125ff4b0b77cc80c10ce267bdbab970cb1a504e3555d315"
+        },
+        {
+            "source_url": "omniverse://localhost/Library/robosort/Collected_robosort_lego_detect_21st_nov/home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_02.png",
+            "source_hash": "sha-256-flat;1048576;99e8e0a9292857bc1e19f18143c17727be2663701cd46004fadfe777862d6605",
+            "target_url": "./home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_02.png",
+            "target_hash": "sha-256-flat;1048576;99e8e0a9292857bc1e19f18143c17727be2663701cd46004fadfe777862d6605"
+        },
+        {
+            "source_url": "omniverse://localhost/Library/robosort/Collected_robosort_lego_detect_21st_nov/home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_03.png",
+            "source_hash": "sha-256-flat;1048576;82e63ea234470b52a28c959bf8d678aad78ded347dc507de842682bc67767c11",
+            "target_url": "./home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_03.png",
+            "target_hash": "sha-256-flat;1048576;82e63ea234470b52a28c959bf8d678aad78ded347dc507de842682bc67767c11"
+        },
+        {
+            "source_url": "omniverse://localhost/Library/robosort/Collected_robosort_lego_detect_21st_nov/home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_04.png",
+            "source_hash": "sha-256-flat;1048576;e7a8078ca56e1566f6c2819fb6d7f4bf9c5419d37f3f5710da386b842f93bc78",
+            "target_url": "./home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_04.png",
+            "target_hash": "sha-256-flat;1048576;e7a8078ca56e1566f6c2819fb6d7f4bf9c5419d37f3f5710da386b842f93bc78"
+        },
+        {
+            "source_url": "omniverse://localhost/Library/robosort/Collected_robosort_lego_detect_21st_nov/home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_05.png",
+            "source_hash": "sha-256-flat;1048576;8bc5246ebcf2e3d587e9bb83ebfffa17d66a1d3af012b3b848d8c1c5b2a800be",
+            "target_url": "./home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_05.png",
+            "target_hash": "sha-256-flat;1048576;8bc5246ebcf2e3d587e9bb83ebfffa17d66a1d3af012b3b848d8c1c5b2a800be"
+        },
+        {
+            "source_url": "omniverse://localhost/Library/robosort/Collected_robosort_lego_detect_21st_nov/home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_06.png",
+            "source_hash": "sha-256-flat;1048576;8456af00c877cb512b891ca31ab972f87e9bdbcf70718728eca4ae3a1e560f66",
+            "target_url": "./home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_06.png",
+            "target_hash": "sha-256-flat;1048576;8456af00c877cb512b891ca31ab972f87e9bdbcf70718728eca4ae3a1e560f66"
+        },
+        {
+            "source_url": "omniverse://localhost/Library/robosort/Collected_robosort_lego_detect_21st_nov/home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_07.png",
+            "source_hash": "sha-256-flat;1048576;13c01e55786e70f68002da031cf3d8b4541876f82f8cb6c2a73aa6476499ea03",
+            "target_url": "./home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_07.png",
+            "target_hash": "sha-256-flat;1048576;13c01e55786e70f68002da031cf3d8b4541876f82f8cb6c2a73aa6476499ea03"
+        },
+        {
+            "source_url": "omniverse://localhost/Library/robosort/Collected_robosort_lego_detect_21st_nov/home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_08.png",
+            "source_hash": "sha-256-flat;1048576;129a26a89453fe90e8996f34a30c7a7fc08172620601a593b54c3b693e124f5c",
+            "target_url": "./home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_08.png",
+            "target_hash": "sha-256-flat;1048576;129a26a89453fe90e8996f34a30c7a7fc08172620601a593b54c3b693e124f5c"
+        },
+        {
+            "source_url": "omniverse://localhost/Library/robosort/Collected_robosort_lego_detect_21st_nov/home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_09.png",
+            "source_hash": "sha-256-flat;1048576;45e36bb36601b49e3587d3366995a070dd68dc67ae749507c1557f868b2223ed",
+            "target_url": "./home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_09.png",
+            "target_hash": "sha-256-flat;1048576;45e36bb36601b49e3587d3366995a070dd68dc67ae749507c1557f868b2223ed"
+        },
+        {
+            "source_url": "omniverse://localhost/Library/robosort/Collected_robosort_lego_detect_21st_nov/home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_10.png",
+            "source_hash": "sha-256-flat;1048576;8656b35aa66019e6541fb039ecd4b06f64dec207293056f06409cb95d3c2d9e8",
+            "target_url": "./home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_10.png",
+            "target_hash": "sha-256-flat;1048576;8656b35aa66019e6541fb039ecd4b06f64dec207293056f06409cb95d3c2d9e8"
+        },
+        {
+            "source_url": "omniverse://localhost/Library/robosort/Collected_robosort_lego_detect_21st_nov/home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_11.png",
+            "source_hash": "sha-256-flat;1048576;6e6e3fc339e68ece436ea4dbd8562f537765d9ebcb340648f196a41596a3f891",
+            "target_url": "./home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_11.png",
+            "target_hash": "sha-256-flat;1048576;6e6e3fc339e68ece436ea4dbd8562f537765d9ebcb340648f196a41596a3f891"
+        },
+        {
+            "source_url": "omniverse://localhost/Library/robosort/Collected_robosort_lego_detect_21st_nov/home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_12.png",
+            "source_hash": "sha-256-flat;1048576;03397a7c3221c795388089d15755a20f0abefab762acf70a235e3b9be6b6e457",
+            "target_url": "./home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_12.png",
+            "target_hash": "sha-256-flat;1048576;03397a7c3221c795388089d15755a20f0abefab762acf70a235e3b9be6b6e457"
+        },
+        {
+            "source_url": "omniverse://localhost/Library/robosort/Collected_robosort_lego_detect_21st_nov/home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_13.png",
+            "source_hash": "sha-256-flat;1048576;c35f1a8c82df900a782d4527fa9398c8a5db6ba74daf5a0d6b1ed5b9a8b029ea",
+            "target_url": "./home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_13.png",
+            "target_hash": "sha-256-flat;1048576;c35f1a8c82df900a782d4527fa9398c8a5db6ba74daf5a0d6b1ed5b9a8b029ea"
+        },
+        {
+            "source_url": "omniverse://localhost/Library/robosort/Collected_robosort_lego_detect_21st_nov/home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_14.png",
+            "source_hash": "sha-256-flat;1048576;029f9da0a1e6cea28e447654cc0169f51ef6814e6e8efc22025d9b528771b7df",
+            "target_url": "./home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_14.png",
+            "target_hash": "sha-256-flat;1048576;029f9da0a1e6cea28e447654cc0169f51ef6814e6e8efc22025d9b528771b7df"
+        },
+        {
+            "source_url": "omniverse://localhost/Library/robosort/Collected_robosort_lego_detect_21st_nov/home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_15.png",
+            "source_hash": "sha-256-flat;1048576;bb5c65887a15929d62f84d8bc49c505db193e0641cd50666fa44f7cd6400529b",
+            "target_url": "./home/aaugus11/Projects/RoboSort/drop_container_description/drop_container_description/aruco_markers/aruco_marker_15.png",
+            "target_hash": "sha-256-flat;1048576;bb5c65887a15929d62f84d8bc49c505db193e0641cd50666fa44f7cd6400529b"
+        },
+        {
+            "source_url": "omniverse://localhost/Library/robosort/Collected_robosort_lego_detect_21st_nov/green_2x3.usd",
+            "source_hash": "sha-256-flat;1048576;e25ec14b1b580c69b57cf036033f7c08ca8e330c66525e7cc0675b0c429408ee",
+            "target_url": "./green_2x3.usd",
+            "target_hash": "sha-256-flat;1048576;cb5ba7c90cbda89a28c99008a1835dbb5bf77cde9d4eb961cd07b10473f55709"
+        },
+        {
+            "source_url": "omniverse://localhost/Library/robosort/Collected_robosort_lego_detect_21st_nov/yellow_2x2.usd",
+            "source_hash": "sha-256-flat;1048576;1f8459db33b7773d209b501175adf68d1667cb3d842f0cc5c7600de8eb457cdb",
+            "target_url": "./yellow_2x2.usd",
+            "target_hash": "sha-256-flat;1048576;70deb939504331c8cde75295a8442c465495bb3a20c70a16b00c7bc5630a1553"
+        },
+        {
+            "source_url": "omniverse://localhost/Library/robosort/Collected_robosort_lego_detect_21st_nov/red_2x2.usd",
+            "source_hash": "sha-256-flat;1048576;57e0e955699428945e545601790518c2e7a9c00d4576226c592d22e912feb684",
+            "target_url": "./red_2x2.usd",
+            "target_hash": "sha-256-flat;1048576;5988fc7ed638fd5c3b4391ce7cd5249f6d3b8bef6457467ddb845143d576ed05"
+        }
+    ]
+}

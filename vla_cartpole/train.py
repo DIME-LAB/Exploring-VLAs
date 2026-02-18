@@ -36,6 +36,8 @@ def main(num_episodes: int = 6000, seed: int | None = 0):
 
     env = make_env()
     model = MiniVLA().to(device)
+    # kernel fusion and other optimizations for faster training (PyTorch 2.0+)
+    model = torch.compile(model)
     
     # Print model size
     num_params = sum(p.numel() for p in model.parameters())
