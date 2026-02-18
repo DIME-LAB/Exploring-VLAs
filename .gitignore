@@ -1,8 +1,50 @@
 .cursor
 .jupyter
-.venv
 .vscode
 *.ipynb
 __pycache__/
 *.pyc
 *.pth
+
+# ROS2 build artifacts
+build/
+install/
+log/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Python virtual envs
+.venv/
+venv/
+env/
+
+# IDE files
+.vscode/settings.json
+.vscode/launch.json
+.vscode/tasks.json
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db 
+
+# Runtime/temp logs and artifacts
+*.log
+*.tmp
+
+# TF graph outputs
+frames_*.pdf
+frames_*.gv
+
+# Optional simulator crash dumps
+*.nvdbg
+*.nv-gpudmp
