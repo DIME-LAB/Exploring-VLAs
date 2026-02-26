@@ -1,0 +1,38 @@
+# This config file is used by ros2_control
+# Modeled after ros2_so_arm100 (proven working with mock_components/GenericSystem)
+controller_manager:
+  ros__parameters:
+    update_rate: 50  # Hz (matching ros2_so_arm100 reference)
+
+    arm_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    gripper_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+arm_controller:
+  ros__parameters:
+    joints:
+      - Rotation
+      - Pitch
+      - Elbow
+      - Wrist_Pitch
+      - Wrist_Roll
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+
+gripper_controller:
+  ros__parameters:
+    joints:
+      - Jaw
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
