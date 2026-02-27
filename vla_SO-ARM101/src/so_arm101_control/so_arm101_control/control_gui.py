@@ -173,8 +173,7 @@ class SOArm101ControlGUI(Node):
             JointState, 'joint_commands', self._ext_cmd_callback, 10)
         self.objects_data = {}
         self.objects_lock = threading.Lock()
-        self.objects_sub = self.create_subscription(
-            TFMessage, '/objects_poses', self._objects_callback, 10)
+        self.objects_sub = None  # Created by _build_grasp_tab → _update_grasp_topic
         self.ee_pose_sub = self.create_subscription(
             PoseStamped, '/ee_pose', self._ee_pose_callback, 10)
 
@@ -1238,19 +1237,101 @@ class SOArm101ControlGUI(Node):
         frame = ttk.Frame(notebook)
         notebook.add(frame, text='Grasp')
 
+        # --- Object Source ---
+        topic_frame = ttk.LabelFrame(frame, text='Object Source')
+        topic_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        topic_row = tk.Frame(topic_frame)
+        topic_row.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(topic_row, text='Topic:', anchor='w').pack(side=tk.LEFT)
+        default_topic = '/objects_poses_real' if self.use_real_hardware else '/objects_poses_sim'
+        self._grasp_topic_var = tk.StringVar(value=default_topic)
+        tk.Entry(topic_row, textvariable=self._grasp_topic_var).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
+        tk.Button(topic_row, text='Update Topic', bg='#b0b0b0', fg='#1a1a1a',
+                  command=self._update_grasp_topic).pack(side=tk.RIGHT, padx=(2, 0))
+        tk.Button(topic_row, text='Refresh', bg='#b0b0b0', fg='#1a1a1a',
+                  command=self._refresh_objects).pack(side=tk.RIGHT, padx=(2, 0))
+
         # --- Detected Objects ---
         obj_frame = ttk.LabelFrame(frame, text='Detected Objects')
         obj_frame.pack(fill=tk.X, padx=10, pady=5)
 
-        self.obj_listbox = tk.Listbox(obj_frame, height=8)
+        self.obj_listbox = tk.Listbox(obj_frame, height=8, font=('Consolas', 9),
+                                       selectbackground='#d0d0d0',
+                                       selectforeground='#1a1a1a')
         self.obj_listbox.pack(fill=tk.X, padx=5, pady=2)
 
-        obj_btn = tk.Frame(obj_frame)
-        obj_btn.pack(fill=tk.X, padx=5, pady=2)
-        tk.Button(obj_btn, text='Refresh', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._refresh_objects).pack(side=tk.LEFT, padx=2)
-        tk.Button(obj_btn, text='Move to Selected', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._move_to_object).pack(side=tk.LEFT, padx=2)
+        # --- Arm | Gripper columns ---
+        ctrl_cols = ttk.Frame(frame)
+        ctrl_cols.pack(fill=tk.X, padx=10, pady=5)
+
+        # Left column: Arm
+        arm_col = ttk.LabelFrame(ctrl_cols, text='Arm')
+        arm_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 3))
+
+        z_row = tk.Frame(arm_col)
+        z_row.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(z_row, text='Z offset (m):', anchor='w').pack(side=tk.LEFT)
+        self._grasp_z_offset_var = tk.DoubleVar(value=0.05)
+        tk.Spinbox(z_row, textvariable=self._grasp_z_offset_var,
+                   from_=-0.10, to=0.20, increment=0.01,
+                   width=8, format='%.3f').pack(side=tk.LEFT, padx=(5, 0))
+
+        arm_dur_row = tk.Frame(arm_col)
+        arm_dur_row.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(arm_dur_row, text='Duration (s):', anchor='w').pack(side=tk.LEFT)
+        self._grasp_arm_duration_var = tk.DoubleVar(value=5.0)
+        tk.Spinbox(arm_dur_row, textvariable=self._grasp_arm_duration_var,
+                   from_=0.5, to=10.0, increment=0.5,
+                   width=8, format='%.1f').pack(side=tk.LEFT, padx=(5, 0))
+
+        tk.Button(arm_col, text='Reset', bg='#b0b0b0', fg='#1a1a1a',
+                  command=self._grasp_reset).pack(fill=tk.X, padx=5, pady=2)
+        self._grasp_move_btn = tk.Button(
+            arm_col, text='Move to Grab', bg='#b0b0b0', fg='#1a1a1a',
+            command=self._move_to_object)
+        self._grasp_move_btn.pack(fill=tk.X, padx=5, pady=2)
+
+        # Right column: Gripper
+        grip_col = ttk.LabelFrame(ctrl_cols, text='Gripper')
+        grip_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(3, 0))
+
+        _jaw_min_deg = math.degrees(JOINT_LIMITS['Jaw'][0])
+        _jaw_max_deg = math.degrees(JOINT_LIMITS['Jaw'][1])
+        grip_range_row = tk.Frame(grip_col)
+        grip_range_row.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(grip_range_row, text='Range:', anchor='w').pack(side=tk.LEFT)
+        self._grasp_grip_close_var = tk.DoubleVar(value=_jaw_min_deg)
+        tk.Spinbox(grip_range_row, textvariable=self._grasp_grip_close_var,
+                   from_=_jaw_min_deg, to=_jaw_max_deg,
+                   increment=5, width=5, format='%.0f').pack(side=tk.LEFT, padx=(5, 0))
+        tk.Label(grip_range_row, text='-').pack(side=tk.LEFT)
+        self._grasp_grip_open_var = tk.DoubleVar(value=_jaw_max_deg)
+        tk.Spinbox(grip_range_row, textvariable=self._grasp_grip_open_var,
+                   from_=_jaw_min_deg, to=_jaw_max_deg,
+                   increment=5, width=5, format='%.0f').pack(side=tk.LEFT)
+        tk.Label(grip_range_row, text='\u00b0').pack(side=tk.LEFT)
+
+        grip_dur_row = tk.Frame(grip_col)
+        grip_dur_row.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(grip_dur_row, text='Duration (s):', anchor='w').pack(side=tk.LEFT)
+        self._grasp_grip_duration_var = tk.DoubleVar(value=3.0)
+        tk.Spinbox(grip_dur_row, textvariable=self._grasp_grip_duration_var,
+                   from_=0.2, to=5.0, increment=0.1,
+                   width=8, format='%.1f').pack(side=tk.LEFT, padx=(5, 0))
+
+        tk.Button(grip_col, text='Open Gripper', bg='#b0b0b0', fg='#1a1a1a',
+                  command=lambda: self._gripper_command(
+                      math.radians(self._grasp_grip_open_var.get()), execute=True,
+                      duration_s=self._grasp_grip_duration_var.get())).pack(fill=tk.X, padx=5, pady=2)
+        tk.Button(grip_col, text='Close Gripper', bg='#b0b0b0', fg='#1a1a1a',
+                  command=lambda: self._gripper_command(
+                      math.radians(self._grasp_grip_close_var.get()), execute=True,
+                      duration_s=self._grasp_grip_duration_var.get())).pack(fill=tk.X, padx=5, pady=2)
+
+        # Initial subscription to default topic
+        self._update_grasp_topic()
 
     # ------------------------------------------------------------------
     # IK tab: tab-change, FK, spinbox IK, buttons
@@ -1705,6 +1786,9 @@ class SOArm101ControlGUI(Node):
                 self._set_joints()
             elif mode == 'plan_execute':
                 self._moveit_execute()
+            elif mode == 'grasp_execute':
+                duration = getattr(self, '_grasp_arm_duration', 2.0)
+                self._execute_trajectory(target, duration_s=duration)
 
         if hasattr(self, 'root') and self.root.winfo_exists():
             self.root.after(0, _apply)
@@ -1739,29 +1823,81 @@ class SOArm101ControlGUI(Node):
                     'z': tf.transform.translation.z,
                 }
 
+    def _update_grasp_topic(self):
+        """Switch object subscription to topic from GUI entry and auto-refresh."""
+        new_topic = self._grasp_topic_var.get().strip()
+        if not new_topic:
+            return
+        # Destroy old subscription and create new one
+        if hasattr(self, 'objects_sub') and self.objects_sub is not None:
+            self.destroy_subscription(self.objects_sub)
+        with self.objects_lock:
+            self.objects_data.clear()
+        self.objects_sub = self.create_subscription(
+            TFMessage, new_topic, self._objects_callback, 10)
+        # Update button text
+        if hasattr(self, '_grasp_move_btn'):
+            if new_topic == '/drop_poses':
+                self._grasp_move_btn.config(text='Move to Drop')
+            else:
+                self._grasp_move_btn.config(text='Move to Grab')
+        self._append_log(f'Grasp topic: {new_topic}')
+
+    @service_trigger('grasp_refresh')
     def _refresh_objects(self):
+        if not hasattr(self, 'obj_listbox'):
+            return
         self.obj_listbox.delete(0, tk.END)
         with self.objects_lock:
             for name, pos in self.objects_data.items():
                 self.obj_listbox.insert(
                     tk.END,
                     f'{name}  ({pos["x"]:.3f}, {pos["y"]:.3f}, {pos["z"]:.3f})')
+        count = self.obj_listbox.size()
+        if count > 0:
+            self._append_log(f'Objects refreshed: {count} found')
 
+    def _grasp_reset(self):
+        """Zero the arm sliders and execute trajectory to home position."""
+        self._zero_arm()
+        duration = self._grasp_arm_duration_var.get()
+        target = {name: 0.0 for name in ARM_JOINT_NAMES}
+        self._execute_trajectory(target, duration_s=duration)
+
+    @service_trigger('grasp_move')
     def _move_to_object(self):
         sel = self.obj_listbox.curselection()
         if not sel:
-            self.ik_status_var.set('No object selected')
+            self._append_log('No object selected', 'warn')
             return
         text = self.obj_listbox.get(sel[0])
         obj_name = text.split('  ')[0]
         with self.objects_lock:
             pos = self.objects_data.get(obj_name)
         if pos is None:
+            self._append_log(f'Object "{obj_name}" not found', 'warn')
             return
+
+        z_offset = self._grasp_z_offset_var.get()
+        topic = self._grasp_topic_var.get().strip()
+        # Extra offset for drop poses (matching JETANK behavior)
+        if topic == '/drop_poses':
+            z_offset += 0.05
+
+        target_z = pos['z'] + z_offset
+        action = 'drop' if topic == '/drop_poses' else 'grab'
+        self._append_log(
+            f'Grasp: {action} "{obj_name}" at '
+            f'({pos["x"]:.3f}, {pos["y"]:.3f}, {target_z:.3f})')
+
+        # Set IK target and move directly
+        self._ik_trace_active = False
         self.xyz_vars['X'].set(pos['x'])
         self.xyz_vars['Y'].set(pos['y'])
-        self.xyz_vars['Z'].set(pos['z'] + 0.05)
-        self._ik_set_joints()
+        self.xyz_vars['Z'].set(target_z)
+        self._ik_trace_active = True
+        self._grasp_arm_duration = self._grasp_arm_duration_var.get()
+        self._compute_ik_full(mode='grasp_execute')
 
     # ------------------------------------------------------------------
     # Tab 3: Gripper Control
@@ -1775,8 +1911,8 @@ class SOArm101ControlGUI(Node):
     def _gripper_open(self):
         self._gripper_command(JOINT_LIMITS['Jaw'][1])
 
-    def _gripper_command(self, jaw_target):
-        """Set gripper goal (does NOT execute — use Set Joints or Plan & Execute)."""
+    def _gripper_command(self, jaw_target, execute=False, duration_s=1.0):
+        """Set gripper goal. If execute=True, also send to controller."""
         self._slider_driven = True
         self._select_planning_group('gripper')
         with self.joint_lock:
@@ -1787,6 +1923,8 @@ class SOArm101ControlGUI(Node):
         if hasattr(self, '_ik_jaw_label'):
             self._ik_jaw_label.config(text=f'{jaw_target:.3f}')
         self._publish_goal_state()
+        if execute:
+            self._send_gripper_goal(jaw_target, duration_s=duration_s)
 
     # ------------------------------------------------------------------
     # Trajectory execution (arm joints via action interface)
@@ -1869,6 +2007,12 @@ class SOArm101ControlGUI(Node):
             self._append_log('Switching to SIMULATION mode')
             self.status_var.set('Mode: Simulation')
             self.set_joints_btn.config(state=tk.NORMAL)
+
+        # Update grasp topic to match hardware mode
+        if hasattr(self, '_grasp_topic_var'):
+            new_topic = '/objects_poses_real' if use_real else '/objects_poses_sim'
+            self._grasp_topic_var.set(new_topic)
+            self._update_grasp_topic()
 
     def _real_js_callback(self, msg):
         if not self.use_real_hardware:
