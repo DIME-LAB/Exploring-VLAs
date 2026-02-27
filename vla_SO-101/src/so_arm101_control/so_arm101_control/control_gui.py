@@ -9,6 +9,8 @@ Source: adapted from RoboSort/JETANK_description/jetank_control_gui.py (3133 lin
 """
 
 import math
+import os
+import random
 import threading
 import time
 import tkinter as tk
@@ -17,14 +19,17 @@ from tkinter import ttk
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from control_msgs.action import FollowJointTrajectory
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import PoseStamped
 from tf2_msgs.msg import TFMessage
+from std_srvs.srv import Trigger
 try:
-    from moveit_msgs.srv import GetPositionIK, GetMotionPlan, GetStateValidity
+    from moveit_msgs.srv import GetPositionIK, GetPositionFK, GetMotionPlan, GetStateValidity
     from moveit_msgs.msg import (
         PositionIKRequest, RobotState, Constraints, JointConstraint,
         MotionPlanRequest,
@@ -33,7 +38,7 @@ try:
     MOVEIT_AVAILABLE = True
 except ImportError:
     try:
-        from moveit_msgs.srv import GetPositionIK, GetMotionPlan, GetStateValidity
+        from moveit_msgs.srv import GetPositionIK, GetPositionFK, GetMotionPlan, GetStateValidity
         from moveit_msgs.msg import (
             PositionIKRequest, RobotState, Constraints, JointConstraint,
             MotionPlanRequest,
@@ -43,8 +48,23 @@ except ImportError:
     except ImportError:
         MOVEIT_AVAILABLE = False
         GetPositionIK = None
+        GetPositionFK = None
         GetStateValidity = None
         GetMotionPlan = None
+
+
+# ---------------------------------------------------------------------------
+# Debug service auto-registration
+# ---------------------------------------------------------------------------
+_SERVICE_REGISTRY = {}  # func.__name__ -> service_suffix
+
+
+def service_trigger(service_name):
+    """Decorator: marks a method to be auto-registered as ~/service_name (Trigger)."""
+    def decorator(func):
+        _SERVICE_REGISTRY[func.__name__] = service_name
+        return func
+    return decorator
 
 
 # ---------------------------------------------------------------------------
@@ -63,12 +83,54 @@ JOINT_LIMITS = {
     'Jaw':         (-0.174533, 1.74533),
 }
 
+# ---------------------------------------------------------------------------
+# Workspace bounds — loaded from compute_workspace.py output
+# ---------------------------------------------------------------------------
+
+def _load_workspace_bounds():
+    """Load workspace_bounds.yaml from the same directory as this file."""
+    yaml_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             'workspace_bounds.yaml')
+    bounds = {}
+    in_section = False
+    try:
+        with open(yaml_path, 'r') as f:
+            for line in f:
+                stripped = line.strip()
+                # Enter the 'workspace_bounds:' section (not raw)
+                if stripped == 'workspace_bounds:':
+                    in_section = True
+                    continue
+                # Exit on any other top-level key (not indented)
+                if in_section and stripped and not line[0].isspace():
+                    break
+                if in_section and ':' in stripped and not stripped.startswith('#'):
+                    key, val = stripped.split(':', 1)
+                    try:
+                        bounds[key.strip()] = float(val.strip())
+                    except ValueError:
+                        pass
+    except FileNotFoundError:
+        pass
+    return bounds
+
+_WS = _load_workspace_bounds()
+WORKSPACE_BOUNDS = {
+    'X': (_WS.get('x_min', -0.35), _WS.get('x_max', 0.35)),
+    'Y': (_WS.get('y_min', -0.35), _WS.get('y_max', 0.25)),
+    'Z': (_WS.get('z_min', -0.10), _WS.get('z_max', 0.45)),
+}
+
 
 class SOArm101ControlGUI(Node):
     """ROS2 node with embedded Tkinter GUI for SO-ARM101 control."""
 
     def __init__(self):
         super().__init__('so_arm101_control_gui')
+
+        # Callback group for service clients — allows responses to be
+        # processed concurrently with other callbacks (requires MultiThreadedExecutor)
+        self._service_cb_group = ReentrantCallbackGroup()
 
         # Hardware mode
         self.use_real_hardware = False
@@ -77,6 +139,8 @@ class SOArm101ControlGUI(Node):
         # Current joint positions (radians) — updated from joint_state_broadcaster
         self.joint_positions = {name: 0.0 for name in ALL_JOINT_NAMES}
         self.joint_lock = threading.Lock()
+        # Actual robot state — always updated from /joint_states, never blocked
+        self._actual_positions = {name: 0.0 for name in ALL_JOINT_NAMES}
 
         # Track last sent arm positions
         self._last_sent_arm = [0.0] * len(ARM_JOINT_NAMES)
@@ -119,11 +183,18 @@ class SOArm101ControlGUI(Node):
         self.plan_client = None
         if MOVEIT_AVAILABLE:
             from moveit_msgs.msg import DisplayTrajectory
-            self.ik_client = self.create_client(GetPositionIK, '/compute_ik')
+            self.ik_client = self.create_client(
+                GetPositionIK, '/compute_ik',
+                callback_group=self._service_cb_group)
+            self.fk_client = self.create_client(
+                GetPositionFK, '/compute_fk',
+                callback_group=self._service_cb_group)
             self.plan_client = self.create_client(
-                GetMotionPlan, '/plan_kinematic_path')
+                GetMotionPlan, '/plan_kinematic_path',
+                callback_group=self._service_cb_group)
             self.validity_client = self.create_client(
-                GetStateValidity, '/check_state_validity')
+                GetStateValidity, '/check_state_validity',
+                callback_group=self._service_cb_group)
             self._display_traj_pub = self.create_publisher(
                 DisplayTrajectory, '/display_planned_path', 10)
             # Publish goal state to RViz MotionPlanning plugin
@@ -141,11 +212,226 @@ class SOArm101ControlGUI(Node):
         # Track whether we should update sliders from joint_states
         self._slider_driven = False
 
+        # Parameter for set_ik_target service
+        self.declare_parameter('ik_target', '')
+
         # GUI
         self.running = True
         self._setup_gui_thread()
 
+        # --- Debug services (auto-registered via @service_trigger) ---
+        self._debug_services = []
+        for method_name, srv_suffix in _SERVICE_REGISTRY.items():
+            cb = self._make_trigger_callback(method_name)
+            srv = self.create_service(Trigger, f'~/{srv_suffix}', cb)
+            self._debug_services.append(srv)
+            self.get_logger().info(f'  service: ~/{srv_suffix}')
+
+        # Manual services (read/write UI fields directly)
+        for name, cb in [
+            ('get_joint_positions', self._srv_get_joint_positions),
+            ('get_ik_target', self._srv_get_ik_target),
+            ('set_ik_target', self._srv_set_ik_target),
+            ('get_ee_pose', self._srv_get_ee_pose),
+            ('get_log', self._srv_get_log),
+        ]:
+            self._debug_services.append(
+                self.create_service(Trigger, f'~/{name}', cb))
+            self.get_logger().info(f'  service: ~/{name}')
+
         self.get_logger().info('SO-ARM101 Control GUI initialized')
+
+    # ------------------------------------------------------------------
+    # Async service helper (thread-safe future wait)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _wait_future(future, timeout_sec=2.0):
+        """Wait for a ROS2 future to complete by polling. Thread-safe.
+
+        Unlike rclpy.spin_until_future_complete, this does NOT create a
+        temporary executor and does NOT spin the node.  The main-thread
+        executor (rclpy.spin) processes callbacks; we just poll.
+        """
+        end = time.monotonic() + timeout_sec
+        while not future.done() and time.monotonic() < end:
+            time.sleep(0.01)          # 10 ms poll
+        return future.result()        # None if timed-out / not done
+
+    # ------------------------------------------------------------------
+    # Debug service helpers
+    # ------------------------------------------------------------------
+
+    def _make_trigger_callback(self, method_name):
+        """Factory: returns a Trigger callback that dispatches to tkinter thread."""
+        def _callback(request, response):
+            done_event = threading.Event()
+            result = {'ok': True, 'msg': ''}
+
+            def _run():
+                try:
+                    getattr(self, method_name)()
+                    result['msg'] = f'{method_name} executed'
+                except Exception as e:
+                    result['ok'] = False
+                    result['msg'] = str(e)
+                finally:
+                    done_event.set()
+
+            if hasattr(self, 'root') and self.root.winfo_exists():
+                self.root.after(0, _run)
+            else:
+                result['ok'] = False
+                result['msg'] = 'GUI not available'
+                done_event.set()
+
+            done_event.wait(timeout=2.0)
+            response.success = result['ok']
+            response.message = result['msg']
+            return response
+        return _callback
+
+    def _srv_get_joint_positions(self, request, response):
+        """Return current joint positions as name=value pairs."""
+        with self.joint_lock:
+            pairs = [f'{n}={self.joint_positions[n]:.6f}'
+                     for n in ALL_JOINT_NAMES]
+        response.success = True
+        response.message = ', '.join(pairs)
+        return response
+
+    def _srv_get_ik_target(self, request, response):
+        """Read current IK target fields (XYZ + quaternion)."""
+        done_event = threading.Event()
+        result = {'msg': ''}
+
+        def _read():
+            try:
+                parts = []
+                for axis in ['X', 'Y', 'Z']:
+                    parts.append(f'{axis}={self.xyz_vars[axis].get():.6f}')
+                for comp in ['Roll', 'Pitch', 'Yaw']:
+                    parts.append(f'{comp}={self.rpy_vars[comp].get():.1f}')
+                qx, qy, qz, qw = self._rpy_deg_to_quat(
+                    self.rpy_vars['Roll'].get(),
+                    self.rpy_vars['Pitch'].get(),
+                    self.rpy_vars['Yaw'].get())
+                parts.extend([f'qx={qx:.6f}', f'qy={qy:.6f}',
+                              f'qz={qz:.6f}', f'qw={qw:.6f}'])
+                result['msg'] = ', '.join(parts)
+            except Exception as e:
+                result['msg'] = f'error: {e}'
+            finally:
+                done_event.set()
+
+        if hasattr(self, 'root') and self.root.winfo_exists():
+            self.root.after(0, _read)
+        else:
+            result['msg'] = 'GUI not available'
+            done_event.set()
+
+        done_event.wait(timeout=2.0)
+        response.success = 'error' not in result['msg']
+        response.message = result['msg']
+        return response
+
+    def _srv_set_ik_target(self, request, response):
+        """Write IK target fields. Pass key=value pairs in request.message.
+        Example: ros2 service call ... '{message: "x=0.12, z=0.15, qw=1.0"}'
+        Supported keys: x, y, z, qx, qy, qz, qw (case-insensitive)."""
+        done_event = threading.Event()
+        result = {'ok': True, 'msg': ''}
+
+        # Parse key=value pairs from the trigger message field
+        raw = getattr(request, 'message', '') if hasattr(request, 'message') else ''
+        # Trigger doesn't have a message field on request — use a workaround:
+        # We'll accept the values from the service call's yaml string that gets
+        # stuffed into the Trigger request. But Trigger.Request has no fields.
+        # So we need to use a different approach — pass via ROS param or topic.
+        # Actually, let's use a simple convention: the caller sets a parameter first.
+
+        # Better approach: read from a latched parameter
+        # For now, parse from the node's parameter
+        raw = self.get_parameter('ik_target').get_parameter_value().string_value
+
+        if not raw:
+            response.success = False
+            response.message = (
+                'Set param first: ros2 param set /so_arm101_control_gui '
+                'ik_target "x=0.12,y=0.0,z=0.15,qw=1.0" '
+                'then call this service')
+            return response
+
+        # Parse
+        updates = {}
+        for part in raw.replace(' ', '').split(','):
+            if '=' in part:
+                k, v = part.split('=', 1)
+                updates[k.lower()] = float(v)
+
+        def _write():
+            try:
+                axis_map = {'x': 'X', 'y': 'Y', 'z': 'Z'}
+                rpy_map = {'roll': 'Roll', 'pitch': 'Pitch', 'yaw': 'Yaw'}
+                for k, v in updates.items():
+                    if k in axis_map and axis_map[k] in self.xyz_vars:
+                        self.xyz_vars[axis_map[k]].set(v)
+                    elif k in rpy_map and rpy_map[k] in self.rpy_vars:
+                        self.rpy_vars[rpy_map[k]].set(v)
+                set_keys = ', '.join(f'{k}={v:.4f}' for k, v in updates.items())
+                result['msg'] = f'Set: {set_keys}'
+            except Exception as e:
+                result['ok'] = False
+                result['msg'] = str(e)
+            finally:
+                done_event.set()
+
+        if hasattr(self, 'root') and self.root.winfo_exists():
+            self.root.after(0, _write)
+        else:
+            result['ok'] = False
+            result['msg'] = 'GUI not available'
+            done_event.set()
+
+        done_event.wait(timeout=2.0)
+        response.success = result['ok']
+        response.message = result['msg']
+        return response
+
+    def _srv_get_ee_pose(self, request, response):
+        """Read current End-Effector pose values."""
+        parts = []
+        for key in ['X', 'Y', 'Z', 'qx', 'qy', 'qz', 'qw']:
+            parts.append(f'{key}={self.ee_labels[key].get()}')
+        response.success = True
+        response.message = ', '.join(parts)
+        return response
+
+    def _srv_get_log(self, request, response):
+        """Read last 20 lines from Process Log."""
+        done_event = threading.Event()
+        result = {'msg': ''}
+
+        def _read():
+            try:
+                content = self._process_log.get('1.0', 'end').strip()
+                lines = content.split('\n')
+                result['msg'] = '\n'.join(lines[-20:]) if lines else '(empty)'
+            except Exception as e:
+                result['msg'] = f'error: {e}'
+            finally:
+                done_event.set()
+
+        if hasattr(self, 'root') and self.root.winfo_exists():
+            self.root.after(0, _read)
+        else:
+            result['msg'] = 'GUI not available'
+            done_event.set()
+
+        done_event.wait(timeout=2.0)
+        response.success = 'error' not in result['msg']
+        response.message = result['msg']
+        return response
 
     # ------------------------------------------------------------------
     # Controller command publishing (via action interface)
@@ -238,6 +524,11 @@ class SOArm101ControlGUI(Node):
 
     def _joint_states_callback(self, msg):
         """Update internal state and GUI sliders from joint_state_broadcaster."""
+        # Always track actual robot state (never blocked by _slider_driven)
+        with self.joint_lock:
+            for i, name in enumerate(msg.name):
+                if name in self._actual_positions and i < len(msg.position):
+                    self._actual_positions[name] = msg.position[i]
         if self._slider_driven:
             return
         with self.joint_lock:
@@ -280,9 +571,14 @@ class SOArm101ControlGUI(Node):
         # Notebook (tabs)
         notebook = ttk.Notebook(self.root)
         notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=(5, 0))
+        self._notebook = notebook
 
         self._build_individual_tab(notebook)
         self._build_arm_control_tab(notebook)
+        self._build_grasp_tab(notebook)
+
+        # Auto-populate IK fields when switching to IK tab
+        notebook.bind('<<NotebookTabChanged>>', self._on_tab_changed)
 
         # --- Log Panel (bottom) ---
         self._build_log_panel()
@@ -295,7 +591,7 @@ class SOArm101ControlGUI(Node):
 
     def _build_individual_tab(self, notebook):
         frame = ttk.Frame(notebook)
-        notebook.add(frame, text='Robot Control')
+        notebook.add(frame, text='FK')
 
         self.sliders = {}
         self.slider_labels = {}
@@ -408,21 +704,18 @@ class SOArm101ControlGUI(Node):
             self.joint_positions[joint_name] = value
         if joint_name in self.slider_labels:
             self.slider_labels[joint_name].config(text=f'{value:.3f}')
-        # Switch RViz planning group based on which joint is being moved
+        # Sync IK tab jaw label (sliders share the same DoubleVar)
+        if joint_name == GRIPPER_JOINT_NAME and hasattr(self, '_ik_jaw_label'):
+            self._ik_jaw_label.config(text=f'{value:.3f}')
+        # Switch planning group based on which joint is being moved
         if joint_name == GRIPPER_JOINT_NAME:
             self._select_planning_group('gripper')
         else:
             self._select_planning_group('arm')
         # Update RViz goal state only — robot doesn't move until button click
         self._publish_goal_state()
-        # Reset slider_driven after user stops dragging
-        if hasattr(self, '_slider_reset_id'):
-            self.root.after_cancel(self._slider_reset_id)
-        self._slider_reset_id = self.root.after(300, self._reset_slider_driven)
 
-    def _reset_slider_driven(self):
-        self._slider_driven = False
-
+    @service_trigger('zero_arm')
     def _zero_arm(self):
         """Reset arm joints to zero."""
         self._slider_driven = True
@@ -439,24 +732,26 @@ class SOArm101ControlGUI(Node):
 
     def _zero_gripper(self):
         """Reset gripper to zero (closed)."""
-        self._slider_driven = True
-        self._select_planning_group('gripper')
-        with self.joint_lock:
-            self.joint_positions[GRIPPER_JOINT_NAME] = 0.0
-        if GRIPPER_JOINT_NAME in self.sliders:
-            self.sliders[GRIPPER_JOINT_NAME].set(0.0)
-            self.slider_labels[GRIPPER_JOINT_NAME].config(text='0.000')
-        self._publish_goal_state()
+        self._gripper_command(0.0)
         self.status_var.set('Gripper zeroed')
 
     def _select_planning_group(self, group_name):
-        """Switch the active planning group in RViz."""
+        """Switch the active planning group in RViz.
+
+        On first call, cycles through gripper→arm to clear startup markers.
+        """
         if not hasattr(self, '_planning_group_pub'):
             return
+        from std_msgs.msg import String
+        # First call: cycle gripper→arm to clear green startup markers
+        if not hasattr(self, '_planning_group_initialized'):
+            self._planning_group_initialized = True
+            msg = String()
+            msg.data = 'gripper'
+            self._planning_group_pub.publish(msg)
         if hasattr(self, '_active_planning_group') and self._active_planning_group == group_name:
             return
         self._active_planning_group = group_name
-        from std_msgs.msg import String
         msg = String()
         msg.data = group_name
         self._planning_group_pub.publish(msg)
@@ -464,9 +759,9 @@ class SOArm101ControlGUI(Node):
         if hasattr(self, 'root') and self.root.winfo_exists():
             self.root.after(150, self._publish_goal_state)
 
+    @service_trigger('randomize_arm')
     def _randomize_arm(self):
         """Set arm joints to a random collision-free configuration."""
-        import random
         self._select_planning_group('arm')
         self.status_var.set('Finding random valid state...')
 
@@ -488,7 +783,7 @@ class SOArm101ControlGUI(Node):
                         positions[n] for n in ARM_JOINT_NAMES]
                     req.group_name = 'arm'
                     future = self.validity_client.call_async(req)
-                    rclpy.spin_until_future_complete(self, future, timeout_sec=1.0)
+                    self._wait_future(future, timeout_sec=1.0)
                     if future.result() is not None and not future.result().valid:
                         continue  # collision — retry
                 # Valid (or no validity service available) — apply it
@@ -533,6 +828,7 @@ class SOArm101ControlGUI(Node):
                 self.joint_positions[n] for n in ALL_JOINT_NAMES]
         self._goal_state_pub.publish(goal_state)
 
+    @service_trigger('set_joints')
     def _set_joints(self):
         """Send current slider positions directly to arm + gripper controllers."""
         with self.joint_lock:
@@ -546,7 +842,14 @@ class SOArm101ControlGUI(Node):
         jaw_str = f'{GRIPPER_JOINT_NAME}: {jaw:.3f}'
         self.status_var.set('Joints set')
         self._append_log(f'Set Joints → {joints_str}, {jaw_str}')
+        # Allow joint_states to sync sliders again after robot reaches goal
+        self.root.after(1000, self._clear_slider_driven)
 
+    def _clear_slider_driven(self):
+        """Allow joint_states callback to sync sliders again."""
+        self._slider_driven = False
+
+    @service_trigger('plan_execute')
     def _moveit_execute(self):
         """Plan and execute: plan via MoveIt, then send trajectory to arm_controller."""
         if not MOVEIT_AVAILABLE or self.plan_client is None:
@@ -822,179 +1125,609 @@ class SOArm101ControlGUI(Node):
 
     def _build_arm_control_tab(self, notebook):
         frame = ttk.Frame(notebook)
-        notebook.add(frame, text='Grasp')
+        notebook.add(frame, text='IK')
+        self._ik_tab_frame = frame
 
-        # XYZ inputs
-        coord_frame = ttk.LabelFrame(frame, text='Target Position (meters)')
+        # --- Arm (XYZ + RPY) side by side ---
+        coord_frame = ttk.LabelFrame(frame, text='Arm')
         coord_frame.pack(fill=tk.X, padx=10, pady=5)
 
         self.xyz_vars = {}
-        for label, default in [('X', 0.0), ('Y', 0.0), ('Z', 0.15)]:
-            row = tk.Frame(coord_frame)
-            row.pack(fill=tk.X, padx=5, pady=2)
+        self._ik_spinboxes = {}    # field -> Spinbox widget (for color changes)
+        self._ik_last_valid = {}   # field -> last value that produced valid IK
+        self._ik_solve_gen = 0     # generation counter for async IK results
+        self._ik_solve_lock = threading.Lock()  # prevent concurrent rclpy.spin
+        self._ik_debounce_id = None
+        self._ik_trace_active = True  # guard to suppress traces during programmatic updates
+
+        columns_row = tk.Frame(coord_frame)
+        columns_row.pack(fill=tk.X, padx=5, pady=2)
+
+        # Left column: XYZ
+        xyz_col = tk.Frame(columns_row)
+        xyz_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tk.Label(xyz_col, text='Position', font=('Arial', 9, 'bold')).pack(anchor='w', padx=2)
+        for label, default in [('X', 0.12), ('Y', 0.0), ('Z', 0.15)]:
+            lo, hi = WORKSPACE_BOUNDS[label]
+            row = tk.Frame(xyz_col)
+            row.pack(fill=tk.X, pady=1)
             tk.Label(row, text=f'{label}:', width=3).pack(side=tk.LEFT)
             var = tk.DoubleVar(value=default)
-            tk.Entry(row, textvariable=var, width=12).pack(side=tk.LEFT, padx=5)
+            spin = tk.Spinbox(
+                row, textvariable=var, from_=lo, to=hi,
+                increment=0.01, width=8, format='%.3f')
+            spin.pack(side=tk.LEFT, padx=3)
+            var.trace_add('write', lambda *a, f=label: self._on_ik_var_changed(f))
             self.xyz_vars[label] = var
+            self._ik_spinboxes[label] = spin
+            self._ik_last_valid[label] = default
 
-        # Gripper buttons
+        # Right column: RPY
+        rpy_col = tk.Frame(columns_row)
+        rpy_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tk.Label(rpy_col, text='Orientation', font=('Arial', 9, 'bold')).pack(anchor='w', padx=2)
+        self.rpy_vars = {}
+        for comp, default in [('Roll', 0.0), ('Pitch', 0.0), ('Yaw', 0.0)]:
+            row = tk.Frame(rpy_col)
+            row.pack(fill=tk.X, pady=1)
+            tk.Label(row, text=f'{comp[0]}:', width=3).pack(side=tk.LEFT)
+            var = tk.DoubleVar(value=default)
+            spin = tk.Spinbox(
+                row, textvariable=var, from_=-180.0, to=180.0,
+                increment=1.0, width=8, format='%.1f')
+            spin.pack(side=tk.LEFT, padx=3)
+            var.trace_add('write', lambda *a, f=comp: self._on_ik_var_changed(f))
+            self.rpy_vars[comp] = var
+            self._ik_spinboxes[comp] = spin
+            self._ik_last_valid[comp] = default
+
+        # Buttons inside Arm frame
+        arm_btn_frame = tk.Frame(coord_frame)
+        arm_btn_frame.pack(fill=tk.X, padx=5, pady=5)
+        tk.Button(arm_btn_frame, text='Reset Arm', bg='#b0b0b0', fg='#1a1a1a',
+                  command=self._ik_reset).pack(side=tk.LEFT, padx=5)
+        tk.Button(arm_btn_frame, text='Randomize', bg='#b0b0b0', fg='#1a1a1a',
+                  command=self._ik_randomize).pack(side=tk.LEFT, padx=5)
+
+        # --- Gripper Section (shares DoubleVar with FK tab) ---
         gripper_frame2 = ttk.LabelFrame(frame, text='Gripper')
-        gripper_frame2.pack(fill=tk.X, padx=10, pady=(2, 5))
-        gripper_btn2 = tk.Frame(gripper_frame2)
-        gripper_btn2.pack(fill=tk.X, padx=5, pady=5)
-        tk.Button(gripper_btn2, text='Open', bg='#b0b0b0', fg='#1a1a1a',
+        gripper_frame2.pack(fill=tk.X, padx=10, pady=(2, 2))
+
+        jaw_row2 = tk.Frame(gripper_frame2)
+        jaw_row2.pack(fill=tk.X, padx=5, pady=2)
+        lo, hi = JOINT_LIMITS[GRIPPER_JOINT_NAME]
+        tk.Label(jaw_row2, text=GRIPPER_JOINT_NAME, width=14, anchor='w').pack(side=tk.LEFT, padx=(5, 0))
+        # Reuse the FK tab's DoubleVar so both sliders stay in sync automatically
+        jaw_var_shared = self.sliders[GRIPPER_JOINT_NAME]
+        self._ik_jaw_slider = tk.Scale(
+            jaw_row2, variable=jaw_var_shared, from_=lo, to=hi,
+            orient=tk.HORIZONTAL, resolution=0.001, length=300,
+            command=lambda val: self._on_slider(GRIPPER_JOINT_NAME, float(val)))
+        self._ik_jaw_slider.pack(side=tk.LEFT, padx=5)
+        self._ik_jaw_label = tk.Label(jaw_row2, text='0.000', width=8)
+        self._ik_jaw_label.pack(side=tk.LEFT)
+
+        gripper_btn_frame2 = tk.Frame(gripper_frame2)
+        gripper_btn_frame2.pack(fill=tk.X, padx=5, pady=5)
+        tk.Button(gripper_btn_frame2, text='Reset Gripper', bg='#b0b0b0', fg='#1a1a1a',
+                  command=self._zero_gripper).pack(side=tk.LEFT, padx=5)
+        tk.Button(gripper_btn_frame2, text='Open', bg='#b0b0b0', fg='#1a1a1a',
                   command=self._gripper_open).pack(side=tk.LEFT, padx=5)
-        tk.Button(gripper_btn2, text='Close', bg='#b0b0b0', fg='#1a1a1a',
+        tk.Button(gripper_btn_frame2, text='Close', bg='#b0b0b0', fg='#1a1a1a',
                   command=self._gripper_close).pack(side=tk.LEFT, padx=5)
 
-        # Action buttons
+        # --- Action buttons: Set Joints / Plan & Execute ---
         ik_btn_frame = tk.Frame(frame)
         ik_btn_frame.pack(fill=tk.X, padx=10, pady=5)
         tk.Button(ik_btn_frame, text='Set Joints', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._ik_set_joints).pack(side=tk.LEFT, padx=5)
+                  command=self._ik_btn_set_joints).pack(side=tk.LEFT, padx=5)
         tk.Button(ik_btn_frame, text='Plan & Execute', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._ik_plan_execute).pack(side=tk.LEFT, padx=5)
+                  command=self._ik_btn_plan_execute).pack(side=tk.LEFT, padx=5)
 
-        # IK status
+        # IK state tracking
         self.ik_status_var = tk.StringVar(value='Ready')
-        tk.Label(frame, textvariable=self.ik_status_var, anchor='w',
-                 font=('Arial', 9)).pack(fill=tk.X, padx=10, pady=2)
+        self._ik_valid = True
+        self._ik_planned_target = None
 
-        # Current EE pose display
-        ee_frame = ttk.LabelFrame(frame, text='Current End-Effector Pose')
-        ee_frame.pack(fill=tk.X, padx=10, pady=5)
+        # Hidden EE pose storage — used by services
         self.ee_labels = {}
-        for axis in ['X', 'Y', 'Z']:
-            row = tk.Frame(ee_frame)
-            row.pack(fill=tk.X, padx=5, pady=1)
-            tk.Label(row, text=f'{axis}:', width=3).pack(side=tk.LEFT)
-            lbl = tk.Label(row, text='---', width=12, anchor='w')
-            lbl.pack(side=tk.LEFT)
-            self.ee_labels[axis] = lbl
+        for key in ['X', 'Y', 'Z', 'qx', 'qy', 'qz', 'qw']:
+            self.ee_labels[key] = tk.StringVar(value='---')
 
-        # Object detection section
+    def _build_grasp_tab(self, notebook):
+        frame = ttk.Frame(notebook)
+        notebook.add(frame, text='Grasp')
+
+        # --- Detected Objects ---
         obj_frame = ttk.LabelFrame(frame, text='Detected Objects')
         obj_frame.pack(fill=tk.X, padx=10, pady=5)
 
-        self.obj_listbox = tk.Listbox(obj_frame, height=5)
+        self.obj_listbox = tk.Listbox(obj_frame, height=8)
         self.obj_listbox.pack(fill=tk.X, padx=5, pady=2)
 
         obj_btn = tk.Frame(obj_frame)
         obj_btn.pack(fill=tk.X, padx=5, pady=2)
-        tk.Button(obj_btn, text='Refresh', bg='#b0b0b0', fg='#1a1a1a', command=self._refresh_objects).pack(side=tk.LEFT, padx=2)
+        tk.Button(obj_btn, text='Refresh', bg='#b0b0b0', fg='#1a1a1a',
+                  command=self._refresh_objects).pack(side=tk.LEFT, padx=2)
         tk.Button(obj_btn, text='Move to Selected', bg='#b0b0b0', fg='#1a1a1a',
                   command=self._move_to_object).pack(side=tk.LEFT, padx=2)
 
-    def _ik_set_joints(self):
-        """Compute IK then send directly to controllers."""
-        self._compute_ik(mode='set_joints')
+    # ------------------------------------------------------------------
+    # IK tab: tab-change, FK, spinbox IK, buttons
+    # ------------------------------------------------------------------
 
-    def _ik_plan_execute(self):
-        """Compute IK then plan & execute via MoveIt."""
-        self._compute_ik(mode='plan_execute')
+    @staticmethod
+    def _quat_to_rpy_deg(qx, qy, qz, qw):
+        """Convert quaternion to Roll/Pitch/Yaw in degrees."""
+        sinr = 2.0 * (qw * qx + qy * qz)
+        cosr = 1.0 - 2.0 * (qx * qx + qy * qy)
+        roll = math.atan2(sinr, cosr)
+        sinp = 2.0 * (qw * qy - qz * qx)
+        pitch = math.asin(max(-1.0, min(1.0, sinp)))
+        siny = 2.0 * (qw * qz + qx * qy)
+        cosy = 1.0 - 2.0 * (qy * qy + qz * qz)
+        yaw = math.atan2(siny, cosy)
+        return math.degrees(roll), math.degrees(pitch), math.degrees(yaw)
 
-    def _compute_ik(self, move=True, mode=None):
-        if not MOVEIT_AVAILABLE or self.ik_client is None:
-            self.ik_status_var.set('moveit_msgs not installed — IK unavailable')
-            return
-        if not self.ik_client.service_is_ready():
-            self.ik_status_var.set('MoveIt /compute_ik service not available')
-            self._append_log('compute_ik service not ready', 'warn')
-            return
+    @staticmethod
+    def _rpy_deg_to_quat(roll_deg, pitch_deg, yaw_deg):
+        """Convert Roll/Pitch/Yaw in degrees to quaternion (x, y, z, w)."""
+        r, p, y = math.radians(roll_deg), math.radians(pitch_deg), math.radians(yaw_deg)
+        cr, cp, cy = math.cos(r / 2), math.cos(p / 2), math.cos(y / 2)
+        sr, sp, sy = math.sin(r / 2), math.sin(p / 2), math.sin(y / 2)
+        return (sr * cp * cy - cr * sp * sy,
+                cr * sp * cy + sr * cp * sy,
+                cr * cp * sy - sr * sp * cy,
+                cr * cp * cy + sr * sp * sy)
 
-        self.ik_status_var.set('Computing IK...')
-
+    def _get_ik_target_quat(self):
+        """Read XYZ + RPY from spinboxes, return (x, y, z, qx, qy, qz, qw)."""
         x = self.xyz_vars['X'].get()
         y = self.xyz_vars['Y'].get()
         z = self.xyz_vars['Z'].get()
+        qx, qy, qz, qw = self._rpy_deg_to_quat(
+            self.rpy_vars['Roll'].get(),
+            self.rpy_vars['Pitch'].get(),
+            self.rpy_vars['Yaw'].get())
+        return x, y, z, qx, qy, qz, qw
 
-        request = GetPositionIK.Request()
-        ik_req = PositionIKRequest()
-        ik_req.group_name = 'arm'
-        ik_req.avoid_collisions = True
-
-        robot_state = RobotState()
-        robot_state.joint_state.name = list(ARM_JOINT_NAMES)
+    def _on_tab_changed(self, event):
+        """Auto-populate IK spinboxes from current EE pose when switching to IK tab."""
+        tab_text = self._notebook.tab(self._notebook.select(), 'text')
+        if tab_text != 'IK':
+            return
+        self._compute_fk_to_spinboxes()
         with self.joint_lock:
-            robot_state.joint_state.position = [
-                self.joint_positions[n] for n in ARM_JOINT_NAMES]
-        ik_req.robot_state = robot_state
+            self._ik_planned_target = {n: self.joint_positions[n] for n in ARM_JOINT_NAMES}
+        self._ik_valid = True
 
-        pose = PoseStamped()
-        pose.header.frame_id = 'base'
-        pose.header.stamp = self.get_clock().now().to_msg()
-        pose.pose.position.x = x
-        pose.pose.position.y = y
-        pose.pose.position.z = z
-        pose.pose.orientation.w = 1.0
-        ik_req.pose_stamped = pose
-
-        request.ik_request = ik_req
-
-        future = self.ik_client.call_async(request)
-        future.add_done_callback(
-            lambda f: self._ik_result_callback(f, move, mode))
-
-    def _ik_result_callback(self, future, move, mode=None):
-        """Handle IK service response. Called from ROS executor thread."""
-        try:
-            response = future.result()
-        except Exception as e:
-            self._set_ik_status(f'IK service error: {e}')
+    def _compute_fk_to_spinboxes(self, joint_positions=None):
+        """Compute FK and populate IK spinboxes. Uses current joints if None."""
+        if not MOVEIT_AVAILABLE or not hasattr(self, 'fk_client'):
+            return
+        if not self.fk_client.service_is_ready():
             return
 
-        if response.error_code.val != 1:
-            self._set_ik_status(
-                f'IK failed (error code {response.error_code.val})')
-            self._append_log(f'IK failed (error code {response.error_code.val})', 'warn')
+        if joint_positions is None:
+            with self.joint_lock:
+                positions = [self.joint_positions[n] for n in ARM_JOINT_NAMES]
+        else:
+            positions = [joint_positions[n] for n in ARM_JOINT_NAMES]
+
+        def _call_fk():
+            with self._ik_solve_lock:
+                request = GetPositionFK.Request()
+                request.header.frame_id = 'base'
+                request.header.stamp = self.get_clock().now().to_msg()
+                request.fk_link_names = ['gripper']
+                request.robot_state.joint_state.name = list(ARM_JOINT_NAMES)
+                request.robot_state.joint_state.position = list(positions)
+
+                future = self.fk_client.call_async(request)
+                self._wait_future(future, timeout_sec=2.0)
+
+            if future.result() is None:
+                return
+            resp = future.result()
+            if resp.error_code.val != 1 or not resp.pose_stamped:
+                return
+
+            p = resp.pose_stamped[0].pose.position
+            o = resp.pose_stamped[0].pose.orientation
+            if hasattr(self, 'root') and self.root.winfo_exists():
+                self.root.after(0, self._populate_ik_spinboxes,
+                               p.x, p.y, p.z, o.x, o.y, o.z, o.w)
+
+        threading.Thread(target=_call_fk, daemon=True).start()
+
+    def _populate_ik_spinboxes(self, x, y, z, qx, qy, qz, qw):
+        """Set IK spinbox values from FK result and mark state as valid."""
+        self._ik_trace_active = False  # suppress IK solves during batch update
+        self.xyz_vars['X'].set(round(x, 3))
+        self.xyz_vars['Y'].set(round(y, 3))
+        self.xyz_vars['Z'].set(round(z, 3))
+        r, p, ya = self._quat_to_rpy_deg(qx, qy, qz, qw)
+        self.rpy_vars['Roll'].set(round(r, 1))
+        self.rpy_vars['Pitch'].set(round(p, 1))
+        self.rpy_vars['Yaw'].set(round(ya, 1))
+        self._ik_trace_active = True
+        # Store as last valid
+        for key in ['X', 'Y', 'Z']:
+            self._ik_last_valid[key] = self.xyz_vars[key].get()
+        for key in ['Roll', 'Pitch', 'Yaw']:
+            self._ik_last_valid[key] = self.rpy_vars[key].get()
+        # Mark valid, clear red
+        self._ik_valid = True
+        for spin in self._ik_spinboxes.values():
+            spin.config(fg='black')
+
+    def _ik_reset(self):
+        """Reset IK tab: zero arm and populate spinboxes from resulting FK."""
+        self._zero_arm()
+        def _after_zero():
+            with self.joint_lock:
+                pos = {n: self.joint_positions[n] for n in ARM_JOINT_NAMES}
+            self._ik_planned_target = dict(pos)
+            self._ik_valid = True
+            self._compute_fk_to_spinboxes(pos)
+        if hasattr(self, 'root') and self.root.winfo_exists():
+            self.root.after(500, _after_zero)
+
+    # --- Spinbox IK: debounced, serialized ---
+
+    def _on_ik_var_changed(self, field):
+        """Any IK spinbox variable changed. Debounce then solve IK."""
+        if not self._ik_trace_active:
+            self.get_logger().debug(f'IK trace suppressed: {field}')
+            return  # suppress during programmatic batch updates
+        self.get_logger().info(f'IK var changed: {field}')
+        if self._ik_debounce_id is not None:
+            self.root.after_cancel(self._ik_debounce_id)
+        self._ik_debounce_id = self.root.after(
+            150, lambda: self._ik_solve_interactive(field))
+
+    def _ik_solve_interactive(self, changed_field, revert_on_fail=False):
+        """Compute IK from current spinbox values. Serialized via lock."""
+        if not MOVEIT_AVAILABLE or self.ik_client is None:
+            self.get_logger().warn('IK solve skipped: MoveIt not available')
+            return
+        if not self.ik_client.service_is_ready():
+            self.get_logger().warn('IK solve skipped: /compute_ik not ready')
             return
 
-        sol = response.solution.joint_state
-        target = {}
-        for i, name in enumerate(sol.name):
-            if name in ARM_JOINT_NAMES and i < len(sol.position):
-                target[name] = sol.position[i]
+        self._ik_debounce_id = None
+        x, y, z, qx, qy, qz, qw = self._get_ik_target_quat()
+        self.get_logger().info(
+            f'IK solve starting: {changed_field} -> ({x:.3f}, {y:.3f}, {z:.3f})')
 
-        angles_str = ', '.join(f'{n}: {target.get(n, 0):.3f}' for n in ARM_JOINT_NAMES)
-        self._set_ik_status(f'IK solution: {angles_str}')
-        self._append_log(f'IK solution: {angles_str}')
+        with self.joint_lock:
+            current_joints = [self.joint_positions[n] for n in ARM_JOINT_NAMES]
 
-        # Snap sliders to IK solution + publish goal state
+        seeds = [
+            list(current_joints),
+            [math.atan2(x, -y) if abs(x) + abs(y) > 0.001 else 0.0,
+             0.0, 0.0, 0.0, 0.0],
+            [0.0] * len(ARM_JOINT_NAMES),
+        ]
+
+        self._ik_solve_gen += 1
+        gen = self._ik_solve_gen
+
+        def _make_ik_request(seed, avoid_collisions):
+            request = GetPositionIK.Request()
+            ik_req = PositionIKRequest()
+            ik_req.group_name = 'arm'
+            ik_req.avoid_collisions = avoid_collisions
+            robot_state = RobotState()
+            robot_state.joint_state.name = list(ARM_JOINT_NAMES)
+            robot_state.joint_state.position = list(seed)
+            ik_req.robot_state = robot_state
+            pose = PoseStamped()
+            pose.header.frame_id = 'base'
+            pose.header.stamp = self.get_clock().now().to_msg()
+            pose.pose.position.x = x
+            pose.pose.position.y = y
+            pose.pose.position.z = z
+            pose.pose.orientation.x = qx
+            pose.pose.orientation.y = qy
+            pose.pose.orientation.z = qz
+            pose.pose.orientation.w = qw
+            ik_req.pose_stamped = pose
+            ik_req.timeout.sec = 0
+            ik_req.timeout.nanosec = 500_000_000  # 0.5s cap per request
+            request.ik_request = ik_req
+            return request
+
+        def _extract_joints(result):
+            sol = result.solution.joint_state
+            target = {}
+            for i, name in enumerate(sol.name):
+                if name in ARM_JOINT_NAMES and i < len(sol.position):
+                    target[name] = sol.position[i]
+            return target
+
+        def _solve():
+            if not self._ik_solve_lock.acquire(blocking=False):
+                self.get_logger().info('IK solve: lock busy, skipping')
+                return  # another solve running, debounce will retry
+            try:
+                # Pass 1: collision-aware IK (valid + safe)
+                for i, seed in enumerate(seeds):
+                    request = _make_ik_request(seed, avoid_collisions=True)
+                    future = self.ik_client.call_async(request)
+                    result = self._wait_future(future, timeout_sec=2.0)
+                    code = result.error_code.val if result else 'N/A'
+                    self.get_logger().info(
+                        f'IK pass1 seed{i}: done={future.done()}, code={code}')
+                    if result is not None and result.error_code.val == 1:
+                        target = _extract_joints(result)
+                        self.get_logger().info('IK SUCCESS (collision-free)')
+                        if hasattr(self, 'root') and self.root.winfo_exists():
+                            self.root.after(0, self._ik_interactive_success,
+                                           target, gen)
+                        return
+
+                # Pass 2: collision-ignored IK (reachable but colliding)
+                for i, seed in enumerate(seeds):
+                    request = _make_ik_request(seed, avoid_collisions=False)
+                    future = self.ik_client.call_async(request)
+                    result = self._wait_future(future, timeout_sec=2.0)
+                    code = result.error_code.val if result else 'N/A'
+                    self.get_logger().info(
+                        f'IK pass2 seed{i}: done={future.done()}, code={code}')
+                    if result is not None and result.error_code.val == 1:
+                        target = _extract_joints(result)
+                        self.get_logger().info('IK COLLISION (goal shown red)')
+                        if hasattr(self, 'root') and self.root.winfo_exists():
+                            self.root.after(0, self._ik_interactive_fail_with_goal,
+                                           target, changed_field, gen)
+                        return
+
+                # Truly unreachable — no solution even ignoring collisions
+                self.get_logger().info('IK UNREACHABLE (all seeds failed)')
+                if hasattr(self, 'root') and self.root.winfo_exists():
+                    self.root.after(0, self._ik_interactive_fail,
+                                   changed_field, revert_on_fail, gen)
+            finally:
+                self._ik_solve_lock.release()
+
+        threading.Thread(target=_solve, daemon=True).start()
+
+    def _ik_interactive_success(self, target, gen):
+        """IK succeeded — update goal state, clear red."""
+        if gen != self._ik_solve_gen:
+            return  # stale
+
+        self._ik_valid = True
+        self._ik_planned_target = dict(target)
+
+        for key in ['X', 'Y', 'Z']:
+            self._ik_last_valid[key] = self.xyz_vars[key].get()
+        for key in ['Roll', 'Pitch', 'Yaw']:
+            self._ik_last_valid[key] = self.rpy_vars[key].get()
+
+        # Clear all red
+        for spin in self._ik_spinboxes.values():
+            spin.config(fg='black')
+
+        # Update sliders + goal state
+        self._slider_driven = True
+        self._select_planning_group('arm')
+        with self.joint_lock:
+            for name in ARM_JOINT_NAMES:
+                if name in target:
+                    self.joint_positions[name] = target[name]
+        for name in ARM_JOINT_NAMES:
+            if name in target and name in self.sliders:
+                self.sliders[name].set(target[name])
+                self.slider_labels[name].config(text=f'{target[name]:.3f}')
+        self._publish_goal_state()
+
+    def _ik_interactive_fail_with_goal(self, target, changed_field, gen):
+        """IK collision — publish colliding goal (RViz shows red), mark field red."""
+        if gen != self._ik_solve_gen:
+            return  # stale
+
+        self._ik_valid = False
+        self._ik_planned_target = None  # not executable
+
+        # Mark the offending field red
+        self._ik_spinboxes[changed_field].config(fg='red')
+
+        # Publish the colliding solution so goal robot shows RED in RViz
+        self._slider_driven = True
+        self._select_planning_group('arm')
+        with self.joint_lock:
+            for name in ARM_JOINT_NAMES:
+                if name in target:
+                    self.joint_positions[name] = target[name]
+        for name in ARM_JOINT_NAMES:
+            if name in target and name in self.sliders:
+                self.sliders[name].set(target[name])
+                self.slider_labels[name].config(text=f'{target[name]:.3f}')
+        self._publish_goal_state()
+
+        self._append_log(
+            f'IK collision — {changed_field} causes collision', 'warn')
+
+    def _ik_interactive_fail(self, changed_field, revert_on_fail, gen):
+        """IK truly unreachable — mark field red, log warning."""
+        if gen != self._ik_solve_gen:
+            return  # stale
+
+        self._ik_valid = False
+
+        # Mark the offending field red
+        self._ik_spinboxes[changed_field].config(fg='red')
+        self._append_log(
+            f'IK unreachable — {changed_field} value out of workspace', 'warn')
+
+    # --- IK buttons (always enabled, show warning if invalid) ---
+
+    def _ik_btn_set_joints(self):
+        """Send currently planned IK joints directly to controllers."""
+        if not self._ik_valid or self._ik_planned_target is None:
+            self._append_log('IK solution not found — adjust target first', 'warn')
+            return
+        self._set_joints()
+
+    def _ik_btn_plan_execute(self):
+        """Plan & Execute from currently planned IK joints via MoveIt."""
+        if not self._ik_valid or self._ik_planned_target is None:
+            self._append_log('IK solution not found — adjust target first', 'warn')
+            return
+        self._moveit_execute()
+
+    # --- IK services (for programmatic access) ---
+
+    @service_trigger('ik_set_joints')
+    def _ik_set_joints(self):
+        """Service: send IK joints to controllers."""
+        if self._ik_valid and self._ik_planned_target is not None:
+            self._set_joints()
+        else:
+            self._compute_ik_full(mode='set_joints')
+
+    @service_trigger('ik_plan_execute')
+    def _ik_plan_execute(self):
+        """Service: plan & execute IK joints."""
+        if self._ik_valid and self._ik_planned_target is not None:
+            self._moveit_execute()
+        else:
+            self._compute_ik_full(mode='plan_execute')
+
+    @service_trigger('ik_randomize')
+    def _ik_randomize(self):
+        """Randomize arm goal state, compute FK, populate spinboxes."""
+        self._randomize_arm()
+        def _fk_after_randomize():
+            with self.joint_lock:
+                pos = {n: self.joint_positions[n] for n in ARM_JOINT_NAMES}
+            self._ik_planned_target = dict(pos)
+            self._ik_valid = True
+            joints_str = ', '.join(f'{n}: {pos[n]:.3f}' for n in ARM_JOINT_NAMES)
+            self._append_log(f'Randomized goal: {joints_str}')
+            self._compute_fk_to_spinboxes(pos)
+        if hasattr(self, 'root') and self.root.winfo_exists():
+            self.root.after(1500, _fk_after_randomize)
+
+    # --- Full IK solver (for services, 6 seeds + 2 passes) ---
+
+    def _compute_ik_full(self, mode=None):
+        """Multi-seed IK computation for service/fallback use."""
+        if not MOVEIT_AVAILABLE or self.ik_client is None:
+            self._append_log('moveit_msgs not installed', 'warn')
+            return
+        if not self.ik_client.service_is_ready():
+            self._append_log('compute_ik service not ready', 'warn')
+            return
+
+        x, y, z, qx, qy, qz, qw = self._get_ik_target_quat()
+
+        with self.joint_lock:
+            current_joints = [self.joint_positions[n] for n in ARM_JOINT_NAMES]
+
+        seeds = [
+            list(current_joints),
+            [math.atan2(x, -y) if abs(x) + abs(y) > 0.001 else 0.0,
+             0.0, 0.0, 0.0, 0.0],
+            [0.0] * len(ARM_JOINT_NAMES),
+        ]
+        for _ in range(3):
+            seeds.append([random.uniform(*JOINT_LIMITS[n]) for n in ARM_JOINT_NAMES])
+
+        def _try_seeds():
+            with self._ik_solve_lock:
+                for avoid_col in [True, False]:
+                    for seed in seeds:
+                        request = GetPositionIK.Request()
+                        ik_req = PositionIKRequest()
+                        ik_req.group_name = 'arm'
+                        ik_req.avoid_collisions = avoid_col
+
+                        robot_state = RobotState()
+                        robot_state.joint_state.name = list(ARM_JOINT_NAMES)
+                        robot_state.joint_state.position = list(seed)
+                        ik_req.robot_state = robot_state
+
+                        pose = PoseStamped()
+                        pose.header.frame_id = 'base'
+                        pose.header.stamp = self.get_clock().now().to_msg()
+                        pose.pose.position.x = x
+                        pose.pose.position.y = y
+                        pose.pose.position.z = z
+                        pose.pose.orientation.x = qx
+                        pose.pose.orientation.y = qy
+                        pose.pose.orientation.z = qz
+                        pose.pose.orientation.w = qw
+                        ik_req.pose_stamped = pose
+                        ik_req.timeout.sec = 0
+                        ik_req.timeout.nanosec = 500_000_000  # 0.5s cap
+                        request.ik_request = ik_req
+
+                        future = self.ik_client.call_async(request)
+                        self._wait_future(future, timeout_sec=2.0)
+
+                        if future.result() is None:
+                            continue
+                        resp = future.result()
+                        if resp.error_code.val == 1:
+                            sol = resp.solution.joint_state
+                            target = {}
+                            for i, name in enumerate(sol.name):
+                                if name in ARM_JOINT_NAMES and i < len(sol.position):
+                                    target[name] = sol.position[i]
+                            self._ik_apply_and_act(target, mode)
+                            return
+
+            self._append_log(
+                f'IK failed for ({x:.3f}, {y:.3f}, {z:.3f})', 'warn')
+
+        threading.Thread(target=_try_seeds, daemon=True).start()
+
+    def _ik_apply_and_act(self, target, mode):
+        """Apply IK solution to sliders/goal state and optionally execute."""
         def _apply():
+            self._slider_driven = True
             self._select_planning_group('arm')
+            with self.joint_lock:
+                for name in ARM_JOINT_NAMES:
+                    if name in target:
+                        self.joint_positions[name] = target[name]
             for name in ARM_JOINT_NAMES:
                 if name in target and name in self.sliders:
                     self.sliders[name].set(target[name])
+                    self.slider_labels[name].config(text=f'{target[name]:.3f}')
             self._publish_goal_state()
+            self._ik_planned_target = dict(target)
+            self._ik_valid = True
+            if mode == 'set_joints':
+                self._set_joints()
+            elif mode == 'plan_execute':
+                self._moveit_execute()
 
-        if mode == 'set_joints':
-            # Snap sliders then send directly
-            if hasattr(self, 'root') and self.root.winfo_exists():
-                self.root.after(0, _apply)
-                self.root.after(50, self._set_joints)
-        elif mode == 'plan_execute':
-            # Snap sliders then plan & execute via MoveIt
-            if hasattr(self, 'root') and self.root.winfo_exists():
-                self.root.after(0, _apply)
-                self.root.after(50, self._moveit_execute)
-        elif move:
-            self._execute_trajectory(target, duration_s=2.0)
+        if hasattr(self, 'root') and self.root.winfo_exists():
+            self.root.after(0, _apply)
 
     def _set_ik_status(self, text):
-        if hasattr(self, 'root') and self.root.winfo_exists():
-            self.root.after(0, self.ik_status_var.set, text)
+        self.ik_status_var.set(text)
+        self._append_log(text)
 
     def _ee_pose_callback(self, msg):
         if hasattr(self, 'root') and self.root.winfo_exists():
+            p = msg.pose.position
+            o = msg.pose.orientation
             self.root.after(0, self._update_ee_display,
-                           msg.pose.position.x,
-                           msg.pose.position.y,
-                           msg.pose.position.z)
+                           p.x, p.y, p.z, o.x, o.y, o.z, o.w)
 
-    def _update_ee_display(self, x, y, z):
-        self.ee_labels['X'].config(text=f'{x:.4f}')
-        self.ee_labels['Y'].config(text=f'{y:.4f}')
-        self.ee_labels['Z'].config(text=f'{z:.4f}')
+    def _update_ee_display(self, x, y, z, qx=0.0, qy=0.0, qz=0.0, qw=1.0):
+        self.ee_labels['X'].set(f'{x:.4f}')
+        self.ee_labels['Y'].set(f'{y:.4f}')
+        self.ee_labels['Z'].set(f'{z:.4f}')
+        self.ee_labels['qx'].set(f'{qx:.4f}')
+        self.ee_labels['qy'].set(f'{qy:.4f}')
+        self.ee_labels['qz'].set(f'{qz:.4f}')
+        self.ee_labels['qw'].set(f'{qw:.4f}')
 
     def _objects_callback(self, msg):
         with self.objects_lock:
@@ -1028,32 +1761,31 @@ class SOArm101ControlGUI(Node):
         self.xyz_vars['X'].set(pos['x'])
         self.xyz_vars['Y'].set(pos['y'])
         self.xyz_vars['Z'].set(pos['z'] + 0.05)
-        self._ik_move()
+        self._ik_set_joints()
 
     # ------------------------------------------------------------------
     # Tab 3: Gripper Control
     # ------------------------------------------------------------------
 
+    @service_trigger('gripper_close')
     def _gripper_close(self):
-        self._slider_driven = True
-        self._select_planning_group('gripper')
-        target = JOINT_LIMITS['Jaw'][0]
-        with self.joint_lock:
-            self.joint_positions['Jaw'] = target
-        if 'Jaw' in self.sliders:
-            self.sliders['Jaw'].set(target)
-            self.slider_labels['Jaw'].config(text=f'{target:.3f}')
-        self._publish_goal_state()
+        self._gripper_command(JOINT_LIMITS['Jaw'][0])
 
+    @service_trigger('gripper_open')
     def _gripper_open(self):
+        self._gripper_command(JOINT_LIMITS['Jaw'][1])
+
+    def _gripper_command(self, jaw_target):
+        """Set gripper goal (does NOT execute — use Set Joints or Plan & Execute)."""
         self._slider_driven = True
         self._select_planning_group('gripper')
-        target = JOINT_LIMITS['Jaw'][1]
         with self.joint_lock:
-            self.joint_positions['Jaw'] = target
+            self.joint_positions['Jaw'] = jaw_target
         if 'Jaw' in self.sliders:
-            self.sliders['Jaw'].set(target)
-            self.slider_labels['Jaw'].config(text=f'{target:.3f}')
+            self.sliders['Jaw'].set(jaw_target)
+            self.slider_labels['Jaw'].config(text=f'{jaw_target:.3f}')
+        if hasattr(self, '_ik_jaw_label'):
+            self._ik_jaw_label.config(text=f'{jaw_target:.3f}')
         self._publish_goal_state()
 
     # ------------------------------------------------------------------
@@ -1106,6 +1838,7 @@ class SOArm101ControlGUI(Node):
                     time.sleep(1.0 / 50)
 
                 self._append_log('Trajectory complete')
+                self._slider_driven = False
             finally:
                 self._traj_lock.release()
 
@@ -1195,8 +1928,10 @@ class SOArm101ControlGUI(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = SOArm101ControlGUI()
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:

@@ -1,0 +1,23 @@
+# SO-ARM101 workspace bounding box
+# Computed from 200011 FK samples (5% safety margin)
+# Home EE: (0.0206, -0.2775, 0.2669)
+#
+# Regenerate: ros2 run so_arm101_control compute_workspace
+
+workspace_bounds:
+  x_min: -0.2869
+  x_max: 0.3287
+  y_min: -0.3339
+  y_max: 0.2257
+  z_min: -0.0657
+  z_max: 0.4334
+  r_min: 0.0079
+  r_max: 0.4732
+
+workspace_bounds_raw:
+  x_min: -0.3211
+  x_max: 0.3629
+  y_min: -0.3650
+  y_max: 0.2568
+  z_min: -0.0934
+  z_max: 0.4611

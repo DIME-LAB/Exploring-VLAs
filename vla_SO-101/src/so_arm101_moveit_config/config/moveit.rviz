@@ -21,7 +21,7 @@ Visualization Manager:
         Loop Animation: false
         Robot Alpha: 0.5
         Show Robot Collision: false
-        Show Robot Visual: true
+        Show Robot Visual: false
         State Display Time: 3x
         Trajectory Topic: /display_planned_path
       Planning Request:
