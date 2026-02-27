@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<!-- Reference: vla_SO-ARM101/src/so_arm101_moveit_config/config/so_arm101.urdf.xacro -->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="so_arm101">
+
+    <!-- Import base URDF -->
+    <xacro:include filename="$(find so_arm101_description)/urdf/so_arm101.urdf" />
+
+    <!-- Import Gazebo-specific ros2_control + plugins + materials -->
+    <xacro:include filename="$(find so_arm101_description)/urdf/so_arm101.gazebo.xacro" />
+
+</robot>

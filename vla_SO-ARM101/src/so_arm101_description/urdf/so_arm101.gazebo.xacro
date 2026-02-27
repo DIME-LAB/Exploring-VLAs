@@ -1,0 +1,112 @@
+<?xml version="1.0"?>
+<!-- Reference: ~/ros2_ws/src/jetank_description/urdf/jetank_sensors.xacro -->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="so_arm101">
+
+  <!-- Fix the base to the world so the robot doesn't fall -->
+  <link name="world"/>
+  <joint name="world_to_base" type="fixed">
+    <parent link="world"/>
+    <child link="base"/>
+  </joint>
+
+  <!-- ros2_control hardware interface for Ignition Gazebo -->
+  <ros2_control name="GazeboSimSystem" type="system">
+    <hardware>
+      <plugin>gz_ros2_control/GazeboSimSystem</plugin>
+    </hardware>
+
+    <joint name="Rotation">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+
+    <joint name="Pitch">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+
+    <joint name="Elbow">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+
+    <joint name="Wrist_Pitch">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+
+    <joint name="Wrist_Roll">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+
+    <joint name="Jaw">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+  </ros2_control>
+
+  <!-- Gazebo ros2_control plugin — loads controller_manager with our controller config -->
+  <gazebo>
+    <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
+      <parameters>$(find so_arm101_moveit_config)/config/ros2_controllers.yaml</parameters>
+    </plugin>
+  </gazebo>
+
+  <!-- Gazebo materials for each link -->
+  <gazebo reference="base">
+    <material>
+      <ambient>1.0 0.82 0.12 1</ambient>
+      <diffuse>1.0 0.82 0.12 1</diffuse>
+    </material>
+  </gazebo>
+
+  <gazebo reference="shoulder">
+    <material>
+      <ambient>0.1 0.1 0.1 1</ambient>
+      <diffuse>0.1 0.1 0.1 1</diffuse>
+    </material>
+  </gazebo>
+
+  <gazebo reference="upper_arm">
+    <material>
+      <ambient>1.0 0.82 0.12 1</ambient>
+      <diffuse>1.0 0.82 0.12 1</diffuse>
+    </material>
+  </gazebo>
+
+  <gazebo reference="lower_arm">
+    <material>
+      <ambient>1.0 0.82 0.12 1</ambient>
+      <diffuse>1.0 0.82 0.12 1</diffuse>
+    </material>
+  </gazebo>
+
+  <gazebo reference="wrist">
+    <material>
+      <ambient>0.1 0.1 0.1 1</ambient>
+      <diffuse>0.1 0.1 0.1 1</diffuse>
+    </material>
+  </gazebo>
+
+  <gazebo reference="gripper">
+    <material>
+      <ambient>1.0 0.82 0.12 1</ambient>
+      <diffuse>1.0 0.82 0.12 1</diffuse>
+    </material>
+  </gazebo>
+
+  <gazebo reference="jaw">
+    <material>
+      <ambient>1.0 0.82 0.12 1</ambient>
+      <diffuse>1.0 0.82 0.12 1</diffuse>
+    </material>
+  </gazebo>
+
+</robot>
