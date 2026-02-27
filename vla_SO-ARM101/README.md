@@ -14,7 +14,7 @@ ROS2 Humble packages for the SO-ARM101 5-DOF robot arm with MoveIt2 motion plann
 
 - **5-DOF arm**: Rotation, Pitch, Elbow, Wrist_Pitch, Wrist_Roll (STS3215 servos)
 - **1 gripper**: Jaw
-- **IK solver**: [pick_ik](https://github.com/PickNikRobotics/pick_ik) (position-only, `rotation_scale: 0.0` for 5-DOF)
+- **IK solver**: [pick_ik](https://github.com/PickNikRobotics/pick_ik) (`rotation_scale: 0.5` for 5-DOF)
 - **Planner**: OMPL (RRTConnect)
 
 ## Prerequisites
@@ -41,9 +41,9 @@ source ~/.bashrc
 ```bash
 # Create workspace and symlink/copy src packages
 mkdir -p ~/ros2_ws/src
-ln -s /path/to/vla_SO-101/src/so_arm101_description ~/ros2_ws/src/
-ln -s /path/to/vla_SO-101/src/so_arm101_control ~/ros2_ws/src/
-ln -s /path/to/vla_SO-101/src/so_arm101_moveit_config ~/ros2_ws/src/
+ln -s /path/to/vla_SO-ARM101/src/so_arm101_description ~/ros2_ws/src/
+ln -s /path/to/vla_SO-ARM101/src/so_arm101_control ~/ros2_ws/src/
+ln -s /path/to/vla_SO-ARM101/src/so_arm101_moveit_config ~/ros2_ws/src/
 
 # Build
 cd ~/ros2_ws
@@ -62,15 +62,13 @@ ros2 launch so_arm101_moveit_config demo.launch.py
 
 This launches move_group, RViz with MotionPlanning plugin, and ros2_control with fake hardware. Drag the interactive marker arrows in RViz to set goal positions, then click **Plan & Execute**.
 
-### Control GUI + MoveIt
+### Full Stack (GUI + MoveIt + RViz + EE publisher)
 
 ```bash
-# Terminal 1: MoveIt
-ros2 launch so_arm101_moveit_config demo.launch.py
-
-# Terminal 2: GUI + EE pose publisher
 ros2 launch so_arm101_control control.launch.py
 ```
+
+This launches everything: MoveIt move_group, ros2_control, RViz, control GUI, and EE pose publisher in a single command.
 
 The GUI has two modes:
 - **Direct**: sliders move the robot immediately via joint trajectory controller
@@ -93,13 +91,12 @@ ros2 run so_arm101_control test_planning
 ```yaml
 arm:
   kinematics_solver: pick_ik/PickIkPlugin
-  rotation_scale: 0.0          # Ignore orientation (5-DOF can't do full 6-DOF)
-  orientation_threshold: 6.28   # Accept any orientation
+  rotation_scale: 0.5           # Low orientation weight (5-DOF can't do full 6-DOF)
+  orientation_threshold: 0.1
   minimal_displacement_weight: 0.001
 ```
 
-- `rotation_scale: 0.0` is critical — any nonzero value causes IK failures for XYZ Cartesian goals on this 5-DOF arm
-- The arm has 3 position DOFs + 2 orientation DOFs (pitch + tool roll), insufficient for full 6-DOF pose control
+- `rotation_scale: 0.5` keeps orientation influence low — the 5-DOF arm has 3 position DOFs + 2 orientation DOFs (pitch + tool roll), insufficient for full 6-DOF pose control
 
 ### RViz (`so_arm101_moveit_config/config/moveit.rviz`)
 
