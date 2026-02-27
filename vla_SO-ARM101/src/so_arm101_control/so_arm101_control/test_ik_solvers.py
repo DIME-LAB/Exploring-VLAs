@@ -19,13 +19,13 @@ from moveit_msgs.srv import GetPositionIK
 from moveit_msgs.msg import PositionIKRequest, RobotState
 
 
-ARM_JOINT_NAMES = ['Rotation', 'Pitch', 'Elbow', 'Wrist_Pitch', 'Wrist_Roll']
+ARM_JOINT_NAMES = ['shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll']
 
 # Test poses: (x, y, z, qx, qy, qz, qw, description)
 #
 # SO-ARM101 joint axes at home config:
-#   Rotation: -Z (base yaw), Pitch/Elbow/Wrist_Pitch: +X (pitch),
-#   Wrist_Roll: +Y (tool roll)
+#   shoulder_pan: -Z (base yaw), shoulder_lift/elbow_flex/wrist_flex: +X (pitch),
+#   wrist_roll: +Y (tool roll)
 # Controllable EE orientation: pitch (X-rot) + tool-roll (Y-rot)
 # CANNOT independently control: side-tilt (Y-rot decoupled from tool-roll)
 #
@@ -38,9 +38,9 @@ TEST_POSES = [
     (0.08, 0.0, 0.20, 0.0, 0.0, 0.0, 1.0, 'high_center'),
     (0.15, 0.0, 0.05, 0.0, 0.0, 0.0, 1.0, 'low_front'),
     # --- Achievable orientations (pitch about X + tool roll about Y) ---
-    # 45-deg pitch about X (uses Pitch/Elbow/Wrist_Pitch)
+    # 45-deg pitch about X (uses shoulder_lift/elbow_flex/wrist_flex)
     (0.12, 0.0, 0.12, 0.383, 0.0, 0.0, 0.924, 'pitch_45'),
-    # 90-deg tool roll about Y (uses Wrist_Roll, within +-2.79 rad limit)
+    # 90-deg tool roll about Y (uses wrist_roll, within +-2.79 rad limit)
     (0.12, 0.0, 0.15, 0.0, 0.707, 0.0, 0.707, 'tool_roll_90'),
     # --- Impossible orientation (side-tilt about Z = missing DOF) ---
     (0.12, 0.0, 0.15, 0.0, 0.0, 0.383, 0.924, 'side_tilt_45_IMPOSSIBLE'),

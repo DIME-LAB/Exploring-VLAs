@@ -32,19 +32,19 @@ import numpy as np
 # Joint chain in order: base -> gripper
 # (joint_name, origin_xyz, origin_rpy, lower_limit, upper_limit)
 KINEMATIC_CHAIN = [
-    ('Rotation',    (0.0207909, -0.0230745, 0.0948817), (-3.14159, 6.03684e-16, 1.5708),
+    ('shoulder_pan',    (0.0207909, -0.0230745, 0.0948817), (-3.14159, 6.03684e-16, 1.5708),
      -1.91986, 1.91986),
-    ('Pitch',       (-0.0303992, -0.0182778, -0.0542),  (-1.5708, -1.5708, 0.0),
+    ('shoulder_lift',       (-0.0303992, -0.0182778, -0.0542),  (-1.5708, -1.5708, 0.0),
      -1.74533, 1.74533),
-    ('Elbow',       (-0.11257, -0.028, 2.46331e-16),    (-1.22818e-15, 5.75928e-16, 1.5708),
+    ('elbow_flex',       (-0.11257, -0.028, 2.46331e-16),    (-1.22818e-15, 5.75928e-16, 1.5708),
      -1.74533, 1.5708),
-    ('Wrist_Pitch', (-0.1349, 0.0052, 1.65232e-16),     (3.2474e-15, 2.86219e-15, -1.5708),
+    ('wrist_flex', (-0.1349, 0.0052, 1.65232e-16),     (3.2474e-15, 2.86219e-15, -1.5708),
      -1.65806, 1.65806),
-    ('Wrist_Roll',  (0.0, -0.0611, 0.0181),             (1.5708, -9.38083e-08, 3.14159),
+    ('wrist_roll',  (0.0, -0.0611, 0.0181),             (1.5708, -9.38083e-08, 3.14159),
      -2.79253, 2.79253),
 ]
 
-# Fixed transform from Wrist_Roll child (gripper) frame — this is the EE frame
+# Fixed transform from wrist_roll child (gripper) frame — this is the EE frame
 # No additional offset needed; the gripper link origin IS the EE point.
 
 ARM_JOINT_NAMES = [j[0] for j in KINEMATIC_CHAIN]

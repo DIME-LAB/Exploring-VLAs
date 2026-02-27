@@ -22,7 +22,7 @@ try:
 except ImportError:
     MOVEIT_AVAILABLE = False
 
-ARM_JOINT_NAMES = ['Rotation', 'Pitch', 'Elbow', 'Wrist_Pitch', 'Wrist_Roll']
+ARM_JOINT_NAMES = ['shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll']
 GUI_NODE = '/so_arm101_control_gui'
 
 # Test positions: (label, x, y, z)

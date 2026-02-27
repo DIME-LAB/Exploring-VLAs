@@ -35,12 +35,12 @@ class JointStateReader(Node):
         self.joint_pub = self.create_publisher(JointState, '/joint_states', 10)
 
         self.joint_names = [
-            'Rotation',
-            'Pitch',
-            'Elbow',
-            'Wrist_Pitch',
-            'Wrist_Roll',
-            'Jaw',
+            'shoulder_pan',
+            'shoulder_lift',
+            'elbow_flex',
+            'wrist_flex',
+            'wrist_roll',
+            'gripper',
         ]
 
         self.leader_serial = None

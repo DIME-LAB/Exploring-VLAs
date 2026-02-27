@@ -19,7 +19,7 @@ from moveit_msgs.srv import GetPositionIK
 from moveit_msgs.msg import PositionIKRequest, RobotState
 
 
-ARM_JOINT_NAMES = ['Rotation', 'Pitch', 'Elbow', 'Wrist_Pitch', 'Wrist_Roll']
+ARM_JOINT_NAMES = ['shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll']
 
 # Test poses: (x, y, z, qx, qy, qz, qw, description)
 # Orientation (0,0,0,1) = identity quaternion (pointing forward/up)

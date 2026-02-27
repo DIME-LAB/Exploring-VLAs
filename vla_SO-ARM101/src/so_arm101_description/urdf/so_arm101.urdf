@@ -14,62 +14,62 @@
   <!-- Link base -->
   <link name="base">
     <inertial>
-      <origin xyz="0.020739 0.00204287 0.065966" rpy="0 0 0"/>
+      <origin xyz="-5.2e-05 0.00310787 0.035885" rpy="0 0 0"/>
       <mass value="0.147"/>
       <inertia ixx="0.000136117" ixy="4.59787e-07" ixz="9.75275e-08" iyy="0.000114686" iyz="-4.97151e-06" izz="0.000130364"/>
     </inertial>
     <!-- Part base_motor_holder_so101_v1 -->
     <visual>
-      <origin xyz="0.0206915 0.0221255 0.0300817" rpy="1.5708 -1.23909e-16 2.33147e-15"/>
+      <origin xyz="-9.95e-05 0.0231905 0" rpy="1.5708 -1.23909e-16 2.33147e-15"/>
       <geometry>
         <mesh filename="package://so_arm101_description/meshes/base_motor_holder_so101_v1.stl"/>
       </geometry>
       <material name="3d_printed"/>
     </visual>
     <collision>
-      <origin xyz="0.0206915 0.0221255 0.0300817" rpy="1.5708 -1.23909e-16 2.33147e-15"/>
+      <origin xyz="-9.95e-05 0.0231905 0" rpy="1.5708 -1.23909e-16 2.33147e-15"/>
       <geometry>
         <mesh filename="package://so_arm101_description/meshes/base_motor_holder_so101_v1.stl"/>
       </geometry>
     </collision>
     <!-- Part base_so101_v2 -->
     <visual>
-      <origin xyz="0.0207909 0.0221255 0.0300817" rpy="1.5708 -0 0"/>
+      <origin xyz="0 0.0231905 0" rpy="1.5708 -0 0"/>
       <geometry>
         <mesh filename="package://so_arm101_description/meshes/base_so101_v2.stl"/>
       </geometry>
       <material name="3d_printed"/>
     </visual>
     <collision>
-      <origin xyz="0.0207909 0.0221255 0.0300817" rpy="1.5708 -0 0"/>
+      <origin xyz="0 0.0231905 0" rpy="1.5708 -0 0"/>
       <geometry>
         <mesh filename="package://so_arm101_description/meshes/base_so101_v2.stl"/>
       </geometry>
     </collision>
     <!-- Part sts3215_03a_v1 -->
     <visual>
-      <origin xyz="0.0207909 -0.0105745 0.0761817" rpy="-2.20282e-15 2.77556e-17 -1.5708"/>
+      <origin xyz="0 -0.0095095 0.0461007" rpy="-2.20282e-15 2.77556e-17 -1.5708"/>
       <geometry>
         <mesh filename="package://so_arm101_description/meshes/sts3215_03a_v1.stl"/>
       </geometry>
       <material name="sts3215"/>
     </visual>
     <collision>
-      <origin xyz="0.0207909 -0.0105745 0.0761817" rpy="-2.20282e-15 2.77556e-17 -1.5708"/>
+      <origin xyz="0 -0.0095095 0.0461007" rpy="-2.20282e-15 2.77556e-17 -1.5708"/>
       <geometry>
         <mesh filename="package://so_arm101_description/meshes/sts3215_03a_v1.stl"/>
       </geometry>
     </collision>
     <!-- Part waveshare_mounting_plate_so101_v2 -->
     <visual>
-      <origin xyz="0.0205915 0.0467435 0.0798817" rpy="1.5708 -1.21716e-14 2.33147e-15"/>
+      <origin xyz="-0.0001995 0.0478085 0.0498007" rpy="1.5708 -1.21716e-14 2.33147e-15"/>
       <geometry>
         <mesh filename="package://so_arm101_description/meshes/waveshare_mounting_plate_so101_v2.stl"/>
       </geometry>
       <material name="3d_printed"/>
     </visual>
     <collision>
-      <origin xyz="0.0205915 0.0467435 0.0798817" rpy="1.5708 -1.21716e-14 2.33147e-15"/>
+      <origin xyz="-0.0001995 0.0478085 0.0498007" rpy="1.5708 -1.21716e-14 2.33147e-15"/>
       <geometry>
         <mesh filename="package://so_arm101_description/meshes/waveshare_mounting_plate_so101_v2.stl"/>
       </geometry>
@@ -313,7 +313,7 @@
   </link>
 
   <!-- Joint from gripper to jaw -->
-  <joint name="Jaw" type="revolute">
+  <joint name="gripper" type="revolute">
     <origin xyz="0.0202 0.0188 -0.0234" rpy="1.5708 -5.14108e-17 -1.38655e-14"/>
     <parent link="gripper"/>
     <child link="jaw"/>
@@ -323,7 +323,7 @@
 
   <transmission name="6_trans">
     <type>transmission_interface/SimpleTransmission</type>
-    <joint name="Jaw">
+    <joint name="gripper">
       <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface>
     </joint>
     <actuator name="motor6">
@@ -333,7 +333,7 @@
   </transmission>
 
   <!-- Joint from wrist to gripper -->
-  <joint name="Wrist_Roll" type="revolute">
+  <joint name="wrist_roll" type="revolute">
     <origin xyz="0 -0.0611 0.0181" rpy="1.5708 -9.38083e-08 3.14159"/>
     <parent link="wrist"/>
     <child link="gripper"/>
@@ -343,7 +343,7 @@
 
   <transmission name="5_trans">
     <type>transmission_interface/SimpleTransmission</type>
-    <joint name="Wrist_Roll">
+    <joint name="wrist_roll">
       <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface>
     </joint>
     <actuator name="motor5">
@@ -353,7 +353,7 @@
   </transmission>
 
   <!-- Joint from lower_arm to wrist -->
-  <joint name="Wrist_Pitch" type="revolute">
+  <joint name="wrist_flex" type="revolute">
     <origin xyz="-0.1349 0.0052 1.65232e-16" rpy="3.2474e-15 2.86219e-15 -1.5708"/>
     <parent link="lower_arm"/>
     <child link="wrist"/>
@@ -363,7 +363,7 @@
 
   <transmission name="4_trans">
     <type>transmission_interface/SimpleTransmission</type>
-    <joint name="Wrist_Pitch">
+    <joint name="wrist_flex">
       <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface>
     </joint>
     <actuator name="motor4">
@@ -373,7 +373,7 @@
   </transmission>
 
   <!-- Joint from upper_arm to lower_arm -->
-  <joint name="Elbow" type="revolute">
+  <joint name="elbow_flex" type="revolute">
     <origin xyz="-0.11257 -0.028 2.46331e-16" rpy="-1.22818e-15 5.75928e-16 1.5708"/>
     <parent link="upper_arm"/>
     <child link="lower_arm"/>
@@ -383,7 +383,7 @@
 
   <transmission name="3_trans">
     <type>transmission_interface/SimpleTransmission</type>
-    <joint name="Elbow">
+    <joint name="elbow_flex">
       <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface>
     </joint>
     <actuator name="motor3">
@@ -393,7 +393,7 @@
   </transmission>
 
   <!-- Joint from shoulder to upper_arm -->
-  <joint name="Pitch" type="revolute">
+  <joint name="shoulder_lift" type="revolute">
     <origin xyz="-0.0303992 -0.0182778 -0.0542" rpy="-1.5708 -1.5708 0"/>
     <parent link="shoulder"/>
     <child link="upper_arm"/>
@@ -403,7 +403,7 @@
 
   <transmission name="2_trans">
     <type>transmission_interface/SimpleTransmission</type>
-    <joint name="Pitch">
+    <joint name="shoulder_lift">
       <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface>
     </joint>
     <actuator name="motor2">
@@ -413,8 +413,8 @@
   </transmission>
 
   <!-- Joint from base to shoulder -->
-  <joint name="Rotation" type="revolute">
-    <origin xyz="0.0207909 -0.0230745 0.0948817" rpy="-3.14159 6.03684e-16 1.5708"/>
+  <joint name="shoulder_pan" type="revolute">
+    <origin xyz="0 -0.0220095 0.0648007" rpy="-3.14159 6.03684e-16 1.5708"/>
     <parent link="base"/>
     <child link="shoulder"/>
     <axis xyz="0 0 1"/>
@@ -423,7 +423,7 @@
 
   <transmission name="1_trans">
     <type>transmission_interface/SimpleTransmission</type>
-    <joint name="Rotation">
+    <joint name="shoulder_pan">
       <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface>
     </joint>
     <actuator name="motor1">

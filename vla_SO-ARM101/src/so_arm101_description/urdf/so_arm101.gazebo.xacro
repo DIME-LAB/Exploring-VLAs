@@ -15,37 +15,37 @@
       <plugin>gz_ros2_control/GazeboSimSystem</plugin>
     </hardware>
 
-    <joint name="Rotation">
+    <joint name="shoulder_pan">
       <command_interface name="position"/>
       <state_interface name="position"/>
       <state_interface name="velocity"/>
     </joint>
 
-    <joint name="Pitch">
+    <joint name="shoulder_lift">
       <command_interface name="position"/>
       <state_interface name="position"/>
       <state_interface name="velocity"/>
     </joint>
 
-    <joint name="Elbow">
+    <joint name="elbow_flex">
       <command_interface name="position"/>
       <state_interface name="position"/>
       <state_interface name="velocity"/>
     </joint>
 
-    <joint name="Wrist_Pitch">
+    <joint name="wrist_flex">
       <command_interface name="position"/>
       <state_interface name="position"/>
       <state_interface name="velocity"/>
     </joint>
 
-    <joint name="Wrist_Roll">
+    <joint name="wrist_roll">
       <command_interface name="position"/>
       <state_interface name="position"/>
       <state_interface name="velocity"/>
     </joint>
 
-    <joint name="Jaw">
+    <joint name="gripper">
       <command_interface name="position"/>
       <state_interface name="position"/>
       <state_interface name="velocity"/>

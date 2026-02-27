@@ -27,7 +27,7 @@ from moveit_msgs.msg import (
 from sensor_msgs.msg import JointState
 
 
-ARM_JOINT_NAMES = ['Rotation', 'Pitch', 'Elbow', 'Wrist_Pitch', 'Wrist_Roll']
+ARM_JOINT_NAMES = ['shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll']
 
 # Target positions (x, y, z, description) — will use position-only IK
 TARGETS = [

@@ -70,17 +70,17 @@ def service_trigger(service_name):
 # ---------------------------------------------------------------------------
 # Joint configuration for SO-ARM101
 # ---------------------------------------------------------------------------
-ARM_JOINT_NAMES = ['Rotation', 'Pitch', 'Elbow', 'Wrist_Pitch', 'Wrist_Roll']
-GRIPPER_JOINT_NAME = 'Jaw'
+ARM_JOINT_NAMES = ['shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll']
+GRIPPER_JOINT_NAME = 'gripper'
 ALL_JOINT_NAMES = ARM_JOINT_NAMES + [GRIPPER_JOINT_NAME]
 
 JOINT_LIMITS = {
-    'Rotation':    (-1.91986, 1.91986),
-    'Pitch':       (-1.74533, 1.74533),
-    'Elbow':       (-1.74533, 1.5708),
-    'Wrist_Pitch': (-1.65806, 1.65806),
-    'Wrist_Roll':  (-2.79253, 2.79253),
-    'Jaw':         (-0.174533, 1.74533),
+    'shoulder_pan':    (-1.91986, 1.91986),
+    'shoulder_lift':       (-1.74533, 1.74533),
+    'elbow_flex':       (-1.74533, 1.5708),
+    'wrist_flex': (-1.65806, 1.65806),
+    'wrist_roll':  (-2.79253, 2.79253),
+    'gripper':         (-0.174533, 1.74533),
 }
 
 # ---------------------------------------------------------------------------
@@ -309,11 +309,11 @@ class SOArm101ControlGUI(Node):
                 parts = []
                 for axis in ['X', 'Y', 'Z']:
                     parts.append(f'{axis}={self.xyz_vars[axis].get():.6f}')
-                for comp in ['Roll', 'Pitch', 'Yaw']:
+                for comp in ['Roll', 'shoulder_lift', 'Yaw']:
                     parts.append(f'{comp}={self.rpy_vars[comp].get():.1f}')
                 qx, qy, qz, qw = self._rpy_deg_to_quat(
                     self.rpy_vars['Roll'].get(),
-                    self.rpy_vars['Pitch'].get(),
+                    self.rpy_vars['shoulder_lift'].get(),
                     self.rpy_vars['Yaw'].get())
                 parts.extend([f'qx={qx:.6f}', f'qy={qy:.6f}',
                               f'qz={qz:.6f}', f'qw={qw:.6f}'])
@@ -371,7 +371,7 @@ class SOArm101ControlGUI(Node):
         def _write():
             try:
                 axis_map = {'x': 'X', 'y': 'Y', 'z': 'Z'}
-                rpy_map = {'roll': 'Roll', 'pitch': 'Pitch', 'yaw': 'Yaw'}
+                rpy_map = {'roll': 'Roll', 'pitch': 'shoulder_lift', 'yaw': 'Yaw'}
                 for k, v in updates.items():
                     if k in axis_map and axis_map[k] in self.xyz_vars:
                         self.xyz_vars[axis_map[k]].set(v)
@@ -485,7 +485,7 @@ class SOArm101ControlGUI(Node):
 
         traj = JointTrajectory()
         traj.header.stamp = self.get_clock().now().to_msg()
-        traj.joint_names = ['Jaw']
+        traj.joint_names = ['gripper']
         point = JointTrajectoryPoint()
         point.positions = [jaw_position]
         point.velocities = [0.0]
@@ -1166,7 +1166,7 @@ class SOArm101ControlGUI(Node):
         rpy_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         tk.Label(rpy_col, text='Orientation', font=('Arial', 9, 'bold')).pack(anchor='w', padx=2)
         self.rpy_vars = {}
-        for comp, default in [('Roll', 0.0), ('Pitch', 0.0), ('Yaw', 0.0)]:
+        for comp, default in [('Roll', 0.0), ('shoulder_lift', 0.0), ('Yaw', 0.0)]:
             row = tk.Frame(rpy_col)
             row.pack(fill=tk.X, pady=1)
             tk.Label(row, text=f'{comp[0]}:', width=3).pack(side=tk.LEFT)
@@ -1297,8 +1297,8 @@ class SOArm101ControlGUI(Node):
         grip_col = ttk.LabelFrame(ctrl_cols, text='Gripper')
         grip_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(3, 0))
 
-        _jaw_min_deg = math.degrees(JOINT_LIMITS['Jaw'][0])
-        _jaw_max_deg = math.degrees(JOINT_LIMITS['Jaw'][1])
+        _jaw_min_deg = math.degrees(JOINT_LIMITS['gripper'][0])
+        _jaw_max_deg = math.degrees(JOINT_LIMITS['gripper'][1])
         grip_range_row = tk.Frame(grip_col)
         grip_range_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(grip_range_row, text='Range:', anchor='w').pack(side=tk.LEFT)
@@ -1339,7 +1339,7 @@ class SOArm101ControlGUI(Node):
 
     @staticmethod
     def _quat_to_rpy_deg(qx, qy, qz, qw):
-        """Convert quaternion to Roll/Pitch/Yaw in degrees."""
+        """Convert quaternion to Roll/shoulder_lift/Yaw in degrees."""
         sinr = 2.0 * (qw * qx + qy * qz)
         cosr = 1.0 - 2.0 * (qx * qx + qy * qy)
         roll = math.atan2(sinr, cosr)
@@ -1352,7 +1352,7 @@ class SOArm101ControlGUI(Node):
 
     @staticmethod
     def _rpy_deg_to_quat(roll_deg, pitch_deg, yaw_deg):
-        """Convert Roll/Pitch/Yaw in degrees to quaternion (x, y, z, w)."""
+        """Convert Roll/shoulder_lift/Yaw in degrees to quaternion (x, y, z, w)."""
         r, p, y = math.radians(roll_deg), math.radians(pitch_deg), math.radians(yaw_deg)
         cr, cp, cy = math.cos(r / 2), math.cos(p / 2), math.cos(y / 2)
         sr, sp, sy = math.sin(r / 2), math.sin(p / 2), math.sin(y / 2)
@@ -1368,7 +1368,7 @@ class SOArm101ControlGUI(Node):
         z = self.xyz_vars['Z'].get()
         qx, qy, qz, qw = self._rpy_deg_to_quat(
             self.rpy_vars['Roll'].get(),
-            self.rpy_vars['Pitch'].get(),
+            self.rpy_vars['shoulder_lift'].get(),
             self.rpy_vars['Yaw'].get())
         return x, y, z, qx, qy, qz, qw
 
@@ -1429,13 +1429,13 @@ class SOArm101ControlGUI(Node):
         self.xyz_vars['Z'].set(round(z, 3))
         r, p, ya = self._quat_to_rpy_deg(qx, qy, qz, qw)
         self.rpy_vars['Roll'].set(round(r, 1))
-        self.rpy_vars['Pitch'].set(round(p, 1))
+        self.rpy_vars['shoulder_lift'].set(round(p, 1))
         self.rpy_vars['Yaw'].set(round(ya, 1))
         self._ik_trace_active = True
         # Store as last valid
         for key in ['X', 'Y', 'Z']:
             self._ik_last_valid[key] = self.xyz_vars[key].get()
-        for key in ['Roll', 'Pitch', 'Yaw']:
+        for key in ['Roll', 'shoulder_lift', 'Yaw']:
             self._ik_last_valid[key] = self.rpy_vars[key].get()
         # Mark valid, clear red
         self._ik_valid = True
@@ -1584,7 +1584,7 @@ class SOArm101ControlGUI(Node):
 
         for key in ['X', 'Y', 'Z']:
             self._ik_last_valid[key] = self.xyz_vars[key].get()
-        for key in ['Roll', 'Pitch', 'Yaw']:
+        for key in ['Roll', 'shoulder_lift', 'Yaw']:
             self._ik_last_valid[key] = self.rpy_vars[key].get()
 
         # Clear all red
@@ -1905,21 +1905,21 @@ class SOArm101ControlGUI(Node):
 
     @service_trigger('gripper_close')
     def _gripper_close(self):
-        self._gripper_command(JOINT_LIMITS['Jaw'][0])
+        self._gripper_command(JOINT_LIMITS['gripper'][0])
 
     @service_trigger('gripper_open')
     def _gripper_open(self):
-        self._gripper_command(JOINT_LIMITS['Jaw'][1])
+        self._gripper_command(JOINT_LIMITS['gripper'][1])
 
     def _gripper_command(self, jaw_target, execute=False, duration_s=1.0):
         """Set gripper goal. If execute=True, also send to controller."""
         self._slider_driven = True
         self._select_planning_group('gripper')
         with self.joint_lock:
-            self.joint_positions['Jaw'] = jaw_target
-        if 'Jaw' in self.sliders:
-            self.sliders['Jaw'].set(jaw_target)
-            self.slider_labels['Jaw'].config(text=f'{jaw_target:.3f}')
+            self.joint_positions['gripper'] = jaw_target
+        if 'gripper' in self.sliders:
+            self.sliders['gripper'].set(jaw_target)
+            self.slider_labels['gripper'].config(text=f'{jaw_target:.3f}')
         if hasattr(self, '_ik_jaw_label'):
             self._ik_jaw_label.config(text=f'{jaw_target:.3f}')
         self._publish_goal_state()
