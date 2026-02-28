@@ -40,7 +40,7 @@ class JointStateReader(Node):
             'elbow_flex',
             'wrist_flex',
             'wrist_roll',
-            'gripper',
+            'gripper_joint',
         ]
 
         self.leader_serial = None

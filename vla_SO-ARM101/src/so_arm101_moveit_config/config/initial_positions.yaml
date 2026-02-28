@@ -2,7 +2,7 @@
 
 initial_positions:
   elbow_flex: 0
-  gripper: 0
+  gripper_joint: 0
   shoulder_lift: 0
   shoulder_pan: 0
   wrist_flex: 0

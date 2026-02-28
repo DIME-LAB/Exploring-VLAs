@@ -71,7 +71,7 @@ def service_trigger(service_name):
 # Joint configuration for SO-ARM101
 # ---------------------------------------------------------------------------
 ARM_JOINT_NAMES = ['shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll']
-GRIPPER_JOINT_NAME = 'gripper'
+GRIPPER_JOINT_NAME = 'gripper_joint'
 ALL_JOINT_NAMES = ARM_JOINT_NAMES + [GRIPPER_JOINT_NAME]
 
 JOINT_LIMITS = {
@@ -80,7 +80,7 @@ JOINT_LIMITS = {
     'elbow_flex':       (-1.74533, 1.5708),
     'wrist_flex': (-1.65806, 1.65806),
     'wrist_roll':  (-2.79253, 2.79253),
-    'gripper':         (-0.174533, 1.74533),
+    'gripper_joint':   (-0.174533, 1.74533),
 }
 
 # ---------------------------------------------------------------------------
@@ -485,7 +485,7 @@ class SOArm101ControlGUI(Node):
 
         traj = JointTrajectory()
         traj.header.stamp = self.get_clock().now().to_msg()
-        traj.joint_names = ['gripper']
+        traj.joint_names = ['gripper_joint']
         point = JointTrajectoryPoint()
         point.positions = [jaw_position]
         point.velocities = [0.0]
@@ -1297,8 +1297,8 @@ class SOArm101ControlGUI(Node):
         grip_col = ttk.LabelFrame(ctrl_cols, text='Gripper')
         grip_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(3, 0))
 
-        _jaw_min_deg = math.degrees(JOINT_LIMITS['gripper'][0])
-        _jaw_max_deg = math.degrees(JOINT_LIMITS['gripper'][1])
+        _jaw_min_deg = math.degrees(JOINT_LIMITS['gripper_joint'][0])
+        _jaw_max_deg = math.degrees(JOINT_LIMITS['gripper_joint'][1])
         grip_range_row = tk.Frame(grip_col)
         grip_range_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(grip_range_row, text='Range:', anchor='w').pack(side=tk.LEFT)
@@ -1905,21 +1905,21 @@ class SOArm101ControlGUI(Node):
 
     @service_trigger('gripper_close')
     def _gripper_close(self):
-        self._gripper_command(JOINT_LIMITS['gripper'][0])
+        self._gripper_command(JOINT_LIMITS['gripper_joint'][0])
 
     @service_trigger('gripper_open')
     def _gripper_open(self):
-        self._gripper_command(JOINT_LIMITS['gripper'][1])
+        self._gripper_command(JOINT_LIMITS['gripper_joint'][1])
 
     def _gripper_command(self, jaw_target, execute=False, duration_s=1.0):
         """Set gripper goal. If execute=True, also send to controller."""
         self._slider_driven = True
         self._select_planning_group('gripper')
         with self.joint_lock:
-            self.joint_positions['gripper'] = jaw_target
-        if 'gripper' in self.sliders:
-            self.sliders['gripper'].set(jaw_target)
-            self.slider_labels['gripper'].config(text=f'{jaw_target:.3f}')
+            self.joint_positions['gripper_joint'] = jaw_target
+        if 'gripper_joint' in self.sliders:
+            self.sliders['gripper_joint'].set(jaw_target)
+            self.slider_labels['gripper_joint'].config(text=f'{jaw_target:.3f}')
         if hasattr(self, '_ik_jaw_label'):
             self._ik_jaw_label.config(text=f'{jaw_target:.3f}')
         self._publish_goal_state()

@@ -53,7 +53,7 @@ class ServoDriver(Node):
     - Initialize-to-center sequence (from ft_arm_controller.py)
     """
 
-    JOINT_NAMES = ['shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll', 'gripper']
+    JOINT_NAMES = ['shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll', 'gripper_joint']
     NUM_SERVOS = 6
 
     def __init__(self):
