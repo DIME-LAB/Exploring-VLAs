@@ -66,17 +66,35 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
-# Debug service auto-registration
+# Debug service auto-registration (convention-based: _cmd_* → ~/cmd_name)
 # ---------------------------------------------------------------------------
-_SERVICE_REGISTRY = {}  # func.__name__ -> service_suffix
 
 
-def service_trigger(service_name):
-    """Decorator: marks a method to be auto-registered as ~/service_name (Trigger)."""
-    def decorator(func):
-        _SERVICE_REGISTRY[func.__name__] = service_name
-        return func
-    return decorator
+# ---------------------------------------------------------------------------
+# Hot reload helpers
+# ---------------------------------------------------------------------------
+
+def _patch_methods(instance, new_cls):
+    """Replace all methods on a running instance with those from new_cls.
+
+    Preserves instance state (attributes, ROS2 infra, widgets). Only replaces
+    method implementations. Handles regular methods, staticmethod, classmethod.
+    """
+    SKIP = frozenset({'__init__', '__del__', '__class__', '__dict__', '__weakref__'})
+    for name, raw in new_cls.__dict__.items():
+        if name in SKIP:
+            continue
+        if isinstance(raw, staticmethod):
+            setattr(instance, name, raw.__func__)
+        elif isinstance(raw, classmethod):
+            setattr(instance, name, raw.__func__.__get__(new_cls, type(new_cls)))
+        elif callable(raw):
+            setattr(instance, name, raw.__get__(instance, type(instance)))
+
+    # Apply default values for any new instance attributes
+    for attr, default in getattr(new_cls, '_RELOAD_DEFAULTS', {}).items():
+        if not hasattr(instance, attr):
+            setattr(instance, attr, default)
 
 
 # ---------------------------------------------------------------------------
@@ -310,13 +328,17 @@ class SOArm101ControlGUI(Node):
         self.running = True
         self._setup_gui_thread()
 
-        # --- Debug services (auto-registered via @service_trigger) ---
+        # --- Debug services ---
+        # Auto-register: any method named _cmd_* → ~/cmd_name (Trigger)
+        # Manual services: _srv_* stay registered individually below
         self._debug_services = []
-        for method_name, srv_suffix in _SERVICE_REGISTRY.items():
-            cb = self._make_trigger_callback(method_name)
-            srv = self.create_service(Trigger, f'~/{srv_suffix}', cb)
-            self._debug_services.append(srv)
-            self.get_logger().info(f'  service: ~/{srv_suffix}')
+        for name in sorted(dir(self)):
+            if name.startswith('_cmd_'):
+                srv_name = name[5:]
+                cb = self._make_trigger_callback(name)
+                srv = self.create_service(Trigger, f'~/{srv_name}', cb)
+                self._debug_services.append(srv)
+                self.get_logger().info(f'  service: ~/{srv_name}')
 
         # Manual services (read/write UI fields directly)
         for name, cb in [
@@ -326,6 +348,7 @@ class SOArm101ControlGUI(Node):
             ('get_ee_pose', self._srv_get_ee_pose),
             ('get_tcp_pose', self._srv_get_tcp_pose),
             ('get_log', self._srv_get_log),
+            ('list_commands', self._srv_list_commands),
         ]:
             self._debug_services.append(
                 self.create_service(Trigger, f'~/{name}', cb))
@@ -382,6 +405,13 @@ class SOArm101ControlGUI(Node):
             response.message = result['msg']
             return response
         return _callback
+
+    def _srv_list_commands(self, request, response):
+        """Return all available _cmd_* command names for agent discovery."""
+        commands = sorted(n[5:] for n in dir(self) if n.startswith('_cmd_'))
+        response.success = True
+        response.message = ', '.join(commands)
+        return response
 
     def _srv_get_joint_positions(self, request, response):
         """Return current joint positions as name=value pairs."""
@@ -683,13 +713,13 @@ class SOArm101ControlGUI(Node):
         self._ground_plane_var = tk.BooleanVar(value=True)
         tk.Checkbutton(scene_frame, text='Ground Plane',
                        variable=self._ground_plane_var,
-                       command=self._toggle_ground_plane).pack(side=tk.LEFT)
+                       command=self._cmd_toggle_ground_plane).pack(side=tk.LEFT)
         tk.Label(scene_frame, text='  Z:').pack(side=tk.LEFT)
         self._ground_z_var = tk.DoubleVar(value=0.0)
         tk.Spinbox(scene_frame, from_=-0.5, to=0.5, increment=0.01,
                    textvariable=self._ground_z_var, width=6).pack(side=tk.LEFT)
         # Publish ground plane on startup after MoveIt is ready
-        self.root.after(3000, self._toggle_ground_plane)
+        self.root.after(3000, self._cmd_toggle_ground_plane)
 
         # Notebook (tabs)
         notebook = ttk.Notebook(self.root)
@@ -705,6 +735,10 @@ class SOArm101ControlGUI(Node):
 
         # --- Log Panel (bottom) ---
         self._build_log_panel()
+
+        # Hot reload keybindings
+        self.root.bind('<Control-r>', lambda e: self._hot_reload_logic())
+        self.root.bind('<Control-Shift-R>', lambda e: self._hot_reload_gui())
 
         self._gui_ready = True
         self.root.mainloop()
@@ -748,9 +782,9 @@ class SOArm101ControlGUI(Node):
         arm_btn_frame = tk.Frame(arm_frame)
         arm_btn_frame.pack(fill=tk.X, padx=5, pady=5)
         tk.Button(arm_btn_frame, text='Reset Arm', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._zero_arm).pack(side=tk.LEFT, padx=5)
+                  command=self._cmd_zero_arm).pack(side=tk.LEFT, padx=5)
         tk.Button(arm_btn_frame, text='Randomize', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._randomize_arm).pack(side=tk.LEFT, padx=5)
+                  command=self._cmd_randomize_arm).pack(side=tk.LEFT, padx=5)
 
         # --- Gripper Section ---
         gripper_frame = ttk.LabelFrame(frame, text='Gripper')
@@ -780,18 +814,18 @@ class SOArm101ControlGUI(Node):
         tk.Button(gripper_btn_frame, text='Reset Gripper', bg='#b0b0b0', fg='#1a1a1a',
                   command=self._zero_gripper).pack(side=tk.LEFT, padx=5)
         tk.Button(gripper_btn_frame, text='Open', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._gripper_open).pack(side=tk.LEFT, padx=5)
+                  command=self._cmd_gripper_open).pack(side=tk.LEFT, padx=5)
         tk.Button(gripper_btn_frame, text='Close', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._gripper_close).pack(side=tk.LEFT, padx=5)
+                  command=self._cmd_gripper_close).pack(side=tk.LEFT, padx=5)
 
         # --- Action Buttons (always visible) ---
         action_frame = tk.Frame(frame)
         action_frame.pack(fill=tk.X, padx=10, pady=(8, 5))
         self.set_joints_btn = tk.Button(
-            action_frame, text='Set Joints', bg='#b0b0b0', fg='#1a1a1a', command=self._set_joints)
+            action_frame, text='Set Joints', bg='#b0b0b0', fg='#1a1a1a', command=self._cmd_set_joints)
         self.set_joints_btn.pack(side=tk.LEFT, padx=5)
         self.execute_btn = tk.Button(
-            action_frame, text='Plan & Execute', bg='#b0b0b0', fg='#1a1a1a', command=self._moveit_execute)
+            action_frame, text='Plan & Execute', bg='#b0b0b0', fg='#1a1a1a', command=self._cmd_plan_execute)
         self.execute_btn.pack(side=tk.LEFT, padx=5)
         tk.Label(action_frame, text='Speed:', font=('Arial', 9)).pack(side=tk.LEFT, padx=(10, 2))
         self.velocity_scale_var = tk.DoubleVar(value=0.5)
@@ -840,8 +874,7 @@ class SOArm101ControlGUI(Node):
         # Update RViz goal state only — robot doesn't move until button click
         self._publish_goal_state()
 
-    @service_trigger('zero_arm')
-    def _zero_arm(self):
+    def _cmd_zero_arm(self):
         """Reset arm joints to zero."""
         self._slider_driven = True
         self._select_planning_group('arm')
@@ -884,8 +917,7 @@ class SOArm101ControlGUI(Node):
         if getattr(self, '_gui_ready', False):
             self.root.after(150, self._publish_goal_state)
 
-    @service_trigger('randomize_arm')
-    def _randomize_arm(self):
+    def _cmd_randomize_arm(self):
         """Set arm joints to a random collision-free configuration."""
         self._select_planning_group('arm')
         self.status_var.set('Finding random valid state...')
@@ -953,8 +985,7 @@ class SOArm101ControlGUI(Node):
                 self.joint_positions[n] for n in ALL_JOINT_NAMES]
         self._goal_state_pub.publish(goal_state)
 
-    @service_trigger('set_joints')
-    def _set_joints(self):
+    def _cmd_set_joints(self):
         """Send current slider positions directly to arm + gripper controllers."""
         with self.joint_lock:
             positions = dict(self.joint_positions)
@@ -974,8 +1005,7 @@ class SOArm101ControlGUI(Node):
         """Allow joint_states callback to sync sliders again."""
         self._slider_driven = False
 
-    @service_trigger('plan_execute')
-    def _moveit_execute(self):
+    def _cmd_plan_execute(self):
         """Plan and execute: plan via MoveIt, then send trajectory to arm_controller."""
         if not MOVEIT_AVAILABLE or self.plan_client is None:
             self.status_var.set('MoveIt not available')
@@ -1100,7 +1130,7 @@ class SOArm101ControlGUI(Node):
 
     def _build_log_panel(self):
         """Build the bottom log panel with Process Log and System Errors tabs."""
-        outer = tk.Frame(self.root)
+        self._log_outer = outer = tk.Frame(self.root)
         outer.pack(fill=tk.BOTH, padx=5, pady=(2, 5), expand=False)
 
         log_notebook = ttk.Notebook(outer)
@@ -1169,6 +1199,9 @@ class SOArm101ControlGUI(Node):
 
     def _setup_stderr_capture(self):
         """Redirect stderr and sys.excepthook to System Errors log."""
+        if hasattr(self, '_stderr_captured'):
+            return  # already redirected (e.g. after GUI rebuild)
+        self._stderr_captured = True
         import sys
 
         gui = self  # prevent closure issues
@@ -1245,6 +1278,211 @@ class SOArm101ControlGUI(Node):
             self.root.after(0, _do_append)
 
     # ------------------------------------------------------------------
+    # Hot Reload (Ctrl+R = logic, Ctrl+Shift+R = logic + GUI rebuild)
+    # ------------------------------------------------------------------
+
+    def _hot_reload_logic(self):
+        """Reload control_gui + compute_workspace modules and patch methods.
+
+        Preserves all ROS2 infra, widgets, locks, and runtime state.
+        Only method implementations and module-level constants are updated.
+        """
+        import importlib
+        import sys
+
+        try:
+            # Reload compute_workspace first (control_gui imports from it)
+            cw = 'so_arm101_control.compute_workspace'
+            if cw in sys.modules:
+                importlib.reload(sys.modules[cw])
+
+            # Reload control_gui
+            mod_name = 'so_arm101_control.control_gui'
+            new_mod = importlib.reload(sys.modules[mod_name])
+
+            # Patch all methods on this running instance
+            _patch_methods(self, new_mod.SOArm101ControlGUI)
+
+            self._append_log('HOT RELOAD: logic reloaded (Ctrl+R)', 'info')
+        except Exception as e:
+            import traceback
+            self._append_log(f'HOT RELOAD FAILED: {e}', 'error')
+            self._append_system_error(traceback.format_exc())
+
+    def _save_gui_state(self):
+        """Snapshot all GUI variable values before a GUI rebuild."""
+        state = {}
+
+        # FK tab
+        state['sliders'] = {n: v.get() for n, v in self.sliders.items()}
+        state['velocity_scale'] = self.velocity_scale_var.get()
+        state['slider_driven'] = self._slider_driven
+        state['last_speed_val'] = self._last_speed_val
+
+        # IK tab
+        state['xyz'] = {k: v.get() for k, v in self.xyz_vars.items()}
+        state['rpy'] = {k: v.get() for k, v in self.rpy_vars.items()}
+        state['ik_last_valid'] = dict(self._ik_last_valid)
+        state['ik_valid'] = self._ik_valid
+        state['ik_planned_target'] = self._ik_planned_target
+        state['ik_status'] = self.ik_status_var.get()
+        state['ee_labels'] = {k: v.get() for k, v in self.ee_labels.items()}
+
+        # Grasp tab
+        state['grasp_topic'] = self._grasp_topic_var.get()
+        state['bbox_topic'] = self._bbox_topic_var.get()
+        state['bbox_enabled'] = self._bbox_enabled_var.get()
+        state['grasp_arm_duration'] = self._grasp_arm_duration_var.get()
+        state['grasp_approach_height'] = self._grasp_approach_height_var.get()
+        state['grasp_obj_z'] = self._grasp_obj_z_var.get()
+        state['grasp_cross'] = self._grasp_cross_var.get()
+        state['grasp_grip_close'] = self._grasp_grip_close_var.get()
+        state['grasp_grip_open'] = self._grasp_grip_open_var.get()
+        state['grasp_grip_duration'] = self._grasp_grip_duration_var.get()
+        state['jaw_open_clearance'] = self._jaw_open_clearance_var.get()
+        state['jaw_close_clearance'] = self._jaw_close_clearance_var.get()
+        state['tcp_clearance'] = self._tcp_clearance_var.get()
+
+        # Object listbox
+        sel = self.obj_listbox.curselection()
+        state['obj_selection'] = sel[0] if sel else None
+
+        # Log contents
+        state['process_log'] = self._process_log.get('1.0', 'end-1c')
+        state['error_log'] = self._error_log.get('1.0', 'end-1c')
+        state['log_tab'] = self._log_notebook.index(self._log_notebook.select())
+
+        # Active notebook tab
+        state['active_tab'] = self._notebook.index(self._notebook.select())
+
+        return state
+
+    def _restore_gui_state(self, state):
+        """Restore GUI variable values after a GUI rebuild."""
+        # FK tab
+        for name, val in state.get('sliders', {}).items():
+            if name in self.sliders:
+                self.sliders[name].set(val)
+                if name in self.slider_labels:
+                    self.slider_labels[name].config(text=f'{val:.3f}')
+        if 'velocity_scale' in state:
+            self.velocity_scale_var.set(state['velocity_scale'])
+        self._slider_driven = state.get('slider_driven', False)
+        self._last_speed_val = state.get('last_speed_val', 0.5)
+
+        # IK tab — suppress IK solves during batch restore
+        self._ik_trace_active = False
+        for k, v in state.get('xyz', {}).items():
+            if k in self.xyz_vars:
+                self.xyz_vars[k].set(v)
+        for k, v in state.get('rpy', {}).items():
+            if k in self.rpy_vars:
+                self.rpy_vars[k].set(v)
+        self._ik_trace_active = True
+        self._ik_last_valid = state.get('ik_last_valid', {})
+        self._ik_valid = state.get('ik_valid', True)
+        self._ik_planned_target = state.get('ik_planned_target')
+        self.ik_status_var.set(state.get('ik_status', 'Ready'))
+        for k, v in state.get('ee_labels', {}).items():
+            if k in self.ee_labels:
+                self.ee_labels[k].set(v)
+
+        # Grasp tab
+        self._grasp_topic_var.set(state.get('grasp_topic', ''))
+        self._bbox_topic_var.set(state.get('bbox_topic', ''))
+        self._bbox_enabled_var.set(state.get('bbox_enabled', True))
+        self._grasp_arm_duration_var.set(state.get('grasp_arm_duration', 2.5))
+        self._grasp_approach_height_var.set(state.get('grasp_approach_height', 0.05))
+        self._grasp_obj_z_var.set(state.get('grasp_obj_z', 0.0))
+        self._grasp_cross_var.set(state.get('grasp_cross', False))
+        self._grasp_grip_close_var.set(state.get('grasp_grip_close', -10.0))
+        self._grasp_grip_open_var.set(state.get('grasp_grip_open', 100.0))
+        self._grasp_grip_duration_var.set(state.get('grasp_grip_duration', 3.0))
+        self._jaw_open_clearance_var.set(state.get('jaw_open_clearance', 5.0))
+        self._jaw_close_clearance_var.set(state.get('jaw_close_clearance', 0.0))
+        self._tcp_clearance_var.set(state.get('tcp_clearance', 1.0))
+
+        # Repopulate listbox from current objects_data
+        self._populate_object_list()
+        if state.get('obj_selection') is not None:
+            idx = state['obj_selection']
+            if idx < self.obj_listbox.size():
+                self.obj_listbox.selection_set(idx)
+
+        # Restore log contents
+        self._process_log.config(state=tk.NORMAL)
+        self._process_log.insert('1.0', state.get('process_log', ''))
+        self._process_log.see(tk.END)
+        self._process_log.config(state=tk.DISABLED)
+
+        self._error_log.config(state=tk.NORMAL)
+        self._error_log.insert('1.0', state.get('error_log', ''))
+        self._error_log.see(tk.END)
+        self._error_log.config(state=tk.DISABLED)
+
+        # Restore active tabs
+        if state.get('log_tab') is not None:
+            try:
+                self._log_notebook.select(state['log_tab'])
+            except Exception:
+                pass
+        if state.get('active_tab') is not None:
+            try:
+                self._notebook.select(state['active_tab'])
+            except Exception:
+                pass
+
+    def _hot_reload_gui(self):
+        """Rebuild all GUI tabs with new code. Preserves state and ROS2 infra."""
+        try:
+            state = self._save_gui_state()
+            self._hot_reload_logic()
+
+            self._gui_ready = False
+            self._ik_debounce_id = None
+
+            # Destroy notebook and log panel
+            self._notebook.destroy()
+            self._log_outer.destroy()
+
+            # Recreate notebook
+            notebook = ttk.Notebook(self.root)
+            notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=(5, 0))
+            self._notebook = notebook
+
+            # Rebuild tabs with error-safe wrappers
+            for builder, tab_name in [
+                (self._build_individual_tab, 'FK'),
+                (self._build_arm_control_tab, 'IK'),
+                (self._build_grasp_tab, 'Grasp'),
+            ]:
+                try:
+                    builder(notebook)
+                except Exception as e:
+                    err_frame = ttk.Frame(notebook)
+                    notebook.add(err_frame, text=f'{tab_name} (ERROR)')
+                    tk.Label(err_frame, text=f'Build error:\n{e}',
+                             fg='red', wraplength=500, justify=tk.LEFT
+                             ).pack(padx=10, pady=10)
+
+            notebook.bind('<<NotebookTabChanged>>', self._on_tab_changed)
+
+            # Rebuild log panel
+            self._build_log_panel()
+
+            # Restore all state
+            self._restore_gui_state(state)
+
+            self._gui_ready = True
+            self._append_log('HOT RELOAD: GUI rebuilt (Ctrl+Shift+R)', 'info')
+
+        except Exception as e:
+            import traceback
+            self._gui_ready = True
+            self._append_log(f'HOT RELOAD GUI FAILED: {e}', 'error')
+            self._append_system_error(traceback.format_exc())
+
+    # ------------------------------------------------------------------
     # Tab 2: Arm Control (IK via MoveIt)
     # ------------------------------------------------------------------
 
@@ -1312,7 +1550,7 @@ class SOArm101ControlGUI(Node):
         tk.Button(arm_btn_frame, text='Reset Arm', bg='#b0b0b0', fg='#1a1a1a',
                   command=self._ik_reset).pack(side=tk.LEFT, padx=5)
         tk.Button(arm_btn_frame, text='Randomize', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._ik_randomize).pack(side=tk.LEFT, padx=5)
+                  command=self._cmd_ik_randomize).pack(side=tk.LEFT, padx=5)
 
         # --- Gripper Section (shares DoubleVar with FK tab) ---
         gripper_frame2 = ttk.LabelFrame(frame, text='Gripper')
@@ -1337,9 +1575,9 @@ class SOArm101ControlGUI(Node):
         tk.Button(gripper_btn_frame2, text='Reset Gripper', bg='#b0b0b0', fg='#1a1a1a',
                   command=self._zero_gripper).pack(side=tk.LEFT, padx=5)
         tk.Button(gripper_btn_frame2, text='Open', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._gripper_open).pack(side=tk.LEFT, padx=5)
+                  command=self._cmd_gripper_open).pack(side=tk.LEFT, padx=5)
         tk.Button(gripper_btn_frame2, text='Close', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._gripper_close).pack(side=tk.LEFT, padx=5)
+                  command=self._cmd_gripper_close).pack(side=tk.LEFT, padx=5)
 
         # --- Action buttons: Set Joints / Plan & Execute ---
         ik_btn_frame = tk.Frame(frame)
@@ -1375,9 +1613,9 @@ class SOArm101ControlGUI(Node):
         tk.Entry(topic_row, textvariable=self._grasp_topic_var).pack(
             side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
         tk.Button(topic_row, text='Update Topic', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._update_grasp_topic).pack(side=tk.RIGHT, padx=(2, 0))
+                  command=self._cmd_grasp_update_topic).pack(side=tk.RIGHT, padx=(2, 0))
         tk.Button(topic_row, text='Refresh', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._refresh_objects).pack(side=tk.RIGHT, padx=(2, 0))
+                  command=self._cmd_grasp_refresh).pack(side=tk.RIGHT, padx=(2, 0))
 
         opts_row = tk.Frame(topic_frame)
         opts_row.pack(fill=tk.X, padx=5, pady=2)
@@ -1437,10 +1675,10 @@ class SOArm101ControlGUI(Node):
             fill=tk.X, padx=5, pady=1)
 
         tk.Button(arm_col, text='Home', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._grasp_reset).pack(fill=tk.X, padx=5, pady=2)
+                  command=self._cmd_grasp_reset).pack(fill=tk.X, padx=5, pady=2)
         self._grasp_move_btn = tk.Button(
             arm_col, text='Move to Grab', bg='#b0b0b0', fg='#1a1a1a',
-            command=self._move_to_object)
+            command=self._cmd_grasp_move)
         self._grasp_move_btn.pack(fill=tk.X, padx=5, pady=2)
 
         # Right column: Gripper
@@ -1498,19 +1736,19 @@ class SOArm101ControlGUI(Node):
         grip_btn_row1 = tk.Frame(grip_col)
         grip_btn_row1.pack(fill=tk.X, padx=5, pady=2)
         tk.Button(grip_btn_row1, text='Grasp Open', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._gripper_open_for_object).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+                  command=self._cmd_gripper_open_for_object).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
         tk.Button(grip_btn_row1, text='Grasp Close', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._gripper_close_for_object).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
+                  command=self._cmd_gripper_close_for_object).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
 
         grip_btn_row2 = tk.Frame(grip_col)
         grip_btn_row2.pack(fill=tk.X, padx=5, pady=2)
         tk.Button(grip_btn_row2, text='Open', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._gripper_open_range).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+                  command=self._cmd_gripper_open_range).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
         tk.Button(grip_btn_row2, text='Close', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._gripper_close_range).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
+                  command=self._cmd_gripper_close_range).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
 
         # Initial subscription to default topic
-        self._update_grasp_topic()
+        self._cmd_grasp_update_topic()
 
     # ------------------------------------------------------------------
     # IK tab: tab-change, FK, spinbox IK, buttons
@@ -1623,7 +1861,7 @@ class SOArm101ControlGUI(Node):
 
     def _ik_reset(self):
         """Reset IK tab: zero arm and populate spinboxes from resulting FK."""
-        self._zero_arm()
+        self._cmd_zero_arm()
         def _after_zero():
             with self.joint_lock:
                 pos = {n: self.joint_positions[n] for n in ARM_JOINT_NAMES}
@@ -1829,37 +2067,34 @@ class SOArm101ControlGUI(Node):
         if not self._ik_valid or self._ik_planned_target is None:
             self._append_log('IK solution not found — adjust target first', 'warn')
             return
-        self._set_joints()
+        self._cmd_set_joints()
 
     def _ik_btn_plan_execute(self):
         """Plan & Execute from currently planned IK joints via MoveIt."""
         if not self._ik_valid or self._ik_planned_target is None:
             self._append_log('IK solution not found — adjust target first', 'warn')
             return
-        self._moveit_execute()
+        self._cmd_plan_execute()
 
     # --- IK services (for programmatic access) ---
 
-    @service_trigger('ik_set_joints')
-    def _ik_set_joints(self):
+    def _cmd_ik_set_joints(self):
         """Service: send IK joints to controllers."""
         if self._ik_valid and self._ik_planned_target is not None:
-            self._set_joints()
+            self._cmd_set_joints()
         else:
             self._compute_ik_full(mode='set_joints')
 
-    @service_trigger('ik_plan_execute')
-    def _ik_plan_execute(self):
+    def _cmd_ik_plan_execute(self):
         """Service: plan & execute IK joints."""
         if self._ik_valid and self._ik_planned_target is not None:
-            self._moveit_execute()
+            self._cmd_plan_execute()
         else:
             self._compute_ik_full(mode='plan_execute')
 
-    @service_trigger('ik_randomize')
-    def _ik_randomize(self):
+    def _cmd_ik_randomize(self):
         """Randomize arm goal state, compute FK, populate spinboxes."""
-        self._randomize_arm()
+        self._cmd_randomize_arm()
         def _fk_after_randomize():
             with self.joint_lock:
                 pos = {n: self.joint_positions[n] for n in ARM_JOINT_NAMES}
@@ -2047,9 +2282,9 @@ class SOArm101ControlGUI(Node):
             self._ik_planned_target = dict(target)
             self._ik_valid = True
             if mode == 'set_joints':
-                self._set_joints()
+                self._cmd_set_joints()
             elif mode == 'plan_execute':
-                self._moveit_execute()
+                self._cmd_plan_execute()
             elif mode == 'grasp_approach':
                 duration = getattr(self, '_grasp_arm_duration', 2.0)
                 final_joints = getattr(self, '_grasp_final_joints', None)
@@ -2108,8 +2343,7 @@ class SOArm101ControlGUI(Node):
         except json.JSONDecodeError:
             pass
 
-    @service_trigger('grasp_update_topic')
-    def _update_grasp_topic(self):
+    def _cmd_grasp_update_topic(self):
         """Switch object subscription to topic from GUI entry and auto-refresh."""
         new_topic = self._grasp_topic_var.get().strip()
         if not new_topic:
@@ -2129,8 +2363,7 @@ class SOArm101ControlGUI(Node):
                 self._grasp_move_btn.config(text='Move to Grab')
         self._append_log(f'Grasp topic: {new_topic}')
 
-    @service_trigger('grasp_refresh')
-    def _refresh_objects(self):
+    def _cmd_grasp_refresh(self):
         if not hasattr(self, 'obj_listbox'):
             return
         # Clear stale data so only fresh messages populate the list
@@ -2154,8 +2387,7 @@ class SOArm101ControlGUI(Node):
         if count > 0:
             self._append_log(f'Objects refreshed: {count} found')
 
-    @service_trigger('grasp_reset')
-    def _grasp_reset(self):
+    def _cmd_grasp_reset(self):
         """Move arm to grasp-ready home: gripper pointing down.
 
         Plans from current joint state (not from zeros) to avoid flinging.
@@ -2165,8 +2397,7 @@ class SOArm101ControlGUI(Node):
         target['wrist_flex'] = math.pi / 2
         self._execute_trajectory(target, duration_s=duration)
 
-    @service_trigger('grasp_select')
-    def _grasp_select(self):
+    def _cmd_grasp_select(self):
         """Select an object in the listbox by name (via ik_target param) or first item.
         Usage: ros2 param set ... ik_target "green_1" then call this service.
         """
@@ -2264,8 +2495,7 @@ class SOArm101ControlGUI(Node):
                           min(close_angle, JOINT_LIMITS['gripper_joint'][1]))
         return open_angle, close_angle
 
-    @service_trigger('gripper_open_for_object')
-    def _gripper_open_for_object(self):
+    def _cmd_gripper_open_for_object(self):
         """Open gripper to the angle matching the selected object's width."""
         obj_name = self._get_selected_object_name()
         bbox = self.objects_bbox.get(obj_name) if obj_name else None
@@ -2278,8 +2508,7 @@ class SOArm101ControlGUI(Node):
         self._gripper_command(open_angle, execute=True,
                               duration_s=self._grasp_grip_duration_var.get())
 
-    @service_trigger('gripper_close_for_object')
-    def _gripper_close_for_object(self):
+    def _cmd_gripper_close_for_object(self):
         """Close gripper to the object's width minus threshold."""
         obj_name = self._get_selected_object_name()
         bbox = self.objects_bbox.get(obj_name) if obj_name else None
@@ -2291,8 +2520,7 @@ class SOArm101ControlGUI(Node):
         self._gripper_command(close_angle, execute=True,
                               duration_s=self._grasp_grip_duration_var.get())
 
-    @service_trigger('grasp_move')
-    def _move_to_object(self):
+    def _cmd_grasp_move(self):
         sel = self.obj_listbox.curselection()
         if not sel:
             self._append_log('No object selected', 'warn')
@@ -2420,38 +2648,32 @@ class SOArm101ControlGUI(Node):
     # Tab 3: Gripper Control
     # ------------------------------------------------------------------
 
-    @service_trigger('gripper_close')
-    def _gripper_close(self):
+    def _cmd_gripper_close(self):
         self._gripper_command(JOINT_LIMITS['gripper_joint'][0], execute=True)
 
-    @service_trigger('gripper_open')
-    def _gripper_open(self):
+    def _cmd_gripper_open(self):
         self._gripper_command(JOINT_LIMITS['gripper_joint'][1], execute=True)
 
-    @service_trigger('gripper_open_range')
-    def _gripper_open_range(self):
+    def _cmd_gripper_open_range(self):
         """Open gripper to the range spinbox upper value (grasp tab)."""
         angle = math.radians(self._grasp_grip_open_var.get())
         self._gripper_command(angle, execute=True,
                               duration_s=self._grasp_grip_duration_var.get())
 
-    @service_trigger('gripper_close_range')
-    def _gripper_close_range(self):
+    def _cmd_gripper_close_range(self):
         """Close gripper to the range spinbox lower value (grasp tab)."""
         angle = math.radians(self._grasp_grip_close_var.get())
         self._gripper_command(angle, execute=True,
                               duration_s=self._grasp_grip_duration_var.get())
 
-    @service_trigger('set_jaw_open_clearance')
-    def _set_jaw_open_clearance(self):
+    def _cmd_set_jaw_open_clearance(self):
         """Set jaw open clearance: ros2 param set ... jaw_open_clearance_mm 5.0"""
         val = self.get_parameter('jaw_open_clearance_mm').get_parameter_value().double_value
         if hasattr(self, '_jaw_open_clearance_var'):
             self._jaw_open_clearance_var.set(val)
         self._append_log(f'Jaw open clearance set to {val:.1f}mm')
 
-    @service_trigger('set_jaw_close_clearance')
-    def _set_jaw_close_clearance(self):
+    def _cmd_set_jaw_close_clearance(self):
         """Set jaw close clearance: ros2 param set ... jaw_close_clearance_mm 0.0
         +ve = more gap, -ve = tighter"""
         val = self.get_parameter('jaw_close_clearance_mm').get_parameter_value().double_value
@@ -2459,16 +2681,14 @@ class SOArm101ControlGUI(Node):
             self._jaw_close_clearance_var.set(val)
         self._append_log(f'Jaw close clearance set to {val:+.1f}mm')
 
-    @service_trigger('set_tcp_clearance')
-    def _set_tcp_clearance(self):
+    def _cmd_set_tcp_clearance(self):
         """Set TCP IK clearance from param: ros2 param set ... tcp_clearance_mm 1.0"""
         val = self.get_parameter('tcp_clearance_mm').get_parameter_value().double_value
         if hasattr(self, '_tcp_clearance_var'):
             self._tcp_clearance_var.set(val)
         self._append_log(f'TCP clearance set to {val:.1f}mm')
 
-    @service_trigger('check_grasp_reachable')
-    def _check_grasp_reachable_svc(self):
+    def _cmd_check_grasp_reachable(self):
         """Check if the selected object is within the top-down grasp workspace."""
         obj_name = self._get_selected_object_name()
         if not obj_name:
@@ -2598,10 +2818,9 @@ class SOArm101ControlGUI(Node):
         if hasattr(self, '_grasp_topic_var'):
             new_topic = '/objects_poses_real' if use_real else '/objects_poses_sim'
             self._grasp_topic_var.set(new_topic)
-            self._update_grasp_topic()
+            self._cmd_grasp_update_topic()
 
-    @service_trigger('toggle_ground_plane')
-    def _toggle_ground_plane(self):
+    def _cmd_toggle_ground_plane(self):
         """Add/remove a ground plane collision object in MoveIt's planning scene."""
         if not MOVEIT_AVAILABLE or not hasattr(self, '_apply_scene_client'):
             self._append_log('MoveIt not available — cannot update planning scene', 'warn')
