@@ -32,20 +32,17 @@ import numpy as np
 # Joint chain in order: base -> gripper
 # (joint_name, origin_xyz, origin_rpy, lower_limit, upper_limit)
 KINEMATIC_CHAIN = [
-    ('shoulder_pan',    (0.0207909, -0.0230745, 0.0948817), (-3.14159, 6.03684e-16, 1.5708),
+    ('shoulder_pan',    (0.0388353, -8.97657e-09, 0.0624), (3.14159, 4.18253e-17, -3.14159),
      -1.91986, 1.91986),
     ('shoulder_lift',       (-0.0303992, -0.0182778, -0.0542),  (-1.5708, -1.5708, 0.0),
      -1.74533, 1.74533),
     ('elbow_flex',       (-0.11257, -0.028, 2.46331e-16),    (-1.22818e-15, 5.75928e-16, 1.5708),
-     -1.74533, 1.5708),
+     -1.69, 1.69),
     ('wrist_flex', (-0.1349, 0.0052, 1.65232e-16),     (3.2474e-15, 2.86219e-15, -1.5708),
      -1.65806, 1.65806),
-    ('wrist_roll',  (0.0, -0.0611, 0.0181),             (1.5708, -9.38083e-08, 3.14159),
-     -2.79253, 2.79253),
+    ('wrist_roll',  (0.0, -0.0611, 0.0181),             (1.5708, 0.0486795, 3.14159),
+     -2.74385, 2.84121),
 ]
-
-# Fixed transform from wrist_roll child (gripper) frame — this is the EE frame
-# No additional offset needed; the gripper link origin IS the EE point.
 
 ARM_JOINT_NAMES = [j[0] for j in KINEMATIC_CHAIN]
 
@@ -79,12 +76,19 @@ def rot_z(angle):
     return T
 
 
+# TCP transform from gripper frame to jaw-tip grasp center.
+# Translation + 180° Y rotation so TCP Z points opposite to gripper Z
+# (TCP Z = approach direction, points down in top-down grasp).
+# Reference: https://maegantucker.com/ECE4560/assignment7-so101/ (IK frame diagram)
+TCP_TRANSFORM = make_transform((-0.0079, -0.000218121, -0.0981274), (0, math.pi, 0))
+
+
 def forward_kinematics(joint_angles):
-    """Compute EE position (x,y,z) for given joint angles. Returns 3-element array."""
+    """Compute TCP position (x,y,z) for given joint angles. Returns 3-element array."""
     T = np.eye(4)
     for i, (name, xyz, rpy, lo, hi) in enumerate(KINEMATIC_CHAIN):
         T = T @ make_transform(xyz, rpy) @ rot_z(joint_angles[i])
-    return T[:3, 3]
+    return (T @ TCP_TRANSFORM)[:3, 3]
 
 
 def forward_kinematics_batch(all_angles):
@@ -101,9 +105,206 @@ def forward_kinematics_batch(all_angles):
         T = np.eye(4)
         for j in range(len(KINEMATIC_CHAIN)):
             T = T @ fixed_transforms[j] @ rot_z(all_angles[i, j])
-        positions[i] = T[:3, 3]
+        positions[i] = (T @ TCP_TRANSFORM)[:3, 3]
 
     return positions
+
+
+# ---------------------------------------------------------------------------
+# Geometric IK constants — derived from FK trace and verified numerically
+# Reference: https://maegantucker.com/ECE4560/assignment7-so101/
+# Reference: https://github.com/TheRobotStudio/SO-ARM100/blob/main/Simulation/SO101/so101_new_calib.urdf
+# ---------------------------------------------------------------------------
+
+# Pan joint X offset from base origin (meters)
+X_PAN = 0.0388353
+
+# Shoulder-lift pivot position in arm plane (meters, from FK trace at home)
+#   r = radial distance from pan axis,  h = height from base
+LIFT_R = 0.0304   # = (shoulder_lift_post.x - X_PAN) at home
+LIFT_H = 0.1166   # = shoulder_lift_post.z at home
+
+# Link lengths (meters) — measured from FK trace joint positions at home
+L_UPPER = 0.1160  # shoulder_lift to elbow_flex pivot
+L_LOWER = 0.1350  # elbow_flex to wrist_flex pivot
+
+# Arm-plane angles at home position (radians, from FK trace)
+UPPER_HOME = math.radians(76.03)   # upper arm angle from horizontal at θ₂=0
+LOWER_HOME = math.radians(2.21)    # lower arm angle from horizontal at θ₂=0,θ₃=0
+HOME_BEND = UPPER_HOME - LOWER_HOME  # relative angle between links at home (73.82°)
+
+# Wrist_flex pivot to TCP offset at gripper-down (meters, constant for all
+# gripper-down configs — verified across 15 configurations in FK trace)
+WF_TCP_DR = -0.0079    # radial: TCP is 7.9mm inboard of wrist_flex pivot
+WF_TCP_DH = -0.15923   # height: TCP is 159.2mm below wrist_flex pivot
+
+# Gripper-down constraint: θ₂ + θ₃ + θ₄ = 90° (verified across all configs)
+GRIPPER_DOWN_SUM = math.radians(90.0)
+
+# Wrist-roll RPY offset from URDF (the 0.0487 rad pitch in wrist_roll joint)
+WRIST_ROLL_OFFSET = math.pi / 2 - 0.0487
+
+# Joint limits dict (for clamping)
+JOINT_LIMITS = {
+    'shoulder_pan':  (-1.91986, 1.91986),
+    'shoulder_lift': (-1.74533, 1.74533),
+    'elbow_flex':    (-1.69, 1.69),
+    'wrist_flex':    (-1.65806, 1.65806),
+    'wrist_roll':    (-2.74385, 2.84121),
+}
+
+
+def forward_kinematics_full(joint_angles):
+    """Compute full 4x4 TCP transform for given joint angles.
+
+    Unlike forward_kinematics() which returns only (x,y,z), this returns
+    the complete homogeneous transform including orientation.
+    """
+    T = np.eye(4)
+    for i, (name, xyz, rpy, lo, hi) in enumerate(KINEMATIC_CHAIN):
+        T = T @ make_transform(xyz, rpy) @ rot_z(joint_angles[i])
+    return T @ TCP_TRANSFORM
+
+
+def _solve_2link(r_tcp, z, theta5):
+    """Core 2-link IK: given radial TCP distance, height, and wrist_roll,
+    solve for (theta2, theta3, theta4). Returns list of (θ₂, θ₃, θ₄) tuples."""
+    # TCP-to-wrist offset: the radial component rotates with wrist_roll
+    # (height component is invariant). At roll=0 the offset is -7.9mm radial;
+    # at roll=±90° the offset rotates out of the arm plane.
+    dr = WF_TCP_DR * math.cos(theta5)
+    r_wf = r_tcp - dr
+    h_wf = z - WF_TCP_DH
+
+    r_target = r_wf - LIFT_R
+    h_target = h_wf - LIFT_H
+
+    d_sq = r_target * r_target + h_target * h_target
+    d = math.sqrt(d_sq)
+
+    if d > L_UPPER + L_LOWER or d < abs(L_UPPER - L_LOWER):
+        return []
+
+    cos_bend = (d_sq - L_UPPER * L_UPPER - L_LOWER * L_LOWER) / \
+               (2.0 * L_UPPER * L_LOWER)
+    cos_bend = max(-1.0, min(1.0, cos_bend))
+    alpha = math.atan2(h_target, r_target)
+
+    results = []
+    for sign in [1, -1]:
+        bend = sign * math.acos(cos_bend)
+        delta = math.atan2(
+            L_LOWER * math.sin(bend),
+            L_UPPER + L_LOWER * math.cos(bend))
+        phi2 = alpha + delta
+
+        theta2 = UPPER_HOME - phi2
+        theta3 = bend - HOME_BEND
+        theta4 = GRIPPER_DOWN_SUM - theta2 - theta3
+        results.append((theta2, theta3, theta4))
+    return results
+
+
+def geometric_ik(x, y, z, grasp_yaw=None):
+    """Analytical IK for SO-ARM101 with gripper pointing straight down.
+
+    Solves the 5-DOF arm using geometric decomposition:
+      1. θ₁ (pan) decouples as atan2(-y, x - X_PAN)
+      2. θ₅ (wrist_roll) from analytical formula with grasp_yaw
+      3. Back-compute wrist_flex pivot from TCP target (roll-adjusted offset)
+      4. θ₂, θ₃ (lift, elbow) solved via 2-link law of cosines
+      5. θ₄ (wrist_flex) from gripper-down constraint: θ₂+θ₃+θ₄ = 90°
+      6. One FK refinement step to compensate for cross-plane coupling
+
+    Returns list of dicts (up to 2: elbow-up and elbow-down), each mapping
+    joint name -> angle (radians). Returns empty list if target is unreachable.
+
+    Args:
+        x, y, z: TCP target position in base frame (meters)
+        grasp_yaw: desired jaw-line direction in base frame (radians), or None
+    """
+    # --- Joint 1: Pan ---
+    dx = x - X_PAN
+    r_tcp = math.sqrt(dx * dx + y * y)
+    if r_tcp < 1e-6:
+        theta1 = 0.0
+    else:
+        theta1 = math.atan2(-y, dx)
+
+    # --- Joint 5: Wrist roll (computed early — needed for TCP offset) ---
+    if grasp_yaw is not None:
+        theta5 = theta1 + grasp_yaw - WRIST_ROLL_OFFSET
+    else:
+        theta5 = 0.0
+
+    # --- Solve 2-link IK ---
+    arm_solutions = _solve_2link(r_tcp, z, theta5)
+    if not arm_solutions:
+        return []
+
+    target = np.array([x, y, z])
+    solutions = []
+    for theta2, theta3, theta4 in arm_solutions:
+        angles = {
+            'shoulder_pan': theta1,
+            'shoulder_lift': theta2,
+            'elbow_flex': theta3,
+            'wrist_flex': theta4,
+            'wrist_roll': theta5,
+        }
+
+        # --- Check joint limits ---
+        in_limits = True
+        for name, val in angles.items():
+            lo, hi = JOINT_LIMITS[name]
+            if val < lo - 0.01 or val > hi + 0.01:
+                in_limits = False
+                break
+            angles[name] = max(lo, min(hi, val))
+
+        if not in_limits:
+            continue
+
+        # --- FK refinement: correct for cross-plane coupling ---
+        # The arm plane has a Y offset and the TCP offset rotates with
+        # wrist_roll, causing small position errors (~1-8mm). One Newton
+        # step via FK typically brings error below 0.5mm.
+        angle_list = [angles[n] for n in ARM_JOINT_NAMES]
+        fk_pos = forward_kinematics(angle_list)
+        err = target - fk_pos
+        err_norm = math.sqrt(err[0]*err[0] + err[1]*err[1] + err[2]*err[2])
+
+        if err_norm > 0.0005:  # > 0.5mm — refine
+            x2, y2, z2 = x + err[0], y + err[1], z + err[2]
+            dx2 = x2 - X_PAN
+            r_tcp2 = math.sqrt(dx2 * dx2 + y2 * y2)
+            theta1_r = math.atan2(-y2, dx2) if r_tcp2 > 1e-6 else 0.0
+            theta5_r = theta1_r + grasp_yaw - WRIST_ROLL_OFFSET \
+                if grasp_yaw is not None else 0.0
+
+            refined = _solve_2link(r_tcp2, z2, theta5_r)
+            if refined:
+                t2r, t3r, t4r = refined[0]
+                angles_r = {
+                    'shoulder_pan': theta1_r,
+                    'shoulder_lift': t2r,
+                    'elbow_flex': t3r,
+                    'wrist_flex': t4r,
+                    'wrist_roll': theta5_r,
+                }
+                ok = True
+                for name, val in angles_r.items():
+                    lo, hi = JOINT_LIMITS[name]
+                    if val < lo - 0.01 or val > hi + 0.01:
+                        ok = False
+                        break
+                    angles_r[name] = max(lo, min(hi, val))
+                if ok:
+                    angles = angles_r
+
+        solutions.append(angles)
+
+    return solutions
 
 
 def main(args=None):

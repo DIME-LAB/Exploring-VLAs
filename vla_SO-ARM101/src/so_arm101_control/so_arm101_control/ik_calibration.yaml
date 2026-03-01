@@ -1,0 +1,21 @@
+# SO-ARM101 Geometric IK Calibration
+# Derived from FK chain — regenerate: python3 calibrate_ik.py
+# Configs tested: 15
+# DR consistency: std=0.0000mm
+# DH consistency: std=0.0000mm
+# Sum consistency: std=0.0000°
+
+ik_constants:
+  X_PAN: 0.0388353
+  LIFT_R: 0.0304
+  LIFT_H: 0.1166
+  L_UPPER: 0.116
+  L_LOWER: 0.135
+  UPPER_HOME_DEG: 76.03
+  LOWER_HOME_DEG: 2.21
+  HOME_BEND_DEG: 73.82
+  WF_TCP_DR: -0.0079
+  WF_TCP_DH: -0.15923
+  GRIPPER_DOWN_SUM_DEG: 90.0
+  WRIST_ROLL_OFFSET: 1.5221
+  WRIST_ROLL_PITCH: 0.0486795

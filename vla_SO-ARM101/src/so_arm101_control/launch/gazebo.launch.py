@@ -141,6 +141,21 @@ def generate_launch_description():
         output='screen',
     )
 
+    # --- Camera Pose Publisher ---
+    camera_pose_publisher = Node(
+        package='so_arm101_control',
+        executable='camera_pose_publisher',
+        name='camera_pose_publisher',
+        parameters=[{
+            'base_frame': 'base',
+            'camera_frame': 'camera_link',
+            'publish_rate': 10.0,
+            'startup_delay': 5.0,
+            'use_sim_time': True,
+        }],
+        output='screen',
+    )
+
     # --- RViz (via MoveIt launch for full plugin support) ---
     rviz = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -190,7 +205,7 @@ def generate_launch_description():
         RegisterEventHandler(
             event_handler=OnProcessExit(
                 target_action=load_gripper_controller,
-                on_exit=[bridge, move_group, control_gui, ee_pose_publisher, rviz],
+                on_exit=[bridge, move_group, control_gui, ee_pose_publisher, camera_pose_publisher, rviz],
             )
         ),
     ])

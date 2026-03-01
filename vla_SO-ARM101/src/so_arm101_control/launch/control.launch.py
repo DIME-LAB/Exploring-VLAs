@@ -9,6 +9,12 @@ Usage:
 
   # Real hardware mode:
   ros2 launch so_arm101_control control.launch.py real_hardware:=true serial_port:=/dev/ttyACM0
+
+Shutdown:
+  # Send SIGINT (same as Ctrl+C) — ros2 launch propagates it to all child nodes.
+  pkill -SIGINT -f "ros2.*launch.*control.launch"
+  # NOTE: SIGTERM does NOT propagate to children — use SIGINT.
+  # NEVER use kill -9 on GUI/RViz processes — it crashes X11 window cleanup.
 """
 
 import os
@@ -120,7 +126,21 @@ def generate_launch_description():
             name='ee_pose_publisher',
             parameters=[{
                 'base_frame': 'base',
-                'ee_frame': 'gripper',
+                'ee_frame': 'tcp_link',
+                'publish_rate': 10.0,
+                'startup_delay': 3.0,
+            }],
+            output='screen',
+        ),
+
+        # Camera Pose Publisher
+        Node(
+            package='so_arm101_control',
+            executable='camera_pose_publisher',
+            name='camera_pose_publisher',
+            parameters=[{
+                'base_frame': 'base',
+                'camera_frame': 'camera_link',
                 'publish_rate': 10.0,
                 'startup_delay': 3.0,
             }],

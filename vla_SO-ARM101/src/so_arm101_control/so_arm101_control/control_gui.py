@@ -11,6 +11,7 @@ Source: adapted from RoboSort/JETANK_description/jetank_control_gui.py (3133 lin
 import math
 import os
 import random
+import signal
 import threading
 import time
 import tkinter as tk
@@ -25,23 +26,32 @@ from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from control_msgs.action import FollowJointTrajectory
 from builtin_interfaces.msg import Duration
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import Pose, PoseStamped
 from tf2_msgs.msg import TFMessage
 from std_srvs.srv import Trigger
 try:
     from moveit_msgs.srv import GetPositionIK, GetPositionFK, GetMotionPlan, GetStateValidity
     from moveit_msgs.msg import (
         PositionIKRequest, RobotState, Constraints, JointConstraint,
-        MotionPlanRequest,
+        MotionPlanRequest, PlanningScene as PlanningSceneMsg, CollisionObject,
+        AllowedCollisionEntry,
     )
-    from moveit_msgs.srv import ExecuteKnownTrajectory
+    from shape_msgs.msg import SolidPrimitive
+    from moveit_msgs.srv import (
+        ExecuteKnownTrajectory, ApplyPlanningScene, GetPlanningScene as GetPlanningSceneSrv,
+    )
     MOVEIT_AVAILABLE = True
 except ImportError:
     try:
         from moveit_msgs.srv import GetPositionIK, GetPositionFK, GetMotionPlan, GetStateValidity
         from moveit_msgs.msg import (
             PositionIKRequest, RobotState, Constraints, JointConstraint,
-            MotionPlanRequest,
+            MotionPlanRequest, PlanningScene as PlanningSceneMsg, CollisionObject,
+            AllowedCollisionEntry,
+        )
+        from shape_msgs.msg import SolidPrimitive
+        from moveit_msgs.srv import (
+            ApplyPlanningScene, GetPlanningScene as GetPlanningSceneSrv,
         )
         MOVEIT_AVAILABLE = True
         ExecuteKnownTrajectory = None
@@ -77,9 +87,9 @@ ALL_JOINT_NAMES = ARM_JOINT_NAMES + [GRIPPER_JOINT_NAME]
 JOINT_LIMITS = {
     'shoulder_pan':    (-1.91986, 1.91986),
     'shoulder_lift':       (-1.74533, 1.74533),
-    'elbow_flex':       (-1.74533, 1.5708),
+    'elbow_flex':       (-1.69, 1.69),
     'wrist_flex': (-1.65806, 1.65806),
-    'wrist_roll':  (-2.79253, 2.79253),
+    'wrist_roll':  (-2.74385, 2.84121),
     'gripper_joint':   (-0.174533, 1.74533),
 }
 
@@ -204,6 +214,13 @@ class SOArm101ControlGUI(Node):
             self._planning_group_pub = self.create_publisher(
                 String, '/rviz/moveit/select_planning_group', 10)
             self._active_planning_group = None  # Force first publish
+            # Planning scene services for collision objects (ground plane, etc.)
+            self._apply_scene_client = self.create_client(
+                ApplyPlanningScene, '/apply_planning_scene',
+                callback_group=self._service_cb_group)
+            self._get_scene_client = self.create_client(
+                GetPlanningSceneSrv, '/get_planning_scene',
+                callback_group=self._service_cb_group)
 
         # Trajectory lock
         self._traj_lock = threading.Lock()
@@ -566,6 +583,20 @@ class SOArm101ControlGUI(Node):
                        value='real', command=self._toggle_hardware).pack(side=tk.RIGHT, padx=2)
         tk.Radiobutton(status_frame, text='Simulation', variable=self.hw_var,
                        value='sim', command=self._toggle_hardware).pack(side=tk.RIGHT, padx=2)
+
+        # Ground plane collision toggle (common to all tabs)
+        scene_frame = tk.Frame(self.root)
+        scene_frame.pack(fill=tk.X, padx=5, pady=1)
+        self._ground_plane_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(scene_frame, text='Ground Plane',
+                       variable=self._ground_plane_var,
+                       command=self._toggle_ground_plane).pack(side=tk.LEFT)
+        tk.Label(scene_frame, text='  Z:').pack(side=tk.LEFT)
+        self._ground_z_var = tk.DoubleVar(value=0.0)
+        tk.Spinbox(scene_frame, from_=-0.5, to=0.5, increment=0.01,
+                   textvariable=self._ground_z_var, width=6).pack(side=tk.LEFT)
+        # Publish ground plane on startup after MoveIt is ready
+        self.root.after(3000, self._toggle_ground_plane)
 
         # Notebook (tabs)
         notebook = ttk.Notebook(self.root)
@@ -1270,14 +1301,6 @@ class SOArm101ControlGUI(Node):
         arm_col = ttk.LabelFrame(ctrl_cols, text='Arm')
         arm_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 3))
 
-        z_row = tk.Frame(arm_col)
-        z_row.pack(fill=tk.X, padx=5, pady=2)
-        tk.Label(z_row, text='Z offset (m):', anchor='w').pack(side=tk.LEFT)
-        self._grasp_z_offset_var = tk.DoubleVar(value=0.05)
-        tk.Spinbox(z_row, textvariable=self._grasp_z_offset_var,
-                   from_=-0.10, to=0.20, increment=0.01,
-                   width=8, format='%.3f').pack(side=tk.LEFT, padx=(5, 0))
-
         arm_dur_row = tk.Frame(arm_col)
         arm_dur_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(arm_dur_row, text='Duration (s):', anchor='w').pack(side=tk.LEFT)
@@ -1285,6 +1308,19 @@ class SOArm101ControlGUI(Node):
         tk.Spinbox(arm_dur_row, textvariable=self._grasp_arm_duration_var,
                    from_=0.5, to=10.0, increment=0.5,
                    width=8, format='%.1f').pack(side=tk.LEFT, padx=(5, 0))
+
+        approach_row = tk.Frame(arm_col)
+        approach_row.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(approach_row, text='Approach height (m):', anchor='w').pack(side=tk.LEFT)
+        self._grasp_approach_height_var = tk.DoubleVar(value=0.05)
+        tk.Spinbox(approach_row, textvariable=self._grasp_approach_height_var,
+                   from_=0.00, to=0.20, increment=0.01,
+                   width=6, format='%.2f').pack(side=tk.LEFT, padx=(5, 0))
+
+        self._grasp_cross_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(arm_col, text='Cross-axis grasp',
+                       variable=self._grasp_cross_var).pack(
+            fill=tk.X, padx=5, pady=1)
 
         tk.Button(arm_col, text='Reset', bg='#b0b0b0', fg='#1a1a1a',
                   command=self._grasp_reset).pack(fill=tk.X, padx=5, pady=2)
@@ -1400,7 +1436,7 @@ class SOArm101ControlGUI(Node):
                 request = GetPositionFK.Request()
                 request.header.frame_id = 'base'
                 request.header.stamp = self.get_clock().now().to_msg()
-                request.fk_link_names = ['gripper']
+                request.fk_link_names = ['tcp_link']
                 request.robot_state.joint_state.name = list(ARM_JOINT_NAMES)
                 request.robot_state.joint_state.position = list(positions)
 
@@ -1486,7 +1522,7 @@ class SOArm101ControlGUI(Node):
 
         seeds = [
             list(current_joints),
-            [math.atan2(x, -y) if abs(x) + abs(y) > 0.001 else 0.0,
+            [math.atan2(-y, x) if abs(x) + abs(y) > 0.001 else 0.0,
              0.0, 0.0, 0.0, 0.0],
             [0.0] * len(ARM_JOINT_NAMES),
         ]
@@ -1694,8 +1730,74 @@ class SOArm101ControlGUI(Node):
 
     # --- Full IK solver (for services, 6 seeds + 2 passes) ---
 
-    def _compute_ik_full(self, mode=None):
-        """Multi-seed IK computation for service/fallback use."""
+    def _compute_ik_full(self, mode=None, target_pose=None, grasp_yaw=None):
+        """IK computation: geometric solver for grasps, MoveIt for general moves.
+
+        For grasp moves (grasp_yaw is not None), uses the analytical geometric
+        IK solver which produces exact gripper-down solutions in ~100µs, then
+        validates with MoveIt collision checking. Falls back to MoveIt IK if
+        geometric IK fails (target out of workspace).
+
+        For non-grasp moves, uses the original multi-seed MoveIt KDL solver.
+
+        target_pose: optional (x, y, z, qx, qy, qz, qw) to bypass spinboxes.
+        grasp_yaw: desired jaw-line direction (rad) for top-down grasp alignment.
+        """
+        if target_pose is not None:
+            x, y, z, qx, qy, qz, qw = target_pose
+        else:
+            x, y, z, qx, qy, qz, qw = self._get_ik_target_quat()
+
+        # --- Grasp moves: geometric IK + collision check ---
+        if grasp_yaw is not None:
+            def _try_geometric():
+                with self._ik_solve_lock:
+                    from so_arm101_control.compute_workspace import geometric_ik
+                    solutions = geometric_ik(x, y, z, grasp_yaw=grasp_yaw)
+                    if not solutions:
+                        self._append_log(
+                            f'Geometric IK: out of workspace '
+                            f'({x:.3f}, {y:.3f}, {z:.3f})', 'warn')
+                        # Fall back to MoveIt IK
+                        self._compute_ik_moveit(
+                            x, y, z, qx, qy, qz, qw, mode, grasp_yaw)
+                        return
+
+                    # Try each solution (elbow-up first, then elbow-down)
+                    for i, sol in enumerate(solutions):
+                        config = 'elbow-up' if i == 0 else 'elbow-down'
+                        if self._check_state_valid(sol):
+                            self._append_log(
+                                f'Geometric IK: {config}, '
+                                f'wrist_roll='
+                                f'{math.degrees(sol["wrist_roll"]):.1f}°')
+                            self._ik_apply_and_act(sol, mode)
+                            return
+                        self._append_log(
+                            f'Geometric IK: {config} collides', 'warn')
+
+                    # All geometric solutions collide — fall back to MoveIt
+                    self._append_log(
+                        'Geometric IK: all solutions collide, '
+                        'falling back to MoveIt', 'warn')
+                    self._compute_ik_moveit(
+                        x, y, z, qx, qy, qz, qw, mode, grasp_yaw)
+
+            threading.Thread(target=_try_geometric, daemon=True).start()
+            return
+
+        # --- Non-grasp moves: MoveIt IK (original pipeline) ---
+        if not MOVEIT_AVAILABLE or self.ik_client is None:
+            self._append_log('moveit_msgs not installed', 'warn')
+            return
+        if not self.ik_client.service_is_ready():
+            self._append_log('compute_ik service not ready', 'warn')
+            return
+        self._compute_ik_moveit(x, y, z, qx, qy, qz, qw, mode, grasp_yaw)
+
+    def _compute_ik_moveit(self, x, y, z, qx, qy, qz, qw, mode, grasp_yaw):
+        """MoveIt multi-seed IK solver — used for non-grasp moves and as
+        fallback when geometric IK fails."""
         if not MOVEIT_AVAILABLE or self.ik_client is None:
             self._append_log('moveit_msgs not installed', 'warn')
             return
@@ -1703,15 +1805,14 @@ class SOArm101ControlGUI(Node):
             self._append_log('compute_ik service not ready', 'warn')
             return
 
-        x, y, z, qx, qy, qz, qw = self._get_ik_target_quat()
-
         with self.joint_lock:
             current_joints = [self.joint_positions[n] for n in ARM_JOINT_NAMES]
 
+        bearing = math.atan2(-y, x) if abs(x) + abs(y) > 0.001 else 0.0
+
         seeds = [
             list(current_joints),
-            [math.atan2(x, -y) if abs(x) + abs(y) > 0.001 else 0.0,
-             0.0, 0.0, 0.0, 0.0],
+            [bearing, 0.0, 0.0, 0.0, 0.0],
             [0.0] * len(ARM_JOINT_NAMES),
         ]
         for _ in range(3):
@@ -1756,7 +1857,8 @@ class SOArm101ControlGUI(Node):
                             sol = resp.solution.joint_state
                             target = {}
                             for i, name in enumerate(sol.name):
-                                if name in ARM_JOINT_NAMES and i < len(sol.position):
+                                if name in ARM_JOINT_NAMES \
+                                        and i < len(sol.position):
                                     target[name] = sol.position[i]
                             self._ik_apply_and_act(target, mode)
                             return
@@ -1765,6 +1867,22 @@ class SOArm101ControlGUI(Node):
                 f'IK failed for ({x:.3f}, {y:.3f}, {z:.3f})', 'warn')
 
         threading.Thread(target=_try_seeds, daemon=True).start()
+
+    def _check_state_valid(self, target):
+        """Check if a joint state is collision-free via MoveIt's planning scene."""
+        if not MOVEIT_AVAILABLE or not hasattr(self, 'validity_client') \
+                or not self.validity_client.service_is_ready():
+            return True  # no checker available — assume valid
+        req = GetStateValidity.Request()
+        req.robot_state.joint_state.name = list(ARM_JOINT_NAMES)
+        req.robot_state.joint_state.position = [
+            target.get(n, 0.0) for n in ARM_JOINT_NAMES]
+        req.group_name = 'arm'
+        future = self.validity_client.call_async(req)
+        self._wait_future(future, timeout_sec=1.0)
+        if future.result() is not None:
+            return future.result().valid
+        return True  # timeout — assume valid
 
     def _ik_apply_and_act(self, target, mode):
         """Apply IK solution to sliders/goal state and optionally execute."""
@@ -1786,6 +1904,18 @@ class SOArm101ControlGUI(Node):
                 self._set_joints()
             elif mode == 'plan_execute':
                 self._moveit_execute()
+            elif mode == 'grasp_approach':
+                duration = getattr(self, '_grasp_arm_duration', 2.0)
+                final = getattr(self, '_grasp_final_params', None)
+                def _descend():
+                    if final is not None:
+                        self._append_log('Approach complete, descending to grasp')
+                        self._compute_ik_full(
+                            mode='grasp_execute',
+                            target_pose=final['pose'],
+                            grasp_yaw=final['yaw'])
+                self._execute_trajectory(target, duration_s=duration,
+                                         on_complete=_descend)
             elif mode == 'grasp_execute':
                 duration = getattr(self, '_grasp_arm_duration', 2.0)
                 self._execute_trajectory(target, duration_s=duration)
@@ -1821,8 +1951,13 @@ class SOArm101ControlGUI(Node):
                     'x': tf.transform.translation.x,
                     'y': tf.transform.translation.y,
                     'z': tf.transform.translation.z,
+                    'qx': tf.transform.rotation.x,
+                    'qy': tf.transform.rotation.y,
+                    'qz': tf.transform.rotation.z,
+                    'qw': tf.transform.rotation.w,
                 }
 
+    @service_trigger('grasp_update_topic')
     def _update_grasp_topic(self):
         """Switch object subscription to topic from GUI entry and auto-refresh."""
         new_topic = self._grasp_topic_var.get().strip()
@@ -1847,6 +1982,17 @@ class SOArm101ControlGUI(Node):
     def _refresh_objects(self):
         if not hasattr(self, 'obj_listbox'):
             return
+        # Clear stale data so only fresh messages populate the list
+        with self.objects_lock:
+            self.objects_data.clear()
+        self.obj_listbox.delete(0, tk.END)
+        # Wait briefly for new messages to arrive, then populate
+        if hasattr(self, 'root') and self.root.winfo_exists():
+            self.root.after(500, self._populate_object_list)
+
+    def _populate_object_list(self):
+        if not hasattr(self, 'obj_listbox'):
+            return
         self.obj_listbox.delete(0, tk.END)
         with self.objects_lock:
             for name, pos in self.objects_data.items():
@@ -1857,12 +2003,47 @@ class SOArm101ControlGUI(Node):
         if count > 0:
             self._append_log(f'Objects refreshed: {count} found')
 
+    @service_trigger('grasp_reset')
     def _grasp_reset(self):
-        """Zero the arm sliders and execute trajectory to home position."""
+        """Move arm to grasp-ready home: gripper pointing down."""
         self._zero_arm()
         duration = self._grasp_arm_duration_var.get()
         target = {name: 0.0 for name in ARM_JOINT_NAMES}
+        target['wrist_flex'] = math.pi / 2
         self._execute_trajectory(target, duration_s=duration)
+
+    @service_trigger('grasp_select')
+    def _grasp_select(self):
+        """Select an object in the listbox by name (via ik_target param) or first item.
+        Usage: ros2 param set ... ik_target "green_1" then call this service.
+        """
+        if not hasattr(self, 'obj_listbox') or self.obj_listbox.size() == 0:
+            self._append_log('No objects to select', 'warn')
+            return
+        # Check if a name was specified via the ik_target parameter
+        name_hint = self.get_parameter('ik_target').get_parameter_value().string_value.strip()
+        target_idx = 0
+        if name_hint and '=' not in name_hint:
+            for i in range(self.obj_listbox.size()):
+                if self.obj_listbox.get(i).split('  ')[0] == name_hint:
+                    target_idx = i
+                    break
+        self.obj_listbox.selection_clear(0, tk.END)
+        self.obj_listbox.selection_set(target_idx)
+        text = self.obj_listbox.get(target_idx)
+        self._append_log(f'Selected: {text.split("  ")[0]}')
+
+    @classmethod
+    def _grasp_orientation(cls, obj_x, obj_y, obj_qz, obj_qw):
+        """Compute a top-down grasp quaternion for a table object.
+        The gripper approaches from above (pitch=90°), with yaw aligned
+        to the pan angle toward the object plus the object's z-rotation.
+        Returns (qx, qy, qz, qw) for the EE in the base frame.
+        """
+        pan = math.atan2(obj_y, obj_x) if abs(obj_x) + abs(obj_y) > 0.001 else 0.0
+        obj_yaw = math.atan2(2.0 * obj_qw * obj_qz, 1.0 - 2.0 * obj_qz * obj_qz)
+        yaw_deg = math.degrees(pan + obj_yaw)
+        return cls._rpy_deg_to_quat(0.0, 90.0, yaw_deg)
 
     @service_trigger('grasp_move')
     def _move_to_object(self):
@@ -1878,26 +2059,52 @@ class SOArm101ControlGUI(Node):
             self._append_log(f'Object "{obj_name}" not found', 'warn')
             return
 
-        z_offset = self._grasp_z_offset_var.get()
+        # Open gripper before moving
+        self._gripper_open()
+
         topic = self._grasp_topic_var.get().strip()
-        # Extra offset for drop poses (matching JETANK behavior)
-        if topic == '/drop_poses':
-            z_offset += 0.05
+        z_offset = 0.05 if topic == '/drop_poses' else 0.0
 
         target_z = pos['z'] + z_offset
         action = 'drop' if topic == '/drop_poses' else 'grab'
+
+        # Compute object yaw for wrist_roll alignment (two-stage IK)
+        obj_qz = pos.get('qz', 0.0)
+        obj_qw = pos.get('qw', 1.0)
+        obj_yaw = math.atan2(2.0 * obj_qw * obj_qz, 1.0 - 2.0 * obj_qz * obj_qz)
+
+        # Minor-axis (cross) grasp: rotate 90° to close across the short axis
+        cross = self._grasp_cross_var.get()
+        if cross:
+            obj_yaw += math.pi / 2
+
         self._append_log(
             f'Grasp: {action} "{obj_name}" at '
-            f'({pos["x"]:.3f}, {pos["y"]:.3f}, {target_z:.3f})')
+            f'({pos["x"]:.3f}, {pos["y"]:.3f}, {target_z:.3f})'
+            f'{" [cross]" if cross else ""}')
 
-        # Set IK target and move directly
-        self._ik_trace_active = False
-        self.xyz_vars['X'].set(pos['x'])
-        self.xyz_vars['Y'].set(pos['y'])
-        self.xyz_vars['Z'].set(target_z)
-        self._ik_trace_active = True
         self._grasp_arm_duration = self._grasp_arm_duration_var.get()
-        self._compute_ik_full(mode='grasp_execute')
+        # Compute top-down grasp orientation (pitch=90°, yaw aligned to object)
+        gqx, gqy, gqz, gqw = self._grasp_orientation(
+            pos['x'], pos['y'], obj_qz, obj_qw)
+
+        approach_h = self._grasp_approach_height_var.get()
+        if approach_h > 0:
+            approach_z = target_z + approach_h
+            self._grasp_final_params = {
+                'pose': (pos['x'], pos['y'], target_z, gqx, gqy, gqz, gqw),
+                'yaw': obj_yaw,
+            }
+            self._append_log(f'  Step 1: approach at z={approach_z:.3f}')
+            self._compute_ik_full(
+                mode='grasp_approach',
+                target_pose=(pos['x'], pos['y'], approach_z, gqx, gqy, gqz, gqw),
+                grasp_yaw=obj_yaw)
+        else:
+            self._compute_ik_full(
+                mode='grasp_execute',
+                target_pose=(pos['x'], pos['y'], target_z, gqx, gqy, gqz, gqw),
+                grasp_yaw=obj_yaw)
 
     # ------------------------------------------------------------------
     # Tab 3: Gripper Control
@@ -1930,7 +2137,7 @@ class SOArm101ControlGUI(Node):
     # Trajectory execution (arm joints via action interface)
     # ------------------------------------------------------------------
 
-    def _execute_trajectory(self, target_positions, duration_s=2.0):
+    def _execute_trajectory(self, target_positions, duration_s=2.0, on_complete=None):
         """Send trajectory to arm_controller via action interface.
         Source: trajectory logic adapted from JETANK_description/jetank_control_gui.py"""
         if not self._traj_lock.acquire(blocking=False):
@@ -1979,6 +2186,8 @@ class SOArm101ControlGUI(Node):
                 self._slider_driven = False
             finally:
                 self._traj_lock.release()
+            if on_complete is not None:
+                on_complete()
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -2013,6 +2222,100 @@ class SOArm101ControlGUI(Node):
             new_topic = '/objects_poses_real' if use_real else '/objects_poses_sim'
             self._grasp_topic_var.set(new_topic)
             self._update_grasp_topic()
+
+    @service_trigger('toggle_ground_plane')
+    def _toggle_ground_plane(self):
+        """Add/remove a ground plane collision object in MoveIt's planning scene."""
+        if not MOVEIT_AVAILABLE or not hasattr(self, '_apply_scene_client'):
+            self._append_log('MoveIt not available — cannot update planning scene', 'warn')
+            return
+
+        def _apply():
+            if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
+                self._append_log('apply_planning_scene service not available', 'warn')
+                return
+
+            # Step 1: Add or remove the collision object
+            scene = PlanningSceneMsg()
+            scene.is_diff = True
+
+            co = CollisionObject()
+            co.header.frame_id = 'base'
+            co.id = 'ground_plane'
+
+            adding = self._ground_plane_var.get()
+            if adding:
+                co.operation = CollisionObject.ADD
+                box = SolidPrimitive()
+                box.type = SolidPrimitive.BOX
+                box.dimensions = [2.0, 2.0, 0.01]
+                co.primitives.append(box)
+                pose = Pose()
+                z = self._ground_z_var.get()
+                pose.position.z = z - 0.005  # center of 0.01-thick box
+                pose.orientation.w = 1.0
+                co.primitive_poses.append(pose)
+            else:
+                co.operation = CollisionObject.REMOVE
+
+            scene.world.collision_objects.append(co)
+            req = ApplyPlanningScene.Request()
+            req.scene = scene
+            future = self._apply_scene_client.call_async(req)
+            self._wait_future(future, timeout_sec=5.0)
+            if future.result() is None or not future.result().success:
+                action = 'add' if adding else 'remove'
+                self._append_log(f'Failed to {action} ground plane', 'warn')
+                return
+
+            if not adding:
+                self._append_log('Ground plane removed')
+                return
+
+            # Step 2: Allow base <-> ground_plane collision in the ACM
+            # (base sits on the ground — contact is expected)
+            if not self._get_scene_client.wait_for_service(timeout_sec=5.0):
+                self._append_log(f'Ground plane added at z={z:.3f} (ACM not updated)', 'warn')
+                return
+
+            get_req = GetPlanningSceneSrv.Request()
+            get_req.components.components = 128  # ALLOWED_COLLISION_MATRIX
+            future = self._get_scene_client.call_async(get_req)
+            self._wait_future(future, timeout_sec=5.0)
+            if future.result() is None:
+                self._append_log(f'Ground plane added at z={z:.3f} (ACM not updated)', 'warn')
+                return
+
+            acm = future.result().scene.allowed_collision_matrix
+            gp_name = 'ground_plane'
+            if gp_name not in acm.entry_names:
+                # Add new column (False) to every existing row
+                for entry in acm.entry_values:
+                    entry.enabled.append(False)
+                # Add new row for ground_plane
+                gp_row = AllowedCollisionEntry()
+                gp_row.enabled = [False] * len(acm.entry_names) + [True]  # self=True
+                # Allow contact with base
+                if 'base' in acm.entry_names:
+                    base_idx = acm.entry_names.index('base')
+                    gp_row.enabled[base_idx] = True
+                    acm.entry_values[base_idx].enabled[-1] = True
+                acm.entry_names.append(gp_name)
+                acm.entry_values.append(gp_row)
+
+            acm_scene = PlanningSceneMsg()
+            acm_scene.is_diff = True
+            acm_scene.allowed_collision_matrix = acm
+            req2 = ApplyPlanningScene.Request()
+            req2.scene = acm_scene
+            future2 = self._apply_scene_client.call_async(req2)
+            self._wait_future(future2, timeout_sec=5.0)
+            if future2.result() is not None and future2.result().success:
+                self._append_log(f'Ground plane added at z={z:.3f}')
+            else:
+                self._append_log(f'Ground plane added at z={z:.3f} (ACM update failed)', 'warn')
+
+        threading.Thread(target=_apply, daemon=True).start()
 
     def _real_js_callback(self, msg):
         if not self.use_real_hardware:
@@ -2070,18 +2373,37 @@ class SOArm101ControlGUI(Node):
 
 
 def main(args=None):
-    rclpy.init(args=args)
+    rclpy.init(args=args, signal_handler_options=rclpy.SignalHandlerOptions.NO)
     node = SOArm101ControlGUI()
     executor = MultiThreadedExecutor()
     executor.add_node(node)
+
+    def _shutdown_handler(signum, frame):
+        node.running = False
+        # Tell tkinter to quit from its own thread
+        if hasattr(node, 'root'):
+            try:
+                node.root.after(0, node._on_close)
+            except Exception:
+                pass
+        executor.shutdown()
+
+    signal.signal(signal.SIGINT, _shutdown_handler)
+    signal.signal(signal.SIGTERM, _shutdown_handler)
+
     try:
         executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
         node.running = False
+        if hasattr(node, 'root'):
+            try:
+                node.root.quit()
+            except Exception:
+                pass
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

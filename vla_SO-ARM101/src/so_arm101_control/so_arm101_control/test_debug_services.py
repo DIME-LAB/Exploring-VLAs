@@ -26,7 +26,7 @@ ARM_JOINT_NAMES = ['shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 
 GUI_NODE = '/so_arm101_control_gui'
 
 # Test positions: (label, x, y, z)
-# Note: arm home points LEFT (-Y), so -Y is the more reachable side
+# Note: arm home points FORWARD (+X at zero), new_calib convention
 IK_POSITIONS = [
     ('front_center', 0.12, 0.0, 0.15),
     ('right_near',   0.10, -0.10, 0.12),
@@ -192,7 +192,7 @@ class TestDebugServices(Node):
                     self.report(f'ik/pos/{label}', True, jstr)
                 else:
                     # Try with heuristic seed
-                    rot = math.atan2(x, -y) if abs(x) + abs(y) > 0.001 else 0.0
+                    rot = math.atan2(-y, x) if abs(x) + abs(y) > 0.001 else 0.0
                     code2, joints2 = self.call_ik(x, y, z, seed=[rot, 0.0, 0.0, 0.0, 0.0])
                     if code2 == 1:
                         jstr = ', '.join(f'{n}:{joints2[n]:.3f}' for n in ARM_JOINT_NAMES if n in joints2)

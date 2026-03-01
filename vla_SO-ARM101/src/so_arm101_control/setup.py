@@ -30,10 +30,12 @@ setup(
             'control_gui = so_arm101_control.control_gui:main',
             'servo_driver = so_arm101_control.servo_driver:main',
             'ee_pose_publisher = so_arm101_control.ee_pose_publisher:main',
+            'camera_pose_publisher = so_arm101_control.camera_pose_publisher:main',
             'test_ik_solvers = so_arm101_control.test_ik_solvers:main',
             'test_planning = so_arm101_control.test_planning:main',
             'test_debug_services = so_arm101_control.test_debug_services:main',
             'compute_workspace = so_arm101_control.compute_workspace:main',
+            'calibrate_ik = so_arm101_control.calibrate_ik:main',
         ],
     },
 )
