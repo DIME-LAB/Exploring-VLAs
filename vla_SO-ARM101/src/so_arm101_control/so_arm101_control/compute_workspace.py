@@ -307,6 +307,68 @@ def geometric_ik(x, y, z, grasp_yaw=None):
     return solutions
 
 
+def compute_grasp_workspace(r_step=0.005, z_step=0.005, yaw_step=0.25,
+                            margin_pct=0.05):
+    """Compute workspace bounds for top-down grasps using geometric_ik directly.
+
+    Sweeps a grid of (r, z, yaw) target positions and calls geometric_ik() on
+    each one. Only positions where geometric_ik returns at least one solution
+    are considered reachable. This accounts for all IK constraints including
+    the θ₁/θ₅ coupling to the target position and grasp yaw.
+
+    Returns dict with keys: r_min, r_max, z_min, z_max, n_reachable, n_tested.
+    """
+    r_values = np.arange(0.02, 0.40, r_step)
+    z_values = np.arange(-0.25, 0.15, z_step)
+    yaw_values = np.arange(-math.pi, math.pi, yaw_step)
+
+    reachable = []
+    n_tested = 0
+
+    for r in r_values:
+        for z in z_values:
+            for yaw in yaw_values:
+                n_tested += 1
+                # Place target along +X axis (pan symmetry makes angle irrelevant)
+                x, y = float(r), 0.0
+                sols = geometric_ik(x, y, float(z), grasp_yaw=float(yaw))
+                if sols:
+                    reachable.append((float(r), float(z)))
+                    break  # one yaw works → this (r, z) is reachable, skip rest
+            # If we already found a yaw that works, the break above exits the
+            # yaw loop. If no yaw worked, this (r, z) is unreachable.
+
+    if not reachable:
+        return None
+
+    reachable = np.array(reachable)
+    r_all = reachable[:, 0]
+    z_all = reachable[:, 1]
+
+    r_min_raw = float(r_all.min())
+    r_max_raw = float(r_all.max())
+    z_min_raw = float(z_all.min())
+    z_max_raw = float(z_all.max())
+
+    r_extent = r_max_raw - r_min_raw
+    z_extent = z_max_raw - z_min_raw
+    r_margin = margin_pct * r_extent
+    z_margin = margin_pct * z_extent
+
+    return {
+        'r_min': r_min_raw + r_margin,
+        'r_max': r_max_raw - r_margin,
+        'z_min': z_min_raw + z_margin,
+        'z_max': z_max_raw - z_margin,
+        'r_min_raw': r_min_raw,
+        'r_max_raw': r_max_raw,
+        'z_min_raw': z_min_raw,
+        'z_max_raw': z_max_raw,
+        'n_reachable': len(reachable),
+        'n_tested': n_tested,
+    }
+
+
 def main(args=None):
     parser = argparse.ArgumentParser(description='Compute SO-ARM101 workspace bounds')
     parser.add_argument('--samples', type=int, default=200000,
@@ -330,7 +392,9 @@ def main(args=None):
     print(f'Home EE position (all zeros): ({home_pos[0]:.4f}, {home_pos[1]:.4f}, {home_pos[2]:.4f})')
     print()
 
-    # Generate random joint samples
+    # ---------------------------------------------------------------
+    # General workspace (all orientations)
+    # ---------------------------------------------------------------
     print(f'Sampling {num_samples} random joint configurations...')
     lower = np.array([j[3] for j in KINEMATIC_CHAIN])
     upper = np.array([j[4] for j in KINEMATIC_CHAIN])
@@ -377,6 +441,49 @@ def main(args=None):
     print(f'  Z: [{safe_min[2]:.4f}, {safe_max[2]:.4f}]')
     print()
 
+    # ---------------------------------------------------------------
+    # Grasp workspace (top-down only — computed via geometric_ik)
+    # ---------------------------------------------------------------
+    print(f'Computing grasp workspace via geometric IK sweep '
+          f'(θ₂+θ₃+θ₄={math.degrees(GRIPPER_DOWN_SUM):.0f}° constraint)...')
+    t0 = time.monotonic()
+    grasp = compute_grasp_workspace(margin_pct=margin_pct)
+    elapsed = time.monotonic() - t0
+
+    if grasp is None:
+        print('ERROR: No reachable grasp configurations found!')
+        grasp_yaml = ""
+    else:
+        print(f'  Reachable: {grasp["n_reachable"]}/{grasp["n_tested"]} (r,z) points')
+        print(f'  Done in {elapsed:.2f}s')
+        print()
+        print('=== Grasp Workspace (top-down, raw) ===')
+        print(f'  Radius: [{grasp["r_min_raw"]:.4f}, {grasp["r_max_raw"]:.4f}]')
+        print(f'  Z:      [{grasp["z_min_raw"]:.4f}, {grasp["z_max_raw"]:.4f}]')
+        print()
+        print(f'=== Grasp Workspace (top-down, {margin_pct*100:.0f}% margin) ===')
+        print(f'  Radius: [{grasp["r_min"]:.4f}, {grasp["r_max"]:.4f}]')
+        print(f'  Z:      [{grasp["z_min"]:.4f}, {grasp["z_max"]:.4f}]')
+        print()
+
+        grasp_yaml = (
+            "\n"
+            f"# Grasp workspace: top-down geometric IK (θ₂+θ₃+θ₄={math.degrees(GRIPPER_DOWN_SUM):.0f}°)\n"
+            f"# Computed by sweeping (r, z, yaw) grid through geometric_ik()\n"
+            f"# {grasp['n_reachable']} reachable (r,z) points out of {grasp['n_tested']} tested\n"
+            "grasp_workspace_bounds:\n"
+            f"  r_min: {grasp['r_min']:.4f}\n"
+            f"  r_max: {grasp['r_max']:.4f}\n"
+            f"  z_min: {grasp['z_min']:.4f}\n"
+            f"  z_max: {grasp['z_max']:.4f}\n"
+            "\n"
+            "grasp_workspace_bounds_raw:\n"
+            f"  r_min: {grasp['r_min_raw']:.4f}\n"
+            f"  r_max: {grasp['r_max_raw']:.4f}\n"
+            f"  z_min: {grasp['z_min_raw']:.4f}\n"
+            f"  z_max: {grasp['z_max_raw']:.4f}\n"
+        )
+
     # Write YAML
     yaml_content = (
         "# SO-ARM101 workspace bounding box\n"
@@ -403,7 +510,7 @@ def main(args=None):
         f"  y_max: {raw_max[1]:.4f}\n"
         f"  z_min: {raw_min[2]:.4f}\n"
         f"  z_max: {raw_max[2]:.4f}\n"
-    )
+    ) + grasp_yaml
 
     # Determine output path
     output_path = parsed.output
@@ -429,6 +536,17 @@ def main(args=None):
         print(f'Cannot write to {output_path}: {e}')
         print()
         print(yaml_content)
+
+    # Also write to the package source directory for symlink installs
+    src_yaml = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            'workspace_bounds.yaml')
+    if os.path.abspath(src_yaml) != os.path.abspath(output_path):
+        try:
+            with open(src_yaml, 'w') as f:
+                f.write(yaml_content)
+            print(f'Also written to: {os.path.abspath(src_yaml)}')
+        except (OSError, IOError):
+            pass
 
 
 if __name__ == '__main__':

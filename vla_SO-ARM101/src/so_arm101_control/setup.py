@@ -36,6 +36,7 @@ setup(
             'test_debug_services = so_arm101_control.test_debug_services:main',
             'compute_workspace = so_arm101_control.compute_workspace:main',
             'calibrate_ik = so_arm101_control.calibrate_ik:main',
+            'calibrate_jaw = so_arm101_control.calibrate_jaw:main',
         ],
     },
 )

@@ -28,7 +28,9 @@ from control_msgs.action import FollowJointTrajectory
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import Pose, PoseStamped
 from tf2_msgs.msg import TFMessage
+from std_msgs.msg import String
 from std_srvs.srv import Trigger
+from tf2_ros import Buffer as TfBuffer, TransformListener
 try:
     from moveit_msgs.srv import GetPositionIK, GetPositionFK, GetMotionPlan, GetStateValidity
     from moveit_msgs.msg import (
@@ -93,12 +95,42 @@ JOINT_LIMITS = {
     'gripper_joint':   (-0.174533, 1.74533),
 }
 
+# Jaw geometry for single-moving-jaw gripper offset compensation.
+# Derived from STL mesh analysis of moving_jaw_so101_v1.stl + FK chain.
+# Linear fit: jaw_gap(m) = BASELINE_JAW_GAP + JAW_GAP_RATE * gripper_joint_angle(rad)
+# At angle=0 the jaws are NOT touching — there is a 16.9mm baseline gap.
+BASELINE_JAW_GAP = 0.0190           # jaw gap at gripper_joint=0 (m)
+JAW_GAP_RATE = 0.0749               # gap increase per radian (m/rad)
+JAW_OPEN_CLEARANCE_M = 0.005        # extra jaw gap on open beyond symmetric baseline (m)
+JAW_CLOSE_CLEARANCE_M = 0.0         # extra jaw gap on close beyond symmetric baseline (m)
+TCP_CLEARANCE_M = 0.001             # extra IK offset beyond grip_width/2 for jaw overhang (m)
+
+# Wrist roll offset from geometric IK: θ₅ = pan + grasp_yaw - WRIST_ROLL_OFFSET
+_WRIST_ROLL_OFFSET = math.pi / 2 - 0.0486795  # ≈ 1.5221 rad (87.2°)
+
+
+def _normalize_grasp_yaw(yaw, pan):
+    """Pick yaw or yaw±π that keeps wrist_roll within joint limits.
+
+    Gripper jaws are symmetric about the grip axis, so yaw and yaw+π
+    produce equivalent grasps. We pick whichever keeps wrist_roll
+    closest to the center of its range.
+    """
+    wr_lo, wr_hi = JOINT_LIMITS['wrist_roll']
+    wr_center = (wr_lo + wr_hi) / 2
+    best, best_dist = yaw, abs(pan + yaw - _WRIST_ROLL_OFFSET - wr_center)
+    for candidate in (yaw + math.pi, yaw - math.pi):
+        dist = abs(pan + candidate - _WRIST_ROLL_OFFSET - wr_center)
+        if dist < best_dist:
+            best, best_dist = candidate, dist
+    return best
+
 # ---------------------------------------------------------------------------
 # Workspace bounds — loaded from compute_workspace.py output
 # ---------------------------------------------------------------------------
 
-def _load_workspace_bounds():
-    """Load workspace_bounds.yaml from the same directory as this file."""
+def _load_workspace_yaml(section_name):
+    """Load a named section from workspace_bounds.yaml."""
     yaml_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              'workspace_bounds.yaml')
     bounds = {}
@@ -107,11 +139,9 @@ def _load_workspace_bounds():
         with open(yaml_path, 'r') as f:
             for line in f:
                 stripped = line.strip()
-                # Enter the 'workspace_bounds:' section (not raw)
-                if stripped == 'workspace_bounds:':
+                if stripped == f'{section_name}:':
                     in_section = True
                     continue
-                # Exit on any other top-level key (not indented)
                 if in_section and stripped and not line[0].isspace():
                     break
                 if in_section and ':' in stripped and not stripped.startswith('#'):
@@ -124,12 +154,46 @@ def _load_workspace_bounds():
         pass
     return bounds
 
-_WS = _load_workspace_bounds()
+_WS = _load_workspace_yaml('workspace_bounds')
 WORKSPACE_BOUNDS = {
     'X': (_WS.get('x_min', -0.35), _WS.get('x_max', 0.35)),
     'Y': (_WS.get('y_min', -0.35), _WS.get('y_max', 0.25)),
     'Z': (_WS.get('z_min', -0.10), _WS.get('z_max', 0.45)),
 }
+
+_GWS = _load_workspace_yaml('grasp_workspace_bounds')
+GRASP_WORKSPACE_BOUNDS = {
+    'R_MIN': _GWS.get('r_min', 0.09),
+    'R_MAX': _GWS.get('r_max', 0.31),
+    'Z_MIN': _GWS.get('z_min', -0.20),
+    'Z_MAX': _GWS.get('z_max', 0.07),
+}
+
+
+def check_grasp_reachable(x, y, z, ground_z=None):
+    """Check if (x, y, z) is within the top-down grasp workspace.
+
+    Bounds are computed by sweeping geometric_ik() over a (r, z, yaw) grid,
+    so they represent the true IK-solvable region, not just FK-reachable.
+    ground_z: if provided, reject targets at or below the ground plane.
+    Returns (ok, reason_string). ok=True means reachable.
+    """
+    if ground_z is not None and z <= ground_z:
+        return False, f'at/below ground: z={z:.3f}m <= ground={ground_z:.3f}m'
+    r = math.sqrt(x * x + y * y)
+    r_min = GRASP_WORKSPACE_BOUNDS['R_MIN']
+    r_max = GRASP_WORKSPACE_BOUNDS['R_MAX']
+    if r < r_min:
+        return False, f'too close: r={r:.3f}m < {r_min:.3f}m'
+    if r > r_max:
+        return False, f'too far: r={r:.3f}m > {r_max:.3f}m'
+    z_min = GRASP_WORKSPACE_BOUNDS['Z_MIN']
+    z_max = GRASP_WORKSPACE_BOUNDS['Z_MAX']
+    if z < z_min:
+        return False, f'too low: z={z:.3f}m < {z_min:.3f}m'
+    if z > z_max:
+        return False, f'too high: z={z:.3f}m > {z_max:.3f}m'
+    return True, ''
 
 
 class SOArm101ControlGUI(Node):
@@ -184,6 +248,10 @@ class SOArm101ControlGUI(Node):
         self.objects_data = {}
         self.objects_lock = threading.Lock()
         self.objects_sub = None  # Created by _build_grasp_tab → _update_grasp_topic
+        self.objects_bbox = {}   # {name: {sx, sy, sz}} from bbox topic
+        _default_bbox = '/objects_bbox_real' if self.use_real_hardware else '/objects_bbox_sim'
+        self.bbox_sub = self.create_subscription(
+            String, _default_bbox, self._bbox_callback, 1)
         self.ee_pose_sub = self.create_subscription(
             PoseStamped, '/ee_pose', self._ee_pose_callback, 10)
 
@@ -210,7 +278,6 @@ class SOArm101ControlGUI(Node):
             self._goal_state_pub = self.create_publisher(
                 RobotState, '/rviz/moveit/update_custom_goal_state', 10)
             # Switch active planning group in RViz
-            from std_msgs.msg import String
             self._planning_group_pub = self.create_publisher(
                 String, '/rviz/moveit/select_planning_group', 10)
             self._active_planning_group = None  # Force first publish
@@ -230,6 +297,14 @@ class SOArm101ControlGUI(Node):
 
         # Parameter for set_ik_target service
         self.declare_parameter('ik_target', '')
+        # Parameters for jaw tuning via service calls
+        self.declare_parameter('jaw_open_clearance_mm', JAW_OPEN_CLEARANCE_M * 1000)
+        self.declare_parameter('jaw_close_clearance_mm', JAW_CLOSE_CLEARANCE_M * 1000)
+        self.declare_parameter('tcp_clearance_mm', TCP_CLEARANCE_M * 1000)
+
+        # TF buffer for TCP pose lookups
+        self._tf_buffer = TfBuffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self)
 
         # GUI
         self.running = True
@@ -249,6 +324,7 @@ class SOArm101ControlGUI(Node):
             ('get_ik_target', self._srv_get_ik_target),
             ('set_ik_target', self._srv_set_ik_target),
             ('get_ee_pose', self._srv_get_ee_pose),
+            ('get_tcp_pose', self._srv_get_tcp_pose),
             ('get_log', self._srv_get_log),
         ]:
             self._debug_services.append(
@@ -294,7 +370,7 @@ class SOArm101ControlGUI(Node):
                 finally:
                     done_event.set()
 
-            if hasattr(self, 'root') and self.root.winfo_exists():
+            if getattr(self, '_gui_ready', False):
                 self.root.after(0, _run)
             else:
                 result['ok'] = False
@@ -340,7 +416,7 @@ class SOArm101ControlGUI(Node):
             finally:
                 done_event.set()
 
-        if hasattr(self, 'root') and self.root.winfo_exists():
+        if getattr(self, '_gui_ready', False):
             self.root.after(0, _read)
         else:
             result['msg'] = 'GUI not available'
@@ -402,7 +478,7 @@ class SOArm101ControlGUI(Node):
             finally:
                 done_event.set()
 
-        if hasattr(self, 'root') and self.root.winfo_exists():
+        if getattr(self, '_gui_ready', False):
             self.root.after(0, _write)
         else:
             result['ok'] = False
@@ -415,12 +491,29 @@ class SOArm101ControlGUI(Node):
         return response
 
     def _srv_get_ee_pose(self, request, response):
-        """Read current End-Effector pose values."""
+        """Read current End-Effector pose values (gripper link)."""
         parts = []
         for key in ['X', 'Y', 'Z', 'qx', 'qy', 'qz', 'qw']:
             parts.append(f'{key}={self.ee_labels[key].get()}')
         response.success = True
         response.message = ', '.join(parts)
+        return response
+
+    def _srv_get_tcp_pose(self, request, response):
+        """Look up tcp_link pose in base frame via TF2."""
+        try:
+            t = self._tf_buffer.lookup_transform(
+                'base', 'tcp_link', rclpy.time.Time(),
+                timeout=rclpy.duration.Duration(seconds=0.5))
+            p = t.transform.translation
+            q = t.transform.rotation
+            response.success = True
+            response.message = (
+                f'X={p.x:.6f}, Y={p.y:.6f}, Z={p.z:.6f}, '
+                f'qx={q.x:.6f}, qy={q.y:.6f}, qz={q.z:.6f}, qw={q.w:.6f}')
+        except Exception as e:
+            response.success = False
+            response.message = f'TF lookup failed: {e}'
         return response
 
     def _srv_get_log(self, request, response):
@@ -438,7 +531,7 @@ class SOArm101ControlGUI(Node):
             finally:
                 done_event.set()
 
-        if hasattr(self, 'root') and self.root.winfo_exists():
+        if getattr(self, '_gui_ready', False):
             self.root.after(0, _read)
         else:
             result['msg'] = 'GUI not available'
@@ -553,7 +646,7 @@ class SOArm101ControlGUI(Node):
                     self.joint_positions[name] = msg.position[i]
             positions = dict(self.joint_positions)
         # Update sliders and goal state to reflect actual robot state
-        if hasattr(self, 'root') and self.root.winfo_exists():
+        if getattr(self, '_gui_ready', False):
             self.root.after(0, self._sync_all_sliders, positions)
         self._publish_goal_state()
 
@@ -568,7 +661,7 @@ class SOArm101ControlGUI(Node):
     def _run_gui(self):
         self.root = tk.Tk()
         self.root.title('SO-ARM101 Control')
-        self.root.geometry('580x680')
+        self.root.geometry('580x780')
         self.root.protocol('WM_DELETE_WINDOW', self._on_close)
 
         # Status bar
@@ -613,7 +706,9 @@ class SOArm101ControlGUI(Node):
         # --- Log Panel (bottom) ---
         self._build_log_panel()
 
+        self._gui_ready = True
         self.root.mainloop()
+        self._gui_ready = False
 
     # ------------------------------------------------------------------
     # Tab 1: Individual Joint Control
@@ -786,7 +881,7 @@ class SOArm101ControlGUI(Node):
         msg.data = group_name
         self._planning_group_pub.publish(msg)
         # Republish goal state after RViz processes the group switch
-        if hasattr(self, 'root') and self.root.winfo_exists():
+        if getattr(self, '_gui_ready', False):
             self.root.after(150, self._publish_goal_state)
 
     @service_trigger('randomize_arm')
@@ -817,13 +912,13 @@ class SOArm101ControlGUI(Node):
                     if future.result() is not None and not future.result().valid:
                         continue  # collision — retry
                 # Valid (or no validity service available) — apply it
-                if hasattr(self, 'root') and self.root.winfo_exists():
+                if getattr(self, '_gui_ready', False):
                     self.root.after(0, self._apply_random_arm, positions)
                 return
 
             # Exhausted attempts — apply last one anyway
             self._append_log(f'No collision-free state after {max_attempts} attempts', 'warn')
-            if hasattr(self, 'root') and self.root.winfo_exists():
+            if getattr(self, '_gui_ready', False):
                 self.root.after(0, self._apply_random_arm, positions)
 
         threading.Thread(target=_find_valid, daemon=True).start()
@@ -996,7 +1091,7 @@ class SOArm101ControlGUI(Node):
 
     def _set_status(self, text):
         """Thread-safe status bar update."""
-        if hasattr(self, 'root') and self.root.winfo_exists():
+        if getattr(self, '_gui_ready', False):
             self.root.after(0, self.status_var.set, text)
 
     # ------------------------------------------------------------------
@@ -1129,7 +1224,7 @@ class SOArm101ControlGUI(Node):
             # Auto-switch to System Errors tab
             self._log_notebook.select(1)
 
-        if hasattr(self, 'root') and self.root.winfo_exists():
+        if getattr(self, '_gui_ready', False):
             self.root.after(0, _do)
 
     def _append_log(self, text, level='info'):
@@ -1146,7 +1241,7 @@ class SOArm101ControlGUI(Node):
             self._process_log.see(tk.END)
             self._process_log.config(state=tk.DISABLED)
 
-        if hasattr(self, 'root') and self.root.winfo_exists():
+        if getattr(self, '_gui_ready', False):
             self.root.after(0, _do_append)
 
     # ------------------------------------------------------------------
@@ -1284,11 +1379,22 @@ class SOArm101ControlGUI(Node):
         tk.Button(topic_row, text='Refresh', bg='#b0b0b0', fg='#1a1a1a',
                   command=self._refresh_objects).pack(side=tk.RIGHT, padx=(2, 0))
 
+        opts_row = tk.Frame(topic_frame)
+        opts_row.pack(fill=tk.X, padx=5, pady=2)
+        default_bbox_topic = '/objects_bbox_real' if self.use_real_hardware else '/objects_bbox_sim'
+        tk.Label(opts_row, text='BBox:', anchor='w').pack(side=tk.LEFT)
+        self._bbox_topic_var = tk.StringVar(value=default_bbox_topic)
+        tk.Entry(opts_row, textvariable=self._bbox_topic_var, width=22).pack(
+            side=tk.LEFT, padx=(5, 5))
+        self._bbox_enabled_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(opts_row, text='TCP offset',
+                       variable=self._bbox_enabled_var).pack(side=tk.LEFT, padx=5)
+
         # --- Detected Objects ---
         obj_frame = ttk.LabelFrame(frame, text='Detected Objects')
         obj_frame.pack(fill=tk.X, padx=10, pady=5)
 
-        self.obj_listbox = tk.Listbox(obj_frame, height=8, font=('Consolas', 9),
+        self.obj_listbox = tk.Listbox(obj_frame, height=5, font=('Consolas', 9),
                                        selectbackground='#d0d0d0',
                                        selectforeground='#1a1a1a')
         self.obj_listbox.pack(fill=tk.X, padx=5, pady=2)
@@ -1304,7 +1410,7 @@ class SOArm101ControlGUI(Node):
         arm_dur_row = tk.Frame(arm_col)
         arm_dur_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(arm_dur_row, text='Duration (s):', anchor='w').pack(side=tk.LEFT)
-        self._grasp_arm_duration_var = tk.DoubleVar(value=5.0)
+        self._grasp_arm_duration_var = tk.DoubleVar(value=2.5)
         tk.Spinbox(arm_dur_row, textvariable=self._grasp_arm_duration_var,
                    from_=0.5, to=10.0, increment=0.5,
                    width=8, format='%.1f').pack(side=tk.LEFT, padx=(5, 0))
@@ -1317,12 +1423,20 @@ class SOArm101ControlGUI(Node):
                    from_=0.00, to=0.20, increment=0.01,
                    width=6, format='%.2f').pack(side=tk.LEFT, padx=(5, 0))
 
+        obj_z_row = tk.Frame(arm_col)
+        obj_z_row.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(obj_z_row, text='Object Z (m):', anchor='w').pack(side=tk.LEFT)
+        self._grasp_obj_z_var = tk.DoubleVar(value=0.0)
+        tk.Spinbox(obj_z_row, textvariable=self._grasp_obj_z_var,
+                   from_=-0.05, to=0.20, increment=0.005,
+                   width=6, format='%.3f').pack(side=tk.LEFT, padx=(5, 0))
+
         self._grasp_cross_var = tk.BooleanVar(value=False)
         tk.Checkbutton(arm_col, text='Cross-axis grasp',
                        variable=self._grasp_cross_var).pack(
             fill=tk.X, padx=5, pady=1)
 
-        tk.Button(arm_col, text='Reset', bg='#b0b0b0', fg='#1a1a1a',
+        tk.Button(arm_col, text='Home', bg='#b0b0b0', fg='#1a1a1a',
                   command=self._grasp_reset).pack(fill=tk.X, padx=5, pady=2)
         self._grasp_move_btn = tk.Button(
             arm_col, text='Move to Grab', bg='#b0b0b0', fg='#1a1a1a',
@@ -1357,14 +1471,43 @@ class SOArm101ControlGUI(Node):
                    from_=0.2, to=5.0, increment=0.1,
                    width=8, format='%.1f').pack(side=tk.LEFT, padx=(5, 0))
 
-        tk.Button(grip_col, text='Open Gripper', bg='#b0b0b0', fg='#1a1a1a',
-                  command=lambda: self._gripper_command(
-                      math.radians(self._grasp_grip_open_var.get()), execute=True,
-                      duration_s=self._grasp_grip_duration_var.get())).pack(fill=tk.X, padx=5, pady=2)
-        tk.Button(grip_col, text='Close Gripper', bg='#b0b0b0', fg='#1a1a1a',
-                  command=lambda: self._gripper_command(
-                      math.radians(self._grasp_grip_close_var.get()), execute=True,
-                      duration_s=self._grasp_grip_duration_var.get())).pack(fill=tk.X, padx=5, pady=2)
+        clearance_row = tk.Frame(grip_col)
+        clearance_row.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(clearance_row, text='Open clearance (mm):', anchor='w').pack(side=tk.LEFT)
+        self._jaw_open_clearance_var = tk.DoubleVar(value=JAW_OPEN_CLEARANCE_M * 1000)
+        tk.Spinbox(clearance_row, textvariable=self._jaw_open_clearance_var,
+                   from_=-5.0, to=20.0, increment=0.5,
+                   width=5, format='%.1f').pack(side=tk.LEFT, padx=(5, 0))
+
+        close_cl_row = tk.Frame(grip_col)
+        close_cl_row.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(close_cl_row, text='Close clearance (mm):', anchor='w').pack(side=tk.LEFT)
+        self._jaw_close_clearance_var = tk.DoubleVar(value=JAW_CLOSE_CLEARANCE_M * 1000)
+        tk.Spinbox(close_cl_row, textvariable=self._jaw_close_clearance_var,
+                   from_=-10.0, to=10.0, increment=0.5,
+                   width=5, format='%.1f').pack(side=tk.LEFT, padx=(5, 0))
+
+        tcp_clear_row = tk.Frame(grip_col)
+        tcp_clear_row.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(tcp_clear_row, text='TCP clearance (mm):', anchor='w').pack(side=tk.LEFT)
+        self._tcp_clearance_var = tk.DoubleVar(value=TCP_CLEARANCE_M * 1000)
+        tk.Spinbox(tcp_clear_row, textvariable=self._tcp_clearance_var,
+                   from_=-5.0, to=10.0, increment=0.5,
+                   width=5, format='%.1f').pack(side=tk.LEFT, padx=(5, 0))
+
+        grip_btn_row1 = tk.Frame(grip_col)
+        grip_btn_row1.pack(fill=tk.X, padx=5, pady=2)
+        tk.Button(grip_btn_row1, text='Grasp Open', bg='#b0b0b0', fg='#1a1a1a',
+                  command=self._gripper_open_for_object).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+        tk.Button(grip_btn_row1, text='Grasp Close', bg='#b0b0b0', fg='#1a1a1a',
+                  command=self._gripper_close_for_object).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
+
+        grip_btn_row2 = tk.Frame(grip_col)
+        grip_btn_row2.pack(fill=tk.X, padx=5, pady=2)
+        tk.Button(grip_btn_row2, text='Open', bg='#b0b0b0', fg='#1a1a1a',
+                  command=self._gripper_open_range).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+        tk.Button(grip_btn_row2, text='Close', bg='#b0b0b0', fg='#1a1a1a',
+                  command=self._gripper_close_range).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
 
         # Initial subscription to default topic
         self._update_grasp_topic()
@@ -1451,7 +1594,7 @@ class SOArm101ControlGUI(Node):
 
             p = resp.pose_stamped[0].pose.position
             o = resp.pose_stamped[0].pose.orientation
-            if hasattr(self, 'root') and self.root.winfo_exists():
+            if getattr(self, '_gui_ready', False):
                 self.root.after(0, self._populate_ik_spinboxes,
                                p.x, p.y, p.z, o.x, o.y, o.z, o.w)
 
@@ -1487,7 +1630,7 @@ class SOArm101ControlGUI(Node):
             self._ik_planned_target = dict(pos)
             self._ik_valid = True
             self._compute_fk_to_spinboxes(pos)
-        if hasattr(self, 'root') and self.root.winfo_exists():
+        if getattr(self, '_gui_ready', False):
             self.root.after(500, _after_zero)
 
     # --- Spinbox IK: debounced, serialized ---
@@ -1579,7 +1722,7 @@ class SOArm101ControlGUI(Node):
                     if result is not None and result.error_code.val == 1:
                         target = _extract_joints(result)
                         self.get_logger().info('IK SUCCESS (collision-free)')
-                        if hasattr(self, 'root') and self.root.winfo_exists():
+                        if getattr(self, '_gui_ready', False):
                             self.root.after(0, self._ik_interactive_success,
                                            target, gen)
                         return
@@ -1595,14 +1738,14 @@ class SOArm101ControlGUI(Node):
                     if result is not None and result.error_code.val == 1:
                         target = _extract_joints(result)
                         self.get_logger().info('IK COLLISION (goal shown red)')
-                        if hasattr(self, 'root') and self.root.winfo_exists():
+                        if getattr(self, '_gui_ready', False):
                             self.root.after(0, self._ik_interactive_fail_with_goal,
                                            target, changed_field, gen)
                         return
 
                 # Truly unreachable — no solution even ignoring collisions
                 self.get_logger().info('IK UNREACHABLE (all seeds failed)')
-                if hasattr(self, 'root') and self.root.winfo_exists():
+                if getattr(self, '_gui_ready', False):
                     self.root.after(0, self._ik_interactive_fail,
                                    changed_field, revert_on_fail, gen)
             finally:
@@ -1725,7 +1868,7 @@ class SOArm101ControlGUI(Node):
             joints_str = ', '.join(f'{n}: {pos[n]:.3f}' for n in ARM_JOINT_NAMES)
             self._append_log(f'Randomized goal: {joints_str}')
             self._compute_fk_to_spinboxes(pos)
-        if hasattr(self, 'root') and self.root.winfo_exists():
+        if getattr(self, '_gui_ready', False):
             self.root.after(1500, _fk_after_randomize)
 
     # --- Full IK solver (for services, 6 seeds + 2 passes) ---
@@ -1735,8 +1878,8 @@ class SOArm101ControlGUI(Node):
 
         For grasp moves (grasp_yaw is not None), uses the analytical geometric
         IK solver which produces exact gripper-down solutions in ~100µs, then
-        validates with MoveIt collision checking. Falls back to MoveIt IK if
-        geometric IK fails (target out of workspace).
+        validates with MoveIt collision checking. No MoveIt fallback — if
+        geometric IK fails, the position is unreachable for a top-down grasp.
 
         For non-grasp moves, uses the original multi-seed MoveIt KDL solver.
 
@@ -1748,19 +1891,25 @@ class SOArm101ControlGUI(Node):
         else:
             x, y, z, qx, qy, qz, qw = self._get_ik_target_quat()
 
-        # --- Grasp moves: geometric IK + collision check ---
+        # --- Grasp moves: geometric IK + collision check (no MoveIt fallback) ---
         if grasp_yaw is not None:
             def _try_geometric():
                 with self._ik_solve_lock:
+                    # Pre-check: is the target within the top-down grasp workspace?
+                    ground_z = self._ground_z_var.get() if hasattr(self, '_ground_z_var') else None
+                    ok, reason = check_grasp_reachable(x, y, z, ground_z=ground_z)
+                    if not ok:
+                        self._append_log(
+                            f'Grasp rejected: {reason} '
+                            f'({x:.3f}, {y:.3f}, {z:.3f})', 'warn')
+                        return
+
                     from so_arm101_control.compute_workspace import geometric_ik
                     solutions = geometric_ik(x, y, z, grasp_yaw=grasp_yaw)
                     if not solutions:
                         self._append_log(
-                            f'Geometric IK: out of workspace '
+                            f'Grasp unreachable: no geometric IK solution '
                             f'({x:.3f}, {y:.3f}, {z:.3f})', 'warn')
-                        # Fall back to MoveIt IK
-                        self._compute_ik_moveit(
-                            x, y, z, qx, qy, qz, qw, mode, grasp_yaw)
                         return
 
                     # Try each solution (elbow-up first, then elbow-down)
@@ -1776,12 +1925,10 @@ class SOArm101ControlGUI(Node):
                         self._append_log(
                             f'Geometric IK: {config} collides', 'warn')
 
-                    # All geometric solutions collide — fall back to MoveIt
+                    # All geometric solutions collide — reject (no MoveIt fallback)
                     self._append_log(
-                        'Geometric IK: all solutions collide, '
-                        'falling back to MoveIt', 'warn')
-                    self._compute_ik_moveit(
-                        x, y, z, qx, qy, qz, qw, mode, grasp_yaw)
+                        'Grasp unreachable: all geometric IK solutions collide '
+                        f'({x:.3f}, {y:.3f}, {z:.3f})', 'warn')
 
             threading.Thread(target=_try_geometric, daemon=True).start()
             return
@@ -1796,8 +1943,7 @@ class SOArm101ControlGUI(Node):
         self._compute_ik_moveit(x, y, z, qx, qy, qz, qw, mode, grasp_yaw)
 
     def _compute_ik_moveit(self, x, y, z, qx, qy, qz, qw, mode, grasp_yaw):
-        """MoveIt multi-seed IK solver — used for non-grasp moves and as
-        fallback when geometric IK fails."""
+        """MoveIt multi-seed IK solver — used for non-grasp moves only."""
         if not MOVEIT_AVAILABLE or self.ik_client is None:
             self._append_log('moveit_msgs not installed', 'warn')
             return
@@ -1906,21 +2052,18 @@ class SOArm101ControlGUI(Node):
                 self._moveit_execute()
             elif mode == 'grasp_approach':
                 duration = getattr(self, '_grasp_arm_duration', 2.0)
-                final = getattr(self, '_grasp_final_params', None)
+                final_joints = getattr(self, '_grasp_final_joints', None)
                 def _descend():
-                    if final is not None:
+                    if final_joints is not None:
                         self._append_log('Approach complete, descending to grasp')
-                        self._compute_ik_full(
-                            mode='grasp_execute',
-                            target_pose=final['pose'],
-                            grasp_yaw=final['yaw'])
+                        self._ik_apply_and_act(final_joints, 'grasp_execute')
                 self._execute_trajectory(target, duration_s=duration,
                                          on_complete=_descend)
             elif mode == 'grasp_execute':
                 duration = getattr(self, '_grasp_arm_duration', 2.0)
                 self._execute_trajectory(target, duration_s=duration)
 
-        if hasattr(self, 'root') and self.root.winfo_exists():
+        if getattr(self, '_gui_ready', False):
             self.root.after(0, _apply)
 
     def _set_ik_status(self, text):
@@ -1928,7 +2071,7 @@ class SOArm101ControlGUI(Node):
         self._append_log(text)
 
     def _ee_pose_callback(self, msg):
-        if hasattr(self, 'root') and self.root.winfo_exists():
+        if getattr(self, '_gui_ready', False):
             p = msg.pose.position
             o = msg.pose.orientation
             self.root.after(0, self._update_ee_display,
@@ -1956,6 +2099,14 @@ class SOArm101ControlGUI(Node):
                     'qz': tf.transform.rotation.z,
                     'qw': tf.transform.rotation.w,
                 }
+
+    def _bbox_callback(self, msg):
+        """Cache world-aligned bounding boxes from /objects_bbox_sim."""
+        import json
+        try:
+            self.objects_bbox = json.loads(msg.data)
+        except json.JSONDecodeError:
+            pass
 
     @service_trigger('grasp_update_topic')
     def _update_grasp_topic(self):
@@ -1987,7 +2138,7 @@ class SOArm101ControlGUI(Node):
             self.objects_data.clear()
         self.obj_listbox.delete(0, tk.END)
         # Wait briefly for new messages to arrive, then populate
-        if hasattr(self, 'root') and self.root.winfo_exists():
+        if getattr(self, '_gui_ready', False):
             self.root.after(500, self._populate_object_list)
 
     def _populate_object_list(self):
@@ -2005,8 +2156,10 @@ class SOArm101ControlGUI(Node):
 
     @service_trigger('grasp_reset')
     def _grasp_reset(self):
-        """Move arm to grasp-ready home: gripper pointing down."""
-        self._zero_arm()
+        """Move arm to grasp-ready home: gripper pointing down.
+
+        Plans from current joint state (not from zeros) to avoid flinging.
+        """
         duration = self._grasp_arm_duration_var.get()
         target = {name: 0.0 for name in ARM_JOINT_NAMES}
         target['wrist_flex'] = math.pi / 2
@@ -2045,6 +2198,99 @@ class SOArm101ControlGUI(Node):
         yaw_deg = math.degrees(pan + obj_yaw)
         return cls._rpy_deg_to_quat(0.0, 90.0, yaw_deg)
 
+    def _get_selected_object_name(self):
+        """Return the object name selected in the grasp listbox, or None."""
+        sel = self.obj_listbox.curselection()
+        if not sel:
+            return None
+        return self.obj_listbox.get(sel[0]).split('  ')[0]
+
+    def _get_grip_width(self, obj_name):
+        """Return the grip width for the object, respecting cross-axis checkbox."""
+        bbox = self.objects_bbox.get(obj_name)
+        if not bbox:
+            return None
+        cross = self._grasp_cross_var.get() if hasattr(self, '_grasp_cross_var') else False
+        return max(bbox['sx'], bbox['sy']) if cross else min(bbox['sx'], bbox['sy'])
+
+    def _compute_jaw_offset(self, obj_name, obj_yaw):
+        """Compute (dx, dy) to shift TCP so the object center sits between jaws.
+
+        TCP is at the fixed jaw tip. The moving jaw opens along the object's
+        local +Y axis: (-sin(obj_yaw), cos(obj_yaw)) in world frame.
+        (wrist_roll compensates for pan, so only obj_yaw matters.)
+        We shift TCP from object center toward the fixed jaw by grip_width/2.
+        Returns (0, 0) when TCP offset is disabled via the checkbox.
+        """
+        if hasattr(self, '_bbox_enabled_var') and not self._bbox_enabled_var.get():
+            return 0.0, 0.0
+        grip_width = self._get_grip_width(obj_name)
+        if grip_width is None:
+            return 0.0, 0.0
+        tcp_clear = (self._tcp_clearance_var.get() / 1000
+                     if hasattr(self, '_tcp_clearance_var') else TCP_CLEARANCE_M)
+        half_offset = grip_width / 2 + tcp_clear
+        # fixed_jaw_dir = (-sin(obj_yaw), +cos(obj_yaw))
+        dx = -half_offset * math.sin(obj_yaw)
+        dy = half_offset * math.cos(obj_yaw)
+        return dx, dy
+
+    def _gripper_angle_for_object(self, obj_name):
+        """Return (open_angle, close_angle) in radians for the selected object.
+
+        Uses jaw_gap = BASELINE_JAW_GAP + JAW_GAP_RATE * angle model derived
+        from STL mesh analysis. Falls back to full range if no bbox data.
+        """
+        grip_width = self._get_grip_width(obj_name) if obj_name else None
+        if grip_width is None:
+            return JOINT_LIMITS['gripper_joint'][1], JOINT_LIMITS['gripper_joint'][0]
+        # Read tunable values from UI (mm → m), fall back to module constants
+        tcp_clear = (self._tcp_clearance_var.get() / 1000
+                     if hasattr(self, '_tcp_clearance_var') else TCP_CLEARANCE_M)
+        open_cl = (self._jaw_open_clearance_var.get() / 1000
+                   if hasattr(self, '_jaw_open_clearance_var') else JAW_OPEN_CLEARANCE_M)
+        close_cl = (self._jaw_close_clearance_var.get() / 1000
+                    if hasattr(self, '_jaw_close_clearance_var') else JAW_CLOSE_CLEARANCE_M)
+        # Symmetric baseline = grip_width + 2*tcp_clearance (tcp_clear gap each side)
+        # Open/close clearances are extra gap on top of that baseline
+        # angle = (desired_gap - baseline_jaw_gap) / rate
+        open_gap = grip_width + 2 * tcp_clear + open_cl
+        open_angle = (open_gap - BASELINE_JAW_GAP) / JAW_GAP_RATE
+        open_angle = max(JOINT_LIMITS['gripper_joint'][0],
+                         min(open_angle, JOINT_LIMITS['gripper_joint'][1]))
+        close_gap = grip_width + 2 * tcp_clear + close_cl
+        close_angle = (close_gap - BASELINE_JAW_GAP) / JAW_GAP_RATE
+        close_angle = max(JOINT_LIMITS['gripper_joint'][0],
+                          min(close_angle, JOINT_LIMITS['gripper_joint'][1]))
+        return open_angle, close_angle
+
+    @service_trigger('gripper_open_for_object')
+    def _gripper_open_for_object(self):
+        """Open gripper to the angle matching the selected object's width."""
+        obj_name = self._get_selected_object_name()
+        bbox = self.objects_bbox.get(obj_name) if obj_name else None
+        if not bbox:
+            self._append_log('Grasp Open: no object selected or no bbox data')
+            return
+        open_angle, _ = self._gripper_angle_for_object(obj_name)
+        self._append_log(
+            f'Grasp Open: {math.degrees(open_angle):.1f}° for {obj_name}')
+        self._gripper_command(open_angle, execute=True,
+                              duration_s=self._grasp_grip_duration_var.get())
+
+    @service_trigger('gripper_close_for_object')
+    def _gripper_close_for_object(self):
+        """Close gripper to the object's width minus threshold."""
+        obj_name = self._get_selected_object_name()
+        bbox = self.objects_bbox.get(obj_name) if obj_name else None
+        if not bbox:
+            self._append_log('Grasp Close: no object selected or no bbox data')
+            return
+        _, close_angle = self._gripper_angle_for_object(obj_name)
+        self._append_log(f'Grasp Close: {math.degrees(close_angle):.1f}° for {obj_name}')
+        self._gripper_command(close_angle, execute=True,
+                              duration_s=self._grasp_grip_duration_var.get())
+
     @service_trigger('grasp_move')
     def _move_to_object(self):
         sel = self.obj_listbox.curselection()
@@ -2059,13 +2305,13 @@ class SOArm101ControlGUI(Node):
             self._append_log(f'Object "{obj_name}" not found', 'warn')
             return
 
-        # Open gripper before moving
-        self._gripper_open()
-
         topic = self._grasp_topic_var.get().strip()
         z_offset = 0.05 if topic == '/drop_poses' else 0.0
 
-        target_z = pos['z'] + z_offset
+        # Use Object Z override if set, otherwise use detected z
+        obj_z_override = self._grasp_obj_z_var.get()
+        base_z = obj_z_override if abs(obj_z_override) > 1e-4 else pos['z']
+        target_z = base_z + z_offset
         action = 'drop' if topic == '/drop_poses' else 'grab'
 
         # Compute object yaw for wrist_roll alignment (two-stage IK)
@@ -2078,33 +2324,97 @@ class SOArm101ControlGUI(Node):
         if cross:
             obj_yaw += math.pi / 2
 
+        # Normalize yaw so wrist_roll stays within joint limits
+        # (gripper jaws are symmetric: yaw ≡ yaw+π for grasping)
+        pan = math.atan2(pos['y'], pos['x']) if abs(pos['x']) + abs(pos['y']) > 0.001 else 0.0
+        obj_yaw = _normalize_grasp_yaw(obj_yaw, pan)
+
+        # Jaw offset: shift target so object sits between both jaws
+        jaw_dx, jaw_dy = self._compute_jaw_offset(obj_name, obj_yaw)
+        tx, ty = pos['x'] + jaw_dx, pos['y'] + jaw_dy
+        if abs(jaw_dx) > 0.001 or abs(jaw_dy) > 0.001:
+            gw = (self._get_grip_width(obj_name) or 0) * 1000
+            self._append_log(
+                f'  Jaw offset: ({jaw_dx*1000:+.1f}, {jaw_dy*1000:+.1f})mm '
+                f'for {gw:.0f}mm grip{"[cross]" if cross else ""}')
+
         self._append_log(
             f'Grasp: {action} "{obj_name}" at '
-            f'({pos["x"]:.3f}, {pos["y"]:.3f}, {target_z:.3f})'
+            f'({tx:.3f}, {ty:.3f}, {target_z:.3f})'
             f'{" [cross]" if cross else ""}')
 
         self._grasp_arm_duration = self._grasp_arm_duration_var.get()
         # Compute top-down grasp orientation (pitch=90°, yaw aligned to object)
         gqx, gqy, gqz, gqw = self._grasp_orientation(
-            pos['x'], pos['y'], obj_qz, obj_qw)
+            tx, ty, obj_qz, obj_qw)
 
         approach_h = self._grasp_approach_height_var.get()
-        if approach_h > 0:
-            approach_z = target_z + approach_h
-            self._grasp_final_params = {
-                'pose': (pos['x'], pos['y'], target_z, gqx, gqy, gqz, gqw),
-                'yaw': obj_yaw,
-            }
-            self._append_log(f'  Step 1: approach at z={approach_z:.3f}')
-            self._compute_ik_full(
-                mode='grasp_approach',
-                target_pose=(pos['x'], pos['y'], approach_z, gqx, gqy, gqz, gqw),
-                grasp_yaw=obj_yaw)
-        else:
-            self._compute_ik_full(
-                mode='grasp_execute',
-                target_pose=(pos['x'], pos['y'], target_z, gqx, gqy, gqz, gqw),
-                grasp_yaw=obj_yaw)
+
+        # Pre-validate ALL stages before moving the arm
+        def _prevalidate_and_execute():
+            from so_arm101_control.compute_workspace import geometric_ik
+            ground_z = self._ground_z_var.get() if hasattr(self, '_ground_z_var') else None
+
+            poses_to_check = []
+            if approach_h > 0:
+                approach_z = target_z + approach_h
+                poses_to_check.append(('approach', tx, ty, approach_z))
+                poses_to_check.append(('final', tx, ty, target_z))
+            else:
+                poses_to_check.append(('final', tx, ty, target_z))
+
+            # Validate each stage: workspace check → geometric IK → collision
+            validated = {}  # stage_name -> joint solution dict
+            for stage, px, py, pz in poses_to_check:
+                ok, reason = check_grasp_reachable(px, py, pz, ground_z=ground_z)
+                if not ok:
+                    self._append_log(
+                        f'Grasp rejected ({stage}): {reason} '
+                        f'({px:.3f}, {py:.3f}, {pz:.3f})', 'warn')
+                    return
+
+                solutions = geometric_ik(px, py, pz, grasp_yaw=obj_yaw)
+                if not solutions:
+                    self._append_log(
+                        f'Grasp unreachable ({stage}): no geometric IK '
+                        f'({px:.3f}, {py:.3f}, {pz:.3f})', 'warn')
+                    return
+
+                found = False
+                for i, sol in enumerate(solutions):
+                    config = 'elbow-up' if i == 0 else 'elbow-down'
+                    if self._check_state_valid(sol):
+                        validated[stage] = sol
+                        self._append_log(
+                            f'  {stage}: {config}, '
+                            f'wrist_roll={math.degrees(sol["wrist_roll"]):.1f}°')
+                        found = True
+                        break
+                    self._append_log(
+                        f'  {stage}: {config} collides', 'warn')
+
+                if not found:
+                    self._append_log(
+                        f'Grasp unreachable ({stage}): all solutions collide '
+                        f'({px:.3f}, {py:.3f}, {pz:.3f})', 'warn')
+                    return
+
+            # All stages validated — execute
+            duration = self._grasp_arm_duration
+            if approach_h > 0 and 'approach' in validated and 'final' in validated:
+                self._append_log(f'  Both stages validated, executing approach')
+                self._grasp_final_joints = validated['final']
+                def _apply_approach():
+                    self._ik_apply_and_act(validated['approach'], 'grasp_approach')
+                if getattr(self, '_gui_ready', False):
+                    self.root.after(0, _apply_approach)
+            elif 'final' in validated:
+                def _apply_final():
+                    self._ik_apply_and_act(validated['final'], 'grasp_execute')
+                if getattr(self, '_gui_ready', False):
+                    self.root.after(0, _apply_final)
+
+        threading.Thread(target=_prevalidate_and_execute, daemon=True).start()
 
     # ------------------------------------------------------------------
     # Tab 3: Gripper Control
@@ -2112,11 +2422,78 @@ class SOArm101ControlGUI(Node):
 
     @service_trigger('gripper_close')
     def _gripper_close(self):
-        self._gripper_command(JOINT_LIMITS['gripper_joint'][0])
+        self._gripper_command(JOINT_LIMITS['gripper_joint'][0], execute=True)
 
     @service_trigger('gripper_open')
     def _gripper_open(self):
-        self._gripper_command(JOINT_LIMITS['gripper_joint'][1])
+        self._gripper_command(JOINT_LIMITS['gripper_joint'][1], execute=True)
+
+    @service_trigger('gripper_open_range')
+    def _gripper_open_range(self):
+        """Open gripper to the range spinbox upper value (grasp tab)."""
+        angle = math.radians(self._grasp_grip_open_var.get())
+        self._gripper_command(angle, execute=True,
+                              duration_s=self._grasp_grip_duration_var.get())
+
+    @service_trigger('gripper_close_range')
+    def _gripper_close_range(self):
+        """Close gripper to the range spinbox lower value (grasp tab)."""
+        angle = math.radians(self._grasp_grip_close_var.get())
+        self._gripper_command(angle, execute=True,
+                              duration_s=self._grasp_grip_duration_var.get())
+
+    @service_trigger('set_jaw_open_clearance')
+    def _set_jaw_open_clearance(self):
+        """Set jaw open clearance: ros2 param set ... jaw_open_clearance_mm 5.0"""
+        val = self.get_parameter('jaw_open_clearance_mm').get_parameter_value().double_value
+        if hasattr(self, '_jaw_open_clearance_var'):
+            self._jaw_open_clearance_var.set(val)
+        self._append_log(f'Jaw open clearance set to {val:.1f}mm')
+
+    @service_trigger('set_jaw_close_clearance')
+    def _set_jaw_close_clearance(self):
+        """Set jaw close clearance: ros2 param set ... jaw_close_clearance_mm 0.0
+        +ve = more gap, -ve = tighter"""
+        val = self.get_parameter('jaw_close_clearance_mm').get_parameter_value().double_value
+        if hasattr(self, '_jaw_close_clearance_var'):
+            self._jaw_close_clearance_var.set(val)
+        self._append_log(f'Jaw close clearance set to {val:+.1f}mm')
+
+    @service_trigger('set_tcp_clearance')
+    def _set_tcp_clearance(self):
+        """Set TCP IK clearance from param: ros2 param set ... tcp_clearance_mm 1.0"""
+        val = self.get_parameter('tcp_clearance_mm').get_parameter_value().double_value
+        if hasattr(self, '_tcp_clearance_var'):
+            self._tcp_clearance_var.set(val)
+        self._append_log(f'TCP clearance set to {val:.1f}mm')
+
+    @service_trigger('check_grasp_reachable')
+    def _check_grasp_reachable_svc(self):
+        """Check if the selected object is within the top-down grasp workspace."""
+        obj_name = self._get_selected_object_name()
+        if not obj_name:
+            self._append_log('No object selected for reachability check', 'warn')
+            return
+        with self.objects_lock:
+            pos = self.objects_data.get(obj_name)
+        if pos is None:
+            self._append_log(f'Object "{obj_name}" not found', 'warn')
+            return
+        obj_z_override = self._grasp_obj_z_var.get()
+        z = obj_z_override if abs(obj_z_override) > 1e-4 else pos['z']
+        ground_z = self._ground_z_var.get() if hasattr(self, '_ground_z_var') else None
+        ok, reason = check_grasp_reachable(pos['x'], pos['y'], z, ground_z=ground_z)
+        r = math.sqrt(pos['x']**2 + pos['y']**2)
+        if ok:
+            self._append_log(
+                f'Grasp reachable: "{obj_name}" r={r:.3f}m z={z:.3f}m '
+                f'[R: {GRASP_WORKSPACE_BOUNDS["R_MIN"]:.3f}-'
+                f'{GRASP_WORKSPACE_BOUNDS["R_MAX"]:.3f}m, '
+                f'Z: {GRASP_WORKSPACE_BOUNDS["Z_MIN"]:.3f}-'
+                f'{GRASP_WORKSPACE_BOUNDS["Z_MAX"]:.3f}m]')
+        else:
+            self._append_log(
+                f'Grasp unreachable: "{obj_name}" — {reason}', 'warn')
 
     def _gripper_command(self, jaw_target, execute=False, duration_s=1.0):
         """Set gripper goal. If execute=True, also send to controller."""
@@ -2172,7 +2549,7 @@ class SOArm101ControlGUI(Node):
                     with self.joint_lock:
                         self.joint_positions.update(positions)
 
-                    if hasattr(self, 'root') and self.root.winfo_exists():
+                    if getattr(self, '_gui_ready', False):
                         self.root.after(0, self._sync_arm_sliders, dict(positions))
 
                     self._publish_goal_state()
@@ -2326,7 +2703,7 @@ class SOArm101ControlGUI(Node):
                     self.joint_positions[name] = msg.position[i]
             positions = dict(self.joint_positions)
 
-        if hasattr(self, 'root') and self.root.winfo_exists():
+        if getattr(self, '_gui_ready', False):
             self.root.after(0, self._sync_all_sliders, positions)
 
     def _sync_all_sliders(self, positions):

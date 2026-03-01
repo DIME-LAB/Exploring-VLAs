@@ -8,13 +8,14 @@ ROS2 Humble packages for the SO-ARM101 5-DOF robot arm with MoveIt2 motion plann
 |---|---|
 | `so_arm101_description` | URDF, meshes, and display launch |
 | `so_arm101_moveit_config` | MoveIt2 config (SRDF, kinematics, controllers, RViz) |
-| `so_arm101_control` | GUI, servo driver, EE pose publisher, IK/planning tests |
+| `so_arm101_control` | GUI, servo driver, geometric IK, grasp pipeline, EE/camera pose publishers |
 
 ## Robot
 
 - **5-DOF arm**: Rotation, Pitch, Elbow, Wrist_Pitch, Wrist_Roll (STS3215 servos)
-- **1 gripper**: Jaw
-- **IK solver**: [pick_ik](https://github.com/PickNikRobotics/pick_ik) (`rotation_scale: 0.5` for 5-DOF)
+- **1 gripper**: Jaw (single moving jaw)
+- **Grasp IK**: Geometric IK solver — analytical 2-link law-of-cosines with gripper-down constraint (θ₂+θ₃+θ₄=90°), FK refinement step (<0.5mm error)
+- **MoveIt IK**: [pick_ik](https://github.com/PickNikRobotics/pick_ik) (`rotation_scale: 0.5`) for non-grasp motion planning
 - **Planner**: OMPL (RRTConnect)
 
 ## Prerequisites
@@ -54,39 +55,78 @@ source install/setup.bash
 
 ## Launch
 
-### MoveIt Demo (RViz + planning + simulated controllers)
+### Control Stack (GUI + MoveIt + mock hardware)
+
+```bash
+# Default: simulation mode, no RViz
+ros2 launch so_arm101_control control.launch.py
+
+# With RViz
+ros2 launch so_arm101_control control.launch.py rviz:=true
+
+# With Isaac Sim topics (sets default object pose/bbox topics)
+ros2 launch so_arm101_control control.launch.py use_sim:=true
+
+# Real hardware
+ros2 launch so_arm101_control control.launch.py real_hardware:=true serial_port:=/dev/ttyACM0
+```
+
+Launches MoveIt move_group, ros2_control (mock or real), control GUI, and EE/camera pose publishers. RViz is off by default — enable with `rviz:=true`.
+
+### Gazebo Simulation (Ignition + full stack)
+
+```bash
+# Default: Gazebo + RViz
+ros2 launch so_arm101_control gazebo.launch.py
+
+# Without RViz
+ros2 launch so_arm101_control gazebo.launch.py rviz:=false
+```
+
+Spawns the robot in Ignition Gazebo with physics, loads ros2_control controllers, and launches the full stack (MoveIt + GUI + RViz).
+
+### MoveIt Demo (RViz + planning only)
 
 ```bash
 ros2 launch so_arm101_moveit_config demo.launch.py
 ```
 
-This launches move_group, RViz with MotionPlanning plugin, and ros2_control with fake hardware. Drag the interactive marker arrows in RViz to set goal positions, then click **Plan & Execute**.
+RViz with MotionPlanning plugin and ros2_control with fake hardware. Drag interactive markers to set goals, click **Plan & Execute**.
 
-### Full Stack (GUI + MoveIt + RViz + EE publisher)
+### URDF Viewer
 
 ```bash
-ros2 launch so_arm101_control control.launch.py
+ros2 launch so_arm101_description display.launch.py
 ```
 
-This launches everything: MoveIt move_group, ros2_control, RViz, control GUI, and EE pose publisher in a single command.
+Robot state publisher + joint slider GUI + RViz. No MoveIt, no control.
 
-The GUI has two modes:
-- **Direct**: sliders move the robot immediately via joint trajectory controller
-- **Planning**: sliders set a goal, then "Plan & Execute" uses MoveIt to plan and execute
-
-### IK / Planning Tests
+### Utilities
 
 ```bash
-# IK benchmark (10 poses, position-only vs full)
-ros2 run so_arm101_control test_ik_solvers
+# Compute workspace bounds (general + top-down grasp)
+ros2 run so_arm101_control compute_workspace
 
-# IK + collision check + OMPL planning diagnostic
-ros2 run so_arm101_control test_planning
+# Calibrate jaw gap model from STL mesh
+ros2 run so_arm101_control calibrate_jaw
+
+# IK benchmark
+ros2 run so_arm101_control test_ik_solvers
 ```
 
 ## Key Configuration
 
-### Kinematics (`so_arm101_moveit_config/config/kinematics.yaml`)
+### Geometric IK (`so_arm101_control/compute_workspace.py`)
+
+The grasp pipeline uses an analytical geometric IK solver instead of MoveIt/pick_ik. Constants are derived from the URDF FK chain and verified by `calibrate_ik.py`:
+
+- Link lengths: `L_UPPER=0.116m`, `L_LOWER=0.135m` (shoulder-to-elbow, elbow-to-wrist)
+- Gripper-down constraint: `θ₂+θ₃+θ₄=90°` forces top-down grasp orientation
+- Pan decoupling: `θ₁=atan2(-y, x-X_PAN)` reduces to 2D arm-plane IK
+- Wrist roll: analytically computed from desired grasp yaw
+- FK refinement: one Newton step corrects cross-plane coupling to <0.5mm
+
+### MoveIt Kinematics (`so_arm101_moveit_config/config/kinematics.yaml`)
 
 ```yaml
 arm:
@@ -97,6 +137,7 @@ arm:
 ```
 
 - `rotation_scale: 0.5` keeps orientation influence low — the 5-DOF arm has 3 position DOFs + 2 orientation DOFs (pitch + tool roll), insufficient for full 6-DOF pose control
+- Used for non-grasp motion planning (joint-space moves, Cartesian path following)
 
 ### RViz (`so_arm101_moveit_config/config/moveit.rviz`)
 

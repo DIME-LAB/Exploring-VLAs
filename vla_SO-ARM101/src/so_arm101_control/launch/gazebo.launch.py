@@ -18,6 +18,7 @@ from launch.actions import (
     RegisterEventHandler,
     SetEnvironmentVariable,
 )
+from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
@@ -44,6 +45,7 @@ def generate_launch_description():
     install_share_parent = os.path.dirname(desc_pkg)
 
     use_sim_time = LaunchConfiguration('use_sim_time', default='true')
+    use_rviz = LaunchConfiguration('rviz')
 
     # --- Gazebo sim ---
     gz_sim = IncludeLaunchDescription(
@@ -160,12 +162,16 @@ def generate_launch_description():
     rviz = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(moveit_pkg, 'launch', 'moveit_rviz.launch.py')),
+        condition=IfCondition(use_rviz),
     )
 
     return LaunchDescription([
         DeclareLaunchArgument(
             'use_sim_time', default_value='true',
             description='Use simulated clock from Gazebo'),
+        DeclareLaunchArgument(
+            'rviz', default_value='true',
+            description='Launch RViz visualization'),
 
         # 0. Set resource path so Gazebo can find package:// meshes
         SetEnvironmentVariable(

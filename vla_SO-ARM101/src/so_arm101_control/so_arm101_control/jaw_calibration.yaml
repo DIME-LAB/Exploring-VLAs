@@ -1,0 +1,9 @@
+# SO-ARM101 Jaw Gap Calibration
+# Derived from STL mesh analysis — regenerate: python3 calibrate_jaw.py
+# Model: jaw_gap = baseline + rate * gripper_joint_angle
+# R² = 0.996941
+# Jaw tip vertices used: 1651
+
+jaw_constants:
+  BASELINE_JAW_GAP: 0.019000   # jaw gap at angle=0 (m) = 19.00mm
+  JAW_GAP_RATE: 0.074900       # gap increase per radian (m/rad) = 74.90mm/rad

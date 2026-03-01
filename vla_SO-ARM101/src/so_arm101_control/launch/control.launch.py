@@ -7,6 +7,12 @@ Usage:
   # Simulation mode (default):
   ros2 launch so_arm101_control control.launch.py
 
+  # Without RViz (headless / faster startup):
+  ros2 launch so_arm101_control control.launch.py rviz:=false
+
+  # Simulation mode flag (sets default topics in GUI):
+  ros2 launch so_arm101_control control.launch.py use_sim:=true
+
   # Real hardware mode:
   ros2 launch so_arm101_control control.launch.py real_hardware:=true serial_port:=/dev/ttyACM0
 
@@ -42,6 +48,8 @@ def generate_launch_description():
 
     real_hardware = LaunchConfiguration('real_hardware')
     serial_port = LaunchConfiguration('serial_port')
+    use_rviz = LaunchConfiguration('rviz')
+    use_sim = LaunchConfiguration('use_sim')
 
     return LaunchDescription([
         # Arguments
@@ -49,6 +57,10 @@ def generate_launch_description():
                               description='Use real servo hardware'),
         DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM0',
                               description='Serial port for servo driver'),
+        DeclareLaunchArgument('rviz', default_value='false',
+                              description='Launch RViz visualization'),
+        DeclareLaunchArgument('use_sim', default_value='false',
+                              description='Simulation mode (sets default topics in GUI)'),
 
         # Robot State Publisher (with xacro-processed URDF including ros2_control)
         Node(
@@ -116,6 +128,7 @@ def generate_launch_description():
             package='so_arm101_control',
             executable='control_gui',
             name='so_arm101_control_gui',
+            parameters=[{'use_sim': use_sim}],
             output='screen',
         ),
 
@@ -152,5 +165,6 @@ def generate_launch_description():
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(moveit_pkg, 'launch', 'moveit_rviz.launch.py')),
+            condition=IfCondition(use_rviz),
         ),
     ])
