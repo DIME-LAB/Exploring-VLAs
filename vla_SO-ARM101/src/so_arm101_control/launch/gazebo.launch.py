@@ -18,7 +18,7 @@ from launch.actions import (
     RegisterEventHandler,
     SetEnvironmentVariable,
 )
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
@@ -37,7 +37,7 @@ def generate_launch_description():
     xacro.process_doc(doc)
     robot_description = doc.toxml()
 
-    world_file = os.path.join(desc_pkg, 'worlds', 'ground_plane.world')
+    world_file = os.path.join(desc_pkg, 'worlds', 'lego_world.sdf')
 
     # Ignition Gazebo needs to find package:// meshes via IGN_GAZEBO_RESOURCE_PATH.
     # The share parent (e.g. .../install/so_arm101_description/share) contains
@@ -46,8 +46,13 @@ def generate_launch_description():
 
     use_sim_time = LaunchConfiguration('use_sim_time', default='true')
     use_rviz = LaunchConfiguration('rviz')
+    headless = LaunchConfiguration('headless')
 
     # --- Gazebo sim ---
+    # headless:=true runs server-only (-s flag) for better ARM64 performance
+    gz_args_gui = '-r ' + world_file
+    gz_args_headless = '-r -s ' + world_file
+
     gz_sim = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
             PathJoinSubstitution([
@@ -56,7 +61,20 @@ def generate_launch_description():
                 'gz_sim.launch.py',
             ])
         ]),
-        launch_arguments={'gz_args': '-r ' + world_file}.items(),
+        launch_arguments={'gz_args': gz_args_headless}.items(),
+        condition=IfCondition(headless),
+    )
+
+    gz_sim_gui = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource([
+            PathJoinSubstitution([
+                FindPackageShare('ros_gz_sim'),
+                'launch',
+                'gz_sim.launch.py',
+            ])
+        ]),
+        launch_arguments={'gz_args': gz_args_gui}.items(),
+        condition=UnlessCondition(headless),
     )
 
     # --- Robot State Publisher ---
@@ -172,14 +190,18 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'rviz', default_value='true',
             description='Launch RViz visualization'),
+        DeclareLaunchArgument(
+            'headless', default_value='false',
+            description='Run Gazebo in headless mode (server only, no GUI)'),
 
         # 0. Set resource path so Gazebo can find package:// meshes
         SetEnvironmentVariable(
             name='IGN_GAZEBO_RESOURCE_PATH',
             value=install_share_parent + ':' + os.environ.get('IGN_GAZEBO_RESOURCE_PATH', '')),
 
-        # 1. Start Gazebo
+        # 1. Start Gazebo (headless or GUI)
         gz_sim,
+        gz_sim_gui,
 
         # 2. Publish robot description
         robot_state_publisher,

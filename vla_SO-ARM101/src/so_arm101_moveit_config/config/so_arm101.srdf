@@ -17,6 +17,10 @@
         <joint name="wrist_flex"/>
         <joint name="wrist_roll"/>
         <link name="tcp_link"/>
+        <link name="camera_mount"/>
+        <link name="usb_camera"/>
+        <link name="camera_link"/>
+        <link name="camera_optical_frame"/>
     </group>
     <group name="gripper">
         <joint name="gripper_joint"/>
@@ -50,4 +54,10 @@
     <disable_collisions link1="lower_arm" link2="upper_arm" reason="Adjacent"/>
     <disable_collisions link1="lower_arm" link2="wrist" reason="Adjacent"/>
     <disable_collisions link1="shoulder" link2="upper_arm" reason="Adjacent"/>
+    <disable_collisions link1="usb_camera" link2="camera_mount" reason="Adjacent"/>
+    <disable_collisions link1="usb_camera" link2="gripper" reason="Never"/>
+    <disable_collisions link1="usb_camera" link2="jaw" reason="Never"/>
+    <disable_collisions link1="usb_camera" link2="tcp_link" reason="Never"/>
+    <disable_collisions link1="usb_camera" link2="wrist" reason="Never"/>
+    <disable_collisions link1="usb_camera" link2="lower_arm" reason="Never"/>
 </robot>
