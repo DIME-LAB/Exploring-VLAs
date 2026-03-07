@@ -319,15 +319,40 @@
     <child link="camera_mount" />
   </joint>
 
-  
+
+  <link name="usb_camera">
+    <visual>
+      <origin xyz="0.0 -0.007299 0.0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://so_arm101_description/meshes/usb_cam_elp.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="sts3215" />
+    </visual>
+    <collision>
+      <origin xyz="0.0 -0.007299 0.0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://so_arm101_description/meshes/usb_cam_elp.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="usb_camera_joint" type="fixed">
+    <origin xyz="-0.010340 0.004827 -0.019687" rpy="1.570625 0.000515 2.705234" />
+    <parent link="camera_mount" />
+    <child link="usb_camera" />
+  </joint>
+
+
+  <!-- camera_link: ROS convention (X-forward, Y-left, Z-up)
+       Positioned at lens center. Rz(-pi/2) maps camera_link X to usb_camera -Y (viewing direction). -->
   <link name="camera_link" />
   <joint name="camera_link_joint" type="fixed">
-    <origin xyz="-0.010350 0.023428 0.004830" rpy="0 0 1.5708" />
-    <parent link="camera_mount" />
+    <origin xyz="0 0.0029 0" rpy="0 0 -1.5708" />
+    <parent link="usb_camera" />
     <child link="camera_link" />
   </joint>
 
-  
+  <!-- camera_optical_frame: OpenCV convention (X-right, Y-down, Z-forward) -->
   <link name="camera_optical_frame" />
   <joint name="camera_optical_joint" type="fixed">
     <origin xyz="0 0 0" rpy="-1.5708 0 -1.5708" />
