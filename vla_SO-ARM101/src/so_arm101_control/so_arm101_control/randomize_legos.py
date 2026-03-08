@@ -41,13 +41,14 @@ TABLE_Z = 0.0055
 MIN_SPACING = 0.03
 
 # Rotation from camera_link frame to OpenCV frame (X=right, Y=down, Z=forward).
-# Derived empirically: cv_X = -Z_link, cv_Y = -Y_link, cv_Z = -X_link.
-# This accounts for the sensor <pose> rotation in so_arm101.gazebo.xacro
-# (roll=pi/2, yaw=pi/2) plus the Gazebo-to-OpenCV convention change.
+# camera_link now includes the full sensor rotation (rpy=1.5708 0 1.5708),
+# so its axes align with SDF camera convention (+X=forward, +Y=left, +Z=up).
+# Mapping to OpenCV (+X=right, +Y=down, +Z=forward):
+#   cv_X = -Y_link, cv_Y = -Z_link, cv_Z = +X_link
 LINK_TO_OPENCV = np.array([
-    [ 0,  0, -1],
     [ 0, -1,  0],
-    [-1,  0,  0],
+    [ 0,  0, -1],
+    [ 1,  0,  0],
 ], dtype=float)
 
 
@@ -103,19 +104,18 @@ class CameraHelper:
         """Return True if camera's optical axis points predominantly downward.
 
         The camera forward direction in OpenCV convention is +Z.
-        In camera_link frame, that corresponds to LINK_TO_OPENCV^-1 @ [0,0,1].
-        Since LINK_TO_OPENCV is its own inverse: forward_link = LINK_TO_OPENCV @ [0,0,1] = [-1,0,0].
-        In world frame: forward_world = R_link @ [-1,0,0] = -R_link[:,0].
+        In camera_link frame (SDF convention), that maps to +X.
+        In world frame: forward_world = R_link @ [1,0,0] = R_link[:,0].
         """
-        forward_world = -self.cam_rot[:, 0]
+        forward_world = self.cam_rot[:, 0]
         return np.dot(forward_world, np.array([0.0, 0.0, -1.0])) >= threshold
 
     def backproject_pixel_to_ground(self, u, v):
         """Back-project a pixel to the ground plane (z=TABLE_Z) in world frame."""
         K_inv = np.linalg.inv(self.K)
         ray_cv = K_inv @ np.array([u, v, 1.0])
-        # OpenCV -> camera_link -> world
-        ray_link = LINK_TO_OPENCV @ ray_cv  # LINK_TO_OPENCV is its own inverse
+        # OpenCV -> camera_link -> world (inverse = transpose for orthogonal matrix)
+        ray_link = LINK_TO_OPENCV.T @ ray_cv
         ray_world = self.cam_rot @ ray_link
 
         if abs(ray_world[2]) < 1e-9:

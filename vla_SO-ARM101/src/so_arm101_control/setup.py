@@ -38,6 +38,7 @@ setup(
             'calibrate_ik = so_arm101_control.calibrate_ik:main',
             'calibrate_jaw = so_arm101_control.calibrate_jaw:main',
             'randomize_legos = so_arm101_control.randomize_legos:main',
+            'verify_detections = so_arm101_control.verify_detections:main',
         ],
     },
 )

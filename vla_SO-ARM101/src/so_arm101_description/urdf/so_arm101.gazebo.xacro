@@ -124,9 +124,9 @@
   </gazebo>
 
   <!-- Wrist camera sensor (Ignition Gazebo) -->
-  <gazebo reference="usb_camera">
+  <gazebo reference="camera_link">
     <sensor name="wrist_camera" type="camera">
-      <pose>0 0.0139 0 1.5708 0 1.5708</pose>
+      <pose>0 0 0 0 0 0</pose>
       <always_on>1</always_on>
       <update_rate>30</update_rate>
       <visualize>true</visualize>
