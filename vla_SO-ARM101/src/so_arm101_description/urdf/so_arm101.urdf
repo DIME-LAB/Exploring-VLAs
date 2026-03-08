@@ -347,7 +347,7 @@
        Positioned at lens center. Rz(-pi/2) maps camera_link X to usb_camera -Y (viewing direction). -->
   <link name="camera_link" />
   <joint name="camera_link_joint" type="fixed">
-    <origin xyz="0 0.0029 0" rpy="0 0 -1.5708" />
+    <origin xyz="0 0.0139 0" rpy="0 0 -1.5708" />
     <parent link="usb_camera" />
     <child link="camera_link" />
   </joint>
