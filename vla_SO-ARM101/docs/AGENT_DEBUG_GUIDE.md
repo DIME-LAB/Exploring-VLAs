@@ -27,17 +27,37 @@ sc/get_joint_positions std_srvs/srv/Trigger
 ## Build → Launch → Test Loop
 
 ```bash
-# 1. Build (one-time --symlink-install enables hot-reload)
+# 1. Build (first time only)
 cd ~/ros2_ws
 colcon build --symlink-install --packages-select so_arm101_control
 
 # 2. Launch
 ros2 launch so_arm101_control control.launch.py
 
-# 3. After code changes:
-#    - Logic only (functions, constants): press Ctrl+R in the GUI
-#    - GUI layout changes (widgets, tabs): press Ctrl+Shift+R in the GUI
-#    - New _cmd_* method or import changes: relaunch
+# 3. After code changes in src/:
+#    - ANY Python change: hot-reload via Ctrl+R in GUI or service call (reads from src/ directly)
+#    - GUI layout changes: Ctrl+Shift+R in GUI
+#    - Rebuild only needed for: new files, setup.py/package.xml, entry point changes
+```
+
+### When to rebuild vs hot-reload vs restart
+
+| Change | Action | Why |
+|--------|--------|-----|
+| Method body, constants, imports | **Hot reload** (Ctrl+R or `~/hot_reload` service) | Reloads from `src/` directly, no build needed |
+| GUI layout (widgets, tabs, buttons) | **Hot reload GUI** (Ctrl+Shift+R or `~/hot_reload_gui` service) | Rebuilds tkinter widgets with new code |
+| New Python files, setup.py, entry points | **`colcon build` + restart** | Package metadata needs updating |
+| New `_cmd_*` method | **Hot reload** (method is patched, but service registration needs restart) | Services are registered at `__init__` time |
+
+### Shutdown
+
+```bash
+# Clean shutdown (~2s) — always use this
+pkill -SIGINT -f "ros2.*launch.*control.launch"
+
+# Never needed: pkill -9. SIGINT propagates cleanly.
+# The node uses spin_once() loop that checks running flag,
+# so service callbacks exit within 0.5s of signal.
 ```
 
 ## Service Reference
@@ -95,8 +115,18 @@ ros2 launch so_arm101_control control.launch.py
 | `~/grasp_select` | Select first object in listbox |
 | `~/check_grasp_reachable` | Check if selected object is within workspace |
 | `~/grasp_move` | Full pick sequence: IK solve → approach → descend |
-| `~/grasp_reset` | Reset grasp state |
+| `~/grasp_home` | Reset grasp state |
 | `~/grasp_update_topic` | Switch object pose topic |
+
+### Drop Pipeline
+
+| Service | Action |
+|---|---|
+| `~/drop_refresh` | Re-read drop targets from /drop_poses topic |
+| `~/drop_select` | Select first drop target in drop listbox |
+| `~/drop_point` | Rotate shoulder_pan to face selected cup (pan only) |
+| `~/drop_sweep` | Sweep wrist_flex 90 deg to 0 deg over cup (IK + trajectory) |
+| `~/drop_release` | Open gripper to release object into cup |
 
 ### Clearance Tuning
 
@@ -143,6 +173,39 @@ ros2 service call $S/gripper_close_for_object $T
 ros2 service call $S/get_ee_pose $T
 ros2 service call $S/get_log $T
 ```
+
+## Drop Sequence (copy-paste)
+
+Drop a held object into a cup (requires /drop_poses publishing):
+
+```bash
+S=/so_arm101_control_gui
+T=std_srvs/srv/Trigger
+
+# Load drop targets
+ros2 service call $S/drop_refresh $T
+
+# Select target
+ros2 service call $S/drop_select $T
+
+# Point toward cup (pan only)
+ros2 service call $S/drop_point $T
+
+# Sweep wrist over cup (wrist_flex 90 -> 0 deg)
+ros2 service call $S/drop_sweep $T
+
+# Release
+ros2 service call $S/drop_release $T
+
+# Return home
+ros2 service call $S/grasp_home $T
+
+# Verify
+ros2 service call $S/get_log $T
+```
+
+For the full pick-and-drop workflow including sim setup, see
+`docs/pick_and_drop_workflow.md`.
 
 ## Debugging Failures
 
@@ -195,24 +258,45 @@ ros2 control list_controllers
 ## Adding New Commands
 
 Define a `_cmd_*` method in `control_gui.py`. It auto-registers as a Trigger
-service on next launch (or Ctrl+R if only logic changed).
+service on next launch. Hot reload (Ctrl+R) patches the method body so it
+runs with new logic, but the ROS2 service registration only happens at init.
 
 ```python
 def _cmd_my_new_action(self):
     """Available as ~/my_new_action after restart."""
-    # your logic here
-    self._append_log('Did the thing', 'info')
+    # Use _execute_trajectory for any arm motion — handles slider sync,
+    # _slider_driven flag, animation, and on_complete callback.
+    evt = threading.Event()
+    self._motion_event = evt
+    self._execute_trajectory(target, duration_s=2.0, on_complete=evt.set)
 ```
+
+**Motion command pattern:** Always use `_execute_trajectory()` for arm motions.
+It handles `_slider_driven`, slider animation, `_publish_goal_state`, and
+`on_complete`. Never call `_send_arm_goal` directly from `_cmd_*` methods —
+that skips slider sync and causes jitter from the joint_states feedback loop.
+
+For gripper motions, use `_gripper_command(execute=False)` for UI update,
+then `_send_gripper_goal(blocking=True)` on a background thread with
+`_motion_event` signaling.
 
 No decorators, no registration code. The `_cmd_` prefix is the convention.
 
 ## Hot-Reload
 
-Requires `colcon build --symlink-install` (one-time setup).
+Hot reload reads from `src/` directly — no `colcon build` needed.
 
-| Hotkey | Reloads | Use when |
+| Method | Reloads | Use when |
 |---|---|---|
-| **Ctrl+R** | Methods + constants | Changed function logic, IK params, callbacks |
-| **Ctrl+Shift+R** | Methods + GUI widgets | Changed tab layout, added buttons, spinbox ranges |
+| **Ctrl+R** / `~/hot_reload` service | Methods + constants | Changed function logic, IK params, callbacks |
+| **Ctrl+Shift+R** / `~/hot_reload_gui` service | Methods + GUI widgets | Changed tab layout, added buttons, spinbox ranges |
 
 Both preserve: ROS2 node, publishers, subscribers, TF, locks, joint state, object data.
+
+**How it works:** `importlib.reload()` redirected to read from `src/` instead of
+`build/`. The egg-link from `--symlink-install` points to `build/`, but hot reload
+bypasses this by patching `__file__` and `__spec__` before reloading.
+
+**Limitation:** New `_cmd_*` methods are patched onto the instance (callable via
+`getattr`), but their corresponding ROS2 service endpoints are only registered
+at `__init__`. A restart is needed for new services to appear in `ros2 service list`.

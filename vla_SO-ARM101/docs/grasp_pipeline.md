@@ -312,7 +312,7 @@ All buttons are exposed as `std_srvs/Trigger` services under
 | grasp_refresh             | Refresh detected objects list                     |
 | grasp_select              | Select object (set ik_target param first)         |
 | grasp_move                | Move to Grab (pre-validates both stages)          |
-| grasp_reset               | Home position (gripper down, all joints zero)     |
+| grasp_home               | Home position (gripper down, all joints zero)     |
 | gripper_open_for_object   | Grasp Open (object-aware)                         |
 | gripper_close_for_object  | Grasp Close (object-aware)                        |
 | gripper_open_range        | Open (range spinbox value)                        |

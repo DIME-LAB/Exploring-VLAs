@@ -148,8 +148,7 @@ def derive_constants():
     # The pitch component (0.0487 rad) creates the offset:
     #   TCP_Y_yaw = (π/2 - 0.0487) + (roll - pan)
     wrist_roll_rpy = KINEMATIC_CHAIN[4][2]  # rpy of wrist_roll joint
-    wrist_roll_pitch = wrist_roll_rpy[1]    # the 0.0487 offset
-    wrist_roll_offset = math.pi / 2 - wrist_roll_pitch
+    wrist_roll_urdf_pitch = wrist_roll_rpy[1]    # the 0.0487 offset
 
     constants = {
         'X_PAN': x_pan,
@@ -163,8 +162,7 @@ def derive_constants():
         'WF_TCP_DR': round(wf_tcp_dr, 5),
         'WF_TCP_DH': round(wf_tcp_dh, 5),
         'GRIPPER_DOWN_SUM_DEG': round(gripper_down_sum_deg, 1),
-        'WRIST_ROLL_OFFSET': round(wrist_roll_offset, 4),
-        'WRIST_ROLL_PITCH': round(wrist_roll_pitch, 7),
+        'WRIST_ROLL_URDF_PITCH': round(wrist_roll_urdf_pitch, 7),
     }
 
     diagnostics = {
@@ -231,7 +229,7 @@ def compare_with_current(constants):
     from compute_workspace import (
         X_PAN, LIFT_R, LIFT_H, L_UPPER, L_LOWER,
         UPPER_HOME, LOWER_HOME, HOME_BEND,
-        WF_TCP_DR, WF_TCP_DH, GRIPPER_DOWN_SUM, WRIST_ROLL_OFFSET,
+        WF_TCP_DR, WF_TCP_DH, GRIPPER_DOWN_SUM, WRIST_ROLL_URDF_PITCH,
     )
 
     current = {
@@ -246,7 +244,7 @@ def compare_with_current(constants):
         'WF_TCP_DR': WF_TCP_DR,
         'WF_TCP_DH': WF_TCP_DH,
         'GRIPPER_DOWN_SUM_DEG': round(math.degrees(GRIPPER_DOWN_SUM), 1),
-        'WRIST_ROLL_OFFSET': round(WRIST_ROLL_OFFSET, 4),
+        'WRIST_ROLL_URDF_PITCH': round(WRIST_ROLL_URDF_PITCH, 7),
     }
 
     print('\n=== Comparison: Derived vs Current (compute_workspace.py) ===')
@@ -317,7 +315,7 @@ def print_python_constants(constants):
     print(f'WF_TCP_DR = {constants["WF_TCP_DR"]}')
     print(f'WF_TCP_DH = {constants["WF_TCP_DH"]}')
     print(f'GRIPPER_DOWN_SUM = math.radians({constants["GRIPPER_DOWN_SUM_DEG"]})')
-    print(f'WRIST_ROLL_OFFSET = math.pi / 2 - {constants["WRIST_ROLL_PITCH"]}')
+    print(f'WRIST_ROLL_URDF_PITCH = {constants["WRIST_ROLL_URDF_PITCH"]}')
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +349,7 @@ def main(args=None):
     print(f'  WF_TCP_DR        = {constants["WF_TCP_DR"]:.5f} m')
     print(f'  WF_TCP_DH        = {constants["WF_TCP_DH"]:.5f} m')
     print(f'  GRIPPER_DOWN_SUM = {constants["GRIPPER_DOWN_SUM_DEG"]:.1f}°')
-    print(f'  WRIST_ROLL_OFFSET= {constants["WRIST_ROLL_OFFSET"]:.4f} rad')
+    print(f'  WRIST_ROLL_URDF_PITCH= {constants["WRIST_ROLL_URDF_PITCH"]:.7f} rad')
 
     print(f'\n=== Consistency (across {diagnostics["n_down_configs"]} gripper-down configs) ===')
     print(f'  DR std: {diagnostics["dr_std_mm"]:.4f} mm')

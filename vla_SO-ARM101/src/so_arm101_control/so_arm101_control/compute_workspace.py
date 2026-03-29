@@ -141,8 +141,12 @@ WF_TCP_DH = -0.15923   # height: TCP is 159.2mm below wrist_flex pivot
 # Gripper-down constraint: θ₂ + θ₃ + θ₄ = 90° (verified across all configs)
 GRIPPER_DOWN_SUM = math.radians(90.0)
 
-# Wrist-roll RPY offset from URDF (the 0.0487 rad pitch in wrist_roll joint)
-WRIST_ROLL_OFFSET = math.pi / 2 - 0.0487
+# Wrist-roll URDF joint origin pitch offset (from rpy="1.5708 0.0486795 3.14159")
+# This is the small manufacturing/design imperfection in the wrist_roll joint.
+# At wrist_roll=0, the jaw Y-axis points at (π/2 - this) in world frame because
+# the kinematic chain (wrist_flex yaw=-π/2, wrist_roll yaw=π) contributes an
+# inherent 90° rotation. The URDF pitch shifts it by 2.79° from that ideal 90°.
+WRIST_ROLL_URDF_PITCH = 0.0487
 
 # Joint limits dict (for clamping)
 JOINT_LIMITS = {
@@ -232,8 +236,10 @@ def geometric_ik(x, y, z, grasp_yaw=None):
         theta1 = math.atan2(-y, dx)
 
     # --- Joint 5: Wrist roll (computed early — needed for TCP offset) ---
+    # π/2 = inherent 90° rotation from kinematic chain (wrist_flex + wrist_roll origins)
+    # URDF_PITCH = small offset from ideal 90° in wrist_roll joint origin
     if grasp_yaw is not None:
-        theta5 = theta1 + grasp_yaw - WRIST_ROLL_OFFSET
+        theta5 = theta1 + grasp_yaw - (math.pi / 2 - WRIST_ROLL_URDF_PITCH)
     else:
         theta5 = 0.0
 
@@ -279,7 +285,7 @@ def geometric_ik(x, y, z, grasp_yaw=None):
             dx2 = x2 - X_PAN
             r_tcp2 = math.sqrt(dx2 * dx2 + y2 * y2)
             theta1_r = math.atan2(-y2, dx2) if r_tcp2 > 1e-6 else 0.0
-            theta5_r = theta1_r + grasp_yaw - WRIST_ROLL_OFFSET \
+            theta5_r = theta1_r + grasp_yaw - (math.pi / 2 - WRIST_ROLL_URDF_PITCH) \
                 if grasp_yaw is not None else 0.0
 
             refined = _solve_2link(r_tcp2, z2, theta5_r)

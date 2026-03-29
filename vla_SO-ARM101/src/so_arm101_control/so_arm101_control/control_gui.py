@@ -123,8 +123,10 @@ JAW_OPEN_CLEARANCE_M = 0.005        # extra jaw gap on open beyond symmetric bas
 JAW_CLOSE_CLEARANCE_M = 0.0         # extra jaw gap on close beyond symmetric baseline (m)
 TCP_CLEARANCE_M = 0.001             # extra IK offset beyond grip_width/2 for jaw overhang (m)
 
-# Wrist roll offset from geometric IK: θ₅ = pan + grasp_yaw - WRIST_ROLL_OFFSET
-_WRIST_ROLL_OFFSET = math.pi / 2 - 0.0486795  # ≈ 1.5221 rad (87.2°)
+# URDF wrist_roll joint origin pitch offset (mirrors compute_workspace.py)
+_WRIST_ROLL_URDF_PITCH = 0.0487
+# Inherent 90° from kinematic chain (wrist_flex yaw=-π/2, wrist_roll yaw=π)
+_CHAIN_BASE_ROTATION = math.pi / 2 - _WRIST_ROLL_URDF_PITCH
 
 
 def _normalize_grasp_yaw(yaw, pan):
@@ -136,9 +138,9 @@ def _normalize_grasp_yaw(yaw, pan):
     """
     wr_lo, wr_hi = JOINT_LIMITS['wrist_roll']
     wr_center = (wr_lo + wr_hi) / 2
-    best, best_dist = yaw, abs(pan + yaw - _WRIST_ROLL_OFFSET - wr_center)
+    best, best_dist = yaw, abs(pan + yaw - _CHAIN_BASE_ROTATION - wr_center)
     for candidate in (yaw + math.pi, yaw - math.pi):
-        dist = abs(pan + candidate - _WRIST_ROLL_OFFSET - wr_center)
+        dist = abs(pan + candidate - _CHAIN_BASE_ROTATION - wr_center)
         if dist < best_dist:
             best, best_dist = candidate, dist
     return best
@@ -214,6 +216,14 @@ def check_grasp_reachable(x, y, z, ground_z=None):
     return True, ''
 
 
+# ArUco marker ID -> human-readable color label for drop targets
+DROP_ID_LABELS = {
+    "drop_0": "red",
+    "drop_1": "green",
+    "drop_2": "blue",
+}
+
+
 class SOArm101ControlGUI(Node):
     """ROS2 node with embedded Tkinter GUI for SO-ARM101 control."""
 
@@ -233,6 +243,7 @@ class SOArm101ControlGUI(Node):
         self.joint_lock = threading.Lock()
         # Actual robot state — always updated from /joint_states, never blocked
         self._actual_positions = {name: 0.0 for name in ALL_JOINT_NAMES}
+        self._initial_sync_done = False  # True after first /joint_states received
 
         # Track last sent arm positions
         self._last_sent_arm = [0.0] * len(ARM_JOINT_NAMES)
@@ -265,7 +276,13 @@ class SOArm101ControlGUI(Node):
             JointState, 'joint_commands', self._ext_cmd_callback, 10)
         self.objects_data = {}
         self.objects_lock = threading.Lock()
+        self._last_grasped_object = None  # persists through pick→drop cycle
         self.objects_sub = None  # Created by _build_grasp_tab → _update_grasp_topic
+
+        # --- Drop target infrastructure ---
+        self._drop_data = {}
+        self._drop_lock = threading.Lock()
+        self._drop_sub = None  # Created by _build_grasp_tab → _update_drop_topic
         self.objects_bbox = {}   # {name: {sx, sy, sz}} from bbox topic
         _default_bbox = '/objects_bbox_real' if self.use_real_hardware else '/objects_bbox_sim'
         self.bbox_sub = self.create_subscription(
@@ -378,13 +395,20 @@ class SOArm101ControlGUI(Node):
     # ------------------------------------------------------------------
 
     def _make_trigger_callback(self, method_name):
-        """Factory: returns a Trigger callback that dispatches to tkinter thread."""
+        """Factory: returns a Trigger callback that dispatches to tkinter thread.
+
+        If the _cmd_* method sets self._motion_event before returning,
+        the callback waits for that event too (up to 30s), so the service
+        response is deferred until the full motion sequence completes.
+        """
         def _callback(request, response):
             done_event = threading.Event()
             result = {'ok': True, 'msg': ''}
 
             def _run():
                 try:
+                    # Clear any stale motion event
+                    self._motion_event = None
                     getattr(self, method_name)()
                     result['msg'] = f'{method_name} executed'
                 except Exception as e:
@@ -400,7 +424,17 @@ class SOArm101ControlGUI(Node):
                 result['msg'] = 'GUI not available'
                 done_event.set()
 
-            done_event.wait(timeout=2.0)
+            # Wait for the _cmd_* method to return (interruptible by shutdown)
+            while not done_event.is_set() and self.running:
+                done_event.wait(timeout=0.5)
+
+            # If the command registered a motion event, wait for motion too
+            motion_evt = getattr(self, '_motion_event', None)
+            if motion_evt is not None:
+                while not motion_evt.is_set() and self.running:
+                    motion_evt.wait(timeout=0.5)
+                self._motion_event = None
+
             response.success = result['ok']
             response.message = result['msg']
             return response
@@ -576,11 +610,18 @@ class SOArm101ControlGUI(Node):
     # Controller command publishing (via action interface)
     # ------------------------------------------------------------------
 
-    def _send_arm_goal(self, positions, duration_s=0.5):
-        """Send arm joint positions via FollowJointTrajectory action."""
+    def _send_arm_goal(self, positions, duration_s=0.5, blocking=False):
+        """Send arm joint positions via FollowJointTrajectory action.
+
+        If blocking=True, waits for the trajectory to complete (or fail)
+        before returning.  Must be called from a background thread when
+        blocking — never from the tkinter or rclpy main thread.
+        Returns True on success, False on failure (only meaningful when
+        blocking; fire-and-forget always returns None).
+        """
         if not self.arm_action_client.server_is_ready():
             self._append_log('arm_controller action server not ready', 'warn')
-            return
+            return False if blocking else None
 
         traj = JointTrajectory()
         traj.header.stamp = self.get_clock().now().to_msg()
@@ -606,7 +647,28 @@ class SOArm101ControlGUI(Node):
                 self._arm_goal_handle = None
 
         future = self.arm_action_client.send_goal_async(goal)
-        future.add_done_callback(self._arm_goal_response)
+
+        if not blocking:
+            future.add_done_callback(self._arm_goal_response)
+            return None
+
+        # Blocking path: wait for goal acceptance, then for result
+        timeout = duration_s + 10.0
+        goal_handle = self._wait_future(future, timeout_sec=5.0)
+        if goal_handle is None or not goal_handle.accepted:
+            self._append_log('Arm goal rejected or timed out', 'warn')
+            return False
+        with self._arm_goal_lock:
+            self._arm_goal_handle = goal_handle
+        result_future = goal_handle.get_result_async()
+        result = self._wait_future(result_future, timeout_sec=timeout)
+        if result is None:
+            self._append_log('Arm trajectory timed out', 'warn')
+            return False
+        if result.status == 4:  # GoalStatus.STATUS_SUCCEEDED
+            return True
+        self._append_log(f'Arm trajectory finished with status {result.status}', 'warn')
+        return False
 
     def _arm_goal_response(self, future):
         try:
@@ -617,11 +679,16 @@ class SOArm101ControlGUI(Node):
         except Exception:
             pass
 
-    def _send_gripper_goal(self, jaw_position, duration_s=0.5):
-        """Send gripper position via FollowJointTrajectory action."""
+    def _send_gripper_goal(self, jaw_position, duration_s=0.5, blocking=False):
+        """Send gripper position via FollowJointTrajectory action.
+
+        If blocking=True, waits for the trajectory to complete before
+        returning.  Must be called from a background thread when blocking.
+        Returns True/False when blocking, None otherwise.
+        """
         if not self.gripper_action_client.server_is_ready():
             self._append_log('gripper_controller action server not ready', 'warn')
-            return
+            return False if blocking else None
 
         traj = JointTrajectory()
         traj.header.stamp = self.get_clock().now().to_msg()
@@ -646,7 +713,27 @@ class SOArm101ControlGUI(Node):
                 self._gripper_goal_handle = None
 
         future = self.gripper_action_client.send_goal_async(goal)
-        future.add_done_callback(self._gripper_goal_response)
+
+        if not blocking:
+            future.add_done_callback(self._gripper_goal_response)
+            return None
+
+        timeout = duration_s + 10.0
+        goal_handle = self._wait_future(future, timeout_sec=5.0)
+        if goal_handle is None or not goal_handle.accepted:
+            self._append_log('Gripper goal rejected or timed out', 'warn')
+            return False
+        with self._gripper_goal_lock:
+            self._gripper_goal_handle = goal_handle
+        result_future = goal_handle.get_result_async()
+        result = self._wait_future(result_future, timeout_sec=timeout)
+        if result is None:
+            self._append_log('Gripper trajectory timed out', 'warn')
+            return False
+        if result.status == 4:
+            return True
+        self._append_log(f'Gripper trajectory finished with status {result.status}', 'warn')
+        return False
 
     def _gripper_goal_response(self, future):
         try:
@@ -668,6 +755,21 @@ class SOArm101ControlGUI(Node):
             for i, name in enumerate(msg.name):
                 if name in self._actual_positions and i < len(msg.position):
                     self._actual_positions[name] = msg.position[i]
+        # On first message, seed joint_positions from actual robot state
+        if not self._initial_sync_done:
+            self._initial_sync_done = True
+            with self.joint_lock:
+                for i, name in enumerate(msg.name):
+                    if name in self.joint_positions and i < len(msg.position):
+                        self.joint_positions[name] = msg.position[i]
+                positions = dict(self.joint_positions)
+            if getattr(self, '_gui_ready', False):
+                self.root.after(0, self._sync_all_sliders, positions)
+            self._publish_goal_state()
+            self.get_logger().info(
+                f'Initial joint sync from /joint_states: '
+                f'{", ".join(f"{n}={v:.3f}" for n, v in positions.items())}')
+            return
         if self._slider_driven:
             return
         with self.joint_lock:
@@ -713,7 +815,7 @@ class SOArm101ControlGUI(Node):
         self._ground_plane_var = tk.BooleanVar(value=True)
         tk.Checkbutton(scene_frame, text='Ground Plane',
                        variable=self._ground_plane_var,
-                       command=self._cmd_toggle_ground_plane).pack(side=tk.LEFT)
+                       command=lambda: self._cmd_toggle_ground_plane()).pack(side=tk.LEFT)
         tk.Label(scene_frame, text='  Z:').pack(side=tk.LEFT)
         self._ground_z_var = tk.DoubleVar(value=0.0)
         tk.Spinbox(scene_frame, from_=-0.5, to=0.5, increment=0.01,
@@ -782,9 +884,9 @@ class SOArm101ControlGUI(Node):
         arm_btn_frame = tk.Frame(arm_frame)
         arm_btn_frame.pack(fill=tk.X, padx=5, pady=5)
         tk.Button(arm_btn_frame, text='Reset Arm', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._cmd_zero_arm).pack(side=tk.LEFT, padx=5)
+                  command=lambda: self._cmd_zero_arm()).pack(side=tk.LEFT, padx=5)
         tk.Button(arm_btn_frame, text='Randomize', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._cmd_randomize_arm).pack(side=tk.LEFT, padx=5)
+                  command=lambda: self._cmd_randomize_arm()).pack(side=tk.LEFT, padx=5)
 
         # --- Gripper Section ---
         gripper_frame = ttk.LabelFrame(frame, text='Gripper')
@@ -814,18 +916,18 @@ class SOArm101ControlGUI(Node):
         tk.Button(gripper_btn_frame, text='Reset Gripper', bg='#b0b0b0', fg='#1a1a1a',
                   command=self._zero_gripper).pack(side=tk.LEFT, padx=5)
         tk.Button(gripper_btn_frame, text='Open', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._cmd_gripper_open).pack(side=tk.LEFT, padx=5)
+                  command=lambda: self._cmd_gripper_open()).pack(side=tk.LEFT, padx=5)
         tk.Button(gripper_btn_frame, text='Close', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._cmd_gripper_close).pack(side=tk.LEFT, padx=5)
+                  command=lambda: self._cmd_gripper_close()).pack(side=tk.LEFT, padx=5)
 
         # --- Action Buttons (always visible) ---
         action_frame = tk.Frame(frame)
         action_frame.pack(fill=tk.X, padx=10, pady=(8, 5))
         self.set_joints_btn = tk.Button(
-            action_frame, text='Set Joints', bg='#b0b0b0', fg='#1a1a1a', command=self._cmd_set_joints)
+            action_frame, text='Set Joints', bg='#b0b0b0', fg='#1a1a1a', command=lambda: self._cmd_set_joints())
         self.set_joints_btn.pack(side=tk.LEFT, padx=5)
         self.execute_btn = tk.Button(
-            action_frame, text='Plan & Execute', bg='#b0b0b0', fg='#1a1a1a', command=self._cmd_plan_execute)
+            action_frame, text='Plan & Execute', bg='#b0b0b0', fg='#1a1a1a', command=lambda: self._cmd_plan_execute())
         self.execute_btn.pack(side=tk.LEFT, padx=5)
         tk.Label(action_frame, text='Speed:', font=('Arial', 9)).pack(side=tk.LEFT, padx=(10, 2))
         self.velocity_scale_var = tk.DoubleVar(value=0.5)
@@ -1286,24 +1388,54 @@ class SOArm101ControlGUI(Node):
 
         Preserves all ROS2 infra, widgets, locks, and runtime state.
         Only method implementations and module-level constants are updated.
+
+        Reloads from the SOURCE directory (not build/) so edits to src/
+        take effect without running colcon build first.
         """
         import importlib
+        import importlib.util
         import sys
 
         try:
+            # Resolve source directory from the build path
+            # build/.../control_gui.py → src/.../control_gui.py
+            src_dir = None
+            mod_file = sys.modules.get('so_arm101_control.control_gui')
+            if mod_file and hasattr(mod_file, '__file__'):
+                build_path = mod_file.__file__
+                # Replace /build/ with /src/ in the path
+                if '/build/' in build_path:
+                    src_path = build_path.replace('/build/', '/src/')
+                    if os.path.isfile(src_path):
+                        src_dir = os.path.dirname(src_path)
+
+            def _reload_from_source(mod_name):
+                """Reload a module from src/ instead of build/."""
+                mod = sys.modules.get(mod_name)
+                if mod is None:
+                    return None
+                if src_dir:
+                    filename = os.path.basename(mod.__file__)
+                    src_file = os.path.join(src_dir, filename)
+                    if os.path.isfile(src_file):
+                        mod.__file__ = src_file
+                        # Also update the loader's path so reload reads the right file
+                        spec = importlib.util.spec_from_file_location(mod_name, src_file)
+                        mod.__spec__ = spec
+                        mod.__loader__ = spec.loader
+                return importlib.reload(mod)
+
             # Reload compute_workspace first (control_gui imports from it)
-            cw = 'so_arm101_control.compute_workspace'
-            if cw in sys.modules:
-                importlib.reload(sys.modules[cw])
+            _reload_from_source('so_arm101_control.compute_workspace')
 
             # Reload control_gui
-            mod_name = 'so_arm101_control.control_gui'
-            new_mod = importlib.reload(sys.modules[mod_name])
+            new_mod = _reload_from_source('so_arm101_control.control_gui')
 
             # Patch all methods on this running instance
             _patch_methods(self, new_mod.SOArm101ControlGUI)
 
-            self._append_log('HOT RELOAD: logic reloaded (Ctrl+R)', 'info')
+            src_label = ' (from src/)' if src_dir else ' (from build/)'
+            self._append_log(f'HOT RELOAD: logic reloaded{src_label}', 'info')
         except Exception as e:
             import traceback
             self._append_log(f'HOT RELOAD FAILED: {e}', 'error')
@@ -1550,7 +1682,7 @@ class SOArm101ControlGUI(Node):
         tk.Button(arm_btn_frame, text='Reset Arm', bg='#b0b0b0', fg='#1a1a1a',
                   command=self._ik_reset).pack(side=tk.LEFT, padx=5)
         tk.Button(arm_btn_frame, text='Randomize', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._cmd_ik_randomize).pack(side=tk.LEFT, padx=5)
+                  command=lambda: self._cmd_ik_randomize()).pack(side=tk.LEFT, padx=5)
 
         # --- Gripper Section (shares DoubleVar with FK tab) ---
         gripper_frame2 = ttk.LabelFrame(frame, text='Gripper')
@@ -1575,9 +1707,9 @@ class SOArm101ControlGUI(Node):
         tk.Button(gripper_btn_frame2, text='Reset Gripper', bg='#b0b0b0', fg='#1a1a1a',
                   command=self._zero_gripper).pack(side=tk.LEFT, padx=5)
         tk.Button(gripper_btn_frame2, text='Open', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._cmd_gripper_open).pack(side=tk.LEFT, padx=5)
+                  command=lambda: self._cmd_gripper_open()).pack(side=tk.LEFT, padx=5)
         tk.Button(gripper_btn_frame2, text='Close', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._cmd_gripper_close).pack(side=tk.LEFT, padx=5)
+                  command=lambda: self._cmd_gripper_close()).pack(side=tk.LEFT, padx=5)
 
         # --- Action buttons: Set Joints / Plan & Execute ---
         ik_btn_frame = tk.Frame(frame)
@@ -1613,9 +1745,9 @@ class SOArm101ControlGUI(Node):
         tk.Entry(topic_row, textvariable=self._grasp_topic_var).pack(
             side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
         tk.Button(topic_row, text='Update Topic', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._cmd_grasp_update_topic).pack(side=tk.RIGHT, padx=(2, 0))
+                  command=lambda: self._cmd_grasp_update_topic()).pack(side=tk.RIGHT, padx=(2, 0))
         tk.Button(topic_row, text='Refresh', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._cmd_grasp_refresh).pack(side=tk.RIGHT, padx=(2, 0))
+                  command=lambda: self._cmd_grasp_refresh()).pack(side=tk.RIGHT, padx=(2, 0))
 
         opts_row = tk.Frame(topic_frame)
         opts_row.pack(fill=tk.X, padx=5, pady=2)
@@ -1675,10 +1807,10 @@ class SOArm101ControlGUI(Node):
             fill=tk.X, padx=5, pady=1)
 
         tk.Button(arm_col, text='Home', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._cmd_grasp_reset).pack(fill=tk.X, padx=5, pady=2)
+                  command=lambda: self._cmd_grasp_home()).pack(fill=tk.X, padx=5, pady=2)
         self._grasp_move_btn = tk.Button(
             arm_col, text='Move to Grab', bg='#b0b0b0', fg='#1a1a1a',
-            command=self._cmd_grasp_move)
+            command=lambda: self._cmd_grasp_move())
         self._grasp_move_btn.pack(fill=tk.X, padx=5, pady=2)
 
         # Right column: Gripper
@@ -1736,16 +1868,66 @@ class SOArm101ControlGUI(Node):
         grip_btn_row1 = tk.Frame(grip_col)
         grip_btn_row1.pack(fill=tk.X, padx=5, pady=2)
         tk.Button(grip_btn_row1, text='Grasp Open', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._cmd_gripper_open_for_object).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+                  command=lambda: self._cmd_gripper_open_for_object()).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
         tk.Button(grip_btn_row1, text='Grasp Close', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._cmd_gripper_close_for_object).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
+                  command=lambda: self._cmd_gripper_close_for_object()).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
 
         grip_btn_row2 = tk.Frame(grip_col)
         grip_btn_row2.pack(fill=tk.X, padx=5, pady=2)
         tk.Button(grip_btn_row2, text='Open', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._cmd_gripper_open_range).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+                  command=lambda: self._cmd_gripper_open_range()).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
         tk.Button(grip_btn_row2, text='Close', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._cmd_gripper_close_range).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
+                  command=lambda: self._cmd_gripper_close_range()).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
+
+        # --- Drop Targets ---
+        drop_src_frame = ttk.LabelFrame(frame, text='Drop Source')
+        drop_src_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        drop_topic_row = tk.Frame(drop_src_frame)
+        drop_topic_row.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(drop_topic_row, text='Topic:', anchor='w').pack(side=tk.LEFT)
+        self._drop_topic_var = tk.StringVar(value='/drop_poses')
+        tk.Entry(drop_topic_row, textvariable=self._drop_topic_var).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
+        tk.Button(drop_topic_row, text='Update Drop Topic', bg='#b0b0b0', fg='#1a1a1a',
+                  command=lambda: self._update_drop_topic(
+                      self._drop_topic_var.get().strip())).pack(side=tk.RIGHT, padx=(2, 0))
+        tk.Button(drop_topic_row, text='Refresh', bg='#b0b0b0', fg='#1a1a1a',
+                  command=lambda: [
+                      self._drop_data.clear(),
+                      self._populate_drop_list(),
+                      self.root.after(500, self._populate_drop_list)
+                  ]).pack(side=tk.RIGHT, padx=(2, 0))
+
+        drop_list_frame = ttk.LabelFrame(frame, text='Drop Targets')
+        drop_list_frame.pack(fill=tk.X, padx=10, pady=5)
+        self._drop_listbox = tk.Listbox(drop_list_frame, height=4, font=('Consolas', 9),
+                                        selectbackground='#d0d0d0',
+                                        selectforeground='#1a1a1a')
+        self._drop_listbox.pack(fill=tk.X, padx=5, pady=2)
+
+        drop_frame = ttk.LabelFrame(frame, text='Drop')
+        drop_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        drop_dur_row = tk.Frame(drop_frame)
+        drop_dur_row.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(drop_dur_row, text='Sweep duration (s):', anchor='w').pack(side=tk.LEFT)
+        self._drop_duration_var = tk.DoubleVar(value=2.5)
+        tk.Spinbox(drop_dur_row, textvariable=self._drop_duration_var,
+                   from_=0.5, to=10.0, increment=0.5,
+                   width=8, format='%.1f').pack(side=tk.LEFT, padx=(5, 0))
+
+        drop_btn_row = tk.Frame(drop_frame)
+        drop_btn_row.pack(fill=tk.X, padx=5, pady=2)
+        tk.Button(drop_btn_row, text='Point to Drop', bg='#b0b0b0', fg='#1a1a1a',
+                  command=lambda: self._cmd_drop_point()).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+        tk.Button(drop_btn_row, text='Sweep to Drop', bg='#b0b0b0', fg='#1a1a1a',
+                  command=lambda: self._cmd_drop_sweep()).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 2))
+        tk.Button(drop_btn_row, text='Release', bg='#b0b0b0', fg='#1a1a1a',
+                  command=lambda: self._cmd_drop_release()).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
+
+        # Start drop subscription immediately
+        self._update_drop_topic(self._drop_topic_var.get())
 
         # Initial subscription to default topic
         self._cmd_grasp_update_topic()
@@ -2292,11 +2474,17 @@ class SOArm101ControlGUI(Node):
                     if final_joints is not None:
                         self._append_log('Approach complete, descending to grasp')
                         self._ik_apply_and_act(final_joints, 'grasp_execute')
+                    else:
+                        evt = getattr(self, '_grasp_motion_event', None)
+                        if evt:
+                            evt.set()
                 self._execute_trajectory(target, duration_s=duration,
                                          on_complete=_descend)
             elif mode == 'grasp_execute':
                 duration = getattr(self, '_grasp_arm_duration', 2.0)
-                self._execute_trajectory(target, duration_s=duration)
+                evt = getattr(self, '_grasp_motion_event', None)
+                self._execute_trajectory(target, duration_s=duration,
+                                         on_complete=evt.set if evt else None)
 
         if getattr(self, '_gui_ready', False):
             self.root.after(0, _apply)
@@ -2343,6 +2531,70 @@ class SOArm101ControlGUI(Node):
         except json.JSONDecodeError:
             pass
 
+    # ------------------------------------------------------------------
+    # Drop target subscription + helpers
+    # ------------------------------------------------------------------
+
+    def _drop_callback(self, msg):
+        """Populate _drop_data from /drop_poses TFMessage."""
+        with self._drop_lock:
+            for tf in msg.transforms:
+                name = tf.child_frame_id
+                self._drop_data[name] = {
+                    'x': tf.transform.translation.x,
+                    'y': tf.transform.translation.y,
+                    'z': tf.transform.translation.z,
+                    'qx': tf.transform.rotation.x,
+                    'qy': tf.transform.rotation.y,
+                    'qz': tf.transform.rotation.z,
+                    'qw': tf.transform.rotation.w,
+                }
+
+    def _update_drop_topic(self, topic='/drop_poses'):
+        """Switch drop subscription to topic."""
+        if self._drop_sub is not None:
+            self.destroy_subscription(self._drop_sub)
+        with self._drop_lock:
+            self._drop_data.clear()
+        self._drop_sub = self.create_subscription(
+            TFMessage, topic, self._drop_callback, 10)
+        self._append_log(f'Drop topic: {topic}')
+
+    def _populate_drop_list(self):
+        """Refresh drop_listbox from _drop_data (call on GUI thread)."""
+        if not hasattr(self, '_drop_listbox'):
+            return
+        self._drop_listbox.delete(0, tk.END)
+        with self._drop_lock:
+            for name, pos in self._drop_data.items():
+                label = DROP_ID_LABELS.get(name, "")
+                label_str = f" [{label}]" if label else ""
+                self._drop_listbox.insert(
+                    tk.END,
+                    f'{name}{label_str}  ({pos["x"]:.3f}, {pos["y"]:.3f}, {pos["z"]:.3f})')
+        count = self._drop_listbox.size()
+        if count > 0:
+            self._append_log(f'Drop targets refreshed: {count} found')
+
+    def _get_selected_drop_pose(self):
+        """Return (name, x, y, z) for the selected drop listbox entry, or None."""
+        if not hasattr(self, '_drop_listbox'):
+            return None
+        sel = self._drop_listbox.curselection()
+        if not sel:
+            self._append_log('No drop target selected', 'warn')
+            return None
+        text = self._drop_listbox.get(sel[0])
+        # Strip label annotation: "drop_0 [red]  (...)" → "drop_0"
+        raw = text.split('  ')[0]  # "drop_0 [red]" or "drop_0"
+        name = raw.split(' [')[0]  # "drop_0"
+        with self._drop_lock:
+            pose = self._drop_data.get(name)
+        if pose is None:
+            self._append_log(f'Drop target {name!r} not in data', 'warn')
+            return None
+        return name, pose['x'], pose['y'], pose['z']
+
     def _cmd_grasp_update_topic(self):
         """Switch object subscription to topic from GUI entry and auto-refresh."""
         new_topic = self._grasp_topic_var.get().strip()
@@ -2387,7 +2639,7 @@ class SOArm101ControlGUI(Node):
         if count > 0:
             self._append_log(f'Objects refreshed: {count} found')
 
-    def _cmd_grasp_reset(self):
+    def _cmd_grasp_home(self):
         """Move arm to grasp-ready home: gripper pointing down.
 
         Plans from current joint state (not from zeros) to avoid flinging.
@@ -2395,7 +2647,118 @@ class SOArm101ControlGUI(Node):
         duration = self._grasp_arm_duration_var.get()
         target = {name: 0.0 for name in ARM_JOINT_NAMES}
         target['wrist_flex'] = math.pi / 2
-        self._execute_trajectory(target, duration_s=duration)
+        from so_arm101_control.compute_workspace import WRIST_ROLL_URDF_PITCH
+        target['wrist_roll'] = math.pi / 2 + WRIST_ROLL_URDF_PITCH
+        self._append_log(f'Grasp Home: wrist_flex=90° wrist_roll={math.degrees(target["wrist_roll"]):.1f}° duration={duration:.1f}s')
+        evt = threading.Event()
+        self._motion_event = evt
+        self._execute_trajectory(target, duration_s=duration,
+                                 on_complete=evt.set)
+
+    # ------------------------------------------------------------------
+    # Hot-reload services (so agents can trigger reload without GUI focus)
+    # ------------------------------------------------------------------
+
+    def _cmd_hot_reload(self):
+        """Hot-reload logic only (same as Ctrl+R). Updates methods + constants."""
+        self._hot_reload_logic()
+
+    def _cmd_hot_reload_gui(self):
+        """Hot-reload logic + rebuild GUI (same as Ctrl+Shift+R)."""
+        self._hot_reload_gui()
+
+    # ------------------------------------------------------------------
+    # Drop motion commands (auto-registered as ~/drop_refresh, ~/drop_select,
+    # ~/drop_point, ~/drop_sweep, ~/drop_release Trigger services)
+    # ------------------------------------------------------------------
+
+    def _cmd_drop_refresh(self):
+        """Refresh drop listbox from /drop_poses topic data."""
+        self._drop_data.clear()
+        self._populate_drop_list()
+        self.root.after(500, self._populate_drop_list)
+
+    def _cmd_drop_select(self):
+        """Select a drop target by name (via ik_target param) or first item.
+        Usage: ros2 param set ... ik_target "drop_2" then call this service.
+        """
+        if not hasattr(self, '_drop_listbox') or self._drop_listbox.size() == 0:
+            self._append_log('No drop targets to select', 'warn')
+            return
+        name_hint = self.get_parameter('ik_target').get_parameter_value().string_value.strip()
+        target_idx = 0
+        if name_hint and name_hint.startswith('drop_'):
+            for i in range(self._drop_listbox.size()):
+                entry = self._drop_listbox.get(i)
+                entry_name = entry.split(' [')[0]  # "drop_2 [blue]  (...)" -> "drop_2"
+                if entry_name == name_hint:
+                    target_idx = i
+                    break
+        self._drop_listbox.selection_clear(0, tk.END)
+        self._drop_listbox.selection_set(target_idx)
+        self._append_log(f'Selected drop target: {self._drop_listbox.get(target_idx)}')
+
+    def _cmd_drop_point(self):
+        """Rotate shoulder_pan to face the selected drop target. ARM-02."""
+        result = self._get_selected_drop_pose()
+        if result is None:
+            return
+        name, x, y, z = result
+
+        # No workspace bounds check — drop_point only rotates pan (always valid).
+        # geometric_ik in drop_sweep will catch truly unreachable targets.
+
+        evt = threading.Event()
+        self._motion_event = evt
+
+        from so_arm101_control.compute_workspace import X_PAN
+        pan = math.atan2(-y, x - X_PAN)
+        with self.joint_lock:
+            current = dict(self.joint_positions)
+        target = dict(current)
+        target['shoulder_pan'] = pan
+        self._append_log(
+            f'Drop Point: pan={math.degrees(pan):.1f}\u00b0 toward {name}')
+        self._execute_trajectory(target, duration_s=1.0,
+                                 on_complete=evt.set)
+
+    def _cmd_drop_sweep(self):
+        """Sweep wrist only: wrist_flex 90->0, wrist_roll aligned. All other joints hold."""
+        result = self._get_selected_drop_pose()
+        if result is None:
+            return
+        name, x, y, z = result
+
+        duration = self._drop_duration_var.get()
+        evt = threading.Event()
+        self._motion_event = evt
+
+        with self.joint_lock:
+            current = dict(self.joint_positions)
+
+        # Only change wrist joints — everything else stays put
+        end = dict(current)
+        end['wrist_flex'] = 0.0           # horizontal (was 90° at grasp home)
+        from so_arm101_control.compute_workspace import WRIST_ROLL_URDF_PITCH
+        end['wrist_roll'] = -(math.pi / 2 + WRIST_ROLL_URDF_PITCH)
+
+        self._append_log(
+            f'Drop Sweep: wrist_flex→0° wrist_roll→{math.degrees(end["wrist_roll"]):.1f}° '
+            f'over {duration:.1f}s toward {name}')
+        self._execute_trajectory(end, duration_s=duration,
+                                 on_complete=evt.set)
+
+    def _cmd_drop_release(self):
+        """Open gripper to release held object into cup. ARM-04.
+        Re-selects the last grasped object so gripper opens to the correct width."""
+        last = getattr(self, '_last_grasped_object', None)
+        if last and hasattr(self, 'obj_listbox'):
+            for i in range(self.obj_listbox.size()):
+                if self.obj_listbox.get(i).split('  ')[0] == last:
+                    self.obj_listbox.selection_clear(0, tk.END)
+                    self.obj_listbox.selection_set(i)
+                    break
+        self._cmd_gripper_open_for_object()
 
     def _cmd_grasp_select(self):
         """Select an object in the listbox by name (via ik_target param) or first item.
@@ -2503,10 +2866,17 @@ class SOArm101ControlGUI(Node):
             self._append_log('Grasp Open: no object selected or no bbox data')
             return
         open_angle, _ = self._gripper_angle_for_object(obj_name)
+        duration = self._grasp_grip_duration_var.get()
         self._append_log(
             f'Grasp Open: {math.degrees(open_angle):.1f}° for {obj_name}')
-        self._gripper_command(open_angle, execute=True,
-                              duration_s=self._grasp_grip_duration_var.get())
+        # Update slider/UI on tkinter thread, send goal on background thread
+        self._gripper_command(open_angle, execute=False, duration_s=duration)
+        evt = threading.Event()
+        self._motion_event = evt
+        def _send():
+            self._send_gripper_goal(open_angle, duration_s=duration, blocking=True)
+            evt.set()
+        threading.Thread(target=_send, daemon=True).start()
 
     def _cmd_gripper_close_for_object(self):
         """Close gripper to the object's width minus threshold."""
@@ -2516,9 +2886,15 @@ class SOArm101ControlGUI(Node):
             self._append_log('Grasp Close: no object selected or no bbox data')
             return
         _, close_angle = self._gripper_angle_for_object(obj_name)
+        duration = self._grasp_grip_duration_var.get()
         self._append_log(f'Grasp Close: {math.degrees(close_angle):.1f}° for {obj_name}')
-        self._gripper_command(close_angle, execute=True,
-                              duration_s=self._grasp_grip_duration_var.get())
+        self._gripper_command(close_angle, execute=False, duration_s=duration)
+        evt = threading.Event()
+        self._motion_event = evt
+        def _send():
+            self._send_gripper_goal(close_angle, duration_s=duration, blocking=True)
+            evt.set()
+        threading.Thread(target=_send, daemon=True).start()
 
     def _cmd_grasp_move(self):
         sel = self.obj_listbox.curselection()
@@ -2527,6 +2903,8 @@ class SOArm101ControlGUI(Node):
             return
         text = self.obj_listbox.get(sel[0])
         obj_name = text.split('  ')[0]
+        # Remember the grasped object so drop_release can open for it later
+        self._last_grasped_object = obj_name
         with self.objects_lock:
             pos = self.objects_data.get(obj_name)
         if pos is None:
@@ -2578,6 +2956,10 @@ class SOArm101ControlGUI(Node):
 
         approach_h = self._grasp_approach_height_var.get()
 
+        # Create motion event BEFORE spawning thread so trigger callback can see it
+        evt = threading.Event()
+        self._motion_event = evt
+
         # Pre-validate ALL stages before moving the arm
         def _prevalidate_and_execute():
             from so_arm101_control.compute_workspace import geometric_ik
@@ -2599,6 +2981,7 @@ class SOArm101ControlGUI(Node):
                     self._append_log(
                         f'Grasp rejected ({stage}): {reason} '
                         f'({px:.3f}, {py:.3f}, {pz:.3f})', 'warn')
+                    evt.set()
                     return
 
                 solutions = geometric_ik(px, py, pz, grasp_yaw=obj_yaw)
@@ -2606,6 +2989,7 @@ class SOArm101ControlGUI(Node):
                     self._append_log(
                         f'Grasp unreachable ({stage}): no geometric IK '
                         f'({px:.3f}, {py:.3f}, {pz:.3f})', 'warn')
+                    evt.set()
                     return
 
                 found = False
@@ -2625,6 +3009,7 @@ class SOArm101ControlGUI(Node):
                     self._append_log(
                         f'Grasp unreachable ({stage}): all solutions collide '
                         f'({px:.3f}, {py:.3f}, {pz:.3f})', 'warn')
+                    evt.set()
                     return
 
             # All stages validated — execute
@@ -2632,15 +3017,19 @@ class SOArm101ControlGUI(Node):
             if approach_h > 0 and 'approach' in validated and 'final' in validated:
                 self._append_log(f'  Both stages validated, executing approach')
                 self._grasp_final_joints = validated['final']
+                self._grasp_motion_event = evt
                 def _apply_approach():
                     self._ik_apply_and_act(validated['approach'], 'grasp_approach')
                 if getattr(self, '_gui_ready', False):
                     self.root.after(0, _apply_approach)
             elif 'final' in validated:
+                self._grasp_motion_event = evt
                 def _apply_final():
                     self._ik_apply_and_act(validated['final'], 'grasp_execute')
                 if getattr(self, '_gui_ready', False):
                     self.root.after(0, _apply_final)
+            else:
+                evt.set()  # nothing to execute
 
         threading.Thread(target=_prevalidate_and_execute, daemon=True).start()
 
@@ -2734,9 +3123,15 @@ class SOArm101ControlGUI(Node):
     # Trajectory execution (arm joints via action interface)
     # ------------------------------------------------------------------
 
-    def _execute_trajectory(self, target_positions, duration_s=2.0, on_complete=None):
+    def _execute_trajectory(self, target_positions, duration_s=2.0, on_complete=None,
+                            blocking=False):
         """Send trajectory to arm_controller via action interface.
-        Source: trajectory logic adapted from JETANK_description/jetank_control_gui.py"""
+        Source: trajectory logic adapted from JETANK_description/jetank_control_gui.py
+
+        If blocking=True, sends with blocking and waits for both the
+        controller result and the UI animation to finish before returning.
+        Must be called from a background thread when blocking.
+        """
         if not self._traj_lock.acquire(blocking=False):
             self._append_log('Trajectory already in progress', 'warn')
             return
@@ -2744,7 +3139,7 @@ class SOArm101ControlGUI(Node):
         self._slider_driven = True
 
         # Send the full trajectory via action (controller handles interpolation)
-        self._send_arm_goal(target_positions, duration_s=duration_s)
+        self._send_arm_goal(target_positions, duration_s=duration_s, blocking=blocking)
 
         # Animate the UI sliders to show progress
         with self.joint_lock:
@@ -2982,13 +3377,14 @@ def main(args=None):
                 node.root.after(0, node._on_close)
             except Exception:
                 pass
-        executor.shutdown()
 
     signal.signal(signal.SIGINT, _shutdown_handler)
     signal.signal(signal.SIGTERM, _shutdown_handler)
 
     try:
-        executor.spin()
+        # Use spin_once loop instead of spin() so we can check running flag
+        while node.running and rclpy.ok():
+            executor.spin_once(timeout_sec=0.5)
     except KeyboardInterrupt:
         pass
     finally:
