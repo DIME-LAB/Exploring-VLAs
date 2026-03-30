@@ -1,0 +1,30 @@
+# OMPL Planning Configuration for SO-ARM101
+# Reference: https://moveit.picknik.ai/humble/doc/examples/ompl_interface/ompl_interface_tutorial
+
+planning_plugin: ompl_interface/OMPLPlanner
+request_adapters: >-
+  default_planner_request_adapters/AddTimeOptimalParameterization
+  default_planner_request_adapters/ResolveConstraintFrames
+  default_planner_request_adapters/FixWorkspaceBounds
+  default_planner_request_adapters/FixStartStateBounds
+
+longest_valid_segment_fraction: 0.01
+maximum_waypoint_distance: 0.01
+simplify_solutions: false
+
+planner_configs:
+  RRTConnect:
+    type: geometric::RRTConnect
+    range: 0.0
+  RRTstar:
+    type: geometric::RRTstar
+    range: 0.0
+    goal_bias: 0.05
+    delay_collision_checking: 0
+    optimization_objective: PathLengthOptimizationObjective
+
+arm:
+  default_planner_config: RRTConnect
+  planner_configs:
+    - RRTConnect
+    - RRTstar

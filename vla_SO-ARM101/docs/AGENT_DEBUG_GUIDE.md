@@ -133,9 +133,9 @@ until the trajectory completes before responding.
 | Service | Action |
 |---|---|
 | `~/drop_refresh` | Re-read drop targets from /drop_poses topic |
-| `~/drop_select` | Select first drop target in drop listbox |
-| `~/drop_point` | Rotate shoulder_pan to face selected cup (pan only) |
-| `~/drop_sweep` | Sweep wrist_flex 90 deg to 0 deg over cup (IK + trajectory) |
+| `~/drop_select` | Select drop target by `ik_target` param (required, no default) |
+| `~/drop_point` | Rotate shoulder_pan + set wrist_roll=-90° toward cup |
+| `~/drop_sweep` | Geometric IK (45° grip) + MoveIt collision-free path planning |
 | `~/drop_release` | Open gripper to release object into cup |
 
 ### Clearance Tuning
@@ -195,13 +195,14 @@ T=std_srvs/srv/Trigger
 # Load drop targets
 ros2 service call $S/drop_refresh $T
 
-# Select target
+# Select target (param required)
+ros2 param set $S ik_target "drop_1"
 ros2 service call $S/drop_select $T
 
-# Point toward cup (pan only)
+# Point toward cup (pan + wrist_roll=-90°)
 ros2 service call $S/drop_point $T
 
-# Sweep wrist over cup (wrist_flex 90 -> 0 deg)
+# Drop sweep — geometric IK + MoveIt collision-free path (avoids cup cylinders)
 ros2 service call $S/drop_sweep $T
 
 # Release
@@ -281,10 +282,11 @@ def _cmd_my_new_action(self):
     self._execute_trajectory(target, duration_s=2.0, on_complete=evt.set)
 ```
 
-**Motion command pattern:** Always use `_execute_trajectory()` for arm motions.
-It handles `_slider_driven`, slider animation, `_publish_goal_state`, and
-`on_complete`. Never call `_send_arm_goal` directly from `_cmd_*` methods —
-that skips slider sync and causes jitter from the joint_states feedback loop.
+**Motion command pattern:** For collision-aware motions (near cups), use
+`_cmd_plan_execute(target=..., on_complete=evt)` which plans via MoveIt OMPL.
+For simple motions without obstacles, use `_execute_trajectory()` which does
+direct joint interpolation. Never call `_send_arm_goal` directly from
+`_cmd_*` methods — that skips slider sync and causes jitter.
 
 For gripper motions, use `_gripper_command(execute=False)` for UI update,
 then `_send_gripper_goal(blocking=True)` on a background thread with

@@ -138,8 +138,18 @@ HOME_BEND = UPPER_HOME - LOWER_HOME  # relative angle between links at home (73.
 WF_TCP_DR = -0.0079    # radial: TCP is 7.9mm inboard of wrist_flex pivot
 WF_TCP_DH = -0.15923   # height: TCP is 159.2mm below wrist_flex pivot
 
+# TCP offset decomposed relative to gripper axis (grip-angle invariant):
+#   TCP_ALONG: extension along the gripper axis (159.2mm from wrist pivot to jaw tips)
+#   TCP_PERP:  lateral offset perpendicular to gripper in arm plane (7.9mm inboard)
+# These are constant regardless of grip angle — the rotation just redistributes
+# the (r, h) components.
+TCP_ALONG = -WF_TCP_DH   # 0.15923m along gripper axis
+TCP_PERP  =  WF_TCP_DR   # -0.0079m perpendicular to gripper in arm plane
+
 # Gripper-down constraint: θ₂ + θ₃ + θ₄ = 90° (verified across all configs)
 GRIPPER_DOWN_SUM = math.radians(90.0)
+# Gripper-horizontal constraint: θ₂ + θ₃ + θ₄ = 0° (verified via FK at home)
+GRIPPER_HORIZONTAL_SUM = 0.0
 
 # Wrist-roll URDF joint origin pitch offset (from rpy="1.5708 0.0486795 3.14159")
 # This is the small manufacturing/design imperfection in the wrist_roll joint.
@@ -170,15 +180,28 @@ def forward_kinematics_full(joint_angles):
     return T @ TCP_TRANSFORM
 
 
-def _solve_2link(r_tcp, z, theta5):
-    """Core 2-link IK: given radial TCP distance, height, and wrist_roll,
-    solve for (theta2, theta3, theta4). Returns list of (θ₂, θ₃, θ₄) tuples."""
-    # TCP-to-wrist offset: the radial component rotates with wrist_roll
-    # (height component is invariant). At roll=0 the offset is -7.9mm radial;
-    # at roll=±90° the offset rotates out of the arm plane.
-    dr = WF_TCP_DR * math.cos(theta5)
+def _solve_2link(r_tcp, z, theta5, grip_angle=GRIPPER_DOWN_SUM):
+    """Core 2-link IK: given radial TCP distance, height, wrist_roll, and
+    grip angle, solve for (theta2, theta3, theta4).
+
+    The grip_angle controls the end-effector orientation constraint:
+        θ₂ + θ₃ + θ₄ = grip_angle
+    Common values: GRIPPER_DOWN_SUM (π/2, gripper points down for grasping),
+    GRIPPER_HORIZONTAL_SUM (0, gripper points forward for drop into cups).
+
+    Returns list of (θ₂, θ₃, θ₄) tuples (up to 2: elbow-up, elbow-down).
+    """
+    # Project TCP offset into arm-plane (r, h) for the given grip angle.
+    # The gripper direction in the arm plane is (cos(ψ), -sin(ψ)) where ψ = grip_angle.
+    # TCP_ALONG is invariant under wrist_roll (along gripper axis).
+    # TCP_PERP scales by cos(θ₅) (perpendicular rotates with wrist_roll).
+    cos_g = math.cos(grip_angle)
+    sin_g = math.sin(grip_angle)
+    dr = TCP_ALONG * cos_g + TCP_PERP * sin_g * math.cos(theta5)
+    dh = -TCP_ALONG * sin_g + TCP_PERP * cos_g * math.cos(theta5)
+
     r_wf = r_tcp - dr
-    h_wf = z - WF_TCP_DH
+    h_wf = z - dh
 
     r_target = r_wf - LIFT_R
     h_target = h_wf - LIFT_H
@@ -204,20 +227,20 @@ def _solve_2link(r_tcp, z, theta5):
 
         theta2 = UPPER_HOME - phi2
         theta3 = bend - HOME_BEND
-        theta4 = GRIPPER_DOWN_SUM - theta2 - theta3
+        theta4 = grip_angle - theta2 - theta3
         results.append((theta2, theta3, theta4))
     return results
 
 
-def geometric_ik(x, y, z, grasp_yaw=None):
-    """Analytical IK for SO-ARM101 with gripper pointing straight down.
+def geometric_ik(x, y, z, grasp_yaw=None, grip_angle=None, wrist_roll=None):
+    """Analytical IK for SO-ARM101 with configurable gripper orientation.
 
     Solves the 5-DOF arm using geometric decomposition:
       1. θ₁ (pan) decouples as atan2(-y, x - X_PAN)
-      2. θ₅ (wrist_roll) from analytical formula with grasp_yaw
-      3. Back-compute wrist_flex pivot from TCP target (roll-adjusted offset)
+      2. θ₅ (wrist_roll) from grasp_yaw formula, or fixed if wrist_roll given
+      3. Back-compute wrist_flex pivot from TCP target (grip-angle-rotated offset)
       4. θ₂, θ₃ (lift, elbow) solved via 2-link law of cosines
-      5. θ₄ (wrist_flex) from gripper-down constraint: θ₂+θ₃+θ₄ = 90°
+      5. θ₄ (wrist_flex) from orientation constraint: θ₂+θ₃+θ₄ = grip_angle
       6. One FK refinement step to compensate for cross-plane coupling
 
     Returns list of dicts (up to 2: elbow-up and elbow-down), each mapping
@@ -225,8 +248,16 @@ def geometric_ik(x, y, z, grasp_yaw=None):
 
     Args:
         x, y, z: TCP target position in base frame (meters)
-        grasp_yaw: desired jaw-line direction in base frame (radians), or None
+        grasp_yaw: desired jaw-line direction in base frame (radians), or None.
+            Ignored when wrist_roll is provided.
+        grip_angle: gripper orientation constraint θ₂+θ₃+θ₄ = grip_angle (radians).
+            GRIPPER_DOWN_SUM (π/2) for top-down grasps (default),
+            GRIPPER_HORIZONTAL_SUM (0) for horizontal reach (drop into cups).
+        wrist_roll: fixed wrist_roll angle (radians). When provided, bypasses the
+            grasp_yaw formula — use for drop where wrist_roll is set independently.
     """
+    if grip_angle is None:
+        grip_angle = GRIPPER_DOWN_SUM
     # --- Joint 1: Pan ---
     dx = x - X_PAN
     r_tcp = math.sqrt(dx * dx + y * y)
@@ -235,16 +266,18 @@ def geometric_ik(x, y, z, grasp_yaw=None):
     else:
         theta1 = math.atan2(-y, dx)
 
-    # --- Joint 5: Wrist roll (computed early — needed for TCP offset) ---
-    # π/2 = inherent 90° rotation from kinematic chain (wrist_flex + wrist_roll origins)
-    # URDF_PITCH = small offset from ideal 90° in wrist_roll joint origin
-    if grasp_yaw is not None:
+    # --- Joint 5: Wrist roll ---
+    if wrist_roll is not None:
+        # Fixed wrist_roll (e.g. drop: π/2). Not part of the IK chain.
+        theta5 = wrist_roll
+    elif grasp_yaw is not None:
+        # Compute from grasp_yaw: π/2 = inherent chain rotation, URDF_PITCH = offset
         theta5 = theta1 + grasp_yaw - (math.pi / 2 - WRIST_ROLL_URDF_PITCH)
     else:
         theta5 = 0.0
 
     # --- Solve 2-link IK ---
-    arm_solutions = _solve_2link(r_tcp, z, theta5)
+    arm_solutions = _solve_2link(r_tcp, z, theta5, grip_angle)
     if not arm_solutions:
         return []
 
@@ -285,10 +318,14 @@ def geometric_ik(x, y, z, grasp_yaw=None):
             dx2 = x2 - X_PAN
             r_tcp2 = math.sqrt(dx2 * dx2 + y2 * y2)
             theta1_r = math.atan2(-y2, dx2) if r_tcp2 > 1e-6 else 0.0
-            theta5_r = theta1_r + grasp_yaw - (math.pi / 2 - WRIST_ROLL_URDF_PITCH) \
-                if grasp_yaw is not None else 0.0
+            if wrist_roll is not None:
+                theta5_r = wrist_roll
+            elif grasp_yaw is not None:
+                theta5_r = theta1_r + grasp_yaw - (math.pi / 2 - WRIST_ROLL_URDF_PITCH)
+            else:
+                theta5_r = 0.0
 
-            refined = _solve_2link(r_tcp2, z2, theta5_r)
+            refined = _solve_2link(r_tcp2, z2, theta5_r, grip_angle)
             if refined:
                 t2r, t3r, t4r = refined[0]
                 angles_r = {

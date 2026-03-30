@@ -312,15 +312,15 @@ ros2 service call $S/grasp_home $T
 # 9. Refresh drop targets from /drop_poses
 ros2 service call $S/drop_refresh $T
 
-# 10. Select drop target
-# To select a specific target:
-#   ros2 param set $S ik_target "drop_0"
+# 10. Select drop target (param required — no silent default)
+ros2 param set $S ik_target "drop_0"
 ros2 service call $S/drop_select $T
 
-# 11. Point toward cup (rotates shoulder_pan only) — blocks until pan complete
+# 11. Point toward cup (rotates shoulder_pan + sets wrist_roll=-90°) — blocks until complete
 ros2 service call $S/drop_point $T
 
-# 12. Sweep wrist over cup (wrist_flex 90° → 0°) — blocks until sweep complete
+# 12. Drop sweep — geometric IK (45° grip angle) + MoveIt collision-free path planning
+# Uses OMPL RRTConnect with cylinder collision objects (10% padded) for cup avoidance
 ros2 service call $S/drop_sweep $T
 
 # 13. Release object into cup — blocks until gripper opens
@@ -357,10 +357,12 @@ ros2 service call $S/drop_release $T
 ros2 service call $S/grasp_home $T
 ```
 
-> **Note:** Service calls block via `_motion_event` pattern. Each motion command
-> uses `_execute_trajectory()` which handles slider sync, feedback suppression,
-> and completion signaling. The trigger callback polls `_motion_event` at 0.5s
-> intervals and only responds after the full trajectory finishes.
+> **Note:** Service calls block via `_motion_event` pattern (60s timeout).
+> `grasp_home` and `drop_sweep` use MoveIt collision-aware planning
+> (`_cmd_plan_execute` → OMPL RRTConnect) which avoids cup collision objects.
+> `drop_point` uses direct trajectory interpolation (no collision checking —
+> only rotates shoulder_pan). The trigger callback polls `_motion_event` at 0.5s
+> intervals and responds after trajectory execution or timeout.
 
 ## Drop Configuration
 
@@ -511,13 +513,11 @@ ros2 service call /so_arm101_control_gui/grasp_home std_srvs/srv/Trigger
 # Arm should move to grasp home (wrist_flex=90 deg) in Isaac Sim
 ```
 
-### Service Calls Return Before Motion Completes
+### Service Calls Block Correctly
 
-Currently `_cmd_*` service calls dispatch trajectories to background threads and return immediately. A scripted sequence of service calls will send conflicting commands because the previous motion hasn't finished.
-
-**Workaround:** Add `sleep` between service calls (3-8s depending on trajectory duration).
-
-**Proper fix (TODO):** Make `_send_arm_goal` block until the FollowJointTrajectory action result arrives.
+Service calls block via `_motion_event` until trajectory completes (60s timeout).
+Action clients use `ReentrantCallbackGroup` to avoid executor deadlock.
+No `sleep` needed between sequential service calls — each waits for completion.
 
 ## Troubleshooting
 
@@ -543,15 +543,28 @@ Currently `_cmd_*` service calls dispatch trajectories to background threads and
 - If cups were deleted/re-added, the object pose publisher action graph may have been destroyed
 - Recreate it: call `setup_pose_publisher` MCP tool or UI button
 
-### "Drop rejected" / not reachable
-- Cup is outside workspace (R: 0.054-0.311m, Z: -0.209-0.074m)
-- Note: drop operations skip the grasp workspace check (different kinematics)
-- If drop_sweep fails with "no IK solution": the drop sweep only moves wrist joints, no IK is computed
+### "Drop rejected" / IK fails
+- Cup is outside workspace (R beyond arm reach at 45° grip angle)
+- `drop_sweep` uses `geometric_ik(grip_angle=45°, wrist_roll=-90°)` — different from grasp IK
+- If "no IK solution": cup position may be unreachable at the given grip angle + height
+- If "all solutions collide": the IK endpoint itself is in collision with a cup cylinder
+
+### "Planning failed (error -2)"
+- MoveIt OMPL finds a path but post-validation detects a collision (jaw vs cup)
+- This is correct behavior — the randomized planner occasionally generates paths that clip cups
+- Retry usually succeeds (50 planning attempts per call)
+- If persistent: increase `num_planning_attempts` or adjust `_CUP_COLLISION_PADDING`
+
+### Cup knocked over in sim but no MoveIt error
+- Check collision objects: `ros2 service call /get_planning_scene ...` — cups should be CYLINDER primitives, not meshes
+- Concave STL meshes cause FCL false negatives — must use convex primitives (cylinders)
+- Check padding: `_CUP_COLLISION_PADDING` in control_gui.py (default 1.1 = 10% larger than real cup)
+- Verify cup positions match: compare `/drop_poses` topic vs planning scene object poses
 
 ### Sweep misses cup
 - Offset values in aruco_config.json may need tuning
-- Check arm configuration at wrist_flex=0 places gripper above cup
-- Adjust sweep duration for smoother motion
+- Drop height: target_z = cup_base_z + 0.127m (30mm above 97mm rim)
+- Grip angle: 45° from horizontal (θ₂+θ₃+θ₄ = 45°)
 
 ### YOLOE model loading slow
 - First launch downloads MobileCLIP (~572MB)

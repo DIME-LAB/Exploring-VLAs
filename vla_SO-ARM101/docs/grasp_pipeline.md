@@ -38,22 +38,35 @@ position is unreachable for a top-down grasp.
 
 ```
 1. theta1 (pan)       = atan2(-y, x - X_PAN)
-2. theta5 (wrist_roll)= theta1 + grasp_yaw - WRIST_ROLL_OFFSET
-3. Back-compute wrist_flex pivot from TCP target (roll-adjusted offset)
+2. theta5 (wrist_roll)= fixed value OR theta1 + grasp_yaw - WRIST_ROLL_OFFSET
+3. Back-compute wrist_flex pivot from TCP target (grip-angle-rotated offset)
 4. theta2, theta3     = 2-link law of cosines (lift, elbow)
-5. theta4 (wrist_flex)= pi/2 - theta2 - theta3   [gripper-down constraint]
+5. theta4 (wrist_flex)= grip_angle - theta2 - theta3   [orientation constraint]
 6. FK refinement step to compensate for cross-plane coupling (~1-8mm error -> <0.5mm)
 7. Joint limit check
 8. Collision check via MoveIt GetStateValidity
 9. Tries elbow-up first, then elbow-down
 ```
 
-### Gripper-Down Constraint
+### Grip Angle Constraint
 
-The constraint `theta2 + theta3 + theta4 = pi/2` (90 degrees) ensures the gripper
-always points straight down. This eliminates one degree of freedom — `theta4` is
-fully determined by `theta2` and `theta3`. The constants `WF_TCP_DR` and
-`WF_TCP_DH` in `compute_workspace.py` are derived assuming exactly pi/2.
+The constraint `theta2 + theta3 + theta4 = grip_angle` controls gripper orientation.
+This eliminates one degree of freedom — `theta4` is fully determined by `theta2`,
+`theta3`, and the desired grip angle.
+
+| grip_angle | Orientation | Use |
+|------------|-------------|-----|
+| π/2 (90°) | Gripper straight down | Top-down grasps (default) |
+| π/4 (45°) | Gripper angled 45° down | Drop into cups |
+| 0 (0°) | Gripper horizontal | Horizontal reach |
+
+The TCP offset from the wrist_flex pivot rotates with the grip angle. Constants
+`TCP_ALONG` (159.2mm along gripper axis) and `TCP_PERP` (-7.9mm perpendicular)
+in `compute_workspace.py` are decomposed relative to the gripper axis and
+projected into the arm plane at the given grip angle.
+
+The `wrist_roll` parameter can be set independently (not computed from `grasp_yaw`)
+for operations like drop where the jaw orientation is fixed.
 
 ### IK Constants
 

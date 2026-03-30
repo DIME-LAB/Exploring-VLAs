@@ -130,7 +130,9 @@ _CHAIN_BASE_ROTATION = math.pi / 2 - _WRIST_ROLL_URDF_PITCH
 
 # Cup mesh for MoveIt collision objects
 # STL is in mm, scaled 0.001 to meters (matches cup.urdf)
+# Padding factor: 1.0 = 100% actual size (no inflation)
 _CUP_STL_SCALE = 0.001
+_CUP_COLLISION_PADDING = 1.1
 
 
 def _load_cup_mesh():
@@ -167,9 +169,10 @@ def _load_cup_mesh():
                     if key not in vertex_map:
                         vertex_map[key] = len(mesh.vertices)
                         pt = Point()
-                        pt.x = float(vx) * _CUP_STL_SCALE
-                        pt.y = float(vy) * _CUP_STL_SCALE
-                        pt.z = float(vz) * _CUP_STL_SCALE
+                        scale = _CUP_STL_SCALE * _CUP_COLLISION_PADDING
+                        pt.x = float(vx) * scale
+                        pt.y = float(vy) * scale
+                        pt.z = float(vz) * scale
                         mesh.vertices.append(pt)
                     indices.append(vertex_map[key])
                 tri.vertex_indices = indices
@@ -304,9 +307,11 @@ class SOArm101ControlGUI(Node):
 
         # --- Action clients (proven reliable for JTC) ---
         self.arm_action_client = ActionClient(
-            self, FollowJointTrajectory, '/arm_controller/follow_joint_trajectory')
+            self, FollowJointTrajectory, '/arm_controller/follow_joint_trajectory',
+            callback_group=self._service_cb_group)
         self.gripper_action_client = ActionClient(
-            self, FollowJointTrajectory, '/gripper_controller/follow_joint_trajectory')
+            self, FollowJointTrajectory, '/gripper_controller/follow_joint_trajectory',
+            callback_group=self._service_cb_group)
 
         # Track active goals so we can cancel before sending new ones
         self._arm_goal_handle = None
@@ -488,11 +493,19 @@ class SOArm101ControlGUI(Node):
             while not done_event.is_set() and self.running:
                 done_event.wait(timeout=0.5)
 
-            # If the command registered a motion event, wait for motion too
+            # If the command registered a motion event, wait for motion too.
+            # Timeout prevents permanent hang if async callback chain breaks.
             motion_evt = getattr(self, '_motion_event', None)
             if motion_evt is not None:
-                while not motion_evt.is_set() and self.running:
+                elapsed = 0.0
+                timeout_s = 60.0
+                while not motion_evt.is_set() and self.running and elapsed < timeout_s:
                     motion_evt.wait(timeout=0.5)
+                    elapsed += 0.5
+                if not motion_evt.is_set():
+                    result['ok'] = False
+                    if not result['msg'] or result['msg'].endswith('executed'):
+                        result['msg'] = f'Motion timed out after {timeout_s:.0f}s'
                 self._motion_event = None
 
             # Check for deferred errors (set by background threads after _run returned)
@@ -1174,31 +1187,115 @@ class SOArm101ControlGUI(Node):
         """Allow joint_states callback to sync sliders again."""
         self._slider_driven = False
 
-    def _cmd_plan_execute(self):
-        """Plan and execute: plan via MoveIt, then send trajectory to arm_controller."""
+    # ------------------------------------------------------------------
+    # Collision-free IK planning: geometric IK → collision check → MoveIt path
+    # ------------------------------------------------------------------
+
+    def _collision_free_ik_plan_and_execute(self, x, y, z, grip_angle,
+                                            wrist_roll, on_complete=None):
+        """Solve geometric IK, then plan a collision-free path via MoveIt.
+
+        Full pipeline: geometric_ik → collision check on solutions →
+        MoveIt path planning around obstacles → trajectory execution.
+
+        Args:
+            x, y, z: TCP target position in base frame (meters).
+            grip_angle: gripper orientation constraint (radians).
+                0 = horizontal, π/4 = 45° down, π/2 = straight down.
+            wrist_roll: fixed wrist_roll angle (radians).
+            on_complete: optional threading.Event to set when done.
+        Returns immediately; execution is async.
+        """
+        from so_arm101_control.compute_workspace import geometric_ik
+
+        solutions = geometric_ik(x, y, z, grip_angle=grip_angle,
+                                 wrist_roll=wrist_roll)
+        if not solutions:
+            self._append_log(
+                f'IK: no solution for ({x:.3f}, {y:.3f}, {z:.3f})', 'warn')
+            if on_complete:
+                on_complete.set()
+            return
+
+        # Pick first collision-free solution
+        chosen = None
+        for i, sol in enumerate(solutions):
+            config = 'elbow-up' if i == 0 else 'elbow-down'
+            if self._check_state_valid(sol):
+                chosen = sol
+                self._append_log(f'  IK: {config} collision-free')
+                break
+            self._append_log(f'  IK: {config} collides', 'warn')
+
+        if chosen is None:
+            self._append_log('IK: all solutions collide', 'warn')
+            if on_complete:
+                on_complete.set()
+            return
+
+        self._append_log(
+            f'IK target: pan={math.degrees(chosen["shoulder_pan"]):.1f}\u00b0 '
+            f'lift={math.degrees(chosen["shoulder_lift"]):.1f}\u00b0 '
+            f'elbow={math.degrees(chosen["elbow_flex"]):.1f}\u00b0 '
+            f'wrist_flex={math.degrees(chosen["wrist_flex"]):.1f}\u00b0 '
+            f'wrist_roll={math.degrees(chosen["wrist_roll"]):.1f}\u00b0')
+
+        self._cmd_plan_execute(target=chosen, on_complete=on_complete,
+                               planner_id='RRTConnect', planning_time=10.0)
+
+    # ------------------------------------------------------------------
+    # FK tab Plan & Execute (MoveIt collision-aware path planning)
+    # ------------------------------------------------------------------
+
+    def _cmd_plan_execute(self, target=None, on_complete=None, planner_id='',
+                          planning_time=10.0):
+        """Plan and execute via MoveIt with collision avoidance.
+
+        Args:
+            target: dict of joint name → angle. If None, reads from slider
+                positions (GUI button mode).
+            on_complete: optional threading.Event to set when done
+                (programmatic/service mode).
+            planner_id: OMPL planner to use (e.g. 'RRTstar' for optimized
+                path). Empty string = default (RRTConnect).
+            planning_time: max seconds for planner (default 10s, use 30s
+                for optimizing planners like RRTstar).
+        """
         if not MOVEIT_AVAILABLE or self.plan_client is None:
             self.status_var.set('MoveIt not available')
+            if on_complete:
+                on_complete.set()
             return
         if not self.plan_client.service_is_ready():
             self.status_var.set('Planning service not ready...')
             self._append_log('/plan_kinematic_path service not ready', 'warn')
+            if on_complete:
+                on_complete.set()
             return
 
         self.root.after(0, lambda: self.execute_btn.config(state=tk.DISABLED))
         self._set_status('Planning...')
+        self._plan_execute_on_complete = on_complete
 
-        with self.joint_lock:
-            target_positions = {n: self.joint_positions[n] for n in ARM_JOINT_NAMES}
-            self._execute_jaw_target = self.joint_positions.get(GRIPPER_JOINT_NAME, 0.0)
+        if target is None:
+            with self.joint_lock:
+                target = {n: self.joint_positions[n] for n in ARM_JOINT_NAMES}
+                self._execute_jaw_target = self.joint_positions.get(GRIPPER_JOINT_NAME, 0.0)
+        else:
+            # Sync sliders so RViz ghost updates to match the target
+            with self.joint_lock:
+                for n in ARM_JOINT_NAMES:
+                    self.joint_positions[n] = target[n]
+            self._execute_jaw_target = None
 
-        goal_str = ', '.join(f'{n}: {target_positions[n]:.3f}' for n in ARM_JOINT_NAMES)
-        self._append_log(f'Plan & Execute → {goal_str}, {GRIPPER_JOINT_NAME}: {self._execute_jaw_target:.3f}')
+        goal_str = ', '.join(f'{n}: {target[n]:.3f}' for n in ARM_JOINT_NAMES)
+        self._append_log(f'Plan & Execute \u2192 {goal_str}')
 
         constraints = Constraints()
         for name in ARM_JOINT_NAMES:
             jc = JointConstraint()
             jc.joint_name = name
-            jc.position = target_positions[name]
+            jc.position = target[name]
             jc.tolerance_above = 0.01
             jc.tolerance_below = 0.01
             jc.weight = 1.0
@@ -1207,8 +1304,10 @@ class SOArm101ControlGUI(Node):
         request = GetMotionPlan.Request()
         mpr = MotionPlanRequest()
         mpr.group_name = 'arm'
-        mpr.num_planning_attempts = 10
-        mpr.allowed_planning_time = 10.0
+        mpr.pipeline_id = 'ompl'
+        mpr.planner_id = planner_id
+        mpr.num_planning_attempts = 50
+        mpr.allowed_planning_time = planning_time
         vel_scale = self.velocity_scale_var.get()
         mpr.max_velocity_scaling_factor = vel_scale
         mpr.max_acceleration_scaling_factor = vel_scale
@@ -1220,11 +1319,14 @@ class SOArm101ControlGUI(Node):
 
     def _plan_and_execute_callback(self, future):
         """Handle planning result — display trajectory in RViz, then execute."""
+        on_complete = getattr(self, '_plan_execute_on_complete', None)
         try:
             resp = future.result()
         except Exception as e:
             self._set_status(f'Planning failed: {e}')
             self.root.after(0, lambda: self.execute_btn.config(state=tk.NORMAL))
+            if on_complete:
+                on_complete.set()
             return
 
         error_code = resp.motion_plan_response.error_code.val
@@ -1232,6 +1334,8 @@ class SOArm101ControlGUI(Node):
             self._set_status(f'Planning failed (error {error_code})')
             self._append_log(f'Planning failed (error {error_code})', 'warn')
             self.root.after(0, lambda: self.execute_btn.config(state=tk.NORMAL))
+            if on_complete:
+                on_complete.set()
             return
 
         robot_trajectory = resp.motion_plan_response.trajectory
@@ -1249,6 +1353,8 @@ class SOArm101ControlGUI(Node):
         if not self.arm_action_client.server_is_ready():
             self._set_status('Arm controller not ready')
             self.root.after(0, lambda: self.execute_btn.config(state=tk.NORMAL))
+            if on_complete:
+                on_complete.set()
             return
 
         self._set_status(f'Executing ({n_pts} points)...')
@@ -1257,21 +1363,26 @@ class SOArm101ControlGUI(Node):
         send_future = self.arm_action_client.send_goal_async(goal)
         send_future.add_done_callback(self._execute_response)
 
-        # Send gripper to its goal position too
-        if hasattr(self, '_execute_jaw_target'):
+        # Send gripper to its goal position too (only from GUI button path)
+        if getattr(self, '_execute_jaw_target', None) is not None:
             self._send_gripper_goal(self._execute_jaw_target, duration_s=1.0)
 
     def _execute_response(self, future):
         """Handle trajectory execution acceptance."""
+        on_complete = getattr(self, '_plan_execute_on_complete', None)
         try:
             goal_handle = future.result()
         except Exception as e:
             self._set_status(f'Execution failed: {e}')
             self.root.after(0, lambda: self.execute_btn.config(state=tk.NORMAL))
+            if on_complete:
+                on_complete.set()
             return
         if not goal_handle.accepted:
             self._set_status('Execution rejected')
             self.root.after(0, lambda: self.execute_btn.config(state=tk.NORMAL))
+            if on_complete:
+                on_complete.set()
             return
         self._set_status('Executing trajectory...')
         result_future = goal_handle.get_result_async()
@@ -1279,6 +1390,7 @@ class SOArm101ControlGUI(Node):
 
     def _execute_result(self, future):
         """Handle trajectory execution result."""
+        on_complete = getattr(self, '_plan_execute_on_complete', None)
         try:
             future.result()
             self._set_status('Execution complete')
@@ -1287,6 +1399,10 @@ class SOArm101ControlGUI(Node):
             self._set_status(f'Execution error: {e}')
             self._append_log(f'Execution error: {e}', 'error')
         self.root.after(0, lambda: self.execute_btn.config(state=tk.NORMAL))
+        # Let joint_states sync sliders back to actual robot position
+        self.root.after(1000, self._clear_slider_driven)
+        if on_complete:
+            on_complete.set()
 
     def _set_status(self, text):
         """Thread-safe status bar update."""
@@ -2650,22 +2766,22 @@ class SOArm101ControlGUI(Node):
             self._append_log(f'Drop targets refreshed: {count} found')
 
     def _add_cup_collision_objects(self):
-        """Add cup mesh collision objects to MoveIt planning scene from _drop_data.
+        """Add cup cylinder collision objects to MoveIt planning scene from _drop_data.
 
-        Loads the actual cup STL mesh (from so_arm101_description/meshes/cup/)
-        and places one collision object per drop target at its /drop_poses position.
-        These appear in RViz as the cup shape and are used by MoveIt for collision avoidance.
+        Uses SolidPrimitive.CYLINDER (radius=39mm, height=96.5mm) instead of
+        the concave cup STL mesh. Convex primitives are reliable with MoveIt FCL
+        collision checking — concave meshes cause false negatives.
         """
         if not MOVEIT_AVAILABLE or not hasattr(self, '_apply_scene_client'):
             return
 
+        # Cup dimensions from STL bounding box (mm → m)
+        CUP_RADIUS = 0.039 * _CUP_COLLISION_PADDING
+        CUP_HEIGHT = 0.0965 * _CUP_COLLISION_PADDING
+
         def _apply():
             if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
                 self._append_log('apply_planning_scene not available for cups', 'warn')
-                return
-            cup_mesh, ok = _load_cup_mesh()
-            if not ok:
-                self._append_log('Could not load cup.stl for collision objects', 'warn')
                 return
             scene = PlanningSceneMsg()
             scene.is_diff = True
@@ -2674,15 +2790,20 @@ class SOArm101ControlGUI(Node):
             for name, pos in drop_items.items():
                 co = CollisionObject()
                 co.header.frame_id = 'base'
-                co.id = f'cup_{name}'  # e.g. "cup_drop_0"
+                co.id = f'cup_{name}'
                 co.operation = CollisionObject.ADD
-                co.meshes.append(cup_mesh)
+                # Cylinder primitive (convex, reliable collision checking)
+                cyl = SolidPrimitive()
+                cyl.type = SolidPrimitive.CYLINDER
+                cyl.dimensions = [CUP_HEIGHT, CUP_RADIUS]
+                co.primitives.append(cyl)
+                # Cylinder origin is at its center, so offset Z up by half height
                 p = Pose()
                 p.position.x = pos['x']
                 p.position.y = pos['y']
-                p.position.z = pos['z']
+                p.position.z = pos['z'] + CUP_HEIGHT / 2.0
                 p.orientation.w = 1.0
-                co.mesh_poses.append(p)
+                co.primitive_poses.append(p)
                 scene.world.collision_objects.append(co)
             if not scene.world.collision_objects:
                 return
@@ -2787,20 +2908,15 @@ class SOArm101ControlGUI(Node):
             self._append_log(f'Objects refreshed: {count} found')
 
     def _cmd_grasp_home(self):
-        """Move arm to grasp-ready home: gripper pointing down.
-
-        Plans from current joint state (not from zeros) to avoid flinging.
-        """
-        duration = self._grasp_arm_duration_var.get()
+        """Move arm to grasp-ready home: gripper pointing down."""
         target = {name: 0.0 for name in ARM_JOINT_NAMES}
         target['wrist_flex'] = math.pi / 2
         from so_arm101_control.compute_workspace import WRIST_ROLL_URDF_PITCH
-        target['wrist_roll'] = math.pi / 2 + WRIST_ROLL_URDF_PITCH
-        self._append_log(f'Grasp Home: wrist_flex=90° wrist_roll={math.degrees(target["wrist_roll"]):.1f}° duration={duration:.1f}s')
+        target['wrist_roll'] = -math.pi / 2 + WRIST_ROLL_URDF_PITCH
+        self._append_log(f'Grasp Home: wrist_flex=90° wrist_roll={math.degrees(target["wrist_roll"]):.1f}°')
         evt = threading.Event()
         self._motion_event = evt
-        self._execute_trajectory(target, duration_s=duration,
-                                 on_complete=evt.set)
+        self._cmd_plan_execute(target=target, on_complete=evt)
 
     # ------------------------------------------------------------------
     # Hot-reload services (so agents can trigger reload without GUI focus)
@@ -2828,24 +2944,29 @@ class SOArm101ControlGUI(Node):
         self.root.after(600, self._add_cup_collision_objects)
 
     def _cmd_drop_select(self):
-        """Select a drop target by name (via ik_target param) or first item.
-        Usage: ros2 param set ... ik_target "drop_2" then call this service.
+        """Select a drop target by name (via ik_target param).
+        Usage: ros2 param set ... ik_target "drop_1" then call this service.
+        Errors if no name provided (matches GUI behavior — must explicitly choose).
         """
         if not hasattr(self, '_drop_listbox') or self._drop_listbox.size() == 0:
             self._append_log('No drop targets to select', 'warn')
             return
         name_hint = self.get_parameter('ik_target').get_parameter_value().string_value.strip()
-        target_idx = 0
-        if name_hint and name_hint.startswith('drop_'):
-            for i in range(self._drop_listbox.size()):
-                entry = self._drop_listbox.get(i)
-                entry_name = entry.split(' [')[0]  # "drop_2 [blue]  (...)" -> "drop_2"
-                if entry_name == name_hint:
-                    target_idx = i
-                    break
-        self._drop_listbox.selection_clear(0, tk.END)
-        self._drop_listbox.selection_set(target_idx)
-        self._append_log(f'Selected drop target: {self._drop_listbox.get(target_idx)}')
+        if not name_hint or not name_hint.startswith('drop_'):
+            self._append_log(
+                'No drop target specified. Set param first: '
+                'ros2 param set /so_arm101_control_gui ik_target "drop_1"',
+                'warn')
+            return
+        for i in range(self._drop_listbox.size()):
+            entry = self._drop_listbox.get(i)
+            entry_name = entry.split(' [')[0]
+            if entry_name == name_hint:
+                self._drop_listbox.selection_clear(0, tk.END)
+                self._drop_listbox.selection_set(i)
+                self._append_log(f'Selected drop target: {self._drop_listbox.get(i)}')
+                return
+        self._append_log(f'Drop target {name_hint!r} not found in list', 'warn')
 
     def _cmd_drop_point(self):
         """Rotate shoulder_pan to face the selected drop target. ARM-02."""
@@ -2866,78 +2987,33 @@ class SOArm101ControlGUI(Node):
             current = dict(self.joint_positions)
         target = dict(current)
         target['shoulder_pan'] = pan
+        target['wrist_roll'] = -math.pi / 2
         self._append_log(
-            f'Drop Point: pan={math.degrees(pan):.1f}\u00b0 toward {name}')
+            f'Drop Point: pan={math.degrees(pan):.1f}\u00b0 wrist_roll=-90\u00b0 toward {name}')
         self._execute_trajectory(target, duration_s=1.0,
                                  on_complete=evt.set)
 
     def _cmd_drop_sweep(self):
-        """Geometric IK drop sweep with collision checking.
-
-        Computes a target position above the cup center, solves with geometric_ik,
-        validates against MoveIt collision scene (cup meshes), and executes.
-        shoulder_pan is locked (set by drop_point). The IK solves for the
-        remaining joints to reach above the cup without colliding.
-        """
+        """IK-planned drop sweep: geometric IK → collision check → MoveIt path."""
         result = self._get_selected_drop_pose()
         if result is None:
             return
         name, x, y, z = result
 
-        duration = self._drop_duration_var.get()
         evt = threading.Event()
         self._motion_event = evt
 
-        # Drop target: above the cup center (cup z + cup height + clearance)
-        drop_height = 0.10  # 100mm above cup base (cup is ~97mm tall)
-        target_z = z + drop_height
-
-        with self.joint_lock:
-            current = dict(self.joint_positions)
+        # Drop target: 30mm above cup rim. Cup is ~97mm tall → 127mm above base.
+        target_z = z + 0.127
 
         self._append_log(
-            f'Drop Sweep: solving IK for ({x:.3f}, {y:.3f}, {target_z:.3f}) '
-            f'above {name}')
+            f'Drop Sweep: IK for ({x:.3f}, {y:.3f}, {target_z:.3f}) above {name}')
 
-        def _solve_and_execute():
-            from so_arm101_control.compute_workspace import geometric_ik
-
-            # Use grasp_yaw=0 (jaws aligned with reach direction)
-            solutions = geometric_ik(x, y, target_z, grasp_yaw=0.0)
-            if not solutions:
-                self._append_log(
-                    f'Drop sweep: no IK solution for ({x:.3f}, {y:.3f}, {target_z:.3f})', 'warn')
-                evt.set()
-                return
-
-            # Check each solution for collision (cup meshes in planning scene)
-            chosen = None
-            for i, sol in enumerate(solutions):
-                config = 'elbow-up' if i == 0 else 'elbow-down'
-                if self._check_state_valid(sol):
-                    chosen = sol
-                    self._append_log(
-                        f'  Drop sweep: {config} collision-free')
-                    break
-                self._append_log(
-                    f'  Drop sweep: {config} collides with cup', 'warn')
-
-            if chosen is None:
-                # Fall back: use first solution anyway (better than not moving)
-                chosen = solutions[0]
-                self._append_log(
-                    'Drop sweep: all solutions collide, using first', 'warn')
-
-            self._append_log(
-                f'Drop Sweep executing: pan={math.degrees(chosen["shoulder_pan"]):.1f}\u00b0 '
-                f'lift={math.degrees(chosen["shoulder_lift"]):.1f}\u00b0 '
-                f'elbow={math.degrees(chosen["elbow_flex"]):.1f}\u00b0 '
-                f'wrist_flex={math.degrees(chosen["wrist_flex"]):.1f}\u00b0 '
-                f'wrist_roll={math.degrees(chosen["wrist_roll"]):.1f}\u00b0')
-            self._execute_trajectory(chosen, duration_s=duration,
-                                     on_complete=evt.set)
-
-        threading.Thread(target=_solve_and_execute, daemon=True).start()
+        self._collision_free_ik_plan_and_execute(
+            x, y, target_z,
+            grip_angle=math.radians(45),
+            wrist_roll=-math.pi / 2,
+            on_complete=evt)
 
     def _cmd_drop_release(self):
         """Open gripper to release held object into cup. ARM-04.
