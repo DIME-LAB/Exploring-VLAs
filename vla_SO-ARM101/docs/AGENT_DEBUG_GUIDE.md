@@ -60,6 +60,16 @@ pkill -SIGINT -f "ros2.*launch.*control.launch"
 # so service callbacks exit within 0.5s of signal.
 ```
 
+## Service Response Behavior
+
+All `_cmd_*` services use `std_srvs/srv/Trigger` and return:
+- `success=True` — command completed without warnings/errors
+- `success=False` — command failed; `message` contains the error reason
+
+Any `_append_log('...', 'warn')` or `_append_log('...', 'error')` inside a command
+automatically sets `success=False` on the service response. Motion commands block
+until the trajectory completes before responding.
+
 ## Service Reference
 
 ### Discovery

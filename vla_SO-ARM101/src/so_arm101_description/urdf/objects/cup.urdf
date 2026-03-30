@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<robot name="cup">
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://so_arm101_description/meshes/cup/cup.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://so_arm101_description/meshes/cup/cup.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin xyz="-7.06381e-07 6.25117e-07 0.0482337" rpy="0 0 0"/>
+      <mass value="0.235049"/>
+      <inertia ixx="0.000009" ixy="-0.000000" ixz="0.000000"
+              iyy="0.000009" iyz="-0.000000" izz="0.000003"/>
+    </inertial>
+  </link>
+</robot>

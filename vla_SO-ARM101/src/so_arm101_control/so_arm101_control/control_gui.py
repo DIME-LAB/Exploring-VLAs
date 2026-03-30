@@ -26,7 +26,7 @@ from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from control_msgs.action import FollowJointTrajectory
 from builtin_interfaces.msg import Duration
-from geometry_msgs.msg import Pose, PoseStamped
+from geometry_msgs.msg import Point, Pose, PoseStamped
 from tf2_msgs.msg import TFMessage
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
@@ -38,7 +38,7 @@ try:
         MotionPlanRequest, PlanningScene as PlanningSceneMsg, CollisionObject,
         AllowedCollisionEntry,
     )
-    from shape_msgs.msg import SolidPrimitive
+    from shape_msgs.msg import SolidPrimitive, Mesh as ShapeMesh, MeshTriangle
     from moveit_msgs.srv import (
         ExecuteKnownTrajectory, ApplyPlanningScene, GetPlanningScene as GetPlanningSceneSrv,
     )
@@ -51,7 +51,7 @@ except ImportError:
             MotionPlanRequest, PlanningScene as PlanningSceneMsg, CollisionObject,
             AllowedCollisionEntry,
         )
-        from shape_msgs.msg import SolidPrimitive
+        from shape_msgs.msg import SolidPrimitive, Mesh as ShapeMesh, MeshTriangle
         from moveit_msgs.srv import (
             ApplyPlanningScene, GetPlanningScene as GetPlanningSceneSrv,
         )
@@ -127,6 +127,59 @@ TCP_CLEARANCE_M = 0.001             # extra IK offset beyond grip_width/2 for ja
 _WRIST_ROLL_URDF_PITCH = 0.0487
 # Inherent 90° from kinematic chain (wrist_flex yaw=-π/2, wrist_roll yaw=π)
 _CHAIN_BASE_ROTATION = math.pi / 2 - _WRIST_ROLL_URDF_PITCH
+
+# Cup mesh for MoveIt collision objects
+# STL is in mm, scaled 0.001 to meters (matches cup.urdf)
+_CUP_STL_SCALE = 0.001
+
+
+def _load_cup_mesh():
+    """Load cup.stl as a shape_msgs/Mesh for MoveIt collision objects.
+
+    Returns (ShapeMesh, success). Caches after first load.
+    The STL is in mm; vertices are scaled by _CUP_STL_SCALE to meters.
+    """
+    if hasattr(_load_cup_mesh, '_cached'):
+        return _load_cup_mesh._cached, True
+    try:
+        import struct
+        stl_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            '..', 'so_arm101_description', 'meshes', 'cup', 'cup.stl')
+        # Also check installed share path
+        if not os.path.isfile(stl_path):
+            from ament_index_python.packages import get_package_share_directory
+            stl_path = os.path.join(
+                get_package_share_directory('so_arm101_description'),
+                'meshes', 'cup', 'cup.stl')
+        with open(stl_path, 'rb') as f:
+            f.read(80)  # header
+            num_triangles = struct.unpack('<I', f.read(4))[0]
+            mesh = ShapeMesh()
+            vertex_map = {}
+            for _ in range(num_triangles):
+                f.read(12)  # normal
+                tri = MeshTriangle()
+                indices = []
+                for _v in range(3):
+                    vx, vy, vz = struct.unpack('<fff', f.read(12))
+                    key = (vx, vy, vz)
+                    if key not in vertex_map:
+                        vertex_map[key] = len(mesh.vertices)
+                        pt = Point()
+                        pt.x = float(vx) * _CUP_STL_SCALE
+                        pt.y = float(vy) * _CUP_STL_SCALE
+                        pt.z = float(vz) * _CUP_STL_SCALE
+                        mesh.vertices.append(pt)
+                    indices.append(vertex_map[key])
+                tri.vertex_indices = indices
+                mesh.triangles.append(tri)
+                f.read(2)  # attribute byte count
+        _load_cup_mesh._cached = mesh
+        return mesh, True
+    except Exception as e:
+        print(f'[cup_mesh] Failed to load cup.stl: {e}')
+        return None, False
 
 
 def _normalize_grasp_yaw(yaw, pan):
@@ -283,6 +336,7 @@ class SOArm101ControlGUI(Node):
         self._drop_data = {}
         self._drop_lock = threading.Lock()
         self._drop_sub = None  # Created by _build_grasp_tab → _update_drop_topic
+        self._cup_collision_names = []
         self.objects_bbox = {}   # {name: {sx, sy, sz}} from bbox topic
         _default_bbox = '/objects_bbox_real' if self.use_real_hardware else '/objects_bbox_sim'
         self.bbox_sub = self.create_subscription(
@@ -407,10 +461,16 @@ class SOArm101ControlGUI(Node):
 
             def _run():
                 try:
-                    # Clear any stale motion event
+                    # Clear any stale motion event / error
                     self._motion_event = None
+                    self._cmd_error = None
                     getattr(self, method_name)()
-                    result['msg'] = f'{method_name} executed'
+                    # Check if the command signaled failure
+                    if self._cmd_error:
+                        result['ok'] = False
+                        result['msg'] = self._cmd_error
+                    else:
+                        result['msg'] = f'{method_name} executed'
                 except Exception as e:
                     result['ok'] = False
                     result['msg'] = str(e)
@@ -434,6 +494,13 @@ class SOArm101ControlGUI(Node):
                 while not motion_evt.is_set() and self.running:
                     motion_evt.wait(timeout=0.5)
                 self._motion_event = None
+
+            # Check for deferred errors (set by background threads after _run returned)
+            cmd_err = getattr(self, '_cmd_error', None)
+            if cmd_err:
+                result['ok'] = False
+                result['msg'] = cmd_err
+                self._cmd_error = None
 
             response.success = result['ok']
             response.message = result['msg']
@@ -589,7 +656,7 @@ class SOArm101ControlGUI(Node):
             try:
                 content = self._process_log.get('1.0', 'end').strip()
                 lines = content.split('\n')
-                result['msg'] = '\n'.join(lines[-20:]) if lines else '(empty)'
+                result['msg'] = '\n'.join(lines) if lines else '(empty)'
             except Exception as e:
                 result['msg'] = f'error: {e}'
             finally:
@@ -1363,10 +1430,17 @@ class SOArm101ControlGUI(Node):
             self.root.after(0, _do)
 
     def _append_log(self, text, level='info'):
-        """Thread-safe log append to Process Log. level: 'info', 'warn', 'error'."""
+        """Thread-safe log append to Process Log. level: 'info', 'warn', 'error'.
+
+        When level is 'warn' or 'error', also sets _cmd_error so the
+        trigger service callback can report success=False.
+        """
         import datetime
         timestamp = datetime.datetime.now().strftime('%H:%M:%S')
         line = f'[{timestamp}] {text}\n'
+
+        if level in ('warn', 'error'):
+            self._cmd_error = text
 
         def _do_append():
             if not hasattr(self, '_process_log'):
@@ -1893,11 +1967,8 @@ class SOArm101ControlGUI(Node):
                   command=lambda: self._update_drop_topic(
                       self._drop_topic_var.get().strip())).pack(side=tk.RIGHT, padx=(2, 0))
         tk.Button(drop_topic_row, text='Refresh', bg='#b0b0b0', fg='#1a1a1a',
-                  command=lambda: [
-                      self._drop_data.clear(),
-                      self._populate_drop_list(),
-                      self.root.after(500, self._populate_drop_list)
-                  ]).pack(side=tk.RIGHT, padx=(2, 0))
+                  command=lambda: self._cmd_drop_refresh()
+                  ).pack(side=tk.RIGHT, padx=(2, 0))
 
         drop_list_frame = ttk.LabelFrame(frame, text='Drop Targets')
         drop_list_frame.pack(fill=tk.X, padx=10, pady=5)
@@ -2549,6 +2620,7 @@ class SOArm101ControlGUI(Node):
                     'qz': tf.transform.rotation.z,
                     'qw': tf.transform.rotation.w,
                 }
+        # Cup collision objects updated on manual refresh (_cmd_drop_refresh), not here
 
     def _update_drop_topic(self, topic='/drop_poses'):
         """Switch drop subscription to topic."""
@@ -2556,6 +2628,7 @@ class SOArm101ControlGUI(Node):
             self.destroy_subscription(self._drop_sub)
         with self._drop_lock:
             self._drop_data.clear()
+        self._remove_cup_collision_objects()
         self._drop_sub = self.create_subscription(
             TFMessage, topic, self._drop_callback, 10)
         self._append_log(f'Drop topic: {topic}')
@@ -2575,6 +2648,80 @@ class SOArm101ControlGUI(Node):
         count = self._drop_listbox.size()
         if count > 0:
             self._append_log(f'Drop targets refreshed: {count} found')
+
+    def _add_cup_collision_objects(self):
+        """Add cup mesh collision objects to MoveIt planning scene from _drop_data.
+
+        Loads the actual cup STL mesh (from so_arm101_description/meshes/cup/)
+        and places one collision object per drop target at its /drop_poses position.
+        These appear in RViz as the cup shape and are used by MoveIt for collision avoidance.
+        """
+        if not MOVEIT_AVAILABLE or not hasattr(self, '_apply_scene_client'):
+            return
+
+        def _apply():
+            if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
+                self._append_log('apply_planning_scene not available for cups', 'warn')
+                return
+            cup_mesh, ok = _load_cup_mesh()
+            if not ok:
+                self._append_log('Could not load cup.stl for collision objects', 'warn')
+                return
+            scene = PlanningSceneMsg()
+            scene.is_diff = True
+            with self._drop_lock:
+                drop_items = dict(self._drop_data)
+            for name, pos in drop_items.items():
+                co = CollisionObject()
+                co.header.frame_id = 'base'
+                co.id = f'cup_{name}'  # e.g. "cup_drop_0"
+                co.operation = CollisionObject.ADD
+                co.meshes.append(cup_mesh)
+                p = Pose()
+                p.position.x = pos['x']
+                p.position.y = pos['y']
+                p.position.z = pos['z']
+                p.orientation.w = 1.0
+                co.mesh_poses.append(p)
+                scene.world.collision_objects.append(co)
+            if not scene.world.collision_objects:
+                return
+            self._cup_collision_names = [co.id for co in scene.world.collision_objects]
+            req = ApplyPlanningScene.Request()
+            req.scene = scene
+            future = self._apply_scene_client.call_async(req)
+            self._wait_future(future, timeout_sec=5.0)
+            if future.result() is not None and future.result().success:
+                self._append_log(f'Added {len(drop_items)} cup collision objects (mesh)')
+            else:
+                self._append_log('Failed to add cup collision objects', 'warn')
+
+        threading.Thread(target=_apply, daemon=True).start()
+
+    def _remove_cup_collision_objects(self):
+        """Remove all cup collision objects from planning scene."""
+        if not MOVEIT_AVAILABLE or not hasattr(self, '_apply_scene_client'):
+            return
+
+        def _apply():
+            if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
+                return
+            scene = PlanningSceneMsg()
+            scene.is_diff = True
+            for name in list(getattr(self, '_cup_collision_names', [])):
+                co = CollisionObject()
+                co.header.frame_id = 'base'
+                co.id = name
+                co.operation = CollisionObject.REMOVE
+                scene.world.collision_objects.append(co)
+            if scene.world.collision_objects:
+                req = ApplyPlanningScene.Request()
+                req.scene = scene
+                future = self._apply_scene_client.call_async(req)
+                self._wait_future(future, timeout_sec=5.0)
+                self._cup_collision_names.clear()
+
+        threading.Thread(target=_apply, daemon=True).start()
 
     def _get_selected_drop_pose(self):
         """Return (name, x, y, z) for the selected drop listbox entry, or None."""
@@ -2673,10 +2820,12 @@ class SOArm101ControlGUI(Node):
     # ------------------------------------------------------------------
 
     def _cmd_drop_refresh(self):
-        """Refresh drop listbox from /drop_poses topic data."""
+        """Refresh drop listbox and cup collision objects from /drop_poses topic data."""
         self._drop_data.clear()
         self._populate_drop_list()
         self.root.after(500, self._populate_drop_list)
+        # Update cup collision objects in MoveIt planning scene (pulls latest poses)
+        self.root.after(600, self._add_cup_collision_objects)
 
     def _cmd_drop_select(self):
         """Select a drop target by name (via ik_target param) or first item.
@@ -2723,7 +2872,13 @@ class SOArm101ControlGUI(Node):
                                  on_complete=evt.set)
 
     def _cmd_drop_sweep(self):
-        """Sweep wrist only: wrist_flex 90->0, wrist_roll aligned. All other joints hold."""
+        """Geometric IK drop sweep with collision checking.
+
+        Computes a target position above the cup center, solves with geometric_ik,
+        validates against MoveIt collision scene (cup meshes), and executes.
+        shoulder_pan is locked (set by drop_point). The IK solves for the
+        remaining joints to reach above the cup without colliding.
+        """
         result = self._get_selected_drop_pose()
         if result is None:
             return
@@ -2733,20 +2888,56 @@ class SOArm101ControlGUI(Node):
         evt = threading.Event()
         self._motion_event = evt
 
+        # Drop target: above the cup center (cup z + cup height + clearance)
+        drop_height = 0.10  # 100mm above cup base (cup is ~97mm tall)
+        target_z = z + drop_height
+
         with self.joint_lock:
             current = dict(self.joint_positions)
 
-        # Only change wrist joints — everything else stays put
-        end = dict(current)
-        end['wrist_flex'] = 0.0           # horizontal (was 90° at grasp home)
-        from so_arm101_control.compute_workspace import WRIST_ROLL_URDF_PITCH
-        end['wrist_roll'] = -(math.pi / 2 + WRIST_ROLL_URDF_PITCH)
-
         self._append_log(
-            f'Drop Sweep: wrist_flex→0° wrist_roll→{math.degrees(end["wrist_roll"]):.1f}° '
-            f'over {duration:.1f}s toward {name}')
-        self._execute_trajectory(end, duration_s=duration,
-                                 on_complete=evt.set)
+            f'Drop Sweep: solving IK for ({x:.3f}, {y:.3f}, {target_z:.3f}) '
+            f'above {name}')
+
+        def _solve_and_execute():
+            from so_arm101_control.compute_workspace import geometric_ik
+
+            # Use grasp_yaw=0 (jaws aligned with reach direction)
+            solutions = geometric_ik(x, y, target_z, grasp_yaw=0.0)
+            if not solutions:
+                self._append_log(
+                    f'Drop sweep: no IK solution for ({x:.3f}, {y:.3f}, {target_z:.3f})', 'warn')
+                evt.set()
+                return
+
+            # Check each solution for collision (cup meshes in planning scene)
+            chosen = None
+            for i, sol in enumerate(solutions):
+                config = 'elbow-up' if i == 0 else 'elbow-down'
+                if self._check_state_valid(sol):
+                    chosen = sol
+                    self._append_log(
+                        f'  Drop sweep: {config} collision-free')
+                    break
+                self._append_log(
+                    f'  Drop sweep: {config} collides with cup', 'warn')
+
+            if chosen is None:
+                # Fall back: use first solution anyway (better than not moving)
+                chosen = solutions[0]
+                self._append_log(
+                    'Drop sweep: all solutions collide, using first', 'warn')
+
+            self._append_log(
+                f'Drop Sweep executing: pan={math.degrees(chosen["shoulder_pan"]):.1f}\u00b0 '
+                f'lift={math.degrees(chosen["shoulder_lift"]):.1f}\u00b0 '
+                f'elbow={math.degrees(chosen["elbow_flex"]):.1f}\u00b0 '
+                f'wrist_flex={math.degrees(chosen["wrist_flex"]):.1f}\u00b0 '
+                f'wrist_roll={math.degrees(chosen["wrist_roll"]):.1f}\u00b0')
+            self._execute_trajectory(chosen, duration_s=duration,
+                                     on_complete=evt.set)
+
+        threading.Thread(target=_solve_and_execute, daemon=True).start()
 
     def _cmd_drop_release(self):
         """Open gripper to release held object into cup. ARM-04.
