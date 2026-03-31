@@ -320,7 +320,7 @@ ros2 service call $S/drop_select $T
 ros2 service call $S/drop_point $T
 
 # 12. Drop sweep — geometric IK (45° grip angle) + MoveIt collision-free path planning
-# Uses OMPL RRTConnect with cylinder collision objects (10% padded) for cup avoidance
+# Uses OMPL RRTConnect with convex hull collision meshes (10% padded) for cup avoidance
 ros2 service call $S/drop_sweep $T
 
 # 13. Release object into cup — blocks until gripper opens
@@ -359,10 +359,15 @@ ros2 service call $S/grasp_home $T
 
 > **Note:** Service calls block via `_motion_event` pattern (60s timeout).
 > `grasp_home` and `drop_sweep` use MoveIt collision-aware planning
-> (`_cmd_plan_execute` → OMPL RRTConnect) which avoids cup collision objects.
+> (`_cmd_plan_execute` → OMPL RRTConnect) which avoids cup convex hull collision meshes.
 > `drop_point` uses direct trajectory interpolation (no collision checking —
 > only rotates shoulder_pan). The trigger callback polls `_motion_event` at 0.5s
 > intervals and responds after trajectory execution or timeout.
+>
+> **RViz display:** `drop_refresh` also publishes colored cup visual markers
+> (MESH_RESOURCE on `/cup_visual_markers_array`). Toggle via the RViz tab in the GUI.
+> Collision hulls are visible underneath when visual markers are toggled OFF
+> (requires "Show Scene Geometry" enabled in RViz MotionPlanning display).
 
 ## Drop Configuration
 
@@ -384,6 +389,8 @@ Dictionary: DICT_4X4_50, marker size: 25mm, placed at 45% cup height.
 | Height | 96.5mm |
 | Marker height | 43.4mm (45% of height) |
 | Opening radius | ~39mm |
+| Collision mesh | Convex hull of cup.stl (via trimesh), 10% padding |
+| Visual marker | Raw cup.stl (MESH_RESOURCE), colored per cup |
 
 ### Drop Pose Sources
 
@@ -556,10 +563,10 @@ No `sleep` needed between sequential service calls — each waits for completion
 - If persistent: increase `num_planning_attempts` or adjust `_CUP_COLLISION_PADDING`
 
 ### Cup knocked over in sim but no MoveIt error
-- Check collision objects: `ros2 service call /get_planning_scene ...` — cups should be CYLINDER primitives, not meshes
-- Concave STL meshes cause FCL false negatives — must use convex primitives (cylinders)
+- Check collision objects: `ros2 service call /get_planning_scene ...` — cups should be convex hull meshes (loaded via trimesh from cup.stl)
 - Check padding: `_CUP_COLLISION_PADDING` in control_gui.py (default 1.1 = 10% larger than real cup)
 - Verify cup positions match: compare `/drop_poses` topic vs planning scene object poses
+- Toggle "Visual (colored cups)" OFF in the RViz tab to see the green collision hulls directly
 
 ### Sweep misses cup
 - Offset values in aruco_config.json may need tuning

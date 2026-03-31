@@ -202,7 +202,7 @@ ros2 service call $S/drop_select $T
 # Point toward cup (pan + wrist_roll=-90°)
 ros2 service call $S/drop_point $T
 
-# Drop sweep — geometric IK + MoveIt collision-free path (avoids cup cylinders)
+# Drop sweep — geometric IK + MoveIt collision-free path (avoids cup convex hulls)
 ros2 service call $S/drop_sweep $T
 
 # Release

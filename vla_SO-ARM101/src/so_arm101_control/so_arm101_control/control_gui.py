@@ -26,9 +26,10 @@ from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from control_msgs.action import FollowJointTrajectory
 from builtin_interfaces.msg import Duration
-from geometry_msgs.msg import Point, Pose, PoseStamped
+from geometry_msgs.msg import Point, Pose, PoseStamped, Vector3
 from tf2_msgs.msg import TFMessage
 from std_msgs.msg import String
+from visualization_msgs.msg import Marker as VisMarker, MarkerArray
 from std_srvs.srv import Trigger
 from tf2_ros import Buffer as TfBuffer, TransformListener
 try:
@@ -139,46 +140,36 @@ def _load_cup_mesh():
     """Load cup.stl as a shape_msgs/Mesh for MoveIt collision objects.
 
     Returns (ShapeMesh, success). Caches after first load.
-    The STL is in mm; vertices are scaled by _CUP_STL_SCALE to meters.
+    Uses trimesh for robust STL loading. The STL is in mm; vertices are
+    scaled by _CUP_STL_SCALE to meters with _CUP_COLLISION_PADDING.
     """
     if hasattr(_load_cup_mesh, '_cached'):
         return _load_cup_mesh._cached, True
     try:
-        import struct
+        import trimesh
         stl_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             '..', 'so_arm101_description', 'meshes', 'cup', 'cup.stl')
-        # Also check installed share path
         if not os.path.isfile(stl_path):
             from ament_index_python.packages import get_package_share_directory
             stl_path = os.path.join(
                 get_package_share_directory('so_arm101_description'),
                 'meshes', 'cup', 'cup.stl')
-        with open(stl_path, 'rb') as f:
-            f.read(80)  # header
-            num_triangles = struct.unpack('<I', f.read(4))[0]
-            mesh = ShapeMesh()
-            vertex_map = {}
-            for _ in range(num_triangles):
-                f.read(12)  # normal
-                tri = MeshTriangle()
-                indices = []
-                for _v in range(3):
-                    vx, vy, vz = struct.unpack('<fff', f.read(12))
-                    key = (vx, vy, vz)
-                    if key not in vertex_map:
-                        vertex_map[key] = len(mesh.vertices)
-                        pt = Point()
-                        scale = _CUP_STL_SCALE * _CUP_COLLISION_PADDING
-                        pt.x = float(vx) * scale
-                        pt.y = float(vy) * scale
-                        pt.z = float(vz) * scale
-                        mesh.vertices.append(pt)
-                    indices.append(vertex_map[key])
-                tri.vertex_indices = indices
-                mesh.triangles.append(tri)
-                f.read(2)  # attribute byte count
+        raw = trimesh.load(stl_path).convex_hull  # Solid hull for clean RViz rendering
+        scale = _CUP_STL_SCALE * _CUP_COLLISION_PADDING
+        mesh = ShapeMesh()
+        for v in raw.vertices:
+            pt = Point()
+            pt.x = float(v[0]) * scale
+            pt.y = float(v[1]) * scale
+            pt.z = float(v[2]) * scale
+            mesh.vertices.append(pt)
+        for f in raw.faces:
+            tri = MeshTriangle()
+            tri.vertex_indices = [int(f[0]), int(f[1]), int(f[2])]
+            mesh.triangles.append(tri)
         _load_cup_mesh._cached = mesh
+        print(f'[cup_mesh] Loaded {len(mesh.triangles)} triangles, {len(mesh.vertices)} vertices')
         return mesh, True
     except Exception as e:
         print(f'[cup_mesh] Failed to load cup.stl: {e}')
@@ -279,6 +270,20 @@ DROP_ID_LABELS = {
     "drop_2": "blue",
 }
 
+# Visual marker colors for cups in RViz (RGBA, alpha<1.0 avoids ros2/rviz#875)
+_CUP_VISUAL_COLORS = {
+    "drop_0": (0.9, 0.15, 0.1, 0.99),   # red
+    "drop_1": (0.1, 0.75, 0.2, 0.99),   # green
+    "drop_2": (0.15, 0.3, 0.9, 0.99),   # blue
+}
+def _get_cup_stl_uri():
+    """Resolve cup STL file URI for RViz MESH_RESOURCE markers."""
+    from ament_index_python.packages import get_package_share_directory
+    path = os.path.join(
+        get_package_share_directory('so_arm101_description'),
+        'meshes', 'cup', 'cup.stl')
+    return 'file://' + path if os.path.isfile(path) else ''
+
 
 class SOArm101ControlGUI(Node):
     """ROS2 node with embedded Tkinter GUI for SO-ARM101 control."""
@@ -342,6 +347,10 @@ class SOArm101ControlGUI(Node):
         self._drop_lock = threading.Lock()
         self._drop_sub = None  # Created by _build_grasp_tab → _update_drop_topic
         self._cup_collision_names = []
+        from rclpy.qos import QoSProfile, DurabilityPolicy
+        self._cup_visual_pub = self.create_publisher(
+            MarkerArray, '/cup_visual_markers_array',
+            QoSProfile(depth=5, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.objects_bbox = {}   # {name: {sx, sy, sz}} from bbox topic
         _default_bbox = '/objects_bbox_real' if self.use_real_hardware else '/objects_bbox_sim'
         self.bbox_sub = self.create_subscription(
@@ -911,6 +920,7 @@ class SOArm101ControlGUI(Node):
         self._build_individual_tab(notebook)
         self._build_arm_control_tab(notebook)
         self._build_grasp_tab(notebook)
+        self._build_display_tab(notebook)
 
         # Auto-populate IK fields when switching to IK tab
         notebook.bind('<<NotebookTabChanged>>', self._on_tab_changed)
@@ -1306,7 +1316,8 @@ class SOArm101ControlGUI(Node):
         mpr.group_name = 'arm'
         mpr.pipeline_id = 'ompl'
         mpr.planner_id = planner_id
-        mpr.num_planning_attempts = 50
+        attempts_var = getattr(self, '_planning_attempts_var', None)
+        mpr.num_planning_attempts = attempts_var.get() if attempts_var else 50
         mpr.allowed_planning_time = planning_time
         vel_scale = self.velocity_scale_var.get()
         mpr.max_velocity_scaling_factor = vel_scale
@@ -1777,6 +1788,7 @@ class SOArm101ControlGUI(Node):
                 (self._build_individual_tab, 'FK'),
                 (self._build_arm_control_tab, 'IK'),
                 (self._build_grasp_tab, 'Grasp'),
+                (self._build_display_tab, 'RViz'),
             ]:
                 try:
                     builder(notebook)
@@ -2118,6 +2130,54 @@ class SOArm101ControlGUI(Node):
 
         # Initial subscription to default topic
         self._cmd_grasp_update_topic()
+
+    def _build_display_tab(self, notebook):
+        frame = ttk.Frame(notebook)
+        notebook.add(frame, text='RViz')
+
+        # --- Cups ---
+        cup_frame = ttk.LabelFrame(frame, text='Cups')
+        cup_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        self._show_visual_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(cup_frame, text='Visual (colored cups)',
+                       variable=self._show_visual_var,
+                       command=self._toggle_visual_markers).pack(anchor='w', padx=5, pady=2)
+
+        pad_row = tk.Frame(cup_frame)
+        pad_row.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(pad_row, text='Collision padding %:', anchor='w').pack(side=tk.LEFT)
+        self._collision_padding_var = tk.IntVar(value=10)
+        tk.Spinbox(pad_row, textvariable=self._collision_padding_var,
+                   from_=0, to=50, increment=5, width=5).pack(side=tk.LEFT, padx=(5, 0))
+        tk.Button(pad_row, text='Apply', bg='#b0b0b0', fg='#1a1a1a',
+                  command=self._apply_collision_padding).pack(side=tk.LEFT, padx=(5, 0))
+
+        # --- Planning ---
+        plan_frame = ttk.LabelFrame(frame, text='Planning')
+        plan_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        grip_row = tk.Frame(plan_frame)
+        grip_row.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(grip_row, text='Drop grip angle (deg):', anchor='w').pack(side=tk.LEFT)
+        self._drop_grip_angle_var = tk.IntVar(value=45)
+        tk.Spinbox(grip_row, textvariable=self._drop_grip_angle_var,
+                   from_=0, to=90, increment=5, width=5).pack(side=tk.LEFT, padx=(5, 0))
+
+        attempts_row = tk.Frame(plan_frame)
+        attempts_row.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(attempts_row, text='Planning attempts:', anchor='w').pack(side=tk.LEFT)
+        self._planning_attempts_var = tk.IntVar(value=50)
+        tk.Spinbox(attempts_row, textvariable=self._planning_attempts_var,
+                   from_=1, to=200, increment=10, width=5).pack(side=tk.LEFT, padx=(5, 0))
+
+        # --- Info ---
+        info_frame = ttk.LabelFrame(frame, text='Info')
+        info_frame.pack(fill=tk.X, padx=10, pady=5)
+        tk.Label(info_frame, text='Collision planning is always ON regardless of display',
+                 anchor='w', fg='#555555').pack(anchor='w', padx=5, pady=1)
+        tk.Label(info_frame, text='Changes to planning params take effect on next motion',
+                 anchor='w', fg='#555555').pack(anchor='w', padx=5, pady=1)
 
     # ------------------------------------------------------------------
     # IK tab: tab-change, FK, spinbox IK, buttons
@@ -2766,18 +2826,19 @@ class SOArm101ControlGUI(Node):
             self._append_log(f'Drop targets refreshed: {count} found')
 
     def _add_cup_collision_objects(self):
-        """Add cup cylinder collision objects to MoveIt planning scene from _drop_data.
+        """Add cup collision objects to MoveIt planning scene from _drop_data.
 
-        Uses SolidPrimitive.CYLINDER (radius=39mm, height=96.5mm) instead of
-        the concave cup STL mesh. Convex primitives are reliable with MoveIt FCL
-        collision checking — concave meshes cause false negatives.
+        Uses the CAD cup mesh (via trimesh) for accurate collision geometry.
+        Falls back to SolidPrimitive.CYLINDER if mesh loading fails.
         """
         if not MOVEIT_AVAILABLE or not hasattr(self, '_apply_scene_client'):
             return
 
-        # Cup dimensions from STL bounding box (mm → m)
+        # Cylinder fallback dimensions (mm → m, with padding)
         CUP_RADIUS = 0.039 * _CUP_COLLISION_PADDING
         CUP_HEIGHT = 0.0965 * _CUP_COLLISION_PADDING
+
+        cup_mesh, mesh_ok = _load_cup_mesh()
 
         def _apply():
             if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
@@ -2792,18 +2853,23 @@ class SOArm101ControlGUI(Node):
                 co.header.frame_id = 'base'
                 co.id = f'cup_{name}'
                 co.operation = CollisionObject.ADD
-                # Cylinder primitive (convex, reliable collision checking)
-                cyl = SolidPrimitive()
-                cyl.type = SolidPrimitive.CYLINDER
-                cyl.dimensions = [CUP_HEIGHT, CUP_RADIUS]
-                co.primitives.append(cyl)
-                # Cylinder origin is at its center, so offset Z up by half height
                 p = Pose()
                 p.position.x = pos['x']
                 p.position.y = pos['y']
-                p.position.z = pos['z'] + CUP_HEIGHT / 2.0
                 p.orientation.w = 1.0
-                co.primitive_poses.append(p)
+                if mesh_ok:
+                    # Mesh origin is at bottom center (Z=0 is cup base)
+                    p.position.z = pos['z']
+                    co.meshes.append(cup_mesh)
+                    co.mesh_poses.append(p)
+                else:
+                    # Cylinder origin is at center, offset Z by half height
+                    p.position.z = pos['z'] + CUP_HEIGHT / 2.0
+                    cyl = SolidPrimitive()
+                    cyl.type = SolidPrimitive.CYLINDER
+                    cyl.dimensions = [CUP_HEIGHT, CUP_RADIUS]
+                    co.primitives.append(cyl)
+                    co.primitive_poses.append(p)
                 scene.world.collision_objects.append(co)
             if not scene.world.collision_objects:
                 return
@@ -2813,7 +2879,8 @@ class SOArm101ControlGUI(Node):
             future = self._apply_scene_client.call_async(req)
             self._wait_future(future, timeout_sec=5.0)
             if future.result() is not None and future.result().success:
-                self._append_log(f'Added {len(drop_items)} cup collision objects (mesh)')
+                label = 'mesh' if mesh_ok else 'cylinder'
+                self._append_log(f'Added {len(drop_items)} cup collision objects ({label})')
             else:
                 self._append_log('Failed to add cup collision objects', 'warn')
 
@@ -2843,6 +2910,82 @@ class SOArm101ControlGUI(Node):
                 self._cup_collision_names.clear()
 
         threading.Thread(target=_apply, daemon=True).start()
+
+    def _publish_cup_visual_markers(self):
+        """Publish colored cup meshes as RViz visual markers from _drop_data."""
+        if not hasattr(self, '_cup_visual_pub'):
+            from rclpy.qos import QoSProfile, DurabilityPolicy
+            self._cup_visual_pub = self.create_publisher(
+                MarkerArray, '/cup_visual_markers_array',
+                QoSProfile(depth=5, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        with self._drop_lock:
+            drop_items = dict(self._drop_data)
+        if not drop_items:
+            return
+        scale = _CUP_STL_SCALE * _CUP_COLLISION_PADDING
+        ma = MarkerArray()
+        for i, (name, pos) in enumerate(drop_items.items()):
+            r, g, b, a = _CUP_VISUAL_COLORS.get(name, (0.5, 0.5, 0.5, 0.99))
+            m = VisMarker()
+            m.header.frame_id = 'base'
+            m.header.stamp = self.get_clock().now().to_msg()
+            m.ns = 'cup_visual'
+            m.id = i
+            m.type = VisMarker.MESH_RESOURCE
+            m.action = VisMarker.ADD
+            m.mesh_resource = _get_cup_stl_uri()
+            m.pose.position.x = pos['x']
+            m.pose.position.y = pos['y']
+            m.pose.position.z = pos['z']
+            m.pose.orientation.w = 1.0
+            m.scale = Vector3(x=scale, y=scale, z=scale)
+            from std_msgs.msg import ColorRGBA
+            m.color = ColorRGBA(r=r, g=g, b=b, a=a)
+            m.lifetime = Duration(sec=0)
+            m.frame_locked = True
+            ma.markers.append(m)
+        self._cup_visual_pub.publish(ma)
+
+    def _apply_collision_padding(self):
+        """Update collision padding and re-add collision objects + visual markers."""
+        global _CUP_COLLISION_PADDING
+        pct = self._collision_padding_var.get()
+        _CUP_COLLISION_PADDING = 1.0 + pct / 100.0
+        # Clear cached mesh so it rebuilds with new padding
+        if hasattr(_load_cup_mesh, '_cached'):
+            del _load_cup_mesh._cached
+        self._append_log(f'Collision padding: {pct}% ({_CUP_COLLISION_PADDING:.2f}x)')
+        # Re-add collision objects and visual markers with new padding
+        self._add_cup_collision_objects()
+        self.root.after(300, self._refresh_display_markers)
+
+    def _refresh_display_markers(self):
+        """Republish visual markers based on current toggle state."""
+        if getattr(self, '_show_visual_var', None) and self._show_visual_var.get():
+            self._publish_cup_visual_markers()
+
+    def _toggle_visual_markers(self):
+        """Toggle colored cup visual markers on/off."""
+        if self._show_visual_var.get():
+            self._publish_cup_visual_markers()
+        else:
+            self._delete_visual_markers()
+
+
+    def _delete_visual_markers(self):
+        """Delete cup visual markers."""
+        if not hasattr(self, '_cup_visual_pub'):
+            return
+        ma = MarkerArray()
+        for i in range(3):
+            m = VisMarker()
+            m.header.frame_id = 'base'
+            m.ns = 'cup_visual'
+            m.id = i
+            m.action = VisMarker.DELETE
+            ma.markers.append(m)
+        self._cup_visual_pub.publish(ma)
+
 
     def _get_selected_drop_pose(self):
         """Return (name, x, y, z) for the selected drop listbox entry, or None."""
@@ -2940,8 +3083,10 @@ class SOArm101ControlGUI(Node):
         self._drop_data.clear()
         self._populate_drop_list()
         self.root.after(500, self._populate_drop_list)
-        # Update cup collision objects in MoveIt planning scene (pulls latest poses)
+        # Collision objects always added (MoveIt needs them for planning)
         self.root.after(600, self._add_cup_collision_objects)
+        # Visual markers respect display toggles
+        self.root.after(700, self._refresh_display_markers)
 
     def _cmd_drop_select(self):
         """Select a drop target by name (via ik_target param).
@@ -3009,9 +3154,11 @@ class SOArm101ControlGUI(Node):
         self._append_log(
             f'Drop Sweep: IK for ({x:.3f}, {y:.3f}, {target_z:.3f}) above {name}')
 
+        grip_deg = getattr(self, '_drop_grip_angle_var', None)
+        grip_angle = math.radians(grip_deg.get() if grip_deg else 45)
         self._collision_free_ik_plan_and_execute(
             x, y, target_z,
-            grip_angle=math.radians(45),
+            grip_angle=grip_angle,
             wrist_roll=-math.pi / 2,
             on_complete=evt)
 
