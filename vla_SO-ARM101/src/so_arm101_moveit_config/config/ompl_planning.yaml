@@ -7,6 +7,17 @@ request_adapters: >-
   default_planner_request_adapters/ResolveConstraintFrames
   default_planner_request_adapters/FixWorkspaceBounds
   default_planner_request_adapters/FixStartStateBounds
+  default_planner_request_adapters/FixStartStateCollision
+  default_planner_request_adapters/FixStartStatePathConstraints
+
+# FixStartStateCollision knobs — activate when start state is in collision:
+#   jiggle_fraction          : max perturbation as fraction of joint range
+#                              (0.02 = 2%). Covers servo tolerance + mesh edge
+#                              cases without moving the arm observably.
+#   max_sampling_attempts    : how many random perturbations to try before
+#                              giving up and failing the plan.
+jiggle_fraction: 0.02
+max_sampling_attempts: 100
 
 longest_valid_segment_fraction: 0.01
 maximum_waypoint_distance: 0.01
