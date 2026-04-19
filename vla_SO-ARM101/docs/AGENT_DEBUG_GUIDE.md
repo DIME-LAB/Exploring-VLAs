@@ -312,3 +312,117 @@ bypasses this by patching `__file__` and `__spec__` before reloading.
 **Limitation:** New `_cmd_*` methods are patched onto the instance (callable via
 `getattr`), but their corresponding ROS2 service endpoints are only registered
 at `__init__`. A restart is needed for new services to appear in `ros2 service list`.
+# Button ↔ Service Mapping (auto-generated from dump_services)
+
+> Regenerated from control_gui.py via `ros2 service call /so_arm101_control_gui/dump_services std_srvs/srv/Trigger {}`. Do NOT hand-edit — rerun the service after code changes.
+
+## Buttons
+
+| Tab | Section | Button | Bound Method | Registered Service | Mapping OK |
+|-----|---------|--------|--------------|--------------------|------------|
+| FK | Arm | Reset Arm | `_cmd_zero_arm` | ~/zero_arm | ✓ |
+| FK | Arm | Randomize | `_cmd_randomize_arm` | ~/randomize_arm | ✓ |
+| FK | Gripper | Reset Gripper | `_cmd_gripper_zero` | ~/gripper_zero | ✓ |
+| FK | Gripper | Open | `_cmd_gripper_open` | ~/gripper_open | ✓ |
+| FK | Gripper | Close | `_cmd_gripper_close` | ~/gripper_close | ✓ |
+| FK | Actions | Set Joints | `_cmd_set_joints` | ~/set_joints | ✓ |
+| FK | Actions | Plan & Execute | `_cmd_plan_execute` | ~/plan_execute | ✓ |
+| IK | Arm | Reset Arm | `_cmd_ik_reset` | ~/ik_reset | ✓ |
+| IK | Arm | Randomize | `_cmd_ik_randomize` | ~/ik_randomize | ✓ |
+| IK | Gripper | Reset Gripper | `_cmd_gripper_zero` | ~/gripper_zero | ✓ |
+| IK | Gripper | Open | `_cmd_gripper_open` | ~/gripper_open | ✓ |
+| IK | Gripper | Close | `_cmd_gripper_close` | ~/gripper_close | ✓ |
+| IK | Actions | Set Joints | `_ik_btn_set_joints` | (wrapper) | WRAPPER |
+| IK | Actions | Plan & Execute | `_ik_btn_plan_execute` | (wrapper) | WRAPPER |
+| Grasp | Topic | Update Topic | `_cmd_grasp_update_topic` | ~/grasp_update_topic | ✓ |
+| Grasp | Topic | Refresh | `_cmd_grasp_refresh` | ~/grasp_refresh | ✓ |
+| Grasp | Arm | Home | `_cmd_grasp_home` | ~/grasp_home | ✓ |
+| Grasp | Arm | Move to Grab | `_cmd_grasp_move` | ~/grasp_move | ✓ |
+| Grasp | Gripper | Grasp Open | `_cmd_gripper_open_for_object` | ~/gripper_open_for_object | ✓ |
+| Grasp | Gripper | Grasp Close | `_cmd_gripper_close_for_object` | ~/gripper_close_for_object | ✓ |
+| Grasp | Gripper Range | Open | `_cmd_gripper_open_range` | ~/gripper_open_range | ✓ |
+| Grasp | Gripper Range | Close | `_cmd_gripper_close_range` | ~/gripper_close_range | ✓ |
+| Grasp | Drop Source | Update Drop Topic | `_drop_btn_update_topic` | (wrapper) | WRAPPER |
+| Grasp | Drop Source | Refresh | `_cmd_drop_refresh` | ~/drop_refresh | ✓ |
+| Grasp | Drop | Point to Drop | `_cmd_drop_point` | ~/drop_point | ✓ |
+| Grasp | Drop | Sweep to Drop | `_cmd_drop_sweep` | ~/drop_sweep | ✓ |
+| Grasp | Drop | Release | `_cmd_drop_release` | ~/drop_release | ✓ |
+| RViz | Cups | Apply | `_cmd_apply_collision_padding` | ~/apply_collision_padding | ✓ |
+| Logs | Process | Clear | `_log_btn_clear` | (wrapper) | WRAPPER |
+| Logs | Process | Copy | `_log_btn_copy` | (wrapper) | WRAPPER |
+| Logs | Errors | Clear | `_log_btn_clear` | (wrapper) | WRAPPER |
+| Logs | Errors | Copy | `_log_btn_copy` | (wrapper) | WRAPPER |
+
+## Agent-only services (no button binding)
+
+| Service | Method |
+|---------|--------|
+| `~/check_grasp_reachable` | `_cmd_check_grasp_reachable` |
+| `~/drop_select` | `_cmd_drop_select` |
+| `~/error` | `_cmd_error` |
+| `~/grasp_select` | `_cmd_grasp_select` |
+| `~/hot_reload` | `_cmd_hot_reload` |
+| `~/hot_reload_gui` | `_cmd_hot_reload_gui` |
+| `~/ik_plan_execute` | `_cmd_ik_plan_execute` |
+| `~/ik_set_joints` | `_cmd_ik_set_joints` |
+| `~/set_jaw_close_clearance` | `_cmd_set_jaw_close_clearance` |
+| `~/set_jaw_open_clearance` | `_cmd_set_jaw_open_clearance` |
+| `~/set_tcp_clearance` | `_cmd_set_tcp_clearance` |
+| `~/toggle_ground_plane` | `_cmd_toggle_ground_plane` |
+
+---
+
+# Widgets (auto-generated from list_widgets)
+
+> Regenerated from control_gui.py via `ros2 service call /so_arm101_control_gui/list_widgets std_srvs/srv/Trigger {}`. Do NOT hand-edit.
+
+## Widgets
+
+| Tab | Section | Label | Type | Current Value | Writable |
+|-----|---------|-------|------|---------------|----------|
+| - | Scene | `Ground Plane` | Checkbutton | true | yes |
+| - | Scene | `Ground Z` | Spinbox | 0.0 | yes |
+| FK | Actions | `Speed` | Spinbox | 0.5 | yes |
+| FK | Joint Sliders | `elbow_flex` | Scale | 0.0 | yes |
+| FK | Joint Sliders | `gripper_joint` | Scale | 0.0 | yes |
+| FK | Joint Sliders | `shoulder_lift@FK` | Scale | 0.0 | yes |
+| FK | Joint Sliders | `shoulder_pan` | Scale | 0.0 | yes |
+| FK | Joint Sliders | `wrist_flex` | Scale | 0.0 | yes |
+| FK | Joint Sliders | `wrist_roll` | Scale | 0.0 | yes |
+| Grasp | Arm | `Approach height (m)` | Spinbox | 0.05 | yes |
+| Grasp | Arm | `Arm Duration (s)` | Spinbox | 2.5 | yes |
+| Grasp | Arm | `Cross-axis grasp` | Checkbutton | false | yes |
+| Grasp | Arm | `Object Z (m)` | Spinbox | 0.0 | yes |
+| Grasp | Detected Objects | `Detected Objects` | Listbox |  | yes |
+| Grasp | Drop | `Sweep Duration (s)` | Spinbox | 2.5 | yes |
+| Grasp | Drop Source | `Drop Topic` | Entry | /drop_poses | yes |
+| Grasp | Drop Targets | `Drop Targets` | Listbox |  | yes |
+| Grasp | Gripper | `Close clearance (mm)` | Spinbox | 0.0 | yes |
+| Grasp | Gripper | `Grip Close` | Spinbox | -10.0 | yes |
+| Grasp | Gripper | `Grip Duration (s)` | Spinbox | 3.0 | yes |
+| Grasp | Gripper | `Grip Open` | Spinbox | 100.0 | yes |
+| Grasp | Gripper | `Open clearance (mm)` | Spinbox | 5.0 | yes |
+| Grasp | Gripper | `TCP clearance (mm)` | Spinbox | 1.0 | yes |
+| Grasp | Topic | `BBox Topic` | Entry | /objects_bbox_sim | yes |
+| Grasp | Topic | `Grasp Topic` | Entry | /objects_poses_sim | yes |
+| Grasp | Topic | `TCP offset` | Checkbutton | true | yes |
+| IK | Joint Sliders | `gripper_joint@IK` | Scale | 0.0 | yes |
+| IK | Orientation | `Roll` | Spinbox | 90.0 | yes |
+| IK | Orientation | `Yaw` | Spinbox | 90.0 | yes |
+| IK | Orientation | `shoulder_lift@IK` | Spinbox | 87.2 | yes |
+| IK | Position | `X` | Spinbox | 0.1 | yes |
+| IK | Position | `Y` | Spinbox | 0.05 | yes |
+| IK | Position | `Z` | Spinbox | 0.18 | yes |
+| RViz | Cups | `Collision padding %` | Spinbox | 10 | yes |
+| RViz | Cups | `Visual (colored cups)` | Checkbutton | true | yes |
+| RViz | Planning | `Drop grip angle (deg)` | Spinbox | 45 | yes |
+| RViz | Planning | `Planning attempts` | Spinbox | 50 | yes |
+
+## Agent-only widgets (no tab/section)
+
+| Label | Type | Current Value | Writable |
+|-------|------|---------------|----------|
+| `error_log` | Text |  | no |
+| `log_tab` | Notebook | Process Log | yes |
+| `process_log` | Text | [23:44:01] Ground plane add… | no |
+| `tab` | Notebook | IK | yes |

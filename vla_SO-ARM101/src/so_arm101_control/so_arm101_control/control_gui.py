@@ -15,6 +15,7 @@ import signal
 import threading
 import time
 import tkinter as tk
+import weakref
 from tkinter import ttk
 
 import rclpy
@@ -404,6 +405,9 @@ class SOArm101ControlGUI(Node):
         self.declare_parameter('jaw_open_clearance_mm', JAW_OPEN_CLEARANCE_M * 1000)
         self.declare_parameter('jaw_close_clearance_mm', JAW_CLOSE_CLEARANCE_M * 1000)
         self.declare_parameter('tcp_clearance_mm', TCP_CLEARANCE_M * 1000)
+        # Parameters for widget registry services (~/get_widget_value, ~/set_widget_value)
+        self.declare_parameter('widget_id', '')
+        self.declare_parameter('widget_value', '')
 
         # TF buffer for TCP pose lookups
         self._tf_buffer = TfBuffer()
@@ -411,6 +415,15 @@ class SOArm101ControlGUI(Node):
 
         # GUI
         self.running = True
+        # Button registry — populated by _register_button, audited by _cmd_dump_services.
+        # Every entry: {'text', 'command_name', 'tab', 'section', 'widget_class'}.
+        self._button_registry = []
+        # Widget registry — populated by _register_spinbox/_check/_entry/_listbox/_scale/
+        # _notebook/_log_text factories. Audited by _srv_list_widgets.
+        # Entries: {id: {'type', 'widget' (WeakRef), 'var', 'tab', 'section', 'label', 'writable'}}
+        self._widget_registry: dict = {}
+        self._widget_registry_lock = threading.Lock()
+        self._widget_registry_rebuilding = False
         self._setup_gui_thread()
 
         # --- Debug services ---
@@ -434,6 +447,12 @@ class SOArm101ControlGUI(Node):
             ('get_tcp_pose', self._srv_get_tcp_pose),
             ('get_log', self._srv_get_log),
             ('list_commands', self._srv_list_commands),
+            ('dump_services', self._srv_dump_services),
+            ('get_widget_state', self._srv_get_widget_state),
+            ('screenshot', self._srv_screenshot),
+            ('list_widgets', self._srv_list_widgets),
+            ('get_widget_value', self._srv_get_widget_value),
+            ('set_widget_value', self._srv_set_widget_value),
         ]:
             self._debug_services.append(
                 self.create_service(Trigger, f'~/{name}', cb))
@@ -457,6 +476,171 @@ class SOArm101ControlGUI(Node):
         while not future.done() and time.monotonic() < end:
             time.sleep(0.01)          # 10 ms poll
         return future.result()        # None if timed-out / not done
+
+    # ------------------------------------------------------------------
+    # Button factory — central registration for audit + enforcement
+    # ------------------------------------------------------------------
+    # Every tk.Button / ttk.Button in this file MUST go through this helper.
+    # The `command=` kwarg MUST be a bare method reference:
+    #   - self._cmd_*         (auto-registers as a ~/cmd Trigger service)
+    #   - self._*_btn_*       (thin UI-state wrapper that forwards to a _cmd_*)
+    # Inline `command=lambda: ...` bodies are forbidden — enforced by
+    # test_button_service_mapping.py (Phase 7 workstream A).
+
+    def _register_button(self, parent, *, text, command, tab=None, section=None,
+                         bg='#b0b0b0', fg='#1a1a1a', **kwargs):
+        """Central button factory. Records the button in self._button_registry
+        for _cmd_dump_services audit, then creates a styled tk.Button."""
+        cmd_name = getattr(command, '__name__', repr(command))
+        self._button_registry.append({
+            'text': text,
+            'command_name': cmd_name,
+            'tab': tab,
+            'section': section,
+            'widget_class': 'tk.Button',
+        })
+        return tk.Button(parent, text=text, command=command,
+                         bg=bg, fg=fg, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Widget factory helpers (Phase 07.1) — every interactive widget
+    # MUST go through these so _srv_list_widgets / _srv_get_widget_value /
+    # _srv_set_widget_value can see them. Audited by test_widget_registry.py.
+    # ------------------------------------------------------------------
+
+    def _widget_registry_add(self, label, wtype, widget, var,
+                             tab, section, writable):
+        """Insert a widget into the registry. Duplicate labels are tolerated
+        at insertion time; _finalize_widget_registry resolves collisions with
+        @tab suffixes after all builders have run."""
+        entry = {
+            'type': wtype,
+            'widget': weakref.ref(widget),
+            'var': var,
+            'tab': tab,
+            'section': section,
+            'label': label,
+            'writable': writable,
+        }
+        with self._widget_registry_lock:
+            if label in self._widget_registry and tab:
+                resolved_id = f'{label}@{tab}'
+            else:
+                resolved_id = label
+            self._widget_registry[resolved_id] = entry
+
+    def _finalize_widget_registry(self):
+        """Called after all tab builders complete. Scans for label collisions
+        and retroactively adds @tab suffixes so every id is unique."""
+        with self._widget_registry_lock:
+            by_label: dict = {}
+            for rid, entry in list(self._widget_registry.items()):
+                by_label.setdefault(entry['label'], []).append(rid)
+            for label, rids in by_label.items():
+                if len(rids) == 1:
+                    continue
+                for rid in rids:
+                    if '@' in rid:
+                        continue
+                    entry = self._widget_registry[rid]
+                    tab = entry.get('tab') or '?'
+                    new_id = f'{label}@{tab}'
+                    if new_id == rid:
+                        continue
+                    self._widget_registry[new_id] = entry
+                    del self._widget_registry[rid]
+            self._widget_registry_rebuilding = False
+
+    def _register_spinbox(self, parent, *, label, textvariable, from_, to,
+                          tab=None, section=None, **kwargs):
+        """tk.Spinbox (or ttk.Spinbox via _use_ttk=True). Writable; set coerces to float."""
+        use_ttk = kwargs.pop('_use_ttk', False)
+        cls = ttk.Spinbox if use_ttk else tk.Spinbox
+        widget = cls(parent, textvariable=textvariable,
+                     from_=from_, to=to, **kwargs)
+        self._widget_registry_add(label, 'Spinbox', widget, textvariable,
+                                  tab, section, writable=True)
+        return widget
+
+    def _register_check(self, parent, *, label, variable,
+                        tab=None, section=None, **kwargs):
+        """tk.Checkbutton. Label doubles as the button's visible text."""
+        widget = tk.Checkbutton(parent, text=label, variable=variable, **kwargs)
+        self._widget_registry_add(label, 'Checkbutton', widget, variable,
+                                  tab, section, writable=True)
+        return widget
+
+    def _register_entry(self, parent, *, label, textvariable,
+                        tab=None, section=None, **kwargs):
+        """tk.Entry. `label` is explicit (no sibling-Label heuristic)."""
+        widget = tk.Entry(parent, textvariable=textvariable, **kwargs)
+        self._widget_registry_add(label, 'Entry', widget, textvariable,
+                                  tab, section, writable=True)
+        return widget
+
+    def _register_listbox(self, parent, *, label, tab=None, section=None,
+                          **kwargs):
+        """tk.Listbox. Writable; set expects a non-negative row index."""
+        widget = tk.Listbox(parent, **kwargs)
+        self._widget_registry_add(label, 'Listbox', widget, None,
+                                  tab, section, writable=True)
+        return widget
+
+    def _register_scale(self, parent, *, label, variable, from_, to,
+                        tab=None, section=None, **kwargs):
+        """tk.Scale (or ttk.Scale via _use_ttk=True). Writable; coerces to float."""
+        use_ttk = kwargs.pop('_use_ttk', False)
+        cls = ttk.Scale if use_ttk else tk.Scale
+        widget = cls(parent, variable=variable, from_=from_, to=to, **kwargs)
+        self._widget_registry_add(label, 'Scale', widget, variable,
+                                  tab, section, writable=True)
+        return widget
+
+    def _register_notebook(self, widget, *, label='tab'):
+        """Register an existing ttk.Notebook under a reserved id.
+        Caller constructs the notebook — we don't apply styling."""
+        self._widget_registry_add(label, 'Notebook', widget, None,
+                                  tab=None, section=None, writable=True)
+        return widget
+
+    def _register_log_text(self, widget, *, label):
+        """Register a tk.Text widget as read-only log output."""
+        self._widget_registry_add(label, 'Text', widget, None,
+                                  tab=None, section=None, writable=False)
+        return widget
+
+    # ------------------------------------------------------------------
+    # Shared UI cluster: Reset Arm / Randomize / Reset Gripper / Open / Close
+    # duplicated between FK and IK tabs (Phase 7 Plan 07-03 / D-16..D-18).
+    # ------------------------------------------------------------------
+
+    def _build_arm_btn_row(self, parent, *, tab, reset_cmd):
+        """Build the `[Reset Arm] [Randomize]` button row into `parent`.
+
+        tab: 'FK' or 'IK' — used for dump_services tagging.
+        reset_cmd: which command 'Reset Arm' invokes (different on FK vs IK).
+        """
+        self._register_button(parent, text='Reset Arm', tab=tab, section='Arm',
+                              command=reset_cmd).pack(side=tk.LEFT, padx=5)
+        randomize_cmd = (self._cmd_randomize_arm if tab == 'FK'
+                         else self._cmd_ik_randomize)
+        self._register_button(parent, text='Randomize', tab=tab, section='Arm',
+                              command=randomize_cmd).pack(side=tk.LEFT, padx=5)
+
+    def _build_gripper_btn_row(self, parent, *, tab):
+        """Build `[Reset Gripper] [Open] [Close]` row into `parent`."""
+        self._register_button(parent, text='Reset Gripper', tab=tab,
+                              section='Gripper',
+                              command=self._cmd_gripper_zero).pack(
+            side=tk.LEFT, padx=5)
+        self._register_button(parent, text='Open', tab=tab,
+                              section='Gripper',
+                              command=self._cmd_gripper_open).pack(
+            side=tk.LEFT, padx=5)
+        self._register_button(parent, text='Close', tab=tab,
+                              section='Gripper',
+                              command=self._cmd_gripper_close).pack(
+            side=tk.LEFT, padx=5)
 
     # ------------------------------------------------------------------
     # Debug service helpers
@@ -534,6 +718,497 @@ class SOArm101ControlGUI(Node):
         commands = sorted(n[5:] for n in dir(self) if n.startswith('_cmd_'))
         response.success = True
         response.message = ', '.join(commands)
+        return response
+
+    def _srv_get_widget_state(self, request, response):
+        """Return the runtime state of a widget from _button_registry.
+
+        Pass the widget id via the `ik_target` parameter. Matches on:
+          - Button text (e.g. 'Reset Arm') — first match wins across tabs.
+          - Bound method name (e.g. '_cmd_zero_arm', '_ik_btn_set_joints').
+          - 'text@tab' disambiguator (e.g. 'Reset Arm@FK').
+
+        Returns JSON-like `key=value, ...` pairs in response.message:
+          id=_cmd_zero_arm, text=Reset Arm, tab=FK, section=Arm,
+          enabled=true, visible=true, state=normal
+
+        Usage:
+          ros2 param set /so_arm101_control_gui ik_target 'Reset Arm@FK'
+          ros2 service call /so_arm101_control_gui/get_widget_state std_srvs/srv/Trigger {}
+        """
+        hint = self.get_parameter('ik_target').get_parameter_value().string_value.strip()
+        if not hint:
+            response.success = False
+            response.message = ('no widget id. Set param first: '
+                                "ros2 param set /so_arm101_control_gui "
+                                "ik_target '<button text or _cmd_ name>'")
+            return response
+
+        # Allow 'text@tab' disambiguation
+        qualifier = None
+        if '@' in hint:
+            hint, qualifier = hint.rsplit('@', 1)
+
+        match = None
+        for entry in self._button_registry:
+            if qualifier and entry.get('tab') != qualifier:
+                continue
+            if entry.get('text') == hint or entry.get('command_name') == hint:
+                match = entry
+                break
+
+        if match is None:
+            response.success = False
+            response.message = (f'widget not found: {hint!r}'
+                                + (f' (tab={qualifier!r})' if qualifier else ''))
+            return response
+
+        # Walk the tkinter tree to find the live widget by recreating the
+        # lookup: registry stores text+tab+section, not the widget ref (by
+        # design — avoids WeakRef bookkeeping for a GUI that doesn't churn).
+        # Find the button by scanning winfo_children recursively for a
+        # tk.Button whose text matches.
+        def _find_button(parent, text, tab_hint=None):
+            for child in parent.winfo_children():
+                if isinstance(child, tk.Button) and child.cget('text') == text:
+                    return child
+                found = _find_button(child, text, tab_hint)
+                if found is not None:
+                    return found
+            return None
+
+        widget = _find_button(self.root, match['text'])
+        if widget is None:
+            response.success = False
+            response.message = (f'widget {match["text"]!r} registered but not '
+                                'currently in the tree — did the tab rebuild?')
+            return response
+
+        try:
+            state = str(widget.cget('state'))
+        except tk.TclError:
+            state = 'unknown'
+        try:
+            enabled = state != 'disabled'
+        except Exception:
+            enabled = True
+        try:
+            visible = bool(widget.winfo_viewable())
+        except Exception:
+            visible = True
+
+        parts = [
+            f'id={match.get("command_name")}',
+            f'text={match.get("text")}',
+            f'tab={match.get("tab") or "-"}',
+            f'section={match.get("section") or "-"}',
+            f'enabled={"true" if enabled else "false"}',
+            f'visible={"true" if visible else "false"}',
+            f'state={state}',
+        ]
+        response.success = True
+        response.message = ', '.join(parts)
+        return response
+
+    def _srv_screenshot(self, request, response):
+        """Save a PNG of the main GUI window; return its path + dimensions.
+
+        Pass the desired output path via the `ik_target` parameter. When
+        empty, defaults to /tmp/so_arm101_control_gui.png.
+
+        Uses xdotool + ImageMagick `import` for reliability across tk
+        versions. Falls back to `import -window root` if xdotool fails.
+
+        Usage:
+          ros2 param set /so_arm101_control_gui ik_target '/tmp/gui.png'
+          ros2 service call /so_arm101_control_gui/screenshot std_srvs/srv/Trigger {}
+
+        Response message format: path=/tmp/gui.png, width=1280, height=720
+        """
+        import subprocess
+        target = self.get_parameter('ik_target').get_parameter_value().string_value.strip()
+        if not target:
+            target = '/tmp/so_arm101_control_gui.png'
+
+        # Resolve window id via xdotool (match the tkinter window title)
+        title = self.root.title() if getattr(self, 'root', None) else 'SO-ARM101'
+        window_id = None
+        try:
+            out = subprocess.check_output(
+                ['xdotool', 'search', '--name', title],
+                encoding='utf-8', timeout=3)
+            ids = [line.strip() for line in out.splitlines() if line.strip()]
+            window_id = ids[0] if ids else None
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+                FileNotFoundError):
+            window_id = None
+
+        try:
+            if window_id:
+                subprocess.check_call(
+                    ['import', '-window', window_id, target], timeout=5)
+            else:
+                # Fallback: whole root display
+                subprocess.check_call(['import', '-window', 'root', target],
+                                       timeout=5)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+                FileNotFoundError) as e:
+            response.success = False
+            response.message = f'screenshot failed: {e}'
+            return response
+
+        # Read dimensions via `identify` if available; otherwise skip.
+        width, height = 0, 0
+        try:
+            out = subprocess.check_output(
+                ['identify', '-format', '%w %h', target],
+                encoding='utf-8', timeout=3).strip()
+            w, h = out.split()
+            width, height = int(w), int(h)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+                FileNotFoundError, ValueError):
+            pass
+
+        response.success = True
+        response.message = f'path={target}, width={width}, height={height}'
+        return response
+
+    # ------------------------------------------------------------------
+    # Widget registry services (Phase 07.1) — list/get/set any registered
+    # widget by name. Agent-facing full CLI-level control surface.
+    # ------------------------------------------------------------------
+
+    def _widget_rebuilding_response(self, response):
+        if self._widget_registry_rebuilding:
+            response.success = False
+            response.message = 'GUI rebuilding — retry in 1s'
+            return True
+        return False
+
+    @staticmethod
+    def _widget_live_value(entry):
+        """Read the current value of a widget entry. Returns (value_str, extra_str)."""
+        widget = entry['widget']() if entry['widget'] else None
+        var = entry.get('var')
+        wtype = entry['type']
+        if widget is None:
+            return '(widget freed)', ''
+        try:
+            if wtype == 'Spinbox' or wtype == 'Scale':
+                val = var.get() if var is not None else widget.get()
+                return f'{val}', ''
+            if wtype == 'Entry':
+                val = var.get() if var is not None else widget.get()
+                return f'{val}', ''
+            if wtype == 'Checkbutton':
+                val = bool(var.get()) if var is not None else False
+                return ('true' if val else 'false'), ''
+            if wtype == 'Listbox':
+                sel = widget.curselection()
+                idx = int(sel[0]) if sel else -1
+                count = widget.size()
+                text = widget.get(idx) if idx >= 0 else ''
+                items = [widget.get(i) for i in range(count)]
+                return text, f'index={idx}, count={count}, items=[{"|".join(items)}]'
+            if wtype == 'Notebook':
+                active = widget.select()
+                return widget.tab(active, 'text') if active else '', ''
+            if wtype == 'Text':
+                raw = widget.get('1.0', tk.END)
+                if len(raw) > 10240:
+                    raw = '…(truncated)…' + raw[-10240:]
+                # Compact summary in extra field
+                lines = raw.rstrip('\n').split('\n')
+                summary = f'chars={len(raw)}, lines={len(lines)}'
+                return raw, summary
+        except tk.TclError as e:
+            return f'(tcl error: {e})', ''
+        return '(unknown type)', ''
+
+    def _build_list_widgets_output(self):
+        """Build the markdown table for _srv_list_widgets."""
+        lines = []
+        lines.append('# Widgets (auto-generated from list_widgets)')
+        lines.append('')
+        lines.append('> Regenerated from control_gui.py via '
+                     '`ros2 service call /so_arm101_control_gui/list_widgets '
+                     'std_srvs/srv/Trigger {}`. Do NOT hand-edit.')
+        lines.append('')
+        lines.append('## Widgets')
+        lines.append('')
+        lines.append('| Tab | Section | Label | Type | Current Value | Writable |')
+        lines.append('|-----|---------|-------|------|---------------|----------|')
+        with self._widget_registry_lock:
+            items = sorted(self._widget_registry.items(),
+                           key=lambda kv: (kv[1].get('tab') or '',
+                                           kv[1].get('section') or '',
+                                           kv[1].get('label') or ''))
+            rows = []
+            agent_only = []
+            for rid, entry in items:
+                value, _extra = self._widget_live_value(entry)
+                # Truncate value for table readability
+                vshort = value if len(value) <= 30 else value[:27] + '…'
+                # Escape | to keep table rendering
+                vshort = vshort.replace('|', '\\|').replace('\n', ' ')
+                row = (
+                    f'| {entry.get("tab") or "-"} '
+                    f'| {entry.get("section") or "-"} '
+                    f'| `{rid}` '
+                    f'| {entry["type"]} '
+                    f'| {vshort} '
+                    f'| {"yes" if entry["writable"] else "no"} |'
+                )
+                if entry.get('tab') or entry.get('section'):
+                    rows.append(row)
+                else:
+                    agent_only.append(row)
+            lines.extend(rows)
+            lines.append('')
+            lines.append('## Agent-only widgets (no tab/section)')
+            lines.append('')
+            lines.append('| Label | Type | Current Value | Writable |')
+            lines.append('|-------|------|---------------|----------|')
+            for row in agent_only:
+                # Strip the tab/section columns for this sub-table
+                parts = [p.strip() for p in row.split('|')]
+                # parts: ['', tab, section, label, type, value, writable, '']
+                lines.append(f'| {parts[3]} | {parts[4]} | {parts[5]} | {parts[6]} |')
+        return '\n'.join(lines)
+
+    def _srv_list_widgets(self, request, response):
+        """Return the full widget inventory as markdown."""
+        if self._widget_rebuilding_response(response):
+            return response
+        try:
+            response.message = self._build_list_widgets_output()
+            response.success = True
+        except Exception as e:
+            response.success = False
+            response.message = f'list_widgets error: {e}'
+        return response
+
+    def _srv_get_widget_value(self, request, response):
+        """Read a widget's current value by id (passed via widget_id param).
+
+        Also accepts button IDs — if widget_id matches a button in
+        _button_registry, returns the same state _srv_get_widget_state
+        would return (D-11 uniform API).
+        """
+        if self._widget_rebuilding_response(response):
+            return response
+        wid = self.get_parameter('widget_id').get_parameter_value().string_value.strip()
+        if not wid:
+            response.success = False
+            response.message = ('no widget_id. Set param first: '
+                                "ros2 param set /so_arm101_control_gui widget_id '<id>'")
+            return response
+
+        # If it's a button, delegate to the existing widget-state service
+        for btn in self._button_registry:
+            if btn.get('command_name') == wid or btn.get('text') == wid:
+                # Temporarily reuse get_widget_state path via ik_target
+                old_param = self.get_parameter('ik_target').get_parameter_value().string_value
+                try:
+                    from rclpy.parameter import Parameter as RclParam
+                    self.set_parameters([RclParam('ik_target', RclParam.Type.STRING, wid)])
+                    return self._srv_get_widget_state(request, response)
+                finally:
+                    self.set_parameters([RclParam('ik_target', RclParam.Type.STRING, old_param)])
+
+        with self._widget_registry_lock:
+            entry = self._widget_registry.get(wid)
+        if entry is None:
+            response.success = False
+            response.message = f'widget {wid!r} not found — call ~/list_widgets for the full inventory'
+            return response
+
+        value, extra = self._widget_live_value(entry)
+        parts = [
+            f'id={wid}',
+            f'type={entry["type"]}',
+            f'tab={entry.get("tab") or "-"}',
+            f'section={entry.get("section") or "-"}',
+            f'writable={"true" if entry["writable"] else "false"}',
+            f'value={value}',
+        ]
+        if extra:
+            parts.append(f'extra={extra}')
+        response.success = True
+        response.message = ', '.join(parts)
+        return response
+
+    def _srv_set_widget_value(self, request, response):
+        """Write a value to a registered widget by id.
+
+        Reads widget_id and widget_value params. Coerces the value to the
+        widget's expected type (D-15..D-18). Dispatches the write on the
+        GUI thread and waits up to 1.0s for completion (D-19).
+        """
+        if self._widget_rebuilding_response(response):
+            return response
+        wid = self.get_parameter('widget_id').get_parameter_value().string_value.strip()
+        raw = self.get_parameter('widget_value').get_parameter_value().string_value
+        if not wid:
+            response.success = False
+            response.message = ('no widget_id. Set both params first: '
+                                "ros2 param set ... widget_id '<id>' && "
+                                "ros2 param set ... widget_value '<value>'")
+            return response
+
+        # Buttons reject writes
+        for btn in self._button_registry:
+            if btn.get('command_name') == wid or btn.get('text') == wid:
+                response.success = False
+                response.message = (f'{wid!r} is a button — use '
+                                    f'`ros2 service call ~/{btn.get("command_name","<cmd>")[5:]}`')
+                return response
+
+        with self._widget_registry_lock:
+            entry = self._widget_registry.get(wid)
+        if entry is None:
+            response.success = False
+            response.message = f'widget {wid!r} not found'
+            return response
+        if not entry['writable']:
+            response.success = False
+            response.message = f'widget {wid!r} is read-only'
+            return response
+
+        widget_ref = entry['widget']
+        widget = widget_ref() if widget_ref else None
+        var = entry.get('var')
+        wtype = entry['type']
+        if widget is None:
+            response.success = False
+            response.message = f'widget {wid!r} freed — retry after next refresh'
+            return response
+
+        # ---- Auto-switch tab so the write is visible in the GUI ----
+        # When the target widget is tagged with a tab (FK/IK/Grasp/RViz),
+        # switch the main notebook to that tab BEFORE writing, so a human
+        # watching the GUI sees the change in context. Skip for the notebook
+        # itself (setting 'tab' IS the switch) and for untagged widgets.
+        target_tab = entry.get('tab')
+        if target_tab and wtype != 'Notebook':
+            with self._widget_registry_lock:
+                nb_entry = self._widget_registry.get('tab')
+            if nb_entry is not None:
+                nb_widget = nb_entry['widget']() if nb_entry['widget'] else None
+                if nb_widget is not None:
+                    try:
+                        tabs = [nb_widget.tab(t, 'text') for t in nb_widget.tabs()]
+                        if target_tab in tabs:
+                            def _switch_tab():
+                                try:
+                                    nb_widget.select(tabs.index(target_tab))
+                                except tk.TclError:
+                                    pass
+                            if getattr(self, '_gui_ready', False):
+                                self.root.after(0, _switch_tab)
+                    except tk.TclError:
+                        pass
+
+        # ---- Coerce per type ----
+        done = threading.Event()
+        outcome = {'ok': False, 'msg': ''}
+
+        def _do_write():
+            try:
+                if wtype in ('Spinbox', 'Scale'):
+                    try:
+                        val = float(raw)
+                    except ValueError:
+                        outcome['msg'] = f'{wid!r} expects float, got {raw!r}'
+                        return
+                    # Clamp to widget's configured range if available
+                    try:
+                        lo = float(widget.cget('from'))
+                        hi = float(widget.cget('to'))
+                        if val < lo or val > hi:
+                            self._append_log(
+                                f'set_widget_value: {wid} clamped {val} to '
+                                f'[{lo}, {hi}]', 'warn')
+                            val = max(lo, min(val, hi))
+                    except (tk.TclError, ValueError):
+                        pass
+                    if var is not None:
+                        var.set(val)
+                    else:
+                        widget.set(val)
+                    outcome['ok'] = True
+                    outcome['msg'] = f'wrote {val} to {wid}'
+                    return
+                if wtype == 'Checkbutton':
+                    low = raw.strip().lower()
+                    if low in ('true', '1', 'yes', 'on'):
+                        b = True
+                    elif low in ('false', '0', 'no', 'off', ''):
+                        b = False
+                    else:
+                        outcome['msg'] = f'{wid!r} expects bool (true/false/1/0/yes/no), got {raw!r}'
+                        return
+                    if var is not None:
+                        var.set(b)
+                    outcome['ok'] = True
+                    outcome['msg'] = f'wrote {"true" if b else "false"} to {wid}'
+                    return
+                if wtype == 'Entry':
+                    if var is not None:
+                        var.set(raw)
+                    else:
+                        widget.delete(0, tk.END)
+                        widget.insert(0, raw)
+                    outcome['ok'] = True
+                    outcome['msg'] = f'wrote {raw!r} to {wid}'
+                    return
+                if wtype == 'Listbox':
+                    try:
+                        idx = int(raw)
+                    except ValueError:
+                        outcome['msg'] = f'{wid!r} expects int row index, got {raw!r}'
+                        return
+                    count = widget.size()
+                    if idx < 0 or idx >= count:
+                        outcome['msg'] = f'row {idx} out of range (count={count})'
+                        return
+                    widget.selection_clear(0, tk.END)
+                    widget.selection_set(idx)
+                    widget.see(idx)
+                    outcome['ok'] = True
+                    outcome['msg'] = f'selected row {idx} in {wid}'
+                    return
+                if wtype == 'Notebook':
+                    # Find the tab with matching text
+                    tabs = [widget.tab(t, 'text') for t in widget.tabs()]
+                    if raw not in tabs:
+                        outcome['msg'] = (f'tab {raw!r} not found; '
+                                          f'available: {", ".join(tabs)}')
+                        return
+                    widget.select(tabs.index(raw))
+                    outcome['ok'] = True
+                    outcome['msg'] = f'switched to tab {raw}'
+                    return
+                outcome['msg'] = f'unsupported widget type {wtype}'
+            except Exception as e:
+                outcome['msg'] = f'write failed: {e}'
+            finally:
+                done.set()
+
+        if getattr(self, '_gui_ready', False):
+            self.root.after(0, _do_write)
+        else:
+            response.success = False
+            response.message = 'GUI not ready'
+            return response
+
+        if not done.wait(timeout=1.0):
+            response.success = False
+            response.message = f'write to {wid} timed out after 1.0s'
+            return response
+
+        response.success = outcome['ok']
+        response.message = outcome['msg'] or ('ok' if outcome['ok'] else 'unknown error')
         return response
 
     def _srv_get_joint_positions(self, request, response):
@@ -902,13 +1577,17 @@ class SOArm101ControlGUI(Node):
         scene_frame = tk.Frame(self.root)
         scene_frame.pack(fill=tk.X, padx=5, pady=1)
         self._ground_plane_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(scene_frame, text='Ground Plane',
-                       variable=self._ground_plane_var,
-                       command=lambda: self._cmd_toggle_ground_plane()).pack(side=tk.LEFT)
+        self._register_check(scene_frame, label='Ground Plane',
+                             section='Scene',
+                             variable=self._ground_plane_var,
+                             command=self._cmd_toggle_ground_plane).pack(side=tk.LEFT)
         tk.Label(scene_frame, text='  Z:').pack(side=tk.LEFT)
         self._ground_z_var = tk.DoubleVar(value=0.0)
-        tk.Spinbox(scene_frame, from_=-0.5, to=0.5, increment=0.01,
-                   textvariable=self._ground_z_var, width=6).pack(side=tk.LEFT)
+        self._register_spinbox(scene_frame, label='Ground Z',
+                               section='Scene',
+                               textvariable=self._ground_z_var,
+                               from_=-0.5, to=0.5, increment=0.01,
+                               width=6).pack(side=tk.LEFT)
         # Publish ground plane on startup after MoveIt is ready
         self.root.after(3000, self._cmd_toggle_ground_plane)
 
@@ -916,6 +1595,7 @@ class SOArm101ControlGUI(Node):
         notebook = ttk.Notebook(self.root)
         notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=(5, 0))
         self._notebook = notebook
+        self._register_notebook(notebook, label='tab')
 
         self._build_individual_tab(notebook)
         self._build_arm_control_tab(notebook)
@@ -932,6 +1612,7 @@ class SOArm101ControlGUI(Node):
         self.root.bind('<Control-r>', lambda e: self._hot_reload_logic())
         self.root.bind('<Control-Shift-R>', lambda e: self._hot_reload_gui())
 
+        self._finalize_widget_registry()
         self._gui_ready = True
         self.root.mainloop()
         self._gui_ready = False
@@ -959,8 +1640,9 @@ class SOArm101ControlGUI(Node):
             tk.Label(row, text=name, width=14, anchor='w').pack(side=tk.LEFT, padx=(5, 0))
 
             var = tk.DoubleVar(value=0.0)
-            slider = tk.Scale(
-                row, variable=var, from_=lo, to=hi,
+            slider = self._register_scale(
+                row, label=name, tab='FK', section='Joint Sliders',
+                variable=var, from_=lo, to=hi,
                 orient=tk.HORIZONTAL, resolution=0.001, length=300,
                 command=lambda val, n=name: self._on_slider(n, float(val)))
             slider.pack(side=tk.LEFT, padx=5)
@@ -973,10 +1655,8 @@ class SOArm101ControlGUI(Node):
 
         arm_btn_frame = tk.Frame(arm_frame)
         arm_btn_frame.pack(fill=tk.X, padx=5, pady=5)
-        tk.Button(arm_btn_frame, text='Reset Arm', bg='#b0b0b0', fg='#1a1a1a',
-                  command=lambda: self._cmd_zero_arm()).pack(side=tk.LEFT, padx=5)
-        tk.Button(arm_btn_frame, text='Randomize', bg='#b0b0b0', fg='#1a1a1a',
-                  command=lambda: self._cmd_randomize_arm()).pack(side=tk.LEFT, padx=5)
+        self._build_arm_btn_row(arm_btn_frame, tab='FK',
+                                reset_cmd=self._cmd_zero_arm)
 
         # --- Gripper Section ---
         gripper_frame = ttk.LabelFrame(frame, text='Gripper')
@@ -989,8 +1669,9 @@ class SOArm101ControlGUI(Node):
         tk.Label(jaw_row, text=GRIPPER_JOINT_NAME, width=14, anchor='w').pack(side=tk.LEFT, padx=(5, 0))
 
         jaw_var = tk.DoubleVar(value=0.0)
-        jaw_slider = tk.Scale(
-            jaw_row, variable=jaw_var, from_=lo, to=hi,
+        jaw_slider = self._register_scale(
+            jaw_row, label=GRIPPER_JOINT_NAME, tab='FK', section='Joint Sliders',
+            variable=jaw_var, from_=lo, to=hi,
             orient=tk.HORIZONTAL, resolution=0.001, length=300,
             command=lambda val: self._on_slider(GRIPPER_JOINT_NAME, float(val)))
         jaw_slider.pack(side=tk.LEFT, padx=5)
@@ -1003,30 +1684,28 @@ class SOArm101ControlGUI(Node):
 
         gripper_btn_frame = tk.Frame(gripper_frame)
         gripper_btn_frame.pack(fill=tk.X, padx=5, pady=5)
-        tk.Button(gripper_btn_frame, text='Reset Gripper', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._zero_gripper).pack(side=tk.LEFT, padx=5)
-        tk.Button(gripper_btn_frame, text='Open', bg='#b0b0b0', fg='#1a1a1a',
-                  command=lambda: self._cmd_gripper_open()).pack(side=tk.LEFT, padx=5)
-        tk.Button(gripper_btn_frame, text='Close', bg='#b0b0b0', fg='#1a1a1a',
-                  command=lambda: self._cmd_gripper_close()).pack(side=tk.LEFT, padx=5)
+        self._build_gripper_btn_row(gripper_btn_frame, tab='FK')
 
         # --- Action Buttons (always visible) ---
         action_frame = tk.Frame(frame)
         action_frame.pack(fill=tk.X, padx=10, pady=(8, 5))
-        self.set_joints_btn = tk.Button(
-            action_frame, text='Set Joints', bg='#b0b0b0', fg='#1a1a1a', command=lambda: self._cmd_set_joints())
+        self.set_joints_btn = self._register_button(
+            action_frame, text='Set Joints', tab='FK', section='Actions',
+            command=self._cmd_set_joints)
         self.set_joints_btn.pack(side=tk.LEFT, padx=5)
-        self.execute_btn = tk.Button(
-            action_frame, text='Plan & Execute', bg='#b0b0b0', fg='#1a1a1a', command=lambda: self._cmd_plan_execute())
+        self.execute_btn = self._register_button(
+            action_frame, text='Plan & Execute', tab='FK', section='Actions',
+            command=self._cmd_plan_execute)
         self.execute_btn.pack(side=tk.LEFT, padx=5)
         tk.Label(action_frame, text='Speed:', font=('Arial', 9)).pack(side=tk.LEFT, padx=(10, 2))
         self.velocity_scale_var = tk.DoubleVar(value=0.5)
         self._last_speed_val = 0.5
         vcmd = (self.root.register(self._validate_speed), '%P')
-        self.velocity_scale_spin = tk.Spinbox(
-            action_frame, from_=0.1, to=1.0, increment=0.1,
-            textvariable=self.velocity_scale_var, width=4,
-            font=('Arial', 9), validate='all', validatecommand=vcmd)
+        self.velocity_scale_spin = self._register_spinbox(
+            action_frame, label='Speed', tab='FK', section='Actions',
+            textvariable=self.velocity_scale_var,
+            from_=0.1, to=1.0, increment=0.1,
+            width=4, font=('Arial', 9), validate='all', validatecommand=vcmd)
         self.velocity_scale_spin.pack(side=tk.LEFT)
 
     def _validate_speed(self, value_str):
@@ -1080,7 +1759,7 @@ class SOArm101ControlGUI(Node):
         self._publish_goal_state()
         self.status_var.set('Arm zeroed')
 
-    def _zero_gripper(self):
+    def _cmd_gripper_zero(self):
         """Reset gripper to zero (closed)."""
         self._gripper_command(0.0)
         self.status_var.set('Gripper zeroed')
@@ -1201,7 +1880,7 @@ class SOArm101ControlGUI(Node):
     # Collision-free IK planning: geometric IK → collision check → MoveIt path
     # ------------------------------------------------------------------
 
-    def _collision_free_ik_plan_and_execute(self, x, y, z, grip_angle,
+    def _plan_collision_free_execute(self, x, y, z, grip_angle,
                                             wrist_roll, on_complete=None):
         """Solve geometric IK, then plan a collision-free path via MoveIt.
 
@@ -1432,21 +2111,23 @@ class SOArm101ControlGUI(Node):
         log_notebook = ttk.Notebook(outer)
         log_notebook.pack(fill=tk.BOTH, expand=True)
         self._log_notebook = log_notebook
+        self._register_notebook(log_notebook, label='log_tab')
 
         # Process Log tab — text + buttons inside
         proc_frame = tk.Frame(log_notebook, bg='#1e1e1e')
         log_notebook.add(proc_frame, text='Process Log')
         proc_btn = tk.Frame(proc_frame)
         proc_btn.pack(side=tk.RIGHT, fill=tk.Y)
-        tk.Button(proc_btn, text='Clear', width=6, bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._clear_active_log).pack(fill=tk.BOTH, expand=True, padx=3, pady=(3, 2))
-        tk.Button(proc_btn, text='Copy', width=6, bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._copy_active_log).pack(fill=tk.BOTH, expand=True, padx=3, pady=(2, 3))
+        self._register_button(proc_btn, text='Clear', tab='Logs', section='Process', width=6,
+                              command=self._log_btn_clear).pack(fill=tk.BOTH, expand=True, padx=3, pady=(3, 2))
+        self._register_button(proc_btn, text='Copy', tab='Logs', section='Process', width=6,
+                              command=self._log_btn_copy).pack(fill=tk.BOTH, expand=True, padx=3, pady=(2, 3))
         proc_scroll = tk.Scrollbar(proc_frame)
         proc_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self._process_log = tk.Text(proc_frame, height=6, wrap=tk.WORD,
                                      font=('Consolas', 9), state=tk.DISABLED,
                                      bg='#1e1e1e', fg='#d4d4d4', borderwidth=0)
+        self._register_log_text(self._process_log, label='process_log')
         self._process_log.config(yscrollcommand=proc_scroll.set)
         proc_scroll.config(command=self._process_log.yview)
         self._process_log.tag_configure('info', foreground='#d4d4d4')
@@ -1459,15 +2140,16 @@ class SOArm101ControlGUI(Node):
         log_notebook.add(err_frame, text='System Errors')
         err_btn = tk.Frame(err_frame)
         err_btn.pack(side=tk.RIGHT, fill=tk.Y)
-        tk.Button(err_btn, text='Clear', width=6, bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._clear_active_log).pack(fill=tk.BOTH, expand=True, padx=3, pady=(3, 2))
-        tk.Button(err_btn, text='Copy', width=6, bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._copy_active_log).pack(fill=tk.BOTH, expand=True, padx=3, pady=(2, 3))
+        self._register_button(err_btn, text='Clear', tab='Logs', section='Errors', width=6,
+                              command=self._log_btn_clear).pack(fill=tk.BOTH, expand=True, padx=3, pady=(3, 2))
+        self._register_button(err_btn, text='Copy', tab='Logs', section='Errors', width=6,
+                              command=self._log_btn_copy).pack(fill=tk.BOTH, expand=True, padx=3, pady=(2, 3))
         err_scroll = tk.Scrollbar(err_frame)
         err_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self._error_log = tk.Text(err_frame, height=6, wrap=tk.WORD,
                                    font=('Consolas', 9), state=tk.DISABLED,
                                    bg='#1e1e1e', fg='#ff6b6b', borderwidth=0)
+        self._register_log_text(self._error_log, label='error_log')
         self._error_log.config(yscrollcommand=err_scroll.set)
         err_scroll.config(command=self._error_log.yview)
         self._error_log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -1480,13 +2162,13 @@ class SOArm101ControlGUI(Node):
         idx = self._log_notebook.index(self._log_notebook.select())
         return self._process_log if idx == 0 else self._error_log
 
-    def _clear_active_log(self):
+    def _log_btn_clear(self):
         widget = self._get_active_log_widget()
         widget.config(state=tk.NORMAL)
         widget.delete('1.0', tk.END)
         widget.config(state=tk.DISABLED)
 
-    def _copy_active_log(self):
+    def _log_btn_copy(self):
         widget = self._get_active_log_widget()
         content = widget.get('1.0', tk.END).strip()
         self.root.clipboard_clear()
@@ -1773,6 +2455,12 @@ class SOArm101ControlGUI(Node):
 
             self._gui_ready = False
             self._ik_debounce_id = None
+            # Widget registry is keyed by label + tab. Tabs are about to be
+            # rebuilt from scratch, so the current entries are stale.
+            # Flag services to short-circuit with "retry in 1s" until finalize.
+            with self._widget_registry_lock:
+                self._widget_registry.clear()
+            self._widget_registry_rebuilding = True
 
             # Destroy notebook and log panel
             self._notebook.destroy()
@@ -1782,6 +2470,7 @@ class SOArm101ControlGUI(Node):
             notebook = ttk.Notebook(self.root)
             notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=(5, 0))
             self._notebook = notebook
+            self._register_notebook(notebook, label='tab')
 
             # Rebuild tabs with error-safe wrappers
             for builder, tab_name in [
@@ -1807,6 +2496,7 @@ class SOArm101ControlGUI(Node):
             # Restore all state
             self._restore_gui_state(state)
 
+            self._finalize_widget_registry()
             self._gui_ready = True
             self._append_log('HOT RELOAD: GUI rebuilt (Ctrl+Shift+R)', 'info')
 
@@ -1850,8 +2540,9 @@ class SOArm101ControlGUI(Node):
             row.pack(fill=tk.X, pady=1)
             tk.Label(row, text=f'{label}:', width=3).pack(side=tk.LEFT)
             var = tk.DoubleVar(value=default)
-            spin = tk.Spinbox(
-                row, textvariable=var, from_=lo, to=hi,
+            spin = self._register_spinbox(
+                row, label=label, tab='IK', section='Position',
+                textvariable=var, from_=lo, to=hi,
                 increment=0.01, width=8, format='%.3f')
             spin.pack(side=tk.LEFT, padx=3)
             var.trace_add('write', lambda *a, f=label: self._on_ik_var_changed(f))
@@ -1869,8 +2560,9 @@ class SOArm101ControlGUI(Node):
             row.pack(fill=tk.X, pady=1)
             tk.Label(row, text=f'{comp[0]}:', width=3).pack(side=tk.LEFT)
             var = tk.DoubleVar(value=default)
-            spin = tk.Spinbox(
-                row, textvariable=var, from_=-180.0, to=180.0,
+            spin = self._register_spinbox(
+                row, label=comp, tab='IK', section='Orientation',
+                textvariable=var, from_=-180.0, to=180.0,
                 increment=1.0, width=8, format='%.1f')
             spin.pack(side=tk.LEFT, padx=3)
             var.trace_add('write', lambda *a, f=comp: self._on_ik_var_changed(f))
@@ -1881,10 +2573,8 @@ class SOArm101ControlGUI(Node):
         # Buttons inside Arm frame
         arm_btn_frame = tk.Frame(coord_frame)
         arm_btn_frame.pack(fill=tk.X, padx=5, pady=5)
-        tk.Button(arm_btn_frame, text='Reset Arm', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._ik_reset).pack(side=tk.LEFT, padx=5)
-        tk.Button(arm_btn_frame, text='Randomize', bg='#b0b0b0', fg='#1a1a1a',
-                  command=lambda: self._cmd_ik_randomize()).pack(side=tk.LEFT, padx=5)
+        self._build_arm_btn_row(arm_btn_frame, tab='IK',
+                                reset_cmd=self._cmd_ik_reset)
 
         # --- Gripper Section (shares DoubleVar with FK tab) ---
         gripper_frame2 = ttk.LabelFrame(frame, text='Gripper')
@@ -1896,8 +2586,10 @@ class SOArm101ControlGUI(Node):
         tk.Label(jaw_row2, text=GRIPPER_JOINT_NAME, width=14, anchor='w').pack(side=tk.LEFT, padx=(5, 0))
         # Reuse the FK tab's DoubleVar so both sliders stay in sync automatically
         jaw_var_shared = self.sliders[GRIPPER_JOINT_NAME]
-        self._ik_jaw_slider = tk.Scale(
-            jaw_row2, variable=jaw_var_shared, from_=lo, to=hi,
+        self._ik_jaw_slider = self._register_scale(
+            jaw_row2, label=f'{GRIPPER_JOINT_NAME}@IK',
+            tab='IK', section='Joint Sliders',
+            variable=jaw_var_shared, from_=lo, to=hi,
             orient=tk.HORIZONTAL, resolution=0.001, length=300,
             command=lambda val: self._on_slider(GRIPPER_JOINT_NAME, float(val)))
         self._ik_jaw_slider.pack(side=tk.LEFT, padx=5)
@@ -1906,20 +2598,15 @@ class SOArm101ControlGUI(Node):
 
         gripper_btn_frame2 = tk.Frame(gripper_frame2)
         gripper_btn_frame2.pack(fill=tk.X, padx=5, pady=5)
-        tk.Button(gripper_btn_frame2, text='Reset Gripper', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._zero_gripper).pack(side=tk.LEFT, padx=5)
-        tk.Button(gripper_btn_frame2, text='Open', bg='#b0b0b0', fg='#1a1a1a',
-                  command=lambda: self._cmd_gripper_open()).pack(side=tk.LEFT, padx=5)
-        tk.Button(gripper_btn_frame2, text='Close', bg='#b0b0b0', fg='#1a1a1a',
-                  command=lambda: self._cmd_gripper_close()).pack(side=tk.LEFT, padx=5)
+        self._build_gripper_btn_row(gripper_btn_frame2, tab='IK')
 
         # --- Action buttons: Set Joints / Plan & Execute ---
         ik_btn_frame = tk.Frame(frame)
         ik_btn_frame.pack(fill=tk.X, padx=10, pady=5)
-        tk.Button(ik_btn_frame, text='Set Joints', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._ik_btn_set_joints).pack(side=tk.LEFT, padx=5)
-        tk.Button(ik_btn_frame, text='Plan & Execute', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._ik_btn_plan_execute).pack(side=tk.LEFT, padx=5)
+        self._register_button(ik_btn_frame, text='Set Joints', tab='IK', section='Actions',
+                              command=self._ik_btn_set_joints).pack(side=tk.LEFT, padx=5)
+        self._register_button(ik_btn_frame, text='Plan & Execute', tab='IK', section='Actions',
+                              command=self._ik_btn_plan_execute).pack(side=tk.LEFT, padx=5)
 
         # IK state tracking
         self.ik_status_var = tk.StringVar(value='Ready')
@@ -1944,31 +2631,35 @@ class SOArm101ControlGUI(Node):
         tk.Label(topic_row, text='Topic:', anchor='w').pack(side=tk.LEFT)
         default_topic = '/objects_poses_real' if self.use_real_hardware else '/objects_poses_sim'
         self._grasp_topic_var = tk.StringVar(value=default_topic)
-        tk.Entry(topic_row, textvariable=self._grasp_topic_var).pack(
+        self._register_entry(topic_row, label='Grasp Topic', tab='Grasp', section='Topic',
+                             textvariable=self._grasp_topic_var).pack(
             side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
-        tk.Button(topic_row, text='Update Topic', bg='#b0b0b0', fg='#1a1a1a',
-                  command=lambda: self._cmd_grasp_update_topic()).pack(side=tk.RIGHT, padx=(2, 0))
-        tk.Button(topic_row, text='Refresh', bg='#b0b0b0', fg='#1a1a1a',
-                  command=lambda: self._cmd_grasp_refresh()).pack(side=tk.RIGHT, padx=(2, 0))
+        self._register_button(topic_row, text='Update Topic', tab='Grasp', section='Topic',
+                              command=self._cmd_grasp_update_topic).pack(side=tk.RIGHT, padx=(2, 0))
+        self._register_button(topic_row, text='Refresh', tab='Grasp', section='Topic',
+                              command=self._cmd_grasp_refresh).pack(side=tk.RIGHT, padx=(2, 0))
 
         opts_row = tk.Frame(topic_frame)
         opts_row.pack(fill=tk.X, padx=5, pady=2)
         default_bbox_topic = '/objects_bbox_real' if self.use_real_hardware else '/objects_bbox_sim'
         tk.Label(opts_row, text='BBox:', anchor='w').pack(side=tk.LEFT)
         self._bbox_topic_var = tk.StringVar(value=default_bbox_topic)
-        tk.Entry(opts_row, textvariable=self._bbox_topic_var, width=22).pack(
+        self._register_entry(opts_row, label='BBox Topic', tab='Grasp', section='Topic',
+                             textvariable=self._bbox_topic_var, width=22).pack(
             side=tk.LEFT, padx=(5, 5))
         self._bbox_enabled_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(opts_row, text='TCP offset',
-                       variable=self._bbox_enabled_var).pack(side=tk.LEFT, padx=5)
+        self._register_check(opts_row, label='TCP offset', tab='Grasp', section='Topic',
+                             variable=self._bbox_enabled_var).pack(side=tk.LEFT, padx=5)
 
         # --- Detected Objects ---
         obj_frame = ttk.LabelFrame(frame, text='Detected Objects')
         obj_frame.pack(fill=tk.X, padx=10, pady=5)
 
-        self.obj_listbox = tk.Listbox(obj_frame, height=5, font=('Consolas', 9),
-                                       selectbackground='#d0d0d0',
-                                       selectforeground='#1a1a1a')
+        self.obj_listbox = self._register_listbox(
+            obj_frame, label='Detected Objects', tab='Grasp',
+            section='Detected Objects',
+            height=5, font=('Consolas', 9),
+            selectbackground='#d0d0d0', selectforeground='#1a1a1a')
         self.obj_listbox.pack(fill=tk.X, padx=5, pady=2)
 
         # --- Arm | Gripper columns ---
@@ -1983,36 +2674,43 @@ class SOArm101ControlGUI(Node):
         arm_dur_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(arm_dur_row, text='Duration (s):', anchor='w').pack(side=tk.LEFT)
         self._grasp_arm_duration_var = tk.DoubleVar(value=2.5)
-        tk.Spinbox(arm_dur_row, textvariable=self._grasp_arm_duration_var,
-                   from_=0.5, to=10.0, increment=0.5,
-                   width=8, format='%.1f').pack(side=tk.LEFT, padx=(5, 0))
+        self._register_spinbox(arm_dur_row, label='Arm Duration (s)',
+                               tab='Grasp', section='Arm',
+                               textvariable=self._grasp_arm_duration_var,
+                               from_=0.5, to=10.0, increment=0.5,
+                               width=8, format='%.1f').pack(side=tk.LEFT, padx=(5, 0))
 
         approach_row = tk.Frame(arm_col)
         approach_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(approach_row, text='Approach height (m):', anchor='w').pack(side=tk.LEFT)
         self._grasp_approach_height_var = tk.DoubleVar(value=0.05)
-        tk.Spinbox(approach_row, textvariable=self._grasp_approach_height_var,
-                   from_=0.00, to=0.20, increment=0.01,
-                   width=6, format='%.2f').pack(side=tk.LEFT, padx=(5, 0))
+        self._register_spinbox(approach_row, label='Approach height (m)',
+                               tab='Grasp', section='Arm',
+                               textvariable=self._grasp_approach_height_var,
+                               from_=0.00, to=0.20, increment=0.01,
+                               width=6, format='%.2f').pack(side=tk.LEFT, padx=(5, 0))
 
         obj_z_row = tk.Frame(arm_col)
         obj_z_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(obj_z_row, text='Object Z (m):', anchor='w').pack(side=tk.LEFT)
         self._grasp_obj_z_var = tk.DoubleVar(value=0.0)
-        tk.Spinbox(obj_z_row, textvariable=self._grasp_obj_z_var,
-                   from_=-0.05, to=0.20, increment=0.005,
-                   width=6, format='%.3f').pack(side=tk.LEFT, padx=(5, 0))
+        self._register_spinbox(obj_z_row, label='Object Z (m)',
+                               tab='Grasp', section='Arm',
+                               textvariable=self._grasp_obj_z_var,
+                               from_=-0.05, to=0.20, increment=0.005,
+                               width=6, format='%.3f').pack(side=tk.LEFT, padx=(5, 0))
 
         self._grasp_cross_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(arm_col, text='Cross-axis grasp',
-                       variable=self._grasp_cross_var).pack(
+        self._register_check(arm_col, label='Cross-axis grasp',
+                             tab='Grasp', section='Arm',
+                             variable=self._grasp_cross_var).pack(
             fill=tk.X, padx=5, pady=1)
 
-        tk.Button(arm_col, text='Home', bg='#b0b0b0', fg='#1a1a1a',
-                  command=lambda: self._cmd_grasp_home()).pack(fill=tk.X, padx=5, pady=2)
-        self._grasp_move_btn = tk.Button(
-            arm_col, text='Move to Grab', bg='#b0b0b0', fg='#1a1a1a',
-            command=lambda: self._cmd_grasp_move())
+        self._register_button(arm_col, text='Home', tab='Grasp', section='Arm',
+                              command=self._cmd_grasp_home).pack(fill=tk.X, padx=5, pady=2)
+        self._grasp_move_btn = self._register_button(
+            arm_col, text='Move to Grab', tab='Grasp', section='Arm',
+            command=self._cmd_grasp_move)
         self._grasp_move_btn.pack(fill=tk.X, padx=5, pady=2)
 
         # Right column: Gripper
@@ -2025,61 +2723,73 @@ class SOArm101ControlGUI(Node):
         grip_range_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(grip_range_row, text='Range:', anchor='w').pack(side=tk.LEFT)
         self._grasp_grip_close_var = tk.DoubleVar(value=_jaw_min_deg)
-        tk.Spinbox(grip_range_row, textvariable=self._grasp_grip_close_var,
-                   from_=_jaw_min_deg, to=_jaw_max_deg,
-                   increment=5, width=5, format='%.0f').pack(side=tk.LEFT, padx=(5, 0))
+        self._register_spinbox(grip_range_row, label='Grip Close',
+                               tab='Grasp', section='Gripper',
+                               textvariable=self._grasp_grip_close_var,
+                               from_=_jaw_min_deg, to=_jaw_max_deg,
+                               increment=5, width=5, format='%.0f').pack(side=tk.LEFT, padx=(5, 0))
         tk.Label(grip_range_row, text='-').pack(side=tk.LEFT)
         self._grasp_grip_open_var = tk.DoubleVar(value=_jaw_max_deg)
-        tk.Spinbox(grip_range_row, textvariable=self._grasp_grip_open_var,
-                   from_=_jaw_min_deg, to=_jaw_max_deg,
-                   increment=5, width=5, format='%.0f').pack(side=tk.LEFT)
+        self._register_spinbox(grip_range_row, label='Grip Open',
+                               tab='Grasp', section='Gripper',
+                               textvariable=self._grasp_grip_open_var,
+                               from_=_jaw_min_deg, to=_jaw_max_deg,
+                               increment=5, width=5, format='%.0f').pack(side=tk.LEFT)
         tk.Label(grip_range_row, text='\u00b0').pack(side=tk.LEFT)
 
         grip_dur_row = tk.Frame(grip_col)
         grip_dur_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(grip_dur_row, text='Duration (s):', anchor='w').pack(side=tk.LEFT)
         self._grasp_grip_duration_var = tk.DoubleVar(value=3.0)
-        tk.Spinbox(grip_dur_row, textvariable=self._grasp_grip_duration_var,
-                   from_=0.2, to=5.0, increment=0.1,
-                   width=8, format='%.1f').pack(side=tk.LEFT, padx=(5, 0))
+        self._register_spinbox(grip_dur_row, label='Grip Duration (s)',
+                               tab='Grasp', section='Gripper',
+                               textvariable=self._grasp_grip_duration_var,
+                               from_=0.2, to=5.0, increment=0.1,
+                               width=8, format='%.1f').pack(side=tk.LEFT, padx=(5, 0))
 
         clearance_row = tk.Frame(grip_col)
         clearance_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(clearance_row, text='Open clearance (mm):', anchor='w').pack(side=tk.LEFT)
         self._jaw_open_clearance_var = tk.DoubleVar(value=JAW_OPEN_CLEARANCE_M * 1000)
-        tk.Spinbox(clearance_row, textvariable=self._jaw_open_clearance_var,
-                   from_=-5.0, to=20.0, increment=0.5,
-                   width=5, format='%.1f').pack(side=tk.LEFT, padx=(5, 0))
+        self._register_spinbox(clearance_row, label='Open clearance (mm)',
+                               tab='Grasp', section='Gripper',
+                               textvariable=self._jaw_open_clearance_var,
+                               from_=-5.0, to=20.0, increment=0.5,
+                               width=5, format='%.1f').pack(side=tk.LEFT, padx=(5, 0))
 
         close_cl_row = tk.Frame(grip_col)
         close_cl_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(close_cl_row, text='Close clearance (mm):', anchor='w').pack(side=tk.LEFT)
         self._jaw_close_clearance_var = tk.DoubleVar(value=JAW_CLOSE_CLEARANCE_M * 1000)
-        tk.Spinbox(close_cl_row, textvariable=self._jaw_close_clearance_var,
-                   from_=-10.0, to=10.0, increment=0.5,
-                   width=5, format='%.1f').pack(side=tk.LEFT, padx=(5, 0))
+        self._register_spinbox(close_cl_row, label='Close clearance (mm)',
+                               tab='Grasp', section='Gripper',
+                               textvariable=self._jaw_close_clearance_var,
+                               from_=-10.0, to=10.0, increment=0.5,
+                               width=5, format='%.1f').pack(side=tk.LEFT, padx=(5, 0))
 
         tcp_clear_row = tk.Frame(grip_col)
         tcp_clear_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(tcp_clear_row, text='TCP clearance (mm):', anchor='w').pack(side=tk.LEFT)
         self._tcp_clearance_var = tk.DoubleVar(value=TCP_CLEARANCE_M * 1000)
-        tk.Spinbox(tcp_clear_row, textvariable=self._tcp_clearance_var,
-                   from_=-5.0, to=10.0, increment=0.5,
-                   width=5, format='%.1f').pack(side=tk.LEFT, padx=(5, 0))
+        self._register_spinbox(tcp_clear_row, label='TCP clearance (mm)',
+                               tab='Grasp', section='Gripper',
+                               textvariable=self._tcp_clearance_var,
+                               from_=-5.0, to=10.0, increment=0.5,
+                               width=5, format='%.1f').pack(side=tk.LEFT, padx=(5, 0))
 
         grip_btn_row1 = tk.Frame(grip_col)
         grip_btn_row1.pack(fill=tk.X, padx=5, pady=2)
-        tk.Button(grip_btn_row1, text='Grasp Open', bg='#b0b0b0', fg='#1a1a1a',
-                  command=lambda: self._cmd_gripper_open_for_object()).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
-        tk.Button(grip_btn_row1, text='Grasp Close', bg='#b0b0b0', fg='#1a1a1a',
-                  command=lambda: self._cmd_gripper_close_for_object()).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
+        self._register_button(grip_btn_row1, text='Grasp Open', tab='Grasp', section='Gripper',
+                              command=self._cmd_gripper_open_for_object).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+        self._register_button(grip_btn_row1, text='Grasp Close', tab='Grasp', section='Gripper',
+                              command=self._cmd_gripper_close_for_object).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
 
         grip_btn_row2 = tk.Frame(grip_col)
         grip_btn_row2.pack(fill=tk.X, padx=5, pady=2)
-        tk.Button(grip_btn_row2, text='Open', bg='#b0b0b0', fg='#1a1a1a',
-                  command=lambda: self._cmd_gripper_open_range()).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
-        tk.Button(grip_btn_row2, text='Close', bg='#b0b0b0', fg='#1a1a1a',
-                  command=lambda: self._cmd_gripper_close_range()).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
+        self._register_button(grip_btn_row2, text='Open', tab='Grasp', section='Gripper Range',
+                              command=self._cmd_gripper_open_range).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+        self._register_button(grip_btn_row2, text='Close', tab='Grasp', section='Gripper Range',
+                              command=self._cmd_gripper_close_range).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
 
         # --- Drop Targets ---
         drop_src_frame = ttk.LabelFrame(frame, text='Drop Source')
@@ -2089,20 +2799,22 @@ class SOArm101ControlGUI(Node):
         drop_topic_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(drop_topic_row, text='Topic:', anchor='w').pack(side=tk.LEFT)
         self._drop_topic_var = tk.StringVar(value='/drop_poses')
-        tk.Entry(drop_topic_row, textvariable=self._drop_topic_var).pack(
+        self._register_entry(drop_topic_row, label='Drop Topic',
+                             tab='Grasp', section='Drop Source',
+                             textvariable=self._drop_topic_var).pack(
             side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
-        tk.Button(drop_topic_row, text='Update Drop Topic', bg='#b0b0b0', fg='#1a1a1a',
-                  command=lambda: self._update_drop_topic(
-                      self._drop_topic_var.get().strip())).pack(side=tk.RIGHT, padx=(2, 0))
-        tk.Button(drop_topic_row, text='Refresh', bg='#b0b0b0', fg='#1a1a1a',
-                  command=lambda: self._cmd_drop_refresh()
-                  ).pack(side=tk.RIGHT, padx=(2, 0))
+        self._register_button(drop_topic_row, text='Update Drop Topic', tab='Grasp', section='Drop Source',
+                              command=self._drop_btn_update_topic).pack(side=tk.RIGHT, padx=(2, 0))
+        self._register_button(drop_topic_row, text='Refresh', tab='Grasp', section='Drop Source',
+                              command=self._cmd_drop_refresh).pack(side=tk.RIGHT, padx=(2, 0))
 
         drop_list_frame = ttk.LabelFrame(frame, text='Drop Targets')
         drop_list_frame.pack(fill=tk.X, padx=10, pady=5)
-        self._drop_listbox = tk.Listbox(drop_list_frame, height=4, font=('Consolas', 9),
-                                        selectbackground='#d0d0d0',
-                                        selectforeground='#1a1a1a')
+        self._drop_listbox = self._register_listbox(
+            drop_list_frame, label='Drop Targets',
+            tab='Grasp', section='Drop Targets',
+            height=4, font=('Consolas', 9),
+            selectbackground='#d0d0d0', selectforeground='#1a1a1a')
         self._drop_listbox.pack(fill=tk.X, padx=5, pady=2)
 
         drop_frame = ttk.LabelFrame(frame, text='Drop')
@@ -2112,18 +2824,20 @@ class SOArm101ControlGUI(Node):
         drop_dur_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(drop_dur_row, text='Sweep duration (s):', anchor='w').pack(side=tk.LEFT)
         self._drop_duration_var = tk.DoubleVar(value=2.5)
-        tk.Spinbox(drop_dur_row, textvariable=self._drop_duration_var,
-                   from_=0.5, to=10.0, increment=0.5,
-                   width=8, format='%.1f').pack(side=tk.LEFT, padx=(5, 0))
+        self._register_spinbox(drop_dur_row, label='Sweep Duration (s)',
+                               tab='Grasp', section='Drop',
+                               textvariable=self._drop_duration_var,
+                               from_=0.5, to=10.0, increment=0.5,
+                               width=8, format='%.1f').pack(side=tk.LEFT, padx=(5, 0))
 
         drop_btn_row = tk.Frame(drop_frame)
         drop_btn_row.pack(fill=tk.X, padx=5, pady=2)
-        tk.Button(drop_btn_row, text='Point to Drop', bg='#b0b0b0', fg='#1a1a1a',
-                  command=lambda: self._cmd_drop_point()).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
-        tk.Button(drop_btn_row, text='Sweep to Drop', bg='#b0b0b0', fg='#1a1a1a',
-                  command=lambda: self._cmd_drop_sweep()).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 2))
-        tk.Button(drop_btn_row, text='Release', bg='#b0b0b0', fg='#1a1a1a',
-                  command=lambda: self._cmd_drop_release()).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
+        self._register_button(drop_btn_row, text='Point to Drop', tab='Grasp', section='Drop',
+                              command=self._cmd_drop_point).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+        self._register_button(drop_btn_row, text='Sweep to Drop', tab='Grasp', section='Drop',
+                              command=self._cmd_drop_sweep).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 2))
+        self._register_button(drop_btn_row, text='Release', tab='Grasp', section='Drop',
+                              command=self._cmd_drop_release).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
 
         # Start drop subscription immediately
         self._update_drop_topic(self._drop_topic_var.get())
@@ -2140,18 +2854,21 @@ class SOArm101ControlGUI(Node):
         cup_frame.pack(fill=tk.X, padx=10, pady=5)
 
         self._show_visual_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(cup_frame, text='Visual (colored cups)',
-                       variable=self._show_visual_var,
-                       command=self._toggle_visual_markers).pack(anchor='w', padx=5, pady=2)
+        self._register_check(cup_frame, label='Visual (colored cups)',
+                             tab='RViz', section='Cups',
+                             variable=self._show_visual_var,
+                             command=self._toggle_visual_markers).pack(anchor='w', padx=5, pady=2)
 
         pad_row = tk.Frame(cup_frame)
         pad_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(pad_row, text='Collision padding %:', anchor='w').pack(side=tk.LEFT)
         self._collision_padding_var = tk.IntVar(value=10)
-        tk.Spinbox(pad_row, textvariable=self._collision_padding_var,
-                   from_=0, to=50, increment=5, width=5).pack(side=tk.LEFT, padx=(5, 0))
-        tk.Button(pad_row, text='Apply', bg='#b0b0b0', fg='#1a1a1a',
-                  command=self._apply_collision_padding).pack(side=tk.LEFT, padx=(5, 0))
+        self._register_spinbox(pad_row, label='Collision padding %',
+                               tab='RViz', section='Cups',
+                               textvariable=self._collision_padding_var,
+                               from_=0, to=50, increment=5, width=5).pack(side=tk.LEFT, padx=(5, 0))
+        self._register_button(pad_row, text='Apply', tab='RViz', section='Cups',
+                              command=self._cmd_apply_collision_padding).pack(side=tk.LEFT, padx=(5, 0))
 
         # --- Planning ---
         plan_frame = ttk.LabelFrame(frame, text='Planning')
@@ -2161,15 +2878,19 @@ class SOArm101ControlGUI(Node):
         grip_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(grip_row, text='Drop grip angle (deg):', anchor='w').pack(side=tk.LEFT)
         self._drop_grip_angle_var = tk.IntVar(value=45)
-        tk.Spinbox(grip_row, textvariable=self._drop_grip_angle_var,
-                   from_=0, to=90, increment=5, width=5).pack(side=tk.LEFT, padx=(5, 0))
+        self._register_spinbox(grip_row, label='Drop grip angle (deg)',
+                               tab='RViz', section='Planning',
+                               textvariable=self._drop_grip_angle_var,
+                               from_=0, to=90, increment=5, width=5).pack(side=tk.LEFT, padx=(5, 0))
 
         attempts_row = tk.Frame(plan_frame)
         attempts_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(attempts_row, text='Planning attempts:', anchor='w').pack(side=tk.LEFT)
         self._planning_attempts_var = tk.IntVar(value=50)
-        tk.Spinbox(attempts_row, textvariable=self._planning_attempts_var,
-                   from_=1, to=200, increment=10, width=5).pack(side=tk.LEFT, padx=(5, 0))
+        self._register_spinbox(attempts_row, label='Planning attempts',
+                               tab='RViz', section='Planning',
+                               textvariable=self._planning_attempts_var,
+                               from_=1, to=200, increment=10, width=5).pack(side=tk.LEFT, padx=(5, 0))
 
         # --- Info ---
         info_frame = ttk.LabelFrame(frame, text='Info')
@@ -2288,7 +3009,7 @@ class SOArm101ControlGUI(Node):
         for spin in self._ik_spinboxes.values():
             spin.config(fg='black')
 
-    def _ik_reset(self):
+    def _cmd_ik_reset(self):
         """Reset IK tab: zero arm and populate spinboxes from resulting FK."""
         self._cmd_zero_arm()
         def _after_zero():
@@ -2537,76 +3258,100 @@ class SOArm101ControlGUI(Node):
 
     # --- Full IK solver (for services, 6 seeds + 2 passes) ---
 
+    # ------------------------------------------------------------------
+    # IK pipeline — three entry points (Phase 7 Plan 07-04 / D-10..D-13):
+    #
+    #   Solvers (return candidate joint dicts):
+    #     _solve_grasp_ik   — geometric, top-down grasp poses only (~100µs)
+    #     _solve_free_ik    — MoveIt KDL multi-seed for freeform xyz+quaternion
+    #
+    #   Execution wrapper (solve + collision-check + execute):
+    #     _plan_collision_free_execute — geometric + MoveIt path planning
+    #                                    (used by drop sweep, planned grasp)
+    #
+    #   Post-solve helpers (shared by both solvers):
+    #     _check_state_valid  — collision validity via MoveIt planning scene
+    #     _ik_apply_and_act   — sync sliders, publish goal state, dispatch mode
+    #
+    # Motion entry points:
+    #   _execute_trajectory — direct-send for trajectory-shaped moves
+    #   _cmd_plan_execute   — MoveIt-planned collision-aware execution
+    #   _cmd_set_joints     — 0.5s slider-quick-move (bypasses trajectory by
+    #                         design — quick-move semantics differ)
+    # ------------------------------------------------------------------
+
+    def _solve_grasp_ik(self, x, y, z, grasp_yaw, mode=None):
+        """Geometric top-down grasp IK + collision check (no MoveIt fallback).
+
+        Fast analytical solver (~100µs). Validates each solution against the
+        MoveIt planning scene. On success, dispatches to _ik_apply_and_act(mode).
+        Runs on a background daemon thread (matches historic _try_geometric).
+        """
+        def _try_geometric():
+            with self._ik_solve_lock:
+                ground_z = (self._ground_z_var.get()
+                            if hasattr(self, '_ground_z_var') else None)
+                ok, reason = check_grasp_reachable(x, y, z, ground_z=ground_z)
+                if not ok:
+                    self._append_log(
+                        f'Grasp rejected: {reason} '
+                        f'({x:.3f}, {y:.3f}, {z:.3f})', 'warn')
+                    return
+
+                from so_arm101_control.compute_workspace import geometric_ik
+                solutions = geometric_ik(x, y, z, grasp_yaw=grasp_yaw)
+                if not solutions:
+                    self._append_log(
+                        f'Grasp unreachable: no geometric IK solution '
+                        f'({x:.3f}, {y:.3f}, {z:.3f})', 'warn')
+                    return
+
+                for i, sol in enumerate(solutions):
+                    config = 'elbow-up' if i == 0 else 'elbow-down'
+                    if self._check_state_valid(sol):
+                        self._append_log(
+                            f'Geometric IK: {config}, '
+                            f'wrist_roll='
+                            f'{math.degrees(sol["wrist_roll"]):.1f}°')
+                        self._ik_apply_and_act(sol, mode)
+                        return
+                    self._append_log(
+                        f'Geometric IK: {config} collides', 'warn')
+
+                self._append_log(
+                    'Grasp unreachable: all geometric IK solutions collide '
+                    f'({x:.3f}, {y:.3f}, {z:.3f})', 'warn')
+
+        threading.Thread(target=_try_geometric, daemon=True).start()
+
     def _compute_ik_full(self, mode=None, target_pose=None, grasp_yaw=None):
-        """IK computation: geometric solver for grasps, MoveIt for general moves.
+        """IK routing layer: geometric for grasps, MoveIt KDL for freeform.
 
-        For grasp moves (grasp_yaw is not None), uses the analytical geometric
-        IK solver which produces exact gripper-down solutions in ~100µs, then
-        validates with MoveIt collision checking. No MoveIt fallback — if
-        geometric IK fails, the position is unreachable for a top-down grasp.
-
-        For non-grasp moves, uses the original multi-seed MoveIt KDL solver.
+        See _solve_grasp_ik (grasp_yaw path) and _solve_free_ik (freeform
+        xyz+quaternion path). Both solvers call _ik_apply_and_act on success
+        to sync sliders and dispatch the execution mode.
 
         target_pose: optional (x, y, z, qx, qy, qz, qw) to bypass spinboxes.
-        grasp_yaw: desired jaw-line direction (rad) for top-down grasp alignment.
+        grasp_yaw: desired jaw-line direction (rad) for top-down alignment.
         """
         if target_pose is not None:
             x, y, z, qx, qy, qz, qw = target_pose
         else:
             x, y, z, qx, qy, qz, qw = self._get_ik_target_quat()
 
-        # --- Grasp moves: geometric IK + collision check (no MoveIt fallback) ---
         if grasp_yaw is not None:
-            def _try_geometric():
-                with self._ik_solve_lock:
-                    # Pre-check: is the target within the top-down grasp workspace?
-                    ground_z = self._ground_z_var.get() if hasattr(self, '_ground_z_var') else None
-                    ok, reason = check_grasp_reachable(x, y, z, ground_z=ground_z)
-                    if not ok:
-                        self._append_log(
-                            f'Grasp rejected: {reason} '
-                            f'({x:.3f}, {y:.3f}, {z:.3f})', 'warn')
-                        return
-
-                    from so_arm101_control.compute_workspace import geometric_ik
-                    solutions = geometric_ik(x, y, z, grasp_yaw=grasp_yaw)
-                    if not solutions:
-                        self._append_log(
-                            f'Grasp unreachable: no geometric IK solution '
-                            f'({x:.3f}, {y:.3f}, {z:.3f})', 'warn')
-                        return
-
-                    # Try each solution (elbow-up first, then elbow-down)
-                    for i, sol in enumerate(solutions):
-                        config = 'elbow-up' if i == 0 else 'elbow-down'
-                        if self._check_state_valid(sol):
-                            self._append_log(
-                                f'Geometric IK: {config}, '
-                                f'wrist_roll='
-                                f'{math.degrees(sol["wrist_roll"]):.1f}°')
-                            self._ik_apply_and_act(sol, mode)
-                            return
-                        self._append_log(
-                            f'Geometric IK: {config} collides', 'warn')
-
-                    # All geometric solutions collide — reject (no MoveIt fallback)
-                    self._append_log(
-                        'Grasp unreachable: all geometric IK solutions collide '
-                        f'({x:.3f}, {y:.3f}, {z:.3f})', 'warn')
-
-            threading.Thread(target=_try_geometric, daemon=True).start()
+            self._solve_grasp_ik(x, y, z, grasp_yaw, mode=mode)
             return
 
-        # --- Non-grasp moves: MoveIt IK (original pipeline) ---
         if not MOVEIT_AVAILABLE or self.ik_client is None:
             self._append_log('moveit_msgs not installed', 'warn')
             return
         if not self.ik_client.service_is_ready():
             self._append_log('compute_ik service not ready', 'warn')
             return
-        self._compute_ik_moveit(x, y, z, qx, qy, qz, qw, mode, grasp_yaw)
+        self._solve_free_ik(x, y, z, qx, qy, qz, qw, mode, grasp_yaw)
 
-    def _compute_ik_moveit(self, x, y, z, qx, qy, qz, qw, mode, grasp_yaw):
+    def _solve_free_ik(self, x, y, z, qx, qy, qz, qw, mode, grasp_yaw):
         """MoveIt multi-seed IK solver — used for non-grasp moves only."""
         if not MOVEIT_AVAILABLE or self.ik_client is None:
             self._append_log('moveit_msgs not installed', 'warn')
@@ -2783,7 +3528,11 @@ class SOArm101ControlGUI(Node):
     # ------------------------------------------------------------------
 
     def _drop_callback(self, msg):
-        """Populate _drop_data from /drop_poses TFMessage."""
+        """Populate _drop_data from /drop_poses TFMessage.
+
+        If _cmd_drop_refresh is waiting on a fresh-data event, signal it
+        once the incoming message has been stored.
+        """
         with self._drop_lock:
             for tf in msg.transforms:
                 name = tf.child_frame_id
@@ -2796,7 +3545,10 @@ class SOArm101ControlGUI(Node):
                     'qz': tf.transform.rotation.z,
                     'qw': tf.transform.rotation.w,
                 }
-        # Cup collision objects updated on manual refresh (_cmd_drop_refresh), not here
+        # Cup collision objects updated on manual refresh (_cmd_drop_refresh).
+        evt = getattr(self, '_drop_refresh_event', None)
+        if evt is not None and not evt.is_set():
+            evt.set()
 
     def _update_drop_topic(self, topic='/drop_poses'):
         """Switch drop subscription to topic."""
@@ -2946,7 +3698,7 @@ class SOArm101ControlGUI(Node):
             ma.markers.append(m)
         self._cup_visual_pub.publish(ma)
 
-    def _apply_collision_padding(self):
+    def _cmd_apply_collision_padding(self):
         """Update collision padding and re-add collision objects + visual markers."""
         global _CUP_COLLISION_PADDING
         pct = self._collision_padding_var.get()
@@ -3073,20 +3825,143 @@ class SOArm101ControlGUI(Node):
         """Hot-reload logic + rebuild GUI (same as Ctrl+Shift+R)."""
         self._hot_reload_gui()
 
+    def _build_dump_services_output(self):
+        """Build the markdown button↔service mapping + service inventory.
+
+        Used by both:
+          - _srv_dump_services (Trigger service — returns the string in response.message)
+          - scripts/regen_agent_debug_guide.sh (pastes the string into docs/AGENT_DEBUG_GUIDE.md)
+        """
+        lines = []
+        lines.append('# Button ↔ Service Mapping (auto-generated from dump_services)')
+        lines.append('')
+        lines.append('> Regenerated from control_gui.py via '
+                     '`ros2 service call /so_arm101_control_gui/dump_services '
+                     'std_srvs/srv/Trigger {}`. Do NOT hand-edit — rerun the '
+                     'service after code changes.')
+        lines.append('')
+
+        cmd_methods = {n for n in dir(self) if n.startswith('_cmd_')}
+        wrapper_methods = {n for n in dir(self)
+                           if '_btn_' in n and n.startswith('_')}
+
+        # Table 1 — Button map
+        lines.append('## Buttons')
+        lines.append('')
+        lines.append('| Tab | Section | Button | Bound Method | Registered Service | Mapping OK |')
+        lines.append('|-----|---------|--------|--------------|--------------------|------------|')
+        bound_cmds = set()
+        for entry in self._button_registry:
+            cmd_name = entry.get('command_name', '')
+            tab = entry.get('tab') or '-'
+            section = entry.get('section') or '-'
+            text = entry.get('text', '')
+            if cmd_name.startswith('_cmd_') and cmd_name in cmd_methods:
+                svc = '~/' + cmd_name[5:]
+                ok = '✓'
+                bound_cmds.add(cmd_name)
+            elif cmd_name in wrapper_methods:
+                svc = '(wrapper)'
+                ok = 'WRAPPER'
+            else:
+                svc = '-'
+                ok = '❌ INLINE LAMBDA'
+            lines.append(f'| {tab} | {section} | {text} | `{cmd_name}` | {svc} | {ok} |')
+
+        # Table 2 — Services without buttons (agent-only)
+        lines.append('')
+        lines.append('## Agent-only services (no button binding)')
+        lines.append('')
+        lines.append('| Service | Method |')
+        lines.append('|---------|--------|')
+        for name in sorted(cmd_methods):
+            if name in bound_cmds:
+                continue
+            lines.append(f'| `~/{name[5:]}` | `{name}` |')
+
+        return '\n'.join(lines)
+
+    def _srv_dump_services(self, request, response):
+        """Manual service — returns the button↔service mapping as markdown."""
+        try:
+            response.message = self._build_dump_services_output()
+            response.success = True
+        except Exception as e:
+            response.message = f'dump_services error: {e}'
+            response.success = False
+        return response
+
     # ------------------------------------------------------------------
     # Drop motion commands (auto-registered as ~/drop_refresh, ~/drop_select,
     # ~/drop_point, ~/drop_sweep, ~/drop_release Trigger services)
     # ------------------------------------------------------------------
 
+    def _drop_btn_update_topic(self):
+        """GUI-only wrapper: read the drop topic entry and switch subscription.
+
+        This is a thin _*_btn_* wrapper (not auto-registered as a service)
+        because the agent-callable path for changing topics is the parameter
+        + _cmd_drop_refresh pattern, not a Trigger service.
+        """
+        topic = self._drop_topic_var.get().strip()
+        self._update_drop_topic(topic)
+
     def _cmd_drop_refresh(self):
-        """Refresh drop listbox and cup collision objects from /drop_poses topic data."""
-        self._drop_data.clear()
-        self._populate_drop_list()
-        self.root.after(500, self._populate_drop_list)
-        # Collision objects always added (MoveIt needs them for planning)
-        self.root.after(600, self._add_cup_collision_objects)
-        # Visual markers respect display toggles
-        self.root.after(700, self._refresh_display_markers)
+        """Refresh drop listbox + cup collision objects + visual markers from
+        a FRESH /drop_poses message.
+
+        Sequence-against-fresh-data pattern (Phase 7 Plan 07-02 / D-06):
+          1. Snapshot current cup names (stale_names).
+          2. Remove those cups' collision objects + delete their markers.
+          3. Invalidate _drop_data, arm _drop_refresh_event.
+          4. Wait on a background thread for the next /drop_poses message
+             (up to 2.0s — _drop_callback sets the event when it arrives).
+          5. On fresh data: re-add collisions + publish markers atomically.
+          6. On timeout: log + leave scene empty (user sees the truth).
+
+        Replaces the old root.after(500/600/700) chain.
+        """
+        # Snapshot cups that existed before the refresh
+        with self._drop_lock:
+            stale_names = list(self._drop_data.keys())
+
+        # Remove old collisions + markers so the scene is clean during wait
+        self._remove_cup_collision_objects()
+        if getattr(self, '_cup_visual_pub', None) is not None and stale_names:
+            ma = MarkerArray()
+            for i in range(len(stale_names)):
+                m = VisMarker()
+                m.header.frame_id = 'base'
+                m.ns = 'cup_visual'
+                m.id = i
+                m.action = VisMarker.DELETE
+                ma.markers.append(m)
+            self._cup_visual_pub.publish(ma)
+
+        # Arm the fresh-data event and invalidate _drop_data
+        with self._drop_lock:
+            self._drop_data.clear()
+        self._drop_refresh_event = threading.Event()
+
+        # Update the listbox to empty immediately
+        self.root.after(0, self._populate_drop_list)
+
+        def _wait_and_publish():
+            evt = self._drop_refresh_event
+            got_fresh = evt.wait(timeout=2.0) if evt is not None else False
+            if not got_fresh:
+                self._append_log(
+                    'Drop refresh: no /drop_poses message within 2.0s — '
+                    'topic may be down', 'warn')
+                self._drop_refresh_event = None
+                return
+            # Re-add collisions + markers atomically from fresh data
+            self._add_cup_collision_objects()
+            self._publish_cup_visual_markers()
+            self.root.after(0, self._populate_drop_list)
+            self._drop_refresh_event = None
+
+        threading.Thread(target=_wait_and_publish, daemon=True).start()
 
     def _cmd_drop_select(self):
         """Select a drop target by name (via ik_target param).
@@ -3156,7 +4031,7 @@ class SOArm101ControlGUI(Node):
 
         grip_deg = getattr(self, '_drop_grip_angle_var', None)
         grip_angle = math.radians(grip_deg.get() if grip_deg else 45)
-        self._collision_free_ik_plan_and_execute(
+        self._plan_collision_free_execute(
             x, y, target_z,
             grip_angle=grip_angle,
             wrist_roll=-math.pi / 2,
