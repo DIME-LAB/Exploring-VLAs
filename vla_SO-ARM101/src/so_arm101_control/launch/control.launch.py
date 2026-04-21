@@ -50,6 +50,7 @@ def generate_launch_description():
     serial_port = LaunchConfiguration('serial_port')
     use_rviz = LaunchConfiguration('rviz')
     use_sim = LaunchConfiguration('use_sim')
+    use_mtc = LaunchConfiguration('mtc')
 
     return LaunchDescription([
         # Arguments
@@ -61,6 +62,8 @@ def generate_launch_description():
                               description='Launch RViz visualization'),
         DeclareLaunchArgument('use_sim', default_value='false',
                               description='Simulation mode (sets default topics in GUI)'),
+        DeclareLaunchArgument('mtc', default_value='false',
+                              description='Launch MoveIt Task Constructor pick-place node'),
 
         # Robot State Publisher (with xacro-processed URDF including ros2_control)
         Node(
@@ -107,6 +110,15 @@ def generate_launch_description():
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(moveit_pkg, 'launch', 'move_group.launch.py')),
+        ),
+
+        # MoveIt Task Constructor pick-place node (optional; requires mtc:=true)
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(
+                    get_package_share_directory('so_arm101_mtc'),
+                    'launch', 'mtc.launch.py')),
+            condition=IfCondition(use_mtc),
         ),
 
         # Servo driver (only when real hardware)

@@ -10,17 +10,7 @@
     <!--CHAINS: When a chain is specified, all the links along the chain (including endpoints) are included in the group. Additionally, all the joints that are parents to included links are also included. This means that joints along the chain and the parent joint of the base link are included in the group-->
     <!--SUBGROUPS: Groups can also be formed by referencing to already defined group names-->
     <group name="arm">
-        <link name="base"/>
-        <joint name="shoulder_pan"/>
-        <joint name="shoulder_lift"/>
-        <joint name="elbow_flex"/>
-        <joint name="wrist_flex"/>
-        <joint name="wrist_roll"/>
-        <link name="tcp_link"/>
-        <link name="camera_mount"/>
-        <link name="usb_camera"/>
-        <link name="camera_link"/>
-        <link name="camera_optical_frame"/>
+        <chain base_link="base" tip_link="tcp_link"/>
     </group>
     <group name="gripper">
         <joint name="gripper_joint"/>

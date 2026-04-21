@@ -152,7 +152,7 @@ CUP_BODY_HEIGHT_M = 0.0965
 # at close-in grasp positions, but the lego-in-cup scene filter + sync
 # detach + one-shot OMPL together are now the primary correctness levers;
 # padding returns to its original safety-margin role.
-_CUP_COLLISION_PADDING = 1.1
+_CUP_COLLISION_PADDING = 1.0  # real cup geometry — MoveIt 2.5.9 honest collision
 
 
 def _load_cup_mesh():
@@ -453,17 +453,11 @@ class SOArm101ControlGUI(Node):
         # holds the name currently held by the gripper (or None when table-bound).
         self._lego_collision_names = []
         self._attached_lego_name = None
-        # Phase 9 (held-lego world-pose tracker): MoveIt 2 Humble's collision
-        # checker silently skips AttachedCollisionObject ↔ world.CollisionObject
-        # pairs (verified by probe: 300mm cube attached at TCP was invisible
-        # to /check_state_validity). Workaround: keep the grasped lego as a
-        # WORLD CollisionObject and re-publish its pose at 10Hz (+ before
-        # every plan/validity call). _held_lego stores the tcp_link-local
-        # offset snapshotted at grasp-close; _sync_held_lego_now rebuilds
-        # the world pose via tcp_link TF.
-        self._held_lego = None   # dict{name, local_xyz, local_quat, dims_xyz} or None
-        self._held_lego_lock = threading.Lock()
-        self._held_lego_timer_running = False
+        # MoveIt 2.5.9 correctly reports AttachedCollisionObject ↔ world
+        # CollisionObject collisions (the 2.5.8 skip-bug that required the
+        # 10 Hz held-lego world-pose tracker is gone — verified via
+        # /check_state_validity probe). Standard AttachedCollisionObject
+        # lifecycle is used in _attach_lego_to_gripper / _detach_lego_sync.
         _default_bbox = '/objects_bbox_real' if self.use_real_hardware else '/objects_bbox_sim'
         self.bbox_sub = self.create_subscription(
             String, _default_bbox, self._bbox_callback, 1)
@@ -502,6 +496,11 @@ class SOArm101ControlGUI(Node):
                 callback_group=self._service_cb_group)
             self._get_scene_client = self.create_client(
                 GetPlanningSceneSrv, '/get_planning_scene',
+                callback_group=self._service_cb_group)
+            # MoveIt Task Constructor spike — optional, only responds when
+            # control.launch.py was started with mtc:=true.
+            self._mtc_run_client = self.create_client(
+                Trigger, '/so_arm101_mtc/run',
                 callback_group=self._service_cb_group)
 
         # Trajectory lock
@@ -1750,6 +1749,7 @@ class SOArm101ControlGUI(Node):
         self._build_individual_tab(notebook)
         self._build_arm_control_tab(notebook)
         self._build_grasp_tab(notebook)
+        self._build_quickstart_tab(notebook)
         self._build_display_tab(notebook)
 
         # Auto-populate IK fields when switching to IK tab
@@ -2046,6 +2046,9 @@ class SOArm101ControlGUI(Node):
         Returns immediately; execution is async.
         """
         from so_arm101_control.compute_workspace import geometric_ik
+        # Switch RViz panel to arm group so the Goal State ghost shows the
+        # arm target (gripper commands set it to "gripper").
+        self._select_planning_group('arm')
 
         solutions = geometric_ik(x, y, z, grip_angle=grip_angle,
                                  wrist_roll=wrist_roll)
@@ -2125,6 +2128,11 @@ class SOArm101ControlGUI(Node):
 
         self.root.after(0, lambda: self.execute_btn.config(state=tk.DISABLED))
         self._set_status('Planning...')
+        # Tell the RViz MotionPlanning panel we're planning for the arm.
+        # Gripper commands published "gripper" to /rviz/moveit/select_planning_group
+        # (control_gui.py:6102). Without this switch-back, RViz's Goal State ghost
+        # stays locked to the gripper group and renders no orange arm ghost.
+        self._select_planning_group('arm')
         # Phase 9: if no on_complete was passed (button click or Trigger
         # service), create one and register as _motion_event so the service
         # wrapper waits for the real motion verdict instead of returning
@@ -2133,9 +2141,6 @@ class SOArm101ControlGUI(Node):
             on_complete = threading.Event()
             self._motion_event = on_complete
         self._plan_execute_on_complete = on_complete
-        # Refresh held-lego world pose so /plan_kinematic_path sees the
-        # correct block location during collision-aware planning.
-        self._sync_held_lego_now()
 
         if target is None:
             with self.joint_lock:
@@ -2699,6 +2704,7 @@ class SOArm101ControlGUI(Node):
                 (self._build_individual_tab, 'FK'),
                 (self._build_arm_control_tab, 'IK'),
                 (self._build_grasp_tab, 'Grasp'),
+                (self._build_quickstart_tab, 'Quickstart'),
                 (self._build_display_tab, 'RViz'),
             ]:
                 try:
@@ -3053,7 +3059,7 @@ class SOArm101ControlGUI(Node):
         drop_dur_row = tk.Frame(drop_frame)
         drop_dur_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(drop_dur_row, text='Sweep duration (s):', anchor='w').pack(side=tk.LEFT)
-        self._drop_duration_var = tk.DoubleVar(value=2.5)
+        self._drop_duration_var = tk.DoubleVar(value=5.0)
         self._register_spinbox(drop_dur_row, label='Sweep Duration (s)',
                                tab='Grasp', section='Drop',
                                textvariable=self._drop_duration_var,
@@ -3085,11 +3091,417 @@ class SOArm101ControlGUI(Node):
         self._register_button(drop_btn_row, text='Release', tab='Grasp', section='Drop',
                               command=self._cmd_drop_release).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
 
+        # --- MTC Spike (disabled) ---
+        # The Pick & Drop button is commented out; backend (_cmd_mtc_pick_place,
+        # _mtc_run_client, and the so_arm101_mtc C++ node) is kept intact so
+        # we can re-enable this quickly for the IK iteration spike. Toggle the
+        # three lines below ON to restore the button.
+        # mtc_frame = ttk.LabelFrame(frame, text='MTC (spike)')
+        # mtc_frame.pack(fill=tk.X, padx=10, pady=5)
+        # mtc_btn_row = tk.Frame(mtc_frame)
+        # mtc_btn_row.pack(fill=tk.X, padx=5, pady=2)
+        # self._register_button(mtc_btn_row, text='MTC Pick & Drop',
+        #                       tab='Grasp', section='MTC',
+        #                       command=self._cmd_mtc_pick_place).pack(
+        #                           side=tk.LEFT, fill=tk.X, expand=True)
+
         # Start drop subscription immediately
         self._update_drop_topic(self._drop_topic_var.get())
 
         # Initial subscription to default topic
         self._cmd_grasp_update_topic()
+
+    # ------------------------------------------------------------------
+    # Quickstart tab — high-level player for the full pick-drop lifecycle.
+    # Each step just delegates to the matching _cmd_* handler on the Grasp
+    # tab, so all settings (sweep duration, hover, padding, topic, grip
+    # duration, …) continue to flow through from the Grasp tab untouched.
+    # ------------------------------------------------------------------
+
+    # Pick-and-drop step sequence. Each tuple: (label, callable, kwargs).
+    # The callable is bound on the class, so we reference it by name and
+    # resolve with getattr(self, name) in the runner — keeps this table
+    # readable and independent of method order.
+    _QS_SEQUENCE = [
+        ('move to home',        '_cmd_grasp_home',            {'skip_if_home': True}),
+        ('grasp open',          '_cmd_gripper_open_for_object', {}),
+        ('grasp move',          '_cmd_grasp_move',            {}),
+        ('grasp close',         '_cmd_gripper_close_for_object', {}),
+        ('return home (carry)', '_cmd_grasp_home',            {}),
+        ('point to drop cup',   '_cmd_drop_point',            {}),
+        ('drop sweep',          '_cmd_drop_sweep',            {}),
+        ('release',             '_cmd_drop_release',          {}),
+        ('return home',         '_cmd_grasp_home',            {}),
+    ]
+
+    def _qs_auto_drop_for_lego(self, lego_name):
+        """Return the /drop_poses child_frame_id of the cup matching this
+        lego's color, or None if it can't be inferred.
+
+        Per project convention (CLAUDE.md § Robot Facts):
+          red  → drop_0
+          green→ drop_1
+          blue → drop_2
+
+        TODO(aldrin): implement this 4-line mapping. Return a string like
+        "drop_1", or None when the color prefix isn't recognised (so the
+        caller can surface a clean error instead of picking the wrong cup).
+
+        Called with names like "red_2x3", "green_2x4", "blue_2x2".
+        """
+        return None  # TODO: implement
+
+    def _build_quickstart_tab(self, notebook):
+        frame = ttk.Frame(notebook)
+        notebook.add(frame, text='Quickstart')
+
+        # Player state (thread/events).
+        self._qs_state = 'idle'             # 'idle' | 'running' | 'paused'
+        self._qs_thread = None
+        # set() = running; clear() = pause-wall (next step blocks on wait)
+        self._qs_resume_evt = threading.Event()
+        self._qs_resume_evt.set()
+        # set() = abort at next step boundary
+        self._qs_abort_evt = threading.Event()
+        self._qs_status_var = tk.StringVar(value='Idle')
+        self._qs_step_var = tk.StringVar(value='—')
+
+        # ===== TOP: Refresh-all bar =====
+        top_bar = ttk.Frame(frame)
+        top_bar.pack(fill=tk.X, padx=10, pady=(8, 4))
+        self._register_button(
+            top_bar, text='🔄  Refresh all (objects + drops)',
+            tab='Quickstart', section='Top',
+            command=self._qs_refresh_all,
+        ).pack(fill=tk.X, ipady=4)
+
+        # ===== BODY: two columns =====
+        body = ttk.Frame(frame)
+        body.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
+
+        # --- LEFT column: object listbox ---
+        left = ttk.LabelFrame(body, text='Detected objects  (pick one)')
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 4))
+        self._qs_listbox = tk.Listbox(
+            left, height=16, exportselection=False,
+            font=('TkFixedFont', 10))
+        self._qs_listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # --- RIGHT column: player + steps ---
+        right = ttk.Frame(body)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(4, 0))
+
+        ctrl_frame = ttk.LabelFrame(right, text='Pick & Drop Player')
+        ctrl_frame.pack(fill=tk.X, padx=0, pady=(0, 4))
+        ctrl_row = ttk.Frame(ctrl_frame)
+        ctrl_row.pack(fill=tk.X, padx=5, pady=5)
+        self._register_button(
+            ctrl_row, text='▶ Play',
+            tab='Quickstart', section='Player',
+            command=self._qs_play,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2), ipady=2)
+        self._register_button(
+            ctrl_row, text='⏸ Pause',
+            tab='Quickstart', section='Player',
+            command=self._qs_pause,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 2), ipady=2)
+        self._register_button(
+            ctrl_row, text='⏮ Restart',
+            tab='Quickstart', section='Player',
+            command=self._qs_restart,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0), ipady=2)
+        status_row = ttk.Frame(ctrl_frame)
+        status_row.pack(fill=tk.X, padx=5, pady=(0, 5))
+        tk.Label(status_row, text='Status:', anchor='w').pack(side=tk.LEFT)
+        tk.Label(status_row, textvariable=self._qs_status_var,
+                 anchor='w', font=('TkDefaultFont', 9, 'bold')).pack(
+                     side=tk.LEFT, padx=(5, 15))
+        tk.Label(status_row, text='Step:', anchor='w').pack(side=tk.LEFT)
+        tk.Label(status_row, textvariable=self._qs_step_var,
+                 anchor='w').pack(side=tk.LEFT, padx=(5, 0))
+
+        # Individual step buttons — right column below Player
+        steps_frame = ttk.LabelFrame(
+            right, text='Individual steps  (Grasp-tab handlers)')
+        steps_frame.pack(fill=tk.BOTH, expand=True)
+        for (label, method_name, kwargs) in self._QS_SEQUENCE:
+            row = ttk.Frame(steps_frame)
+            row.pack(fill=tk.X, padx=5, pady=1)
+            tk.Label(row, text=f'{label}', anchor='w', width=22).pack(side=tk.LEFT)
+            self._register_button(
+                row, text='Run',
+                tab='Quickstart', section=label,
+                command=lambda m=method_name, kw=kwargs: self._qs_run_step_oneshot(m, kw)
+            ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # (MTC spike re-enable: uncomment a button row here pointing at
+        # self._cmd_mtc_pick_place when iterating on the MTC task graph.)
+
+        # Initial populate — use refresh_all so legos AND drops get a fresh
+        # pass on first tab build. Deferred via root.after so the grasp tab
+        # (source of the legacy listbox) is already constructed.
+        self.root.after(800, self._qs_refresh_all)
+
+    # ---- Quickstart helpers ----
+
+    def _qs_refresh_all(self):
+        """Hit both Grasp-tab refresh buttons (objects AND drops), then
+        repopulate our local listbox once the topic subscriptions have
+        received fresh data. Non-blocking — schedules the local repopulate
+        via root.after(1000, ...) because _cmd_grasp_refresh uses 500 ms
+        and _cmd_drop_refresh waits up to 2 s for fresh /drop_poses data.
+        """
+        self._append_log('Quickstart: refresh (objects + drops)')
+        try:
+            self._cmd_grasp_refresh()
+        except Exception as exc:
+            self._append_log(f'Quickstart refresh objects failed: {exc}', 'warn')
+        try:
+            self._cmd_drop_refresh()
+        except Exception as exc:
+            self._append_log(f'Quickstart refresh drops failed: {exc}', 'warn')
+        # Our local listbox mirrors self.objects_data which _cmd_grasp_refresh
+        # repopulates after ~500 ms — wait a bit longer for safety.
+        self.root.after(1200, self._qs_refresh_objects)
+
+    def _qs_refresh_objects(self):
+        """Populate the Quickstart listbox from the shared objects_data dict
+        (same source as the Grasp tab's listbox). Preserves selection if the
+        previously-selected entry still exists.
+        """
+        prev = None
+        if self._qs_listbox.curselection():
+            prev = self._qs_listbox.get(self._qs_listbox.curselection()[0]).split('  ')[0]
+        self._qs_listbox.delete(0, tk.END)
+        with self.objects_lock:
+            names = sorted(self.objects_data.keys())
+        restore_idx = None
+        for i, n in enumerate(names):
+            pose = self.objects_data.get(n, {})
+            x, y, z = pose.get('x', 0), pose.get('y', 0), pose.get('z', 0)
+            self._qs_listbox.insert(
+                tk.END, f'{n:<18s}  x={x:+.3f} y={y:+.3f} z={z:+.3f}')
+            if n == prev:
+                restore_idx = i
+        if restore_idx is not None:
+            self._qs_listbox.selection_set(restore_idx)
+
+    def _qs_get_selected_object(self):
+        sel = self._qs_listbox.curselection()
+        if not sel:
+            return None
+        return self._qs_listbox.get(sel[0]).split('  ')[0]
+
+    def _qs_set_status(self, status, step=None):
+        """Thread-safe status/step update via Tk's event loop."""
+        def _update():
+            self._qs_status_var.set(status)
+            if step is not None:
+                self._qs_step_var.set(step)
+        self.root.after(0, _update)
+
+    def _qs_is_at_home(self, tol_deg=2.0):
+        """Check whether the arm joints are already at the grasp-home pose."""
+        from so_arm101_control.compute_workspace import WRIST_ROLL_URDF_PITCH
+        target = {n: 0.0 for n in ARM_JOINT_NAMES}
+        target['wrist_flex'] = math.pi / 2
+        target['wrist_roll'] = -math.pi / 2 + WRIST_ROLL_URDF_PITCH
+        tol = math.radians(tol_deg)
+        with self.joint_lock:
+            for n in ARM_JOINT_NAMES:
+                live = self._actual_positions.get(n, self.joint_positions.get(n, 0.0))
+                if abs(live - target[n]) > tol:
+                    return False
+        return True
+
+    def _qs_sync_grasp_listbox(self, obj_name):
+        """Mirror the Quickstart selection into the Grasp tab's obj_listbox
+        so every _cmd_* downstream reads the same selection.
+        """
+        if not hasattr(self, 'obj_listbox') or self.obj_listbox.size() == 0:
+            # Populate if empty
+            self._cmd_grasp_refresh()
+            time.sleep(0.5)
+        for i in range(self.obj_listbox.size()):
+            if self.obj_listbox.get(i).split('  ')[0] == obj_name:
+                self.obj_listbox.selection_clear(0, tk.END)
+                self.obj_listbox.selection_set(i)
+                return True
+        return False
+
+    def _qs_sync_drop_listbox(self, drop_name):
+        if not hasattr(self, '_drop_listbox') or self._drop_listbox.size() == 0:
+            self._cmd_drop_refresh()
+            time.sleep(0.5)
+        for i in range(self._drop_listbox.size()):
+            entry = self._drop_listbox.get(i).split(' [')[0]
+            if entry == drop_name:
+                self._drop_listbox.selection_clear(0, tk.END)
+                self._drop_listbox.selection_set(i)
+                return True
+        return False
+
+    def _qs_wait_for_step(self, timeout_s=60.0):
+        """Wait for the most recent _cmd_* to complete, gated on pause.
+
+        The existing _cmd_* handlers set self._motion_event when they fire
+        a motion. We just poll that event, honoring pause (pause blocks)
+        and abort (abort breaks out early).
+        """
+        evt = getattr(self, '_motion_event', None)
+        if evt is None:
+            return True  # nothing to wait on
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            if self._qs_abort_evt.is_set():
+                return False
+            # Soft pause: block here until resume
+            if not self._qs_resume_evt.wait(timeout=0.2):
+                continue
+            if evt.wait(timeout=0.2):
+                return True
+        return False
+
+    # ---- Step-runner entry points ----
+
+    def _qs_run_step_oneshot(self, method_name, kwargs):
+        """Run a single step from the individual-step buttons. Non-blocking
+        on the Tk thread; the step itself may spawn its own motion thread.
+        Skips if the Player is currently running (to avoid interleaving)."""
+        if self._qs_state == 'running':
+            self._append_log(
+                'Quickstart step ignored: Player is running — use Pause first', 'warn')
+            return
+        self._qs_set_status('Single step', step=method_name)
+        threading.Thread(
+            target=self._qs_execute_step,
+            args=(method_name, kwargs),
+            daemon=True).start()
+
+    def _qs_execute_step(self, method_name, kwargs):
+        """Run one step's handler. Handles the skip-if-home and auto-cup-
+        selection policies before dispatching to the underlying _cmd_*.
+        Returns True on success, False on abort/error.
+        """
+        # skip_if_home shortcut for grasp_home
+        if kwargs.get('skip_if_home') and self._qs_is_at_home():
+            self._append_log('Already at home — skipping grasp_home')
+            return True
+
+        # Pre-dispatch policies for steps that need a target selection
+        if method_name in ('_cmd_gripper_open_for_object',
+                          '_cmd_grasp_move',
+                          '_cmd_gripper_close_for_object'):
+            lego = self._qs_get_selected_object()
+            if lego is None:
+                self._append_log('Quickstart: no object selected', 'err')
+                return False
+            if not self._qs_sync_grasp_listbox(lego):
+                self._append_log(
+                    f'Quickstart: "{lego}" not in Grasp listbox — try Refresh', 'err')
+                return False
+
+        if method_name in ('_cmd_drop_point', '_cmd_drop_sweep',
+                          '_cmd_drop_release'):
+            lego = self._qs_get_selected_object()
+            drop = self._qs_auto_drop_for_lego(lego) if lego else None
+            if drop is None:
+                self._append_log(
+                    f'Quickstart: could not auto-select cup for "{lego}" — '
+                    'implement _qs_auto_drop_for_lego', 'err')
+                return False
+            if not self._qs_sync_drop_listbox(drop):
+                self._append_log(
+                    f'Quickstart: "{drop}" not in drop listbox', 'err')
+                return False
+
+        # Clear motion event before dispatch so _qs_wait_for_step waits
+        # for THIS step's completion, not a stale one.
+        self._motion_event = threading.Event()
+
+        handler = getattr(self, method_name, None)
+        if handler is None:
+            self._append_log(f'Quickstart: no such handler {method_name}', 'err')
+            return False
+        try:
+            handler()
+        except Exception as exc:
+            self._append_log(f'Quickstart step {method_name} raised: {exc}', 'err')
+            return False
+
+        ok = self._qs_wait_for_step(timeout_s=60.0)
+        if not ok and self._qs_abort_evt.is_set():
+            return False
+        return ok
+
+    # ---- Player controls ----
+
+    def _qs_play(self):
+        """Play: start the lifecycle from the first step, OR resume from pause."""
+        if self._qs_state == 'paused':
+            self._qs_set_status('Running')
+            self._qs_resume_evt.set()
+            self._qs_state = 'running'
+            return
+        if self._qs_state == 'running':
+            self._append_log('Quickstart already running', 'warn')
+            return
+        if self._qs_get_selected_object() is None:
+            self._append_log('Quickstart Play: select an object first', 'err')
+            return
+        self._qs_abort_evt.clear()
+        self._qs_resume_evt.set()
+        self._qs_state = 'running'
+        self._qs_thread = threading.Thread(target=self._qs_run, daemon=True)
+        self._qs_thread.start()
+
+    def _qs_pause(self):
+        if self._qs_state != 'running':
+            self._append_log('Quickstart Pause: not running', 'warn')
+            return
+        self._qs_resume_evt.clear()
+        self._qs_state = 'paused'
+        self._qs_set_status('Paused')
+
+    def _qs_restart(self):
+        """Abort current cycle and return to idle. Does NOT restart a new
+        cycle automatically — user presses Play again (intentional, so a
+        mid-motion abort doesn't race into a fresh motion command).
+        """
+        self._qs_abort_evt.set()
+        self._qs_resume_evt.set()  # unblock any paused wait so the runner exits
+        self._qs_state = 'idle'
+        self._qs_set_status('Aborted', step='—')
+
+    def _qs_run(self):
+        """Lifecycle runner — sequential dispatch of _QS_SEQUENCE steps."""
+        try:
+            # Kick both refreshes on the Tk thread so listboxes repopulate
+            # before the first selection-dependent step. Sleep past the
+            # root.after(1200) repopulate delay in _qs_refresh_all.
+            self._qs_set_status('Running', step='refreshing objects + drops')
+            self.root.after(0, self._qs_refresh_all)
+            time.sleep(1.5)
+
+            self._qs_set_status('Running', step='(starting)')
+            for i, (label, method_name, kwargs) in enumerate(self._QS_SEQUENCE, start=1):
+                if self._qs_abort_evt.is_set():
+                    self._append_log('Quickstart aborted')
+                    return
+                self._qs_resume_evt.wait()  # honor pause
+                self._qs_set_status('Running', step=f'{i}/{len(self._QS_SEQUENCE)}: {label}')
+                ok = self._qs_execute_step(method_name, kwargs)
+                if not ok:
+                    if self._qs_abort_evt.is_set():
+                        self._qs_set_status('Aborted', step=label)
+                    else:
+                        self._qs_set_status('ERROR', step=label)
+                        self._append_log(f'Quickstart halted at: {label}', 'err')
+                    return
+            self._qs_set_status('Complete', step='✓ done')
+            self._append_log('Quickstart: pick-and-drop cycle complete')
+        finally:
+            self._qs_state = 'idle'
 
     def _build_display_tab(self, notebook):
         frame = ttk.Frame(notebook)
@@ -3108,7 +3520,7 @@ class SOArm101ControlGUI(Node):
         pad_row = tk.Frame(cup_frame)
         pad_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(pad_row, text='Collision padding %:', anchor='w').pack(side=tk.LEFT)
-        self._collision_padding_var = tk.IntVar(value=10)
+        self._collision_padding_var = tk.IntVar(value=0)
         self._register_spinbox(pad_row, label='Collision padding %',
                                tab='RViz', section='Cups',
                                textvariable=self._collision_padding_var,
@@ -4366,37 +4778,56 @@ class SOArm101ControlGUI(Node):
             if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
                 self._append_log('apply_planning_scene not available for attach', 'warn')
                 return
-            # Phase 9: DO NOT convert to AttachedCollisionObject. MoveIt 2
-            # Humble's collision checker silently skips attached-vs-world
-            # pairs (verified: 300mm cube attached at TCP was invisible to
-            # /check_state_validity). Instead, keep the lego as a WORLD
-            # CollisionObject and track its pose via tcp_link TF at 10Hz.
-            #
-            # Record the tcp_link-local offset snapshotted at grasp-close.
-            with self._held_lego_lock:
-                self._held_lego = {
-                    'name': obj_name,
-                    'local_xyz': (float(ax), float(ay), float(az)),
-                    'local_quat': (float(aqx), float(aqy), float(aqz),
-                                   float(aqw)),
-                    'dims': (float(bbox['sx']), float(bbox['sy']),
-                             float(bbox['sz'])),
-                }
-            self._attached_lego_name = obj_name
+            # Explicit attach: supply the BOX geometry + link-local pose
+            # (block_in_tcp) computed above from TF + Isaac's last-known pose.
+            # This pins the attached body to our measured offset instead of
+            # letting MoveIt auto-derive from a potentially-stale world pose
+            # at attach time. In the same scene diff, REMOVE the world copy
+            # atomically so there's no duplicate lego lingering at the
+            # pre-grasp table position.
+            name_id = f'lego_{obj_name}'
+            scene = PlanningSceneMsg()
+            scene.is_diff = True
+            scene.robot_state.is_diff = True
 
-            # Initial sync: compute current world pose + add ACM allow
-            # entries for lego↔(gripper/jaw/tcp_link/wrist) so the gripper
-            # holding the block doesn't fire self-collision. Replaces the
-            # touch_links semantics of AttachedCollisionObject.
-            ok_sync = self._sync_held_lego_now(add_acm=True)
-            if not ok_sync:
-                self._append_log('Attach step failed: initial pose sync', 'warn')
+            aco = AttachedCollisionObject()
+            aco.link_name = 'tcp_link'
+            aco.object.id = name_id
+            aco.object.header.frame_id = 'tcp_link'
+            aco.object.operation = CollisionObject.ADD
+            prim = SolidPrimitive()
+            prim.type = SolidPrimitive.BOX
+            prim.dimensions = [float(bbox['sx']), float(bbox['sy']),
+                               float(bbox['sz'])]
+            aco.object.primitives.append(prim)
+            block_pose = Pose()
+            block_pose.position.x = float(ax)
+            block_pose.position.y = float(ay)
+            block_pose.position.z = float(az)
+            block_pose.orientation.x = float(aqx)
+            block_pose.orientation.y = float(aqy)
+            block_pose.orientation.z = float(aqz)
+            block_pose.orientation.w = float(aqw)
+            aco.object.primitive_poses.append(block_pose)
+            aco.touch_links = ['tcp_link', 'gripper', 'jaw']
+            scene.robot_state.attached_collision_objects.append(aco)
+
+            # Atomic world REMOVE so the pre-grasp table-pose copy doesn't
+            # ghost in the scene while the attached copy is in use.
+            rm = CollisionObject()
+            rm.id = name_id
+            rm.operation = CollisionObject.REMOVE
+            scene.world.collision_objects.append(rm)
+
+            # Claim attached-state BEFORE the apply so that a racing
+            # /objects_poses_sim → _add_lego_collision_objects hop doesn't
+            # re-add the world copy underneath us. Rolled back on failure.
+            prev_attached = self._attached_lego_name
+            self._attached_lego_name = obj_name
+            if not _apply_scene(scene, 'attach_lego'):
+                self._attached_lego_name = prev_attached
                 return
 
-            # Start the 10Hz pose-tracking background thread (idempotent).
-            self._start_held_lego_timer()
-
-            name_id = f'lego_{obj_name}'
             if name_id in self._lego_collision_names:
                 self._lego_collision_names.remove(name_id)
             tracer.event('attach_applied',
@@ -4406,250 +4837,135 @@ class SOArm101ControlGUI(Node):
                          bbox=(float(bbox['sx']), float(bbox['sy']),
                                float(bbox['sz'])),
                          dist_mm=dist_mm,
-                         mode='world_pose_tracking')
+                         mode='attached_explicit')
             self._append_log(
-                f'Holding {name_id} (world-tracked) '
+                f'Attached {name_id} to tcp_link '
                 f'({bbox["sx"]*1000:.0f}×{bbox["sy"]*1000:.0f}×{bbox["sz"]*1000:.0f}mm) '
-                f'offset=({ax*1000:+.1f},{ay*1000:+.1f},{az*1000:+.1f})mm in tcp_link')
+                f'offset=({ax*1000:+.1f},{ay*1000:+.1f},{az*1000:+.1f})mm')
 
         threading.Thread(target=_apply, daemon=True).start()
         return True
 
     # ------------------------------------------------------------------
-    # Phase 9: held-lego world-pose tracking (workaround for MoveIt 2
-    # Humble AttachedCollisionObject-vs-world skip bug).
+    # AttachedCollisionObject lifecycle — standard MoveIt 2.5.9 path.
+    # Pre-2.5.9 required a 10 Hz world-tracker workaround (see Phase 9
+    # notes in prior revisions). The bug is fixed: /check_state_validity
+    # correctly reports attached ↔ world collision pairs, so the workaround
+    # is gone and touch_links on the AttachedCollisionObject handles the
+    # gripper-vs-held-block allow semantics.
     # ------------------------------------------------------------------
 
-    _HELD_LEGO_ALLOW_LINKS = ('gripper', 'jaw', 'tcp_link', 'wrist')
+    def _refresh_attached_pose(self):
+        """Re-snapshot the attached lego's tcp_link-local offset from Isaac's
+        current /objects_poses_sim reading. The attached body is rigid once
+        set, but the physical block slides/settles in the jaws over time
+        (gravity + compliance in Isaac). Calling this right before plan
+        operations keeps MoveIt's collision geometry aligned with reality.
+        One-shot — no timer.
 
-    def _sync_held_lego_now(self, add_acm=False):
-        """Push a PlanningScene diff updating the held lego's world pose.
-
-        Reads current tcp_link world transform from TF, multiplies by the
-        stored local offset, and re-publishes the world CollisionObject
-        at the new pose. If add_acm=True, also installs allow entries so
-        the lego doesn't self-collide with gripper/jaw/tcp_link/wrist
-        (replaces the touch_links semantics we lost by not attaching).
-
-        Returns True on success, False if TF lookup or scene apply failed.
-        Silent on transient TF-stale errors — during slider-driven previews
-        the TF tree can lag by a frame.
+        Returns True if the attached pose was updated, False if there was
+        nothing to refresh (no lego attached, no bbox, no fresh pose, or
+        the block appears to have slipped out of the gripper).
         """
-        with self._held_lego_lock:
-            lego = dict(self._held_lego) if self._held_lego else None
-        if not lego:
+        if not getattr(self, '_attached_lego_name', None):
             return False
         if not MOVEIT_AVAILABLE or not hasattr(self, '_apply_scene_client'):
             return False
+        obj_name = self._attached_lego_name
+        bbox = self.objects_bbox.get(obj_name)
+        if not bbox:
+            return False
+        with self.objects_lock:
+            block = dict(self.objects_data.get(obj_name, {}))
+        if not block:
+            return False
 
-        # Compute world pose: tcp_link_world ⊕ local_offset
         import numpy as np
         try:
             t = self._tf_buffer.lookup_transform(
                 'base', 'tcp_link', rclpy.time.Time())
         except Exception:
-            return False  # transient — next tick retries
+            return False
         tr = t.transform
         tcp_mat = self._pose7_to_mat(
             tr.translation.x, tr.translation.y, tr.translation.z,
             tr.rotation.x, tr.rotation.y, tr.rotation.z, tr.rotation.w)
-        lx, ly, lz = lego['local_xyz']
-        lqx, lqy, lqz, lqw = lego['local_quat']
-        local_mat = self._pose7_to_mat(lx, ly, lz, lqx, lqy, lqz, lqw)
-        world_mat = tcp_mat @ local_mat
-        wx, wy, wz, wqx, wqy, wqz, wqw = self._mat_to_pose7(world_mat)
-
-        # Build scene diff
-        scene = PlanningSceneMsg()
-        scene.is_diff = True
-        co = CollisionObject()
-        co.header.frame_id = 'base'
-        co.id = f"lego_{lego['name']}"
-        co.operation = CollisionObject.ADD  # ADD on existing id = pose update
-        box = SolidPrimitive()
-        box.type = SolidPrimitive.BOX
-        box.dimensions = list(lego['dims'])
-        co.primitives.append(box)
-        p = Pose()
-        p.position.x = wx; p.position.y = wy; p.position.z = wz
-        p.orientation.x = wqx; p.orientation.y = wqy
-        p.orientation.z = wqz; p.orientation.w = wqw
-        co.primitive_poses.append(p)
-        scene.world.collision_objects.append(co)
-
-        if add_acm:
-            # Fetch current ACM, add allow entries for held lego vs
-            # gripper/jaw/tcp_link/wrist. Per-tick calls don't need this
-            # (ACM persists once set).
-            self._inject_held_lego_acm_allows(
-                scene, co.id, self._HELD_LEGO_ALLOW_LINKS, allow=True)
-
-        req = ApplyPlanningScene.Request()
-        req.scene = scene
-        try:
-            fut = self._apply_scene_client.call_async(req)
-            # Per-tick: don't block on the response. For add_acm call, wait.
-            if add_acm:
-                self._wait_future(fut, timeout_sec=3.0)
-                res = fut.result()
-                return bool(res and res.success)
-            return True
-        except Exception:
+        block_mat = self._pose7_to_mat(
+            float(block['x']), float(block['y']), float(block['z']),
+            float(block.get('qx', 0.0)), float(block.get('qy', 0.0)),
+            float(block.get('qz', 0.0)), float(block.get('qw', 1.0)))
+        block_in_tcp = np.linalg.inv(tcp_mat) @ block_mat
+        ax, ay, az, aqx, aqy, aqz, aqw = self._mat_to_pose7(block_in_tcp)
+        dist_mm = float((ax*ax + ay*ay + az*az) ** 0.5) * 1000.0
+        if dist_mm > 80.0:
+            self._append_log(
+                f'Refresh skipped: block {dist_mm:.0f}mm from tcp_link '
+                f'(likely slipped from gripper)', 'warn')
             return False
 
-    def _inject_held_lego_acm_allows(self, scene_msg, obj_id, link_names, allow):
-        """Populate scene_msg.allowed_collision_matrix with entries that
-        allow (True) or disallow (False) collision between obj_id and each
-        name in link_names. Symmetric entries in both directions.
+        name_id = f'lego_{obj_name}'
+        # Humble quirk: a single diff with REMOVE+ADD of the same attached
+        # id is a no-op (success=True but the old attached stays put). Two
+        # sequential diffs — REMOVE then ADD — actually re-seats the pose.
+        rm_scene = PlanningSceneMsg()
+        rm_scene.is_diff = True
+        rm_scene.robot_state.is_diff = True
+        aco_rm = AttachedCollisionObject()
+        aco_rm.link_name = 'tcp_link'
+        aco_rm.object.id = name_id
+        aco_rm.object.operation = CollisionObject.REMOVE
+        rm_scene.robot_state.attached_collision_objects.append(aco_rm)
 
-        This fetches the current ACM, applies the edits, and writes the
-        FULL updated ACM back (MoveIt 2 treats the acm field in a scene
-        diff as a full replacement, so we must preserve everything else).
-        """
-        if not hasattr(self, '_get_scene_client'):
-            return
-        from moveit_msgs.msg import PlanningSceneComponents as _PSC
-        from moveit_msgs.srv import GetPlanningScene as _GPS
-        req = _GPS.Request()
-        req.components.components = _PSC.ALLOWED_COLLISION_MATRIX
+        add_scene = PlanningSceneMsg()
+        add_scene.is_diff = True
+        add_scene.robot_state.is_diff = True
+        aco = AttachedCollisionObject()
+        aco.link_name = 'tcp_link'
+        aco.object.id = name_id
+        aco.object.header.frame_id = 'tcp_link'
+        aco.object.operation = CollisionObject.ADD
+        prim = SolidPrimitive()
+        prim.type = SolidPrimitive.BOX
+        prim.dimensions = [float(bbox['sx']), float(bbox['sy']),
+                           float(bbox['sz'])]
+        aco.object.primitives.append(prim)
+        pose = Pose()
+        pose.position.x = float(ax); pose.position.y = float(ay)
+        pose.position.z = float(az)
+        pose.orientation.x = float(aqx); pose.orientation.y = float(aqy)
+        pose.orientation.z = float(aqz); pose.orientation.w = float(aqw)
+        aco.object.primitive_poses.append(pose)
+        aco.touch_links = ['tcp_link', 'gripper', 'jaw']
+        add_scene.robot_state.attached_collision_objects.append(aco)
+
         try:
-            fut = self._get_scene_client.call_async(req)
+            fut = self._apply_scene_client.call_async(
+                ApplyPlanningScene.Request(scene=rm_scene))
             self._wait_future(fut, timeout_sec=3.0)
-            r = fut.result()
+            # Ignore REMOVE result: returns False if the attached didn't
+            # exist yet (e.g., first refresh right after grasp).
+            fut = self._apply_scene_client.call_async(
+                ApplyPlanningScene.Request(scene=add_scene))
+            self._wait_future(fut, timeout_sec=3.0)
+            res = fut.result()
+            if not (res and res.success):
+                return False
         except Exception:
-            return
-        if r is None:
-            return
-        acm = r.scene.allowed_collision_matrix
-        names = list(acm.entry_names)
-        rows = [list(e.enabled) for e in acm.entry_values]
-
-        # Ensure obj_id exists as a row+column
-        if obj_id not in names:
-            names.append(obj_id)
-            # Extend every existing row by one column (default False)
-            for row in rows:
-                row.append(False)
-            # Add new row (all False by default — collision checked)
-            rows.append([False] * len(names))
-
-        oi = names.index(obj_id)
-        for lk in link_names:
-            if lk not in names:
-                continue  # link not tracked in ACM (rare — skip)
-            li = names.index(lk)
-            rows[oi][li] = bool(allow)
-            rows[li][oi] = bool(allow)
-
-        # Write back
-        from moveit_msgs.msg import AllowedCollisionMatrix as _ACM
-        from moveit_msgs.msg import AllowedCollisionEntry as _ACE
-        new_acm = _ACM()
-        new_acm.entry_names = names
-        for row in rows:
-            e = _ACE()
-            e.enabled = row
-            new_acm.entry_values.append(e)
-        # Preserve defaults
-        new_acm.default_entry_names = list(acm.default_entry_names)
-        new_acm.default_entry_values = list(acm.default_entry_values)
-        scene_msg.allowed_collision_matrix = new_acm
-
-    def _start_held_lego_timer(self):
-        """Spawn a 10Hz background thread that keeps the held lego's
-        world pose in sync with tcp_link. Idempotent — only one thread
-        runs at a time. Thread exits when _held_lego becomes None or
-        the node is shutting down."""
-        if self._held_lego_timer_running:
-            return
-        self._held_lego_timer_running = True
-
-        def _loop():
-            try:
-                while self._held_lego_timer_running and self.running:
-                    time.sleep(0.1)
-                    with self._held_lego_lock:
-                        has_lego = self._held_lego is not None
-                    if has_lego:
-                        try:
-                            self._sync_held_lego_now(add_acm=False)
-                        except Exception:
-                            pass
-                    else:
-                        # No lego being held — idle briefly then recheck
-                        time.sleep(0.2)
-            finally:
-                self._held_lego_timer_running = False
-
-        threading.Thread(target=_loop, daemon=True, name='held_lego_sync').start()
-
-    def _release_held_lego(self):
-        """Clear held-lego state: remove ACM allow entries, drop the
-        local-offset record. The lego stays in the world at whatever
-        pose was last synced — the next /objects_poses_sim update will
-        refresh it to Isaac Sim's truth (where it actually landed).
-
-        Returns True on success, False if nothing was held.
-        """
-        with self._held_lego_lock:
-            lego = self._held_lego
-            self._held_lego = None
-        if not lego:
             return False
-        obj_id = f"lego_{lego['name']}"
-        # Clear ACM allow entries + REMOVE the stale world pose. The last
-        # thing the 10Hz tracker wrote was the block's pose AT the TCP
-        # during the sweep (i.e. hovering above the cup where the release
-        # happened). Leaving that pose in MoveIt means the block appears
-        # to "dangle" in the scene — _add_lego_collision_objects's in-cup
-        # filter then skips re-adding it because Isaac reports it settled
-        # inside a cup. Sending an explicit REMOVE here clears the stale
-        # pose; the next /objects_poses_sim refresh cycle will either
-        # re-add the block at Isaac-truth pose (if it bounced out of the
-        # cup onto the table) or leave it removed (if it landed in a cup,
-        # where the cup's own collision geometry already covers the space).
-        if MOVEIT_AVAILABLE and hasattr(self, '_apply_scene_client'):
-            scene = PlanningSceneMsg()
-            scene.is_diff = True
-            # Clear ACM allow entries
-            self._inject_held_lego_acm_allows(
-                scene, obj_id, self._HELD_LEGO_ALLOW_LINKS, allow=False)
-            # REMOVE the stale world CollisionObject
-            rm = CollisionObject()
-            rm.header.frame_id = 'base'
-            rm.id = obj_id
-            rm.operation = CollisionObject.REMOVE
-            scene.world.collision_objects.append(rm)
-            try:
-                req = ApplyPlanningScene.Request()
-                req.scene = scene
-                fut = self._apply_scene_client.call_async(req)
-                self._wait_future(fut, timeout_sec=3.0)
-            except Exception:
-                pass
-        self._attached_lego_name = None
-        # Mark the cycle as "drop complete" so the NEXT grasp_home_done
-        # closes the trace (same semantics as old _detach_lego_sync).
-        self._cycle_detach_seen = True
-        tracer.event('release_applied', obj_name=lego['name'])
-        self._append_log(f'Released lego_{lego["name"]} (world-tracked)')
+        tracer.event('attached_pose_refreshed',
+                     obj_name=obj_name,
+                     block_in_tcp=(ax, ay, az),
+                     block_in_tcp_quat=(aqx, aqy, aqz, aqw),
+                     dist_mm=dist_mm)
         return True
 
     def _cmd_detach_lego(self):
         """Manual/test-harness detach — force-remove every known lego from the
         robot's attached list, regardless of _attached_lego_name's current value.
         Useful after a crashed cycle left a stale AttachedCollisionObject.
-
-        Phase 9: ALSO releases the held-lego world-pose tracker state (stops
-        the 10Hz timer from overwriting grasp_refresh) and clears any lingering
-        ACM allow entries. Without this, a subsequent grasp_refresh would be
-        clobbered by the next timer tick writing the stale local offset.
         """
         self._ensure_lego_state()
-        # Release held-lego state FIRST so the 10Hz timer stops syncing
-        # before we repopulate world objects below. If _release_held_lego
-        # returns False there was nothing to release, which is fine.
-        self._release_held_lego()
+        self._attached_lego_name = None
         if not MOVEIT_AVAILABLE or not hasattr(self, '_apply_scene_client'):
             return
 
@@ -4693,13 +5009,48 @@ class SOArm101ControlGUI(Node):
     def _detach_lego_sync(self):
         """Blocking release of the currently-held lego.
 
-        Phase 9: now delegates to _release_held_lego (world-pose-tracking
-        path). The old AttachedCollisionObject REMOVE path is gone because
-        we never attach anymore — see _attach_lego_to_gripper for the
-        MoveIt 2 Humble skip-bug writeup.
+        Sends AttachedCollisionObject op=REMOVE and a matching world
+        CollisionObject REMOVE in one scene diff. MoveIt detaches the
+        lego; the next /objects_poses_sim tick refreshes its world pose
+        from Isaac Sim truth (wherever it actually landed after release).
         """
         self._ensure_lego_state()
-        return self._release_held_lego()
+        name = self._attached_lego_name
+        if not name:
+            return False
+        if not MOVEIT_AVAILABLE or not hasattr(self, '_apply_scene_client'):
+            return False
+        if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
+            self._append_log('apply_planning_scene not available for detach', 'warn')
+            return False
+        obj_id = f'lego_{name}'
+        scene = PlanningSceneMsg()
+        scene.is_diff = True
+        scene.robot_state.is_diff = True
+        # Detach from gripper
+        aco = AttachedCollisionObject()
+        aco.link_name = 'tcp_link'
+        aco.object.id = obj_id
+        aco.object.operation = CollisionObject.REMOVE
+        scene.robot_state.attached_collision_objects.append(aco)
+        # Remove the world copy MoveIt would put back at detach location —
+        # /objects_poses_sim will re-add at ground truth pose next tick.
+        rm = CollisionObject()
+        rm.id = obj_id
+        rm.operation = CollisionObject.REMOVE
+        scene.world.collision_objects.append(rm)
+        try:
+            req = ApplyPlanningScene.Request()
+            req.scene = scene
+            fut = self._apply_scene_client.call_async(req)
+            self._wait_future(fut, timeout_sec=3.0)
+        except Exception as exc:
+            self._append_log(f'Detach apply exception: {exc}', 'warn')
+        self._attached_lego_name = None
+        self._cycle_detach_seen = True
+        tracer.event('release_applied', obj_name=name)
+        self._append_log(f'Detached {obj_id}')
+        return True
 
     def _publish_cup_visual_markers(self):
         """Publish colored cup meshes as RViz visual markers from _drop_data."""
@@ -4918,12 +5269,6 @@ class SOArm101ControlGUI(Node):
         Returns True if a clean path was found and execution scheduled.
         Returns False if no direct + intermediate path was collision-free.
         """
-        # Refresh held-lego world pose before any validity checks run.
-        # 10Hz timer + this explicit pre-call ensures the planning scene
-        # reflects the block's current location at the exact state the
-        # tier1 interpolant is checking against.
-        self._sync_held_lego_now()
-
         with self.joint_lock:
             current = {n: self._actual_positions.get(n, self.joint_positions.get(n, 0.0))
                        for n in ARM_JOINT_NAMES}
@@ -5043,10 +5388,6 @@ class SOArm101ControlGUI(Node):
                 'msg': 'OMPL plan service not available'}
             on_complete_event.set()
             return False
-
-        # Refresh held-lego world pose so OMPL sees the correct block
-        # location when building its initial collision scene.
-        self._sync_held_lego_now()
 
         with self.joint_lock:
             current = {n: self._actual_positions.get(
@@ -5519,6 +5860,10 @@ class SOArm101ControlGUI(Node):
         evt = threading.Event()
         self._motion_event = evt
 
+        # Refresh attached-body pose so MoveIt collision geometry reflects
+        # physics-induced drift since grasp close (jaw compliance, settle).
+        self._refresh_attached_pose()
+
         from so_arm101_control.compute_workspace import X_PAN
         pan = math.atan2(-y, x - X_PAN)
         with self.joint_lock:
@@ -5555,6 +5900,10 @@ class SOArm101ControlGUI(Node):
 
         evt = threading.Event()
         self._motion_event = evt
+
+        # Refresh attached-body pose so MoveIt collision geometry reflects
+        # physics-induced drift since grasp close (jaw compliance, settle).
+        self._refresh_attached_pose()
 
         # Drop target for the GAP CENTER at (cup_rim_height + hover). Since
         # /drop_poses publishes cup BODY-CENTER (z = cup_base + half_height),
@@ -5655,6 +6004,54 @@ class SOArm101ControlGUI(Node):
                 self._detach_lego_sync()
             except Exception as exc:
                 self._append_log(f'Detach step errored: {exc}', 'warn')
+
+    def _cmd_mtc_pick_place(self):
+        """MTC pick-and-place spike. Runs full cycle for hardcoded target pair
+        (green_2x3_1 -> drop_0) via the so_arm101_mtc C++ node.
+        Requires control.launch.py mtc:=true. See /home/aaugus11/.claude/plans/
+        abstract-swinging-sundae.md for the hypothesis being validated.
+        """
+        self._ensure_lego_state()
+        if self._attached_lego_name:
+            self._append_log(
+                f'MTC refusing to run: lego "{self._attached_lego_name}" is already attached. '
+                'Call /drop_release first.', 'warn')
+            return
+        # Refresh scene so MTC sees current lego + cup collision objects.
+        try:
+            self._add_lego_collision_objects()
+        except Exception as exc:
+            self._append_log(f'MTC pre-step (lego scene refresh) errored: {exc}', 'warn')
+        try:
+            self._add_cup_collision_objects()
+        except Exception as exc:
+            self._append_log(f'MTC pre-step (cup scene refresh) errored: {exc}', 'warn')
+
+        client = getattr(self, '_mtc_run_client', None)
+        if client is None:
+            self._append_log('MTC client not initialised (launch with mtc:=true).', 'err')
+            return
+        if not client.wait_for_service(timeout_sec=2.0):
+            self._append_log(
+                'MTC service /so_arm101_mtc/run unavailable — is the node running '
+                '(launch with mtc:=true)?', 'err')
+            return
+
+        self._append_log('MTC: calling /so_arm101_mtc/run ...')
+        future = client.call_async(Trigger.Request())
+        deadline = time.time() + 60.0
+        while not future.done() and time.time() < deadline:
+            time.sleep(0.05)
+        if not future.done():
+            self._append_log('MTC: timeout waiting for /so_arm101_mtc/run', 'err')
+            return
+        try:
+            resp = future.result()
+        except Exception as exc:
+            self._append_log(f'MTC call failed: {exc}', 'err')
+            return
+        level = 'info' if resp.success else 'err'
+        self._append_log(f'MTC result: success={resp.success} msg="{resp.message}"', level)
 
     def _cmd_grasp_select(self):
         """Select an object in the listbox by name (via ik_target param) or first item.
