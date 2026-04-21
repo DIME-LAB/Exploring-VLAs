@@ -1,38 +1,38 @@
 # SO-ARM101 workspace bounding box
-# Computed from 200011 FK samples (5% safety margin)
+# Computed from 50011 FK samples (5% safety margin)
 # Home EE: (0.3914, -0.0000, 0.2265)
 #
 # Regenerate: ros2 run so_arm101_control compute_workspace
 
 workspace_bounds:
-  x_min: -0.2972
-  x_max: 0.4379
-  y_min: -0.3958
-  y_max: 0.3954
-  z_min: -0.1860
-  z_max: 0.4893
-  r_min: 0.0052
-  r_max: 0.5458
+  x_min: -0.2958
+  x_max: 0.4377
+  y_min: -0.3938
+  y_max: 0.3953
+  z_min: -0.1863
+  z_max: 0.4892
+  r_min: 0.0047
+  r_max: 0.5455
 
 workspace_bounds_raw:
-  x_min: -0.3380
-  x_max: 0.4787
-  y_min: -0.4398
-  y_max: 0.4394
-  z_min: -0.2235
-  z_max: 0.5268
+  x_min: -0.3365
+  x_max: 0.4785
+  y_min: -0.4376
+  y_max: 0.4392
+  z_min: -0.2238
+  z_max: 0.5267
 
 # Grasp workspace: top-down geometric IK (θ₂+θ₃+θ₄=90°)
 # Computed by sweeping (r, z, yaw) grid through geometric_ik()
-# 2831 reachable (r,z) points out of 110849 tested
+# 569 reachable (r,z) points out of 148637 tested
 grasp_workspace_bounds:
-  r_min: 0.0543
-  r_max: 0.3108
-  z_min: -0.2092
-  z_max: 0.0743
+  r_min: 0.1205
+  r_max: 0.3095
+  z_min: 0.0140
+  z_max: 0.0860
 
 grasp_workspace_bounds_raw:
-  r_min: 0.0400
-  r_max: 0.3250
-  z_min: -0.2250
+  r_min: 0.1100
+  r_max: 0.3200
+  z_min: 0.0100
   z_max: 0.0900

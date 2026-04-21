@@ -351,13 +351,20 @@ def geometric_ik(x, y, z, grasp_yaw=None, grip_angle=None, wrist_roll=None):
 
 
 def compute_grasp_workspace(r_step=0.005, z_step=0.005, yaw_step=0.25,
-                            margin_pct=0.05):
+                            margin_pct=0.05, gate_c_validator=None):
     """Compute workspace bounds for top-down grasps using geometric_ik directly.
 
     Sweeps a grid of (r, z, yaw) target positions and calls geometric_ik() on
     each one. Only positions where geometric_ik returns at least one solution
     are considered reachable. This accounts for all IK constraints including
     the θ₁/θ₅ coupling to the target position and grasp yaw.
+
+    Phase 9: optional `gate_c_validator` is a callable (joints_dict -> bool)
+    that runs MoveIt's /check_state_validity. When provided, (r, z) is
+    considered reachable ONLY if at least one geometric_ik solution ALSO
+    passes validity (no self-collision in the live planning scene). Without
+    this, the bounds claim r~=0.054m is reachable but those configs are
+    inside the self-collision envelope (camera_mount ↔ shoulder, etc.).
 
     Returns dict with keys: r_min, r_max, z_min, z_max, n_reachable, n_tested.
     """
@@ -375,11 +382,17 @@ def compute_grasp_workspace(r_step=0.005, z_step=0.005, yaw_step=0.25,
                 # Place target along +X axis (pan symmetry makes angle irrelevant)
                 x, y = float(r), 0.0
                 sols = geometric_ik(x, y, float(z), grasp_yaw=float(yaw))
-                if sols:
-                    reachable.append((float(r), float(z)))
-                    break  # one yaw works → this (r, z) is reachable, skip rest
-            # If we already found a yaw that works, the break above exits the
-            # yaw loop. If no yaw worked, this (r, z) is unreachable.
+                if not sols:
+                    continue
+                # Gate B passed. If Gate C validator is provided, require at
+                # least one IK solution to ALSO pass /check_state_validity.
+                if gate_c_validator is not None:
+                    if not any(gate_c_validator(sol) for sol in sols):
+                        continue
+                reachable.append((float(r), float(z)))
+                break  # this (r, z) is reachable, skip remaining yaws
+            # If we already found a valid yaw, the break above exits the
+            # yaw loop. If no yaw passed all enabled gates, (r, z) unreachable.
 
     if not reachable:
         return None
@@ -412,6 +425,53 @@ def compute_grasp_workspace(r_step=0.005, z_step=0.005, yaw_step=0.25,
     }
 
 
+def _build_gate_c_validator():
+    """Return a callable(joints_dict) -> bool that uses MoveIt's
+    /check_state_validity to reject self-colliding IK solutions. Returns
+    None if rclpy / the service isn't available (falls back to Gate B only).
+    """
+    try:
+        import rclpy
+        from rclpy.node import Node
+        from moveit_msgs.srv import GetStateValidity
+        from moveit_msgs.msg import RobotState
+    except ImportError:
+        print('[gate_c] rclpy/moveit_msgs not importable — running Gate B only')
+        return None, None
+    rclpy.init()
+    node = Node('workspace_gate_c_validator')
+    client = node.create_client(GetStateValidity, '/check_state_validity')
+    if not client.wait_for_service(timeout_sec=10.0):
+        print('[gate_c] /check_state_validity not available — running Gate B only')
+        node.destroy_node()
+        rclpy.shutdown()
+        return None, None
+    ARM = ['shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll']
+
+    def validate(sol):
+        req = GetStateValidity.Request()
+        rs = RobotState()
+        rs.joint_state.name = ARM + ['gripper_joint']
+        rs.joint_state.position = [float(sol.get(n, 0.0)) for n in ARM] + [0.0]
+        req.robot_state = rs
+        req.group_name = ''  # all pairs — authoritative ground truth
+        future = client.call_async(req)
+        deadline = time.monotonic() + 1.0
+        while rclpy.ok() and not future.done():
+            if time.monotonic() > deadline:
+                return True  # timeout → fail-open
+            rclpy.spin_once(node, timeout_sec=0.05)
+        res = future.result()
+        return bool(res and res.valid)
+
+    def teardown():
+        node.destroy_node()
+        rclpy.shutdown()
+
+    print('[gate_c] /check_state_validity connected — Gate B+C sweep enabled')
+    return validate, teardown
+
+
 def main(args=None):
     parser = argparse.ArgumentParser(description='Compute SO-ARM101 workspace bounds')
     parser.add_argument('--samples', type=int, default=200000,
@@ -420,6 +480,11 @@ def main(args=None):
                         help='Safety margin as fraction (default: 0.05 = 5%%)')
     parser.add_argument('--output', type=str, default=None,
                         help='Output YAML path')
+    parser.add_argument('--with-gate-c', action='store_true',
+                        help='Also require /check_state_validity to pass '
+                             '(requires live control stack). Without this, '
+                             'grasp_workspace_bounds over-reports reachability '
+                             'by including self-collision configs.')
     parsed, _ = parser.parse_known_args(args)
 
     num_samples = parsed.samples
@@ -487,10 +552,20 @@ def main(args=None):
     # ---------------------------------------------------------------
     # Grasp workspace (top-down only — computed via geometric_ik)
     # ---------------------------------------------------------------
-    print(f'Computing grasp workspace via geometric IK sweep '
+    gate_c_validator = None
+    gate_c_teardown = None
+    if parsed.with_gate_c:
+        gate_c_validator, gate_c_teardown = _build_gate_c_validator()
+    label = 'Gate B+C (self-collision aware)' if gate_c_validator else 'Gate B only'
+    print(f'Computing grasp workspace via geometric IK sweep — {label} '
           f'(θ₂+θ₃+θ₄={math.degrees(GRIPPER_DOWN_SUM):.0f}° constraint)...')
     t0 = time.monotonic()
-    grasp = compute_grasp_workspace(margin_pct=margin_pct)
+    try:
+        grasp = compute_grasp_workspace(margin_pct=margin_pct,
+                                        gate_c_validator=gate_c_validator)
+    finally:
+        if gate_c_teardown is not None:
+            gate_c_teardown()
     elapsed = time.monotonic() - t0
 
     if grasp is None:

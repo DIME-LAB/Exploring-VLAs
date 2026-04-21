@@ -18,6 +18,8 @@ import tkinter as tk
 import weakref
 from tkinter import ttk
 
+from so_arm101_control.grasp_trace import tracer
+
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
@@ -38,7 +40,7 @@ try:
     from moveit_msgs.msg import (
         PositionIKRequest, RobotState, Constraints, JointConstraint,
         MotionPlanRequest, PlanningScene as PlanningSceneMsg, CollisionObject,
-        AllowedCollisionEntry,
+        AttachedCollisionObject, AllowedCollisionEntry,
     )
     from shape_msgs.msg import SolidPrimitive, Mesh as ShapeMesh, MeshTriangle
     from moveit_msgs.srv import (
@@ -51,7 +53,7 @@ except ImportError:
         from moveit_msgs.msg import (
             PositionIKRequest, RobotState, Constraints, JointConstraint,
             MotionPlanRequest, PlanningScene as PlanningSceneMsg, CollisionObject,
-            AllowedCollisionEntry,
+            AttachedCollisionObject, AllowedCollisionEntry,
         )
         from shape_msgs.msg import SolidPrimitive, Mesh as ShapeMesh, MeshTriangle
         from moveit_msgs.srv import (
@@ -134,6 +136,22 @@ _CHAIN_BASE_ROTATION = math.pi / 2 - _WRIST_ROLL_URDF_PITCH
 # STL is in mm, scaled 0.001 to meters (matches cup.urdf)
 # Padding factor: 1.0 = 100% actual size (no inflation)
 _CUP_STL_SCALE = 0.001
+
+# Cup body height in meters. /drop_poses publishes cup BODY-CENTER pose
+# (same convention as /objects_poses_sim for legos), so every consumer
+# that needs the cup base or the cup rim has to add/subtract half this.
+# Sim-side (isaac-sim-mcp soarm101-dt extension) lifts each drop_{id}
+# wrapper by this/2 when publishing; the real-world equivalent is
+# aruco_camera_localizer applying its marker→cup transform to land on
+# the same body-center convention.
+CUP_BODY_HEIGHT_M = 0.0965
+# Phase 9: kept at 1.1 (10%). Tried 1.05 — OMPL validated paths cleared
+# the 5%-padded cup but physical execution still knocked it (Δ40mm sweep).
+# Actual trajectory tracking error + arm-mesh vs physical-arm discrepancy
+# exceeds 2mm, so 5% margin is insufficient. 10% costs some valid paths
+# at close-in grasp positions, but the lego-in-cup scene filter + sync
+# detach + one-shot OMPL together are now the primary correctness levers;
+# padding returns to its original safety-margin role.
 _CUP_COLLISION_PADDING = 1.1
 
 
@@ -277,30 +295,39 @@ _GRASP_YAW_FALLBACK_OFFSETS = (
 )
 
 
-def find_reachable_grasp_yaw(poses, requested_yaw):
+def find_reachable_grasp_yaw(poses, requested_yaw, debug=False):
     """Find a yaw for which geometric_ik returns solutions at EVERY pose.
 
     poses: iterable of (stage_name, x, y, z) tuples — all stages must be
         solvable at the same yaw (otherwise the arm would twist mid-grasp).
     requested_yaw: preferred yaw; tried first.
 
-    Returns (yaw_used, {stage_name: [ik_solutions]}).
-    Returns (None, {}) if no yaw in the fallback set works for all stages.
+    Returns (yaw_used, {stage_name: [ik_solutions]}, debug_lines).
+    Returns (None, {}, debug_lines) if no yaw in the fallback set works.
     """
     from so_arm101_control.compute_workspace import geometric_ik
+    debug_lines = []
+    debug_lines.append(
+        f'find_reachable_grasp_yaw: requested_yaw={math.degrees(requested_yaw):+.1f}° '
+        f'poses={[(s, round(x,3), round(y,3), round(z,3)) for s,x,y,z in poses]}')
     for offset in _GRASP_YAW_FALLBACK_OFFSETS:
         candidate = requested_yaw + offset
         stage_sols = {}
+        stage_status = []
         all_ok = True
         for stage, px, py, pz in poses:
             sols = geometric_ik(px, py, pz, grasp_yaw=candidate)
+            stage_status.append(f'{stage}={len(sols) if sols else "0"}')
             if not sols:
                 all_ok = False
-                break
-            stage_sols[stage] = sols
+            else:
+                stage_sols[stage] = sols
+        debug_lines.append(
+            f'  off={math.degrees(offset):+6.1f}° cand={math.degrees(candidate):+7.1f}° '
+            f'{" ".join(stage_status)} {"✓" if all_ok else "✗"}')
         if all_ok:
-            return candidate, stage_sols
-    return None, {}
+            return candidate, stage_sols, debug_lines
+    return None, {}, debug_lines
 
 
 # ArUco marker ID -> human-readable color label for drop targets
@@ -334,6 +361,14 @@ class SOArm101ControlGUI(Node):
         # Callback group for service clients — allows responses to be
         # processed concurrently with other callbacks (requires MultiThreadedExecutor)
         self._service_cb_group = ReentrantCallbackGroup()
+        # Phase 9: separate ReentrantCallbackGroup for topic subscriptions so
+        # their callbacks can keep running while a service handler blocks on
+        # a threading.Event (e.g. sync-refresh waiting for fresh data). With
+        # the default MutuallyExclusiveCallbackGroup, a blocked service
+        # handler deadlocks the executor — subscription callbacks never fire
+        # because all executor threads are parked in .wait(). Research ref:
+        # karelics.fi/deadlocks-in-rclpy.
+        self._sub_cb_group = ReentrantCallbackGroup()
 
         # Hardware mode
         self.use_real_hardware = False
@@ -364,6 +399,20 @@ class SOArm101ControlGUI(Node):
         self._arm_goal_lock = threading.Lock()
         self._gripper_goal_lock = threading.Lock()
 
+        # Authoritative motion verdict. Populated by every motion primitive
+        # IMMEDIATELY before it calls on_complete_event.set(). The Trigger
+        # wrapper reads this after waiting on _motion_event — this is the
+        # ONLY source of truth for motion success. Do not infer success from
+        # "no exception raised" (the old bug: on_complete fires on both
+        # success and failure paths, so the absence of an exception is not
+        # evidence of motion).
+        # Shape: {'ok': bool, 'outcome': str, 'msg': str, **extras}
+        # Outcomes: 'completed', 'tier1_then_ompl_failed', 'ompl_mode_a',
+        #   'ompl_mode_b', 'ompl_service_unavailable', 'action_server_not_ready',
+        #   'goal_rejected', 'send_exception', 'result_exception',
+        #   'plan_failed', 'plan_exception'
+        self._last_motion_status = None
+
         # --- Gripper topic publisher (works fine via topic) ---
         self.gripper_traj_pub = self.create_publisher(
             JointTrajectory, '/gripper_controller/joint_trajectory', 10)
@@ -371,6 +420,13 @@ class SOArm101ControlGUI(Node):
         self.joint_cmd_pub = self.create_publisher(JointState, 'joint_commands_hw', 10)
 
         # --- Subscribers ---
+        # High-rate subs (joint_states @ 50Hz etc.) stay on the default
+        # MutuallyExclusive group. Moving them to the Reentrant group
+        # oversubscribed the executor (action-client done callbacks got
+        # starved, making drop_release think the gripper trajectory timed
+        # out when it had actually completed). Only move subs to
+        # _sub_cb_group when a service handler explicitly .wait()s for
+        # them — currently that's /objects_poses_sim + /drop_poses.
         self.js_sub = self.create_subscription(
             JointState, '/joint_states', self._joint_states_callback, 10)
         self.real_js_sub = self.create_subscription(
@@ -392,6 +448,22 @@ class SOArm101ControlGUI(Node):
             MarkerArray, '/cup_visual_markers_array',
             QoSProfile(depth=5, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.objects_bbox = {}   # {name: {sx, sy, sz}} from bbox topic
+        # Phase 9: lego block collision tracking in MoveIt planning scene.
+        # _lego_collision_names tracks world CollisionObject ids; _attached_lego_name
+        # holds the name currently held by the gripper (or None when table-bound).
+        self._lego_collision_names = []
+        self._attached_lego_name = None
+        # Phase 9 (held-lego world-pose tracker): MoveIt 2 Humble's collision
+        # checker silently skips AttachedCollisionObject ↔ world.CollisionObject
+        # pairs (verified by probe: 300mm cube attached at TCP was invisible
+        # to /check_state_validity). Workaround: keep the grasped lego as a
+        # WORLD CollisionObject and re-publish its pose at 10Hz (+ before
+        # every plan/validity call). _held_lego stores the tcp_link-local
+        # offset snapshotted at grasp-close; _sync_held_lego_now rebuilds
+        # the world pose via tcp_link TF.
+        self._held_lego = None   # dict{name, local_xyz, local_quat, dims_xyz} or None
+        self._held_lego_lock = threading.Lock()
+        self._held_lego_timer_running = False
         _default_bbox = '/objects_bbox_real' if self.use_real_hardware else '/objects_bbox_sim'
         self.bbox_sub = self.create_subscription(
             String, _default_bbox, self._bbox_callback, 1)
@@ -698,16 +770,23 @@ class SOArm101ControlGUI(Node):
 
             def _run():
                 try:
-                    # Clear any stale motion event / error
+                    # Clear any stale motion event / error / status
                     self._motion_event = None
                     self._cmd_error = None
+                    self._last_motion_status = None
                     getattr(self, method_name)()
-                    # Check if the command signaled failure
+                    # Check if the command signaled failure synchronously
+                    # (geometric IK reject, missing service, etc). Async
+                    # motion verdict is read later after _motion_event fires.
                     if self._cmd_error:
                         result['ok'] = False
                         result['msg'] = self._cmd_error
                     else:
-                        result['msg'] = f'{method_name} executed'
+                        # Placeholder — overwritten below by motion verdict
+                        # if _motion_event was registered. For commands that
+                        # don't set _motion_event (pure sync cmds), this
+                        # stands as the final message.
+                        result['msg'] = f'{method_name} dispatched'
                 except Exception as e:
                     result['ok'] = False
                     result['msg'] = str(e)
@@ -728,17 +807,36 @@ class SOArm101ControlGUI(Node):
             # If the command registered a motion event, wait for motion too.
             # Timeout prevents permanent hang if async callback chain breaks.
             motion_evt = getattr(self, '_motion_event', None)
-            if motion_evt is not None:
+            motion_registered = motion_evt is not None
+            motion_timed_out = False
+            if motion_registered:
                 elapsed = 0.0
                 timeout_s = 60.0
                 while not motion_evt.is_set() and self.running and elapsed < timeout_s:
                     motion_evt.wait(timeout=0.5)
                     elapsed += 0.5
                 if not motion_evt.is_set():
+                    motion_timed_out = True
                     result['ok'] = False
-                    if not result['msg'] or result['msg'].endswith('executed'):
-                        result['msg'] = f'Motion timed out after {timeout_s:.0f}s'
+                    result['msg'] = f'Motion timed out after {timeout_s:.0f}s'
                 self._motion_event = None
+
+            # Read authoritative motion verdict. Motion primitives set
+            # _last_motion_status right before on_complete_event.set(),
+            # so by the time we get here it reflects the actual outcome.
+            if motion_registered and not motion_timed_out:
+                status = getattr(self, '_last_motion_status', None)
+                if status is None:
+                    # Primitive didn't populate status — treat as failure.
+                    # Every on_complete_event.set() site MUST write status.
+                    result['ok'] = False
+                    result['msg'] = (f'{method_name}: motion completed but '
+                                     'no _last_motion_status was reported')
+                else:
+                    result['ok'] = bool(status.get('ok', False))
+                    msg = status.get('msg') or status.get('outcome') \
+                        or 'unknown'
+                    result['msg'] = f'{method_name}: {msg}'
 
             # Check for deferred errors (set by background threads after _run returned)
             cmd_err = getattr(self, '_cmd_error', None)
@@ -1175,6 +1273,19 @@ class SOArm101ControlGUI(Node):
                         var.set(val)
                     else:
                         widget.set(val)
+                    # tkinter Scale's `command` only fires on user drag, not
+                    # on var.set(val). For arm/IK joint sliders that means
+                    # _on_slider doesn't run, so self.joint_positions stays
+                    # stale and plan_execute reads the wrong target. Fire
+                    # _on_slider manually for joint-name-matched widgets.
+                    if wtype == 'Scale':
+                        joint_name = wid.split('@')[0]  # strip tab suffix if any
+                        if joint_name in ALL_JOINT_NAMES and hasattr(
+                                self, '_on_slider'):
+                            try:
+                                self._on_slider(joint_name, float(val))
+                            except Exception:
+                                pass
                     outcome['ok'] = True
                     outcome['msg'] = f'wrote {val} to {wid}'
                     return
@@ -1996,19 +2107,35 @@ class SOArm101ControlGUI(Node):
         """
         if not MOVEIT_AVAILABLE or self.plan_client is None:
             self.status_var.set('MoveIt not available')
+            self._last_motion_status = {
+                'ok': False, 'outcome': 'moveit_unavailable',
+                'msg': 'MoveIt not available'}
             if on_complete:
                 on_complete.set()
             return
         if not self.plan_client.service_is_ready():
             self.status_var.set('Planning service not ready...')
             self._append_log('/plan_kinematic_path service not ready', 'warn')
+            self._last_motion_status = {
+                'ok': False, 'outcome': 'plan_service_not_ready',
+                'msg': '/plan_kinematic_path service not ready'}
             if on_complete:
                 on_complete.set()
             return
 
         self.root.after(0, lambda: self.execute_btn.config(state=tk.DISABLED))
         self._set_status('Planning...')
+        # Phase 9: if no on_complete was passed (button click or Trigger
+        # service), create one and register as _motion_event so the service
+        # wrapper waits for the real motion verdict instead of returning
+        # "dispatched" immediately.
+        if on_complete is None:
+            on_complete = threading.Event()
+            self._motion_event = on_complete
         self._plan_execute_on_complete = on_complete
+        # Refresh held-lego world pose so /plan_kinematic_path sees the
+        # correct block location during collision-aware planning.
+        self._sync_held_lego_now()
 
         if target is None:
             with self.joint_lock:
@@ -2046,6 +2173,22 @@ class SOArm101ControlGUI(Node):
         mpr.max_velocity_scaling_factor = vel_scale
         mpr.max_acceleration_scaling_factor = vel_scale
         mpr.goal_constraints.append(constraints)
+
+        # Phase 9: populate start_state from live joint positions. Without
+        # this MoveIt emits "Found empty JointState message" errors and
+        # silently aborts planning (verified: 4 such errors per call when
+        # start_state was default-constructed; no trajectory returned).
+        # _ompl_plan_sync already does this; FK-tab plan_execute was the
+        # one remaining path missing it.
+        start_state = RobotState()
+        start_state.joint_state.name = list(ALL_JOINT_NAMES)
+        with self.joint_lock:
+            start_state.joint_state.position = [
+                float(self._actual_positions.get(
+                    n, self.joint_positions.get(n, 0.0)))
+                for n in ALL_JOINT_NAMES]
+        mpr.start_state = start_state
+
         request.motion_plan_request = mpr
 
         future = self.plan_client.call_async(request)
@@ -2059,6 +2202,9 @@ class SOArm101ControlGUI(Node):
         except Exception as e:
             self._set_status(f'Planning failed: {e}')
             self.root.after(0, lambda: self.execute_btn.config(state=tk.NORMAL))
+            self._last_motion_status = {
+                'ok': False, 'outcome': 'plan_exception',
+                'msg': f'planning exception: {e!r}'}
             if on_complete:
                 on_complete.set()
             return
@@ -2068,6 +2214,10 @@ class SOArm101ControlGUI(Node):
             self._set_status(f'Planning failed (error {error_code})')
             self._append_log(f'Planning failed (error {error_code})', 'warn')
             self.root.after(0, lambda: self.execute_btn.config(state=tk.NORMAL))
+            self._last_motion_status = {
+                'ok': False, 'outcome': 'plan_failed',
+                'msg': f'plan_kinematic_path error_code={error_code}',
+                'error_code': error_code}
             if on_complete:
                 on_complete.set()
             return
@@ -2087,6 +2237,9 @@ class SOArm101ControlGUI(Node):
         if not self.arm_action_client.server_is_ready():
             self._set_status('Arm controller not ready')
             self.root.after(0, lambda: self.execute_btn.config(state=tk.NORMAL))
+            self._last_motion_status = {
+                'ok': False, 'outcome': 'action_server_not_ready',
+                'msg': 'arm_controller action server not ready'}
             if on_complete:
                 on_complete.set()
             return
@@ -2109,12 +2262,18 @@ class SOArm101ControlGUI(Node):
         except Exception as e:
             self._set_status(f'Execution failed: {e}')
             self.root.after(0, lambda: self.execute_btn.config(state=tk.NORMAL))
+            self._last_motion_status = {
+                'ok': False, 'outcome': 'send_exception',
+                'msg': f'action send_goal exception: {e!r}'}
             if on_complete:
                 on_complete.set()
             return
         if not goal_handle.accepted:
             self._set_status('Execution rejected')
             self.root.after(0, lambda: self.execute_btn.config(state=tk.NORMAL))
+            self._last_motion_status = {
+                'ok': False, 'outcome': 'goal_rejected',
+                'msg': 'arm action server rejected the goal'}
             if on_complete:
                 on_complete.set()
             return
@@ -2126,12 +2285,29 @@ class SOArm101ControlGUI(Node):
         """Handle trajectory execution result."""
         on_complete = getattr(self, '_plan_execute_on_complete', None)
         try:
-            future.result()
-            self._set_status('Execution complete')
-            self._append_log('Trajectory execution complete')
+            res = future.result()
+            ec = getattr(getattr(res, 'result', None), 'error_code', None)
+            ok = (ec is None) or (ec == 0)
+            if ok:
+                self._set_status('Execution complete')
+                self._append_log('Trajectory execution complete')
+                self._last_motion_status = {
+                    'ok': True, 'outcome': 'completed',
+                    'msg': 'plan_execute trajectory complete',
+                    'error_code': ec}
+            else:
+                self._set_status(f'Execution error: ec={ec}')
+                self._append_log(f'Trajectory error_code={ec}', 'error')
+                self._last_motion_status = {
+                    'ok': False, 'outcome': 'trajectory_error',
+                    'msg': f'trajectory error_code={ec}',
+                    'error_code': ec}
         except Exception as e:
             self._set_status(f'Execution error: {e}')
             self._append_log(f'Execution error: {e}', 'error')
+            self._last_motion_status = {
+                'ok': False, 'outcome': 'result_exception',
+                'msg': f'result callback exception: {e!r}'}
         self.root.after(0, lambda: self.execute_btn.config(state=tk.NORMAL))
         # Let joint_states sync sliders back to actual robot position
         self.root.after(1000, self._clear_slider_driven)
@@ -2401,6 +2577,7 @@ class SOArm101ControlGUI(Node):
         state['jaw_open_clearance'] = self._jaw_open_clearance_var.get()
         state['jaw_close_clearance'] = self._jaw_close_clearance_var.get()
         state['tcp_clearance'] = self._tcp_clearance_var.get()
+        state['drop_hover_above_rim'] = self._drop_hover_above_rim_var.get()
 
         # Object listbox
         sel = self.obj_listbox.curselection()
@@ -2451,7 +2628,7 @@ class SOArm101ControlGUI(Node):
         self._bbox_topic_var.set(state.get('bbox_topic', ''))
         self._bbox_enabled_var.set(state.get('bbox_enabled', True))
         self._grasp_arm_duration_var.set(state.get('grasp_arm_duration', 2.5))
-        self._grasp_approach_height_var.set(state.get('grasp_approach_height', 0.05))
+        self._grasp_approach_height_var.set(state.get('grasp_approach_height', 0.020))
         self._grasp_obj_z_var.set(state.get('grasp_obj_z', 0.0))
         self._grasp_cross_var.set(state.get('grasp_cross', False))
         self._grasp_grip_close_var.set(state.get('grasp_grip_close', -10.0))
@@ -2460,6 +2637,7 @@ class SOArm101ControlGUI(Node):
         self._jaw_open_clearance_var.set(state.get('jaw_open_clearance', 5.0))
         self._jaw_close_clearance_var.set(state.get('jaw_close_clearance', 0.0))
         self._tcp_clearance_var.set(state.get('tcp_clearance', 1.0))
+        self._drop_hover_above_rim_var.set(state.get('drop_hover_above_rim', 0.030))
 
         # Repopulate listbox from current objects_data
         self._populate_object_list()
@@ -2702,7 +2880,7 @@ class SOArm101ControlGUI(Node):
         self.obj_listbox = self._register_listbox(
             obj_frame, label='Detected Objects', tab='Grasp',
             section='Detected Objects',
-            height=5, font=('Consolas', 9),
+            height=2, font=('Consolas', 9),
             selectbackground='#d0d0d0', selectforeground='#1a1a1a')
         self.obj_listbox.pack(fill=tk.X, padx=5, pady=2)
 
@@ -2727,7 +2905,15 @@ class SOArm101ControlGUI(Node):
         approach_row = tk.Frame(arm_col)
         approach_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(approach_row, text='Approach height (m):', anchor='w').pack(side=tk.LEFT)
-        self._grasp_approach_height_var = tk.DoubleVar(value=0.05)
+        # Phase 9: 20mm chosen over the original 50mm to avoid a grasp-
+        # race: if descent's OMPL plan fails, grasp_move still returns
+        # success while the arm is stuck at approach height — gripper_close
+        # then attaches the block at the wrong tcp offset (trace showed
+        # block_in_tcp.z=0.050 instead of ~0). Keeping approach_h small
+        # bounds the worst-case attach offset to ~20mm rather than 50mm.
+        # Reachability at 20mm is 100% across BLOCK_RANDOM bounds
+        # (compute_grasp_reachability.py). 50mm fails 7% of cells.
+        self._grasp_approach_height_var = tk.DoubleVar(value=0.020)
         self._register_spinbox(approach_row, label='Approach height (m)',
                                tab='Grasp', section='Arm',
                                textvariable=self._grasp_approach_height_var,
@@ -2857,7 +3043,7 @@ class SOArm101ControlGUI(Node):
         self._drop_listbox = self._register_listbox(
             drop_list_frame, label='Drop Targets',
             tab='Grasp', section='Drop Targets',
-            height=4, font=('Consolas', 9),
+            height=2, font=('Consolas', 9),
             selectbackground='#d0d0d0', selectforeground='#1a1a1a')
         self._drop_listbox.pack(fill=tk.X, padx=5, pady=2)
 
@@ -2873,6 +3059,22 @@ class SOArm101ControlGUI(Node):
                                textvariable=self._drop_duration_var,
                                from_=0.5, to=10.0, increment=0.5,
                                width=8, format='%.1f').pack(side=tk.LEFT, padx=(5, 0))
+
+        # Hover above cup rim for drop sweep — the block center lands at
+        # cup_center_z + CUP_BODY_HEIGHT_M/2 + this value, i.e. the cup's
+        # rim height + this clearance. Default 30 mm is tuned for the
+        # current 97 mm cup: enough clearance that the block falls past
+        # the rim cleanly, small enough that drop impact is minimal.
+        drop_hover_row = tk.Frame(drop_frame)
+        drop_hover_row.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(drop_hover_row, text='Hover above rim (m):',
+                 anchor='w').pack(side=tk.LEFT)
+        self._drop_hover_above_rim_var = tk.DoubleVar(value=0.030)
+        self._register_spinbox(drop_hover_row, label='Hover Above Rim (m)',
+                               tab='Grasp', section='Drop',
+                               textvariable=self._drop_hover_above_rim_var,
+                               from_=0.00, to=0.15, increment=0.005,
+                               width=8, format='%.3f').pack(side=tk.LEFT, padx=(5, 0))
 
         drop_btn_row = tk.Frame(drop_frame)
         drop_btn_row.pack(fill=tk.X, padx=5, pady=2)
@@ -3342,12 +3544,14 @@ class SOArm101ControlGUI(Node):
                         f'({x:.3f}, {y:.3f}, {z:.3f})', 'warn')
                     return
 
-                yaw_used, stage_sols = find_reachable_grasp_yaw(
+                yaw_used, stage_sols, dbg_lines = find_reachable_grasp_yaw(
                     [('grasp', x, y, z)], grasp_yaw)
                 if yaw_used is None:
                     self._append_log(
                         f'Grasp unreachable: no geometric IK at any yaw '
                         f'({x:.3f}, {y:.3f}, {z:.3f})', 'warn')
+                    for line in dbg_lines:
+                        self._append_log(line, 'warn')
                     return
                 solutions = stage_sols['grasp']
                 if yaw_used != grasp_yaw:
@@ -3477,19 +3681,54 @@ class SOArm101ControlGUI(Node):
 
     def _check_state_valid(self, target):
         """Check if a joint state is collision-free via MoveIt's planning scene."""
+        valid, _ = self._check_state_valid_with_contacts(target)
+        return valid
+
+    def _check_state_valid_with_contacts(self, target):
+        """Like _check_state_valid, but also returns contacts on invalid states.
+        Returns (valid: bool, contacts: list). Empty list on valid / timeout /
+        no-checker-available. Used by tier1 segment check so failures report
+        which links collided.
+
+        Phase 9: gripper_joint is included in the state using the live
+        actual position. Without it, MoveIt substitutes the default (0 rad
+        = 19mm baseline jaw gap), which doesn't match reality when the
+        gripper is carrying a block (~0.11 rad = 27mm gap) or fully open
+        (~1.0 rad = 94mm gap). The mismatch caused OMPL to reject plans
+        our tier1 check accepted — they disagreed on jaw-world collisions.
+        """
         if not MOVEIT_AVAILABLE or not hasattr(self, 'validity_client') \
                 or not self.validity_client.service_is_ready():
-            return True  # no checker available — assume valid
+            return True, []
         req = GetStateValidity.Request()
-        req.robot_state.joint_state.name = list(ARM_JOINT_NAMES)
+        # Include gripper_joint using live position so jaws have correct
+        # spread in the collision check. Fall back to the target's own
+        # gripper value if the caller supplied one, then live position,
+        # then 0 as a last resort.
+        with self.joint_lock:
+            gj_live = self._actual_positions.get(
+                GRIPPER_JOINT_NAME,
+                self.joint_positions.get(GRIPPER_JOINT_NAME, 0.0))
+        gj = target.get(GRIPPER_JOINT_NAME, gj_live)
+        req.robot_state.joint_state.name = list(ALL_JOINT_NAMES)
         req.robot_state.joint_state.position = [
-            target.get(n, 0.0) for n in ARM_JOINT_NAMES]
+            target.get(n, 0.0) for n in ARM_JOINT_NAMES] + [float(gj)]
+        # is_diff=True: merge this joint_state onto the scene's stored
+        # robot_state rather than replacing it. Without this, default-
+        # constructed robot_state fields (including attached_collision_objects)
+        # clobber the scene's attachments for the duration of this probe,
+        # making any AttachedCollisionObject installed via apply_planning_scene
+        # silently invisible — this was the real cause of Phase 9's
+        # "300mm cube invisible to /check_state_validity" observation and
+        # of the drop_sweep passing the held block through cup meshes.
+        req.robot_state.is_diff = True
         req.group_name = 'arm'
         future = self.validity_client.call_async(req)
         self._wait_future(future, timeout_sec=1.0)
-        if future.result() is not None:
-            return future.result().valid
-        return True  # timeout — assume valid
+        res = future.result()
+        if res is None:
+            return True, []
+        return bool(res.valid), list(res.contacts)
 
     def _ik_apply_and_act(self, target, mode):
         """Apply IK solution to sliders/goal state and optionally execute."""
@@ -3564,9 +3803,11 @@ class SOArm101ControlGUI(Node):
         self.ee_labels['qw'].set(f'{qw:.4f}')
 
     def _objects_callback(self, msg):
+        new_any_big_move = False
         with self.objects_lock:
             for tf in msg.transforms:
                 name = tf.child_frame_id
+                prior = self.objects_data.get(name)
                 self.objects_data[name] = {
                     'x': tf.transform.translation.x,
                     'y': tf.transform.translation.y,
@@ -3576,6 +3817,35 @@ class SOArm101ControlGUI(Node):
                     'qz': tf.transform.rotation.z,
                     'qw': tf.transform.rotation.w,
                 }
+                # Detect meaningful pose change for scene-sync scheduling
+                if prior is not None:
+                    dx = self.objects_data[name]['x'] - prior['x']
+                    dy = self.objects_data[name]['y'] - prior['y']
+                    dz = self.objects_data[name]['z'] - prior['z']
+                    if (dx*dx + dy*dy + dz*dz) ** 0.5 > 0.003:  # >3mm
+                        new_any_big_move = True
+        # Signal any pending grasp_refresh that fresh data has arrived.
+        refresh_evt = getattr(self, '_objects_refresh_event', None)
+        if refresh_evt is not None and not refresh_evt.is_set():
+            refresh_evt.set()
+
+        # Phase 9: rate-limited live sync — if any block moved >3mm since last
+        # seen, schedule a lego-scene resync (but at most once per 0.5s).
+        # Never resync while a lego is attached (its world entry is stale by design).
+        if new_any_big_move:
+            self._ensure_lego_state()
+            if self._attached_lego_name:
+                return
+            now = self.get_clock().now().nanoseconds / 1e9
+            last = getattr(self, '_lego_sync_last_t', 0.0)
+            if now - last > 0.5:
+                self._lego_sync_last_t = now
+                # Mode B suspect: lego re-add mid-cycle can invalidate an
+                # OMPL plan made against the pre-resync scene.
+                tracer.event('objects_callback_readd_scheduled',
+                             attached=self._attached_lego_name)
+                if getattr(self, '_gui_ready', False):
+                    self.root.after(0, self._add_lego_collision_objects)
 
     def _bbox_callback(self, msg):
         """Cache world-aligned bounding boxes from /objects_bbox_sim."""
@@ -3620,7 +3890,8 @@ class SOArm101ControlGUI(Node):
             self._drop_data.clear()
         self._remove_cup_collision_objects()
         self._drop_sub = self.create_subscription(
-            TFMessage, topic, self._drop_callback, 10)
+            TFMessage, topic, self._drop_callback, 10,
+            callback_group=self._sub_cb_group)
         self._append_log(f'Drop topic: {topic}')
 
     def _populate_drop_list(self):
@@ -3670,15 +3941,27 @@ class SOArm101ControlGUI(Node):
                 p = Pose()
                 p.position.x = pos['x']
                 p.position.y = pos['y']
-                p.orientation.w = 1.0
+                # Phase 9: honor cup orientation from /drop_poses. Previously
+                # forced identity quaternion, which meant a rotated cup in
+                # Isaac showed up axis-aligned in MoveIt — collision checks
+                # missed the asymmetric flare of the rim and the drop IK
+                # offset computed against a wrong orientation.
+                p.orientation.x = float(pos.get('qx', 0.0))
+                p.orientation.y = float(pos.get('qy', 0.0))
+                p.orientation.z = float(pos.get('qz', 0.0))
+                p.orientation.w = float(pos.get('qw', 1.0))
+                # /drop_poses publishes cup BODY-CENTER (z = base + half_height).
                 if mesh_ok:
-                    # Mesh origin is at bottom center (Z=0 is cup base)
-                    p.position.z = pos['z']
+                    # Cup STL mesh origin is at the cup's BASE. To place its
+                    # base on the ground, set mesh_pose.z = cup_base_z =
+                    # cup_center_z − half_height.
+                    p.position.z = pos['z'] - CUP_BODY_HEIGHT_M / 2.0
                     co.meshes.append(cup_mesh)
                     co.mesh_poses.append(p)
                 else:
-                    # Cylinder origin is at center, offset Z by half height
-                    p.position.z = pos['z'] + CUP_HEIGHT / 2.0
+                    # SolidPrimitive.CYLINDER is center-based (same convention
+                    # as /drop_poses now), so no Z adjustment.
+                    p.position.z = pos['z']
                     cyl = SolidPrimitive()
                     cyl.type = SolidPrimitive.CYLINDER
                     cyl.dimensions = [CUP_HEIGHT, CUP_RADIUS]
@@ -3725,6 +4008,699 @@ class SOArm101ControlGUI(Node):
 
         threading.Thread(target=_apply, daemon=True).start()
 
+    # ------------------------------------------------------------------
+    # Phase 9: lego block collision tracking in MoveIt planning scene
+    # ------------------------------------------------------------------
+    # Blocks enter the scene at grasp_refresh as BOX CollisionObjects (world).
+    # On successful gripper_close_for_object they convert to AttachedCollisionObject
+    # on tcp_link — MoveIt then tracks the carried block's world pose via FK, so
+    # plans during drop_sweep respect the full carried-block envelope.
+    # On drop_release the attached object is removed from the scene entirely.
+    #
+    # 15% padding compensates for: (a) grasp slip during gripper close, (b) lego
+    # stud height not captured by the world-aligned bbox, (c) execution tracking
+    # error on the cup-rim approach. Matches the cup's 5% padding principle.
+    _LEGO_COLLISION_PADDING = 1.15
+
+    @staticmethod
+    def _pose7_to_mat(x, y, z, qx, qy, qz, qw):
+        """Build 4×4 homogeneous transform from translation + unit quaternion."""
+        import numpy as np
+        xx, yy, zz = qx*qx, qy*qy, qz*qz
+        xy, xz, yz = qx*qy, qx*qz, qy*qz
+        wx, wy, wz = qw*qx, qw*qy, qw*qz
+        m = np.eye(4)
+        m[0, 0] = 1 - 2*(yy + zz); m[0, 1] = 2*(xy - wz); m[0, 2] = 2*(xz + wy)
+        m[1, 0] = 2*(xy + wz); m[1, 1] = 1 - 2*(xx + zz); m[1, 2] = 2*(yz - wx)
+        m[2, 0] = 2*(xz - wy); m[2, 1] = 2*(yz + wx); m[2, 2] = 1 - 2*(xx + yy)
+        m[0, 3] = x; m[1, 3] = y; m[2, 3] = z
+        return m
+
+    @staticmethod
+    def _mat_to_pose7(m):
+        """Extract translation + unit quaternion from 4×4 homogeneous transform."""
+        x, y, z = float(m[0, 3]), float(m[1, 3]), float(m[2, 3])
+        tr = m[0, 0] + m[1, 1] + m[2, 2]
+        if tr > 0:
+            s = (tr + 1.0) ** 0.5 * 2
+            qw = 0.25 * s
+            qx = (m[2, 1] - m[1, 2]) / s
+            qy = (m[0, 2] - m[2, 0]) / s
+            qz = (m[1, 0] - m[0, 1]) / s
+        elif m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
+            s = ((1 + m[0, 0] - m[1, 1] - m[2, 2]) ** 0.5) * 2
+            qw = (m[2, 1] - m[1, 2]) / s
+            qx = 0.25 * s
+            qy = (m[0, 1] + m[1, 0]) / s
+            qz = (m[0, 2] + m[2, 0]) / s
+        elif m[1, 1] > m[2, 2]:
+            s = ((1 + m[1, 1] - m[0, 0] - m[2, 2]) ** 0.5) * 2
+            qw = (m[0, 2] - m[2, 0]) / s
+            qx = (m[0, 1] + m[1, 0]) / s
+            qy = 0.25 * s
+            qz = (m[1, 2] + m[2, 1]) / s
+        else:
+            s = ((1 + m[2, 2] - m[0, 0] - m[1, 1]) ** 0.5) * 2
+            qw = (m[1, 0] - m[0, 1]) / s
+            qx = (m[0, 2] + m[2, 0]) / s
+            qy = (m[1, 2] + m[2, 1]) / s
+            qz = 0.25 * s
+        return x, y, z, qx, qy, qz, qw
+
+    def _ensure_lego_state(self):
+        """Lazy-init Phase 9 state so hot-reload (which skips __init__) still works."""
+        if not hasattr(self, '_lego_collision_names'):
+            self._lego_collision_names = []
+        if not hasattr(self, '_attached_lego_name'):
+            self._attached_lego_name = None
+
+    def _add_lego_collision_objects(self):
+        """Add BOX CollisionObjects for every detected block to the planning scene.
+
+        Keyed `lego_{name}`. Pose from /objects_poses_sim, dimensions from
+        /objects_bbox_sim. Mirrors _add_cup_collision_objects.
+        """
+        self._ensure_lego_state()
+        if not MOVEIT_AVAILABLE or not hasattr(self, '_apply_scene_client'):
+            return
+
+        def _apply():
+            if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
+                self._append_log('apply_planning_scene not available for legos', 'warn')
+                return
+            with self.objects_lock:
+                blocks = dict(self.objects_data)
+            bboxes = dict(self.objects_bbox)
+            if not blocks or not bboxes:
+                return
+            # Snapshot cup positions so we can filter legos that have landed
+            # inside one. An in-cup lego is already covered by the cup's own
+            # collision object; adding its box as a separate world collision
+            # causes false start-state collisions for grasp_home after a
+            # successful drop (gripper parked above cup ↔ lego-in-cup).
+            with self._drop_lock:
+                cups = dict(self._drop_data)
+            # Cup rim dimensions from the loader (no padding — we want actual
+            # geometry for the "inside cup?" test).
+            CUP_R = 0.039
+            CUP_H = 0.0965
+            def _inside_any_cup(p):
+                """Returns True if block's XY is inside any cup's footprint
+                AND block_z is at-or-above cup base. No upper Z bound — a
+                block perched ABOVE the cup rim (e.g. balanced on a convex-
+                hull cup top during drop) is still 'cup territory' as far
+                as collision is concerned. The cup's own collision object
+                + the gripper's own padding handle that region; adding a
+                separate lego box on top of the cup causes phantom start-
+                state collisions for the post-drop grasp_home."""
+                lx, ly, lz = float(p.get('x', 0)), float(p.get('y', 0)), float(p.get('z', 0))
+                # /drop_poses is cup BODY-CENTER; "at-or-above cup base" is
+                # therefore lz >= (cup_center_z − half_height) − tol.
+                for cpos in cups.values():
+                    cx, cy, cz = float(cpos['x']), float(cpos['y']), float(cpos['z'])
+                    dx, dy = lx - cx, ly - cy
+                    cup_base_z = cz - CUP_BODY_HEIGHT_M / 2.0
+                    if (dx*dx + dy*dy) ** 0.5 <= CUP_R + 0.005:
+                        if lz >= cup_base_z - 0.005:
+                            return True
+                return False
+            add_scene = PlanningSceneMsg(); add_scene.is_diff = True
+            remove_scene = PlanningSceneMsg(); remove_scene.is_diff = True
+            added = []
+            skipped_in_cup = []
+            # Idempotent-REMOVE pattern: for every lego we DON'T want in
+            # the world scene (attached + in-cup), issue an unconditional
+            # REMOVE. Pre-Phase 9 we relied on self._lego_collision_names
+            # bookkeeping, which diverged from MoveIt's scene across
+            # attach/detach cycles and left phantom lego_blue_2x4 as a world
+            # object after a drop. The always-REMOVE approach is correct;
+            # the Phase-9-era belief that MoveIt Humble "tolerates REMOVE of
+            # non-existent objects" is only half true: the scene is updated
+            # correctly (missing stays missing), but the service still
+            # returns success=False whenever any REMOVE targets a
+            # non-existent id. Bundling ADDs and REMOVEs in one diff
+            # therefore poisons the ADD-success signal. Split them: send
+            # the REMOVEs in their own diff and ignore its success flag,
+            # then send the ADDs separately and trust that flag.
+            def _remove_diff(lego_id):
+                rm = CollisionObject()
+                rm.header.frame_id = 'base'
+                rm.id = lego_id
+                rm.operation = CollisionObject.REMOVE
+                remove_scene.world.collision_objects.append(rm)
+            for name, pose in blocks.items():
+                bbox = bboxes.get(name)
+                if not bbox:
+                    continue
+                lego_id = f'lego_{name}'
+                # Skip the currently-held one — it's tracked by the held-lego
+                # world-pose syncer at 10Hz. Adding an outdated pose here
+                # from Isaac Sim's /objects_poses_sim (which shows the block
+                # at its original table position, not in the gripper) would
+                # clobber the live TCP-tracked pose.
+                if name == self._attached_lego_name:
+                    continue  # DO NOT remove — we own this id now
+                # Skip legos that have landed inside a cup. The cup collision
+                # object already occupies that space; adding the lego on top
+                # causes spurious gripper-vs-lego false positives for any
+                # motion starting or ending above the cup rim.
+                if _inside_any_cup(pose):
+                    skipped_in_cup.append(name)
+                    _remove_diff(lego_id)  # unconditional REMOVE
+                    continue
+                co = CollisionObject()
+                co.header.frame_id = 'base'
+                co.id = f'lego_{name}'
+                co.operation = CollisionObject.ADD
+                box = SolidPrimitive()
+                box.type = SolidPrimitive.BOX
+                box.dimensions = [float(bbox['sx']), float(bbox['sy']), float(bbox['sz'])]
+                p = Pose()
+                p.position.x = float(pose['x'])
+                p.position.y = float(pose['y'])
+                # Isaac Sim reports the block origin at its CENTER (verified
+                # empirically: all three brick sizes report z≈8mm on ground,
+                # matching the 12.78mm-tall block's center, not half-height
+                # above bottom). The previous "+ sz/2" produced a 6.4mm
+                # upward offset that baked into every planning/validity call.
+                p.position.z = float(pose['z'])
+                p.orientation.x = float(pose.get('qx', 0.0))
+                p.orientation.y = float(pose.get('qy', 0.0))
+                p.orientation.z = float(pose.get('qz', 0.0))
+                p.orientation.w = float(pose.get('qw', 1.0))
+                co.primitives.append(box)
+                co.primitive_poses.append(p)
+                add_scene.world.collision_objects.append(co)
+                added.append(co.id)
+            if not add_scene.world.collision_objects and not remove_scene.world.collision_objects:
+                return
+            # Pass 1: REMOVEs (success flag discarded — REMOVE-missing-id
+            # returns success=False in Humble but the scene state is still
+            # what we want).
+            if remove_scene.world.collision_objects:
+                rm_req = ApplyPlanningScene.Request()
+                rm_req.scene = remove_scene
+                rm_fut = self._apply_scene_client.call_async(rm_req)
+                self._wait_future(rm_fut, timeout_sec=5.0)
+            # Pass 2: ADDs (success flag trusted).
+            if not add_scene.world.collision_objects:
+                if skipped_in_cup:
+                    self._append_log(
+                        f'All legos in-cup ({len(skipped_in_cup)}) — '
+                        f'none added to scene: {skipped_in_cup}')
+                return
+            req = ApplyPlanningScene.Request()
+            req.scene = add_scene
+            future = self._apply_scene_client.call_async(req)
+            self._wait_future(future, timeout_sec=5.0)
+            res = future.result()
+            if res is not None and res.success:
+                self._lego_collision_names = added
+                note = f' (skipped {len(skipped_in_cup)} in-cup: {skipped_in_cup})' if skipped_in_cup else ''
+                self._append_log(f'Added {len(added)} lego collision objects{note}')
+            else:
+                reason = 'timeout' if res is None else 'server success=False'
+                self._append_log(
+                    f'Failed to add lego collision objects: {reason} '
+                    f'[ADD={len(added)}]', 'warn')
+
+        threading.Thread(target=_apply, daemon=True).start()
+
+    def _remove_single_lego_from_world(self, obj_name):
+        """Remove one lego's world CollisionObject (does not touch attached).
+        Called at grasp_move entry so gripper can approach without MoveIt
+        flagging the target-being-grasped as an obstacle.
+        """
+        self._ensure_lego_state()
+        if not MOVEIT_AVAILABLE or not hasattr(self, '_apply_scene_client'):
+            return
+        name_id = f'lego_{obj_name}'
+
+        def _apply():
+            if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
+                return
+            scene = PlanningSceneMsg()
+            scene.is_diff = True
+            co = CollisionObject()
+            co.header.frame_id = 'base'
+            co.id = name_id
+            co.operation = CollisionObject.REMOVE
+            scene.world.collision_objects.append(co)
+            req = ApplyPlanningScene.Request()
+            req.scene = scene
+            future = self._apply_scene_client.call_async(req)
+            self._wait_future(future, timeout_sec=3.0)
+            if name_id in self._lego_collision_names:
+                self._lego_collision_names.remove(name_id)
+
+        threading.Thread(target=_apply, daemon=True).start()
+
+    def _remove_lego_collision_objects(self):
+        """Remove all lego_* collision objects from the world (not attached)."""
+        self._ensure_lego_state()
+        if not MOVEIT_AVAILABLE or not hasattr(self, '_apply_scene_client'):
+            return
+
+        def _apply():
+            if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
+                return
+            scene = PlanningSceneMsg()
+            scene.is_diff = True
+            for name in list(self._lego_collision_names):
+                co = CollisionObject()
+                co.header.frame_id = 'base'
+                co.id = name
+                co.operation = CollisionObject.REMOVE
+                scene.world.collision_objects.append(co)
+            if scene.world.collision_objects:
+                req = ApplyPlanningScene.Request()
+                req.scene = scene
+                future = self._apply_scene_client.call_async(req)
+                self._wait_future(future, timeout_sec=5.0)
+                self._lego_collision_names.clear()
+
+        threading.Thread(target=_apply, daemon=True).start()
+
+    def _attach_lego_to_gripper(self, obj_name):
+        """On successful grasp close, convert world CO → AttachedCollisionObject.
+
+        Pose is computed as block-in-tcp_link via TF lookup at attach time,
+        so MoveIt tracks the carried block via FK thereafter.
+        """
+        self._ensure_lego_state()
+        if not obj_name:
+            return False
+        if not MOVEIT_AVAILABLE or not hasattr(self, '_apply_scene_client'):
+            return False
+        bbox = self.objects_bbox.get(obj_name)
+        if not bbox:
+            self._append_log(f'Attach skipped: no bbox for {obj_name}', 'warn')
+            return False
+        with self.objects_lock:
+            block = dict(self.objects_data.get(obj_name, {}))
+        if not block:
+            self._append_log(f'Attach skipped: no pose for {obj_name}', 'warn')
+            return False
+
+        # Model: tcp_link is the fixed-jaw tip. After grasp_move + gripper_close,
+        # the block is pinched between the two jaws with:
+        #   - Block side-center (vertical mid-height) at tcp.Z (no vertical offset)
+        #   - Block center XY offset from tcp by the jaw half-width (set by
+        #     _compute_jaw_offset during grasp_move)
+        # We compute the actual block-in-tcp transform via TF — this gives the
+        # correct XY offset AND the block's orientation relative to tcp (which
+        # determines how the BOX collision volume is oriented in tcp's frame).
+        import numpy as np
+        try:
+            t = self._tf_buffer.lookup_transform('base', 'tcp_link', rclpy.time.Time())
+        except Exception as e:
+            self._append_log(f'Attach failed: TF lookup tcp_link: {e}', 'warn')
+            return False
+        tr = t.transform
+        tcp_mat = self._pose7_to_mat(
+            tr.translation.x, tr.translation.y, tr.translation.z,
+            tr.rotation.x, tr.rotation.y, tr.rotation.z, tr.rotation.w)
+        bx = float(block['x']); by = float(block['y'])
+        # Isaac Sim reports the block origin at its CENTER, not its bottom —
+        # verified empirically: all three brick sizes (2x2/2x3/2x4) report
+        # z≈8mm when resting on ground, matching the 12.78mm-tall brick's
+        # center, not half-height above bottom. The previous "+ sz/2"
+        # adjustment baked a 6.4mm upward offset into the stored local
+        # transform, which then propagated as a 6.4mm Z error in the
+        # world-tracked MoveIt projection (Phase 9 verified).
+        bz = float(block['z'])
+        block_mat = self._pose7_to_mat(
+            bx, by, bz,
+            float(block.get('qx', 0.0)), float(block.get('qy', 0.0)),
+            float(block.get('qz', 0.0)), float(block.get('qw', 1.0)))
+        block_in_tcp = np.linalg.inv(tcp_mat) @ block_mat
+        ax, ay, az, aqx, aqy, aqz, aqw = self._mat_to_pose7(block_in_tcp)
+        # Sanity: block should be within one grip-width of tcp. Reject if grasp
+        # clearly failed (e.g., FC-1 rejected grasp_move but close fired anyway).
+        dist_mm = float((ax*ax + ay*ay + az*az) ** 0.5) * 1000.0
+        if dist_mm > 80.0:
+            self._append_log(
+                f'Attach skipped: tcp-to-block {dist_mm:.0f}mm > 80mm '
+                f'(grasp_move likely failed — no object in gripper)', 'warn')
+            return False
+
+        def _apply_scene(scene_msg, label):
+            req = ApplyPlanningScene.Request()
+            req.scene = scene_msg
+            try:
+                future = self._apply_scene_client.call_async(req)
+                self._wait_future(future, timeout_sec=5.0)
+            except Exception as exc:
+                self._append_log(f'{label}: exception: {exc}', 'warn')
+                return False
+            res = future.result() if future else None
+            if res is None:
+                self._append_log(f'{label}: timed out (5s)', 'warn')
+                return False
+            if not res.success:
+                self._append_log(f'{label}: apply returned success=False', 'warn')
+                return False
+            return True
+
+        def _apply():
+            if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
+                self._append_log('apply_planning_scene not available for attach', 'warn')
+                return
+            # Phase 9: DO NOT convert to AttachedCollisionObject. MoveIt 2
+            # Humble's collision checker silently skips attached-vs-world
+            # pairs (verified: 300mm cube attached at TCP was invisible to
+            # /check_state_validity). Instead, keep the lego as a WORLD
+            # CollisionObject and track its pose via tcp_link TF at 10Hz.
+            #
+            # Record the tcp_link-local offset snapshotted at grasp-close.
+            with self._held_lego_lock:
+                self._held_lego = {
+                    'name': obj_name,
+                    'local_xyz': (float(ax), float(ay), float(az)),
+                    'local_quat': (float(aqx), float(aqy), float(aqz),
+                                   float(aqw)),
+                    'dims': (float(bbox['sx']), float(bbox['sy']),
+                             float(bbox['sz'])),
+                }
+            self._attached_lego_name = obj_name
+
+            # Initial sync: compute current world pose + add ACM allow
+            # entries for lego↔(gripper/jaw/tcp_link/wrist) so the gripper
+            # holding the block doesn't fire self-collision. Replaces the
+            # touch_links semantics of AttachedCollisionObject.
+            ok_sync = self._sync_held_lego_now(add_acm=True)
+            if not ok_sync:
+                self._append_log('Attach step failed: initial pose sync', 'warn')
+                return
+
+            # Start the 10Hz pose-tracking background thread (idempotent).
+            self._start_held_lego_timer()
+
+            name_id = f'lego_{obj_name}'
+            if name_id in self._lego_collision_names:
+                self._lego_collision_names.remove(name_id)
+            tracer.event('attach_applied',
+                         obj_name=obj_name,
+                         block_in_tcp=(ax, ay, az),
+                         block_in_tcp_quat=(aqx, aqy, aqz, aqw),
+                         bbox=(float(bbox['sx']), float(bbox['sy']),
+                               float(bbox['sz'])),
+                         dist_mm=dist_mm,
+                         mode='world_pose_tracking')
+            self._append_log(
+                f'Holding {name_id} (world-tracked) '
+                f'({bbox["sx"]*1000:.0f}×{bbox["sy"]*1000:.0f}×{bbox["sz"]*1000:.0f}mm) '
+                f'offset=({ax*1000:+.1f},{ay*1000:+.1f},{az*1000:+.1f})mm in tcp_link')
+
+        threading.Thread(target=_apply, daemon=True).start()
+        return True
+
+    # ------------------------------------------------------------------
+    # Phase 9: held-lego world-pose tracking (workaround for MoveIt 2
+    # Humble AttachedCollisionObject-vs-world skip bug).
+    # ------------------------------------------------------------------
+
+    _HELD_LEGO_ALLOW_LINKS = ('gripper', 'jaw', 'tcp_link', 'wrist')
+
+    def _sync_held_lego_now(self, add_acm=False):
+        """Push a PlanningScene diff updating the held lego's world pose.
+
+        Reads current tcp_link world transform from TF, multiplies by the
+        stored local offset, and re-publishes the world CollisionObject
+        at the new pose. If add_acm=True, also installs allow entries so
+        the lego doesn't self-collide with gripper/jaw/tcp_link/wrist
+        (replaces the touch_links semantics we lost by not attaching).
+
+        Returns True on success, False if TF lookup or scene apply failed.
+        Silent on transient TF-stale errors — during slider-driven previews
+        the TF tree can lag by a frame.
+        """
+        with self._held_lego_lock:
+            lego = dict(self._held_lego) if self._held_lego else None
+        if not lego:
+            return False
+        if not MOVEIT_AVAILABLE or not hasattr(self, '_apply_scene_client'):
+            return False
+
+        # Compute world pose: tcp_link_world ⊕ local_offset
+        import numpy as np
+        try:
+            t = self._tf_buffer.lookup_transform(
+                'base', 'tcp_link', rclpy.time.Time())
+        except Exception:
+            return False  # transient — next tick retries
+        tr = t.transform
+        tcp_mat = self._pose7_to_mat(
+            tr.translation.x, tr.translation.y, tr.translation.z,
+            tr.rotation.x, tr.rotation.y, tr.rotation.z, tr.rotation.w)
+        lx, ly, lz = lego['local_xyz']
+        lqx, lqy, lqz, lqw = lego['local_quat']
+        local_mat = self._pose7_to_mat(lx, ly, lz, lqx, lqy, lqz, lqw)
+        world_mat = tcp_mat @ local_mat
+        wx, wy, wz, wqx, wqy, wqz, wqw = self._mat_to_pose7(world_mat)
+
+        # Build scene diff
+        scene = PlanningSceneMsg()
+        scene.is_diff = True
+        co = CollisionObject()
+        co.header.frame_id = 'base'
+        co.id = f"lego_{lego['name']}"
+        co.operation = CollisionObject.ADD  # ADD on existing id = pose update
+        box = SolidPrimitive()
+        box.type = SolidPrimitive.BOX
+        box.dimensions = list(lego['dims'])
+        co.primitives.append(box)
+        p = Pose()
+        p.position.x = wx; p.position.y = wy; p.position.z = wz
+        p.orientation.x = wqx; p.orientation.y = wqy
+        p.orientation.z = wqz; p.orientation.w = wqw
+        co.primitive_poses.append(p)
+        scene.world.collision_objects.append(co)
+
+        if add_acm:
+            # Fetch current ACM, add allow entries for held lego vs
+            # gripper/jaw/tcp_link/wrist. Per-tick calls don't need this
+            # (ACM persists once set).
+            self._inject_held_lego_acm_allows(
+                scene, co.id, self._HELD_LEGO_ALLOW_LINKS, allow=True)
+
+        req = ApplyPlanningScene.Request()
+        req.scene = scene
+        try:
+            fut = self._apply_scene_client.call_async(req)
+            # Per-tick: don't block on the response. For add_acm call, wait.
+            if add_acm:
+                self._wait_future(fut, timeout_sec=3.0)
+                res = fut.result()
+                return bool(res and res.success)
+            return True
+        except Exception:
+            return False
+
+    def _inject_held_lego_acm_allows(self, scene_msg, obj_id, link_names, allow):
+        """Populate scene_msg.allowed_collision_matrix with entries that
+        allow (True) or disallow (False) collision between obj_id and each
+        name in link_names. Symmetric entries in both directions.
+
+        This fetches the current ACM, applies the edits, and writes the
+        FULL updated ACM back (MoveIt 2 treats the acm field in a scene
+        diff as a full replacement, so we must preserve everything else).
+        """
+        if not hasattr(self, '_get_scene_client'):
+            return
+        from moveit_msgs.msg import PlanningSceneComponents as _PSC
+        from moveit_msgs.srv import GetPlanningScene as _GPS
+        req = _GPS.Request()
+        req.components.components = _PSC.ALLOWED_COLLISION_MATRIX
+        try:
+            fut = self._get_scene_client.call_async(req)
+            self._wait_future(fut, timeout_sec=3.0)
+            r = fut.result()
+        except Exception:
+            return
+        if r is None:
+            return
+        acm = r.scene.allowed_collision_matrix
+        names = list(acm.entry_names)
+        rows = [list(e.enabled) for e in acm.entry_values]
+
+        # Ensure obj_id exists as a row+column
+        if obj_id not in names:
+            names.append(obj_id)
+            # Extend every existing row by one column (default False)
+            for row in rows:
+                row.append(False)
+            # Add new row (all False by default — collision checked)
+            rows.append([False] * len(names))
+
+        oi = names.index(obj_id)
+        for lk in link_names:
+            if lk not in names:
+                continue  # link not tracked in ACM (rare — skip)
+            li = names.index(lk)
+            rows[oi][li] = bool(allow)
+            rows[li][oi] = bool(allow)
+
+        # Write back
+        from moveit_msgs.msg import AllowedCollisionMatrix as _ACM
+        from moveit_msgs.msg import AllowedCollisionEntry as _ACE
+        new_acm = _ACM()
+        new_acm.entry_names = names
+        for row in rows:
+            e = _ACE()
+            e.enabled = row
+            new_acm.entry_values.append(e)
+        # Preserve defaults
+        new_acm.default_entry_names = list(acm.default_entry_names)
+        new_acm.default_entry_values = list(acm.default_entry_values)
+        scene_msg.allowed_collision_matrix = new_acm
+
+    def _start_held_lego_timer(self):
+        """Spawn a 10Hz background thread that keeps the held lego's
+        world pose in sync with tcp_link. Idempotent — only one thread
+        runs at a time. Thread exits when _held_lego becomes None or
+        the node is shutting down."""
+        if self._held_lego_timer_running:
+            return
+        self._held_lego_timer_running = True
+
+        def _loop():
+            try:
+                while self._held_lego_timer_running and self.running:
+                    time.sleep(0.1)
+                    with self._held_lego_lock:
+                        has_lego = self._held_lego is not None
+                    if has_lego:
+                        try:
+                            self._sync_held_lego_now(add_acm=False)
+                        except Exception:
+                            pass
+                    else:
+                        # No lego being held — idle briefly then recheck
+                        time.sleep(0.2)
+            finally:
+                self._held_lego_timer_running = False
+
+        threading.Thread(target=_loop, daemon=True, name='held_lego_sync').start()
+
+    def _release_held_lego(self):
+        """Clear held-lego state: remove ACM allow entries, drop the
+        local-offset record. The lego stays in the world at whatever
+        pose was last synced — the next /objects_poses_sim update will
+        refresh it to Isaac Sim's truth (where it actually landed).
+
+        Returns True on success, False if nothing was held.
+        """
+        with self._held_lego_lock:
+            lego = self._held_lego
+            self._held_lego = None
+        if not lego:
+            return False
+        obj_id = f"lego_{lego['name']}"
+        # Clear ACM allow entries + REMOVE the stale world pose. The last
+        # thing the 10Hz tracker wrote was the block's pose AT the TCP
+        # during the sweep (i.e. hovering above the cup where the release
+        # happened). Leaving that pose in MoveIt means the block appears
+        # to "dangle" in the scene — _add_lego_collision_objects's in-cup
+        # filter then skips re-adding it because Isaac reports it settled
+        # inside a cup. Sending an explicit REMOVE here clears the stale
+        # pose; the next /objects_poses_sim refresh cycle will either
+        # re-add the block at Isaac-truth pose (if it bounced out of the
+        # cup onto the table) or leave it removed (if it landed in a cup,
+        # where the cup's own collision geometry already covers the space).
+        if MOVEIT_AVAILABLE and hasattr(self, '_apply_scene_client'):
+            scene = PlanningSceneMsg()
+            scene.is_diff = True
+            # Clear ACM allow entries
+            self._inject_held_lego_acm_allows(
+                scene, obj_id, self._HELD_LEGO_ALLOW_LINKS, allow=False)
+            # REMOVE the stale world CollisionObject
+            rm = CollisionObject()
+            rm.header.frame_id = 'base'
+            rm.id = obj_id
+            rm.operation = CollisionObject.REMOVE
+            scene.world.collision_objects.append(rm)
+            try:
+                req = ApplyPlanningScene.Request()
+                req.scene = scene
+                fut = self._apply_scene_client.call_async(req)
+                self._wait_future(fut, timeout_sec=3.0)
+            except Exception:
+                pass
+        self._attached_lego_name = None
+        # Mark the cycle as "drop complete" so the NEXT grasp_home_done
+        # closes the trace (same semantics as old _detach_lego_sync).
+        self._cycle_detach_seen = True
+        tracer.event('release_applied', obj_name=lego['name'])
+        self._append_log(f'Released lego_{lego["name"]} (world-tracked)')
+        return True
+
+    def _cmd_detach_lego(self):
+        """Manual/test-harness detach — force-remove every known lego from the
+        robot's attached list, regardless of _attached_lego_name's current value.
+        Useful after a crashed cycle left a stale AttachedCollisionObject.
+
+        Phase 9: ALSO releases the held-lego world-pose tracker state (stops
+        the 10Hz timer from overwriting grasp_refresh) and clears any lingering
+        ACM allow entries. Without this, a subsequent grasp_refresh would be
+        clobbered by the next timer tick writing the stale local offset.
+        """
+        self._ensure_lego_state()
+        # Release held-lego state FIRST so the 10Hz timer stops syncing
+        # before we repopulate world objects below. If _release_held_lego
+        # returns False there was nothing to release, which is fine.
+        self._release_held_lego()
+        if not MOVEIT_AVAILABLE or not hasattr(self, '_apply_scene_client'):
+            return
+
+        def _apply():
+            if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
+                return
+            # Best-effort: REMOVE every (color × size) lego as attached.
+            colors = ('red', 'green', 'blue')
+            sizes = ('2x2', '2x3', '2x4')
+            scene = PlanningSceneMsg()
+            scene.is_diff = True
+            for c in colors:
+                for s in sizes:
+                    aco = AttachedCollisionObject()
+                    aco.link_name = 'tcp_link'
+                    aco.object.id = f'lego_{c}_{s}'
+                    aco.object.operation = CollisionObject.REMOVE
+                    scene.robot_state.attached_collision_objects.append(aco)
+            scene.robot_state.is_diff = True
+            req = ApplyPlanningScene.Request()
+            req.scene = scene
+            future = self._apply_scene_client.call_async(req)
+            self._wait_future(future, timeout_sec=5.0)
+            self._attached_lego_name = None
+            self._append_log('Detached all legos (force cleanup)')
+
+        threading.Thread(target=_apply, daemon=True).start()
+        # Repopulate world legos shortly after
+        self.root.after(300, self._add_lego_collision_objects)
+
+    def _detach_lego(self):
+        """Non-blocking detach wrapper. Spawns the apply in a thread so
+        callers that don't need to wait (e.g. _cmd_grasp_refresh) aren't
+        blocked. For drop_release, use `_detach_lego_sync` instead — it
+        waits for the planning-scene apply to commit BEFORE returning,
+        which is required so the subsequent grasp_home plans against a
+        scene without the (now phantom) attached block.
+        """
+        threading.Thread(target=self._detach_lego_sync, daemon=True).start()
+
+    def _detach_lego_sync(self):
+        """Blocking release of the currently-held lego.
+
+        Phase 9: now delegates to _release_held_lego (world-pose-tracking
+        path). The old AttachedCollisionObject REMOVE path is gone because
+        we never attach anymore — see _attach_lego_to_gripper for the
+        MoveIt 2 Humble skip-bug writeup.
+        """
+        self._ensure_lego_state()
+        return self._release_held_lego()
+
     def _publish_cup_visual_markers(self):
         """Publish colored cup meshes as RViz visual markers from _drop_data."""
         if not hasattr(self, '_cup_visual_pub'):
@@ -3750,8 +4726,14 @@ class SOArm101ControlGUI(Node):
             m.mesh_resource = _get_cup_stl_uri()
             m.pose.position.x = pos['x']
             m.pose.position.y = pos['y']
-            m.pose.position.z = pos['z']
-            m.pose.orientation.w = 1.0
+            # Cup STL origin is at base. /drop_poses publishes body-center,
+            # so shift down by half height to render the mesh base on ground.
+            m.pose.position.z = pos['z'] - CUP_BODY_HEIGHT_M / 2.0
+            # Phase 9: honor cup orientation from /drop_poses (was identity)
+            m.pose.orientation.x = float(pos.get('qx', 0.0))
+            m.pose.orientation.y = float(pos.get('qy', 0.0))
+            m.pose.orientation.z = float(pos.get('qz', 0.0))
+            m.pose.orientation.w = float(pos.get('qw', 1.0))
             m.scale = Vector3(x=scale, y=scale, z=scale)
             from std_msgs.msg import ColorRGBA
             m.color = ColorRGBA(r=r, g=g, b=b, a=a)
@@ -3831,7 +4813,8 @@ class SOArm101ControlGUI(Node):
         with self.objects_lock:
             self.objects_data.clear()
         self.objects_sub = self.create_subscription(
-            TFMessage, new_topic, self._objects_callback, 10)
+            TFMessage, new_topic, self._objects_callback, 10,
+            callback_group=self._sub_cb_group)
         # Update button text
         if hasattr(self, '_grasp_move_btn'):
             if new_topic == '/drop_poses':
@@ -3841,15 +4824,25 @@ class SOArm101ControlGUI(Node):
         self._append_log(f'Grasp topic: {new_topic}')
 
     def _cmd_grasp_refresh(self):
+        """Resync object state from /objects_poses_sim. Async — schedules
+        listbox repopulate on the tk thread via root.after(500, ...).
+        Callers that need guaranteed-fresh state should sleep ~1s after.
+        """
         if not hasattr(self, 'obj_listbox'):
             return
-        # Clear stale data so only fresh messages populate the list
+        if tracer.is_active():
+            tracer.close_cycle('user_canceled',
+                               note='grasp_refresh while cycle open')
         with self.objects_lock:
             self.objects_data.clear()
         self.obj_listbox.delete(0, tk.END)
-        # Wait briefly for new messages to arrive, then populate
+        self._ensure_lego_state()
+        if self._attached_lego_name:
+            self._detach_lego_sync()
+        self._remove_lego_collision_objects()
         if getattr(self, '_gui_ready', False):
             self.root.after(500, self._populate_object_list)
+            self.root.after(700, self._add_lego_collision_objects)
 
     def _populate_object_list(self):
         if not hasattr(self, 'obj_listbox'):
@@ -3867,23 +4860,37 @@ class SOArm101ControlGUI(Node):
     def _cmd_grasp_home(self):
         """Move arm to grasp-ready home: gripper pointing down.
 
-        Uses joint-space interpolation with per-waypoint collision check via
-        MoveIt (ONE IK path discipline: MoveIt for collision checking only).
-        If the direct path has a collision (e.g. jaw sweeps through a cup after
-        drop_release), inserts a 'lift wrist' safe intermediate and routes
-        through it. OMPL path planning is used only as a last-resort fallback.
+        Dispatches the motion through the same OMPL-planned path the FK-tab
+        "Plan & Execute" button uses — _cmd_plan_execute(target=...) — since
+        both commands have joint-space targets and there is no reason to
+        maintain a separate motion pipeline for home. The previous tier1
+        joint-space-interp + hardcoded-intermediate-fallback + OMPL-last-
+        resort machinery inside _joint_space_collision_free_execute remains
+        available to the drop_sweep / drop_point / grasp_approach callers
+        that benefit from deterministic straight-line motion.
         """
         target = {name: 0.0 for name in ARM_JOINT_NAMES}
         target['wrist_flex'] = math.pi / 2
         from so_arm101_control.compute_workspace import WRIST_ROLL_URDF_PITCH
         target['wrist_roll'] = -math.pi / 2 + WRIST_ROLL_URDF_PITCH
         self._append_log(f'Grasp Home: wrist_flex=90° wrist_roll={math.degrees(target["wrist_roll"]):.1f}°')
+        tracer.event('grasp_home_start', target=dict(target))
         evt = threading.Event()
         self._motion_event = evt
-        # Unified motion primitive: tries direct joint-space first, falls back
-        # to OMPL-with-validated-retry. No outer OMPL fallback needed.
-        self._joint_space_collision_free_execute(
-            target, on_complete_event=evt, duration_s=3.0)
+        # Emit grasp_home_done when motion settles. Close the trace cycle
+        # iff a detach was seen in this cycle — that signals this is the
+        # post-drop return-to-home, the final leg of the pick-place.
+        # Pre-grasp and post-pick grasp_home calls leave _cycle_detach_seen
+        # at False, so they just event and don't close.
+        def _emit_home_done():
+            evt.wait(timeout=30.0)
+            tracer.event('grasp_home_done')
+            if getattr(self, '_cycle_detach_seen', False) and tracer.is_active():
+                tracer.close_cycle('completed')
+                self._cycle_detach_seen = False
+        threading.Thread(target=_emit_home_done, daemon=True).start()
+        # Same MoveIt OMPL pipeline as the FK tab's Plan & Execute button.
+        self._cmd_plan_execute(target=target, on_complete=evt)
 
     def _joint_space_collision_free_execute(self, target, on_complete_event,
                                              duration_s=3.0, waypoints=50):
@@ -3911,128 +4918,205 @@ class SOArm101ControlGUI(Node):
         Returns True if a clean path was found and execution scheduled.
         Returns False if no direct + intermediate path was collision-free.
         """
+        # Refresh held-lego world pose before any validity checks run.
+        # 10Hz timer + this explicit pre-call ensures the planning scene
+        # reflects the block's current location at the exact state the
+        # tier1 interpolant is checking against.
+        self._sync_held_lego_now()
+
         with self.joint_lock:
             current = {n: self._actual_positions.get(n, self.joint_positions.get(n, 0.0))
                        for n in ARM_JOINT_NAMES}
 
         target_full = {n: target.get(n, current[n]) for n in ARM_JOINT_NAMES}
 
+        # Short-circuit: if current is already within 0.5° of target on every
+        # joint, there's nothing to do. Previously this would still dispatch
+        # a zero-delta 51-waypoint trajectory, return success instantly, and
+        # confuse the user into thinking a motion completed ("robot didn't
+        # move but service said OK"). Now we explicitly flag the no-op case
+        # in _last_motion_status so the caller can distinguish "moved to
+        # target" from "already at target".
+        ALREADY_AT_TARGET_TOL = math.radians(0.5)  # 0.0087 rad
+        max_delta = max(abs(target_full[n] - current[n]) for n in ARM_JOINT_NAMES)
+        if max_delta < ALREADY_AT_TARGET_TOL:
+            self._append_log(
+                f'  already at target (max Δ={math.degrees(max_delta):.2f}° '
+                f'< 0.5°) — no motion dispatched')
+            tracer.event('tier1_noop',
+                         max_delta_deg=math.degrees(max_delta),
+                         target=dict(target_full), current=dict(current))
+            self._last_motion_status = {
+                'ok': True, 'outcome': 'already_at_target',
+                'msg': (f'already at target '
+                        f'(max Δ={math.degrees(max_delta):.2f}°)')}
+            on_complete_event.set()
+            return True
+
         def _segment_valid(a, b, N):
-            """Return (ok, invalid_info). ok=True if all interpolation wps are valid."""
+            """Return (ok, invalid_info, contacts). ok=True if all wps valid."""
             for i in range(N + 1):
                 alpha = i / N
                 q = {n: a[n] + alpha * (b[n] - a[n]) for n in ARM_JOINT_NAMES}
-                if not self._check_state_valid(q):
-                    return False, (i, alpha)
-            return True, None
+                valid, contacts = self._check_state_valid_with_contacts(q)
+                if not valid:
+                    return False, (i, alpha), contacts
+            return True, None, []
 
         # Step 1: try direct joint-space interpolation (fast, deterministic).
-        ok, bad = _segment_valid(current, target_full, waypoints)
+        ok, bad, bad_contacts = _segment_valid(current, target_full, waypoints)
+        tracer.event('tier1_check_done',
+                     ok=bool(ok),
+                     bad_wp=(None if ok else bad[0]),
+                     bad_alpha=(None if ok else bad[1]),
+                     waypoints=waypoints,
+                     target=dict(target_full),
+                     current=dict(current),
+                     contacts=([{
+                         'a': c.contact_body_1, 'b': c.contact_body_2,
+                         'depth_mm': c.depth * 1000,
+                     } for c in bad_contacts[:10]] if not ok else []))
         if ok:
             self._append_log(
                 f'  joint-space direct: {waypoints+1} wps clean, executing')
+            # DIAG: dump the exact waypoints tier1 validated
+            try:
+                import json as _json
+                _wps = []
+                for i in range(waypoints + 1):
+                    alpha = i / waypoints
+                    q = {n: current[n] + alpha * (target_full[n] - current[n])
+                         for n in ARM_JOINT_NAMES}
+                    _wps.append({'t': alpha * duration_s,
+                                 'positions': [q[n] for n in ARM_JOINT_NAMES]})
+                with open('/tmp/last_arm_trajectory.json', 'w') as _f:
+                    _json.dump({'source': 'tier1',
+                                'joint_names': list(ARM_JOINT_NAMES),
+                                'points': _wps}, _f)
+            except Exception:
+                pass
+            def _tier1_done():
+                # _execute_trajectory runs a UI animation thread and calls
+                # on_complete after it returns. It doesn't currently wire
+                # into the action-client result callback, so we can only
+                # report "animation finished" — NOT that the physical
+                # controller converged. For now, treat finishing the
+                # animation as success; _send_arm_goal handles the actual
+                # controller dispatch internally.
+                # TODO: if we need controller-level verdict for tier1, wire
+                # _send_arm_goal to surface the action result.
+                self._last_motion_status = {
+                    'ok': True, 'outcome': 'completed',
+                    'msg': f'tier1 joint-space ({waypoints+1} wps) complete'}
+                on_complete_event.set()
             self._execute_trajectory(
                 target_full, duration_s=duration_s,
-                on_complete=lambda: on_complete_event.set())
+                on_complete=_tier1_done)
             return True
 
-        # Step 2: direct path collides — fall back to OMPL with our own
-        # per-waypoint collision validation + start-state micro-perturbation
-        # retry. OMPL is deterministic per start state; a 0.01-0.02 rad nudge
-        # yields a different tree/plan, and empirically 5/6 perturbations
-        # produce a valid plan at the FC-2 post-drop state.
+        # Step 2: direct path collides — fall back to OMPL, one-shot.
         self._append_log(
             f'  joint-space direct: wp[{bad[0]}]@α={bad[1]:.2f} collides — '
-            f'falling back to OMPL with perturb-retry')
-        return self._ompl_plan_with_retry_execute(
-            target_full, on_complete_event, max_retries=12)
+            f'falling back to OMPL (one-shot)')
+        return self._ompl_plan_validate_execute(
+            target_full, on_complete_event)
 
-    def _ompl_plan_with_retry_execute(self, target, on_complete_event,
-                                      max_retries=10):
-        """OMPL path planning + our own waypoint validation + goal-perturb retry.
+    def _ompl_plan_validate_execute(self, target, on_complete_event):
+        """OMPL path planning + waypoint validation. One shot, no retries.
 
-        OMPL is deterministic per (start, goal, scene). When its plan's post-
-        densification produces a waypoint inside an obstacle, the plan is
-        INVALID_MOTION_PLAN (-2). Nudging the GOAL by ±0.005 rad within the
-        tolerance band changes OMPL's tree topology → different plan, without
-        changing the arm's actual final pose (still within the original
-        tolerance). This is execution-safe — NO start-state jump.
+        Previously this method retried up to 10× with small goal perturbations,
+        on the (false) premise that OMPL is deterministic per (start, goal,
+        scene). RRTConnect is sampling-based and non-deterministic — perturbing
+        the goal was just re-rolling the dice with extra latency. In the prior
+        session retries cost ~50s per failure and failed anyway (6/6).
 
-        Strategy: plan; validate every waypoint ourselves; if any invalid,
-        perturb goal within tolerance and retry. Returns True if a valid plan
-        was found and execution scheduled.
+        Strategy: plan once; validate every waypoint; on failure classify
+        (Mode A: OMPL returned no plan, Mode B: plan invalid per our checker)
+        and surface the diagnostic loudly. Returns True iff a valid plan was
+        scheduled for execution.
         """
         if not MOVEIT_AVAILABLE or self.plan_client is None \
                 or not self.plan_client.service_is_ready():
             self._append_log('OMPL: service not available', 'warn')
+            self._last_motion_status = {
+                'ok': False, 'outcome': 'ompl_service_unavailable',
+                'msg': 'OMPL plan service not available'}
             on_complete_event.set()
             return False
+
+        # Refresh held-lego world pose so OMPL sees the correct block
+        # location when building its initial collision scene.
+        self._sync_held_lego_now()
 
         with self.joint_lock:
             current = {n: self._actual_positions.get(
                 n, self.joint_positions.get(n, 0.0))
                        for n in ALL_JOINT_NAMES}
 
-        # Goal perturbations (within tolerance 0.02). Order: empirically
-        # wrist_flex/wrist_roll perturbations are most likely to flip OMPL
-        # tree topology for our geometry (big wrist motion range).
-        perturbations = [
-            None,  # baseline — exact goal
-            {'wrist_flex': +0.005}, {'wrist_roll': +0.005},
-            {'wrist_flex': -0.005}, {'wrist_roll': -0.005},
-            {'shoulder_pan': +0.005}, {'shoulder_pan': -0.005},
-            {'shoulder_lift': +0.005}, {'shoulder_lift': -0.005},
-            {'elbow_flex': +0.005},
-        ]
+        tracer.snapshot_scene('before_ompl_plan', self)
+        traj = self._ompl_plan_sync(current, target, tolerance=0.01)
 
-        trajectory = None
-        pert_used = 'none'
-        for attempt, offsets in enumerate(perturbations[:max_retries]):
-            goal = dict(target)
-            if offsets:
-                for jn, d in offsets.items():
-                    goal[jn] = target.get(jn, 0.0) + d
-                pert_used = '+'.join(f'{n}{d:+.3f}' for n, d in offsets.items())
-
-            traj = self._ompl_plan_sync(current, goal, tolerance=0.02)
-            if traj is None or not traj.joint_trajectory.points:
-                continue
-            if not self._trajectory_all_valid(traj.joint_trajectory):
-                continue
-
-            trajectory = traj
-            if attempt > 0:
-                self._append_log(
-                    f'  OMPL validated after {attempt} retries '
-                    f'(goal perturb={pert_used}, '
-                    f'{len(traj.joint_trajectory.points)} wps)')
-            else:
-                self._append_log(
-                    f'  OMPL validated on first try '
-                    f'({len(traj.joint_trajectory.points)} wps)')
-            break
-
-        if trajectory is None:
+        if traj is None or not traj.joint_trajectory.points:
+            ec_info = getattr(self, '_last_ompl_error', None)
+            tracer.snapshot_scene('after_ompl_returns_modeA', self)
+            tracer.event('ompl_attempt', attempt=0, perturb='none',
+                         mode='A', ec_info=repr(ec_info))
+            tracer.event('ompl_exhausted', n_attempts=1, mode='A',
+                         ec_info=repr(ec_info))
             self._append_log(
-                f'  OMPL: no valid plan after {len(perturbations)} goal-perturb retries',
-                'warn')
-            for ln in diag_lines:
-                self._append_log(f'    {ln}')
+                f'  OMPL Mode A: planner returned no plan ({ec_info})', 'warn')
+            self._last_motion_status = {
+                'ok': False, 'outcome': 'ompl_mode_a',
+                'msg': f'OMPL Mode A: no plan ({ec_info})'}
             on_complete_event.set()
             return False
 
+        tracer.snapshot_scene('after_ompl_returns', self)
+        bad_idx, bad_contacts = self._trajectory_first_invalid_with_contacts(
+            traj.joint_trajectory)
+        if bad_idx is not None:
+            contact_summary = '; '.join(
+                f'{c.contact_body_1}↔{c.contact_body_2}(d={c.depth*1000:.1f}mm)'
+                for c in bad_contacts[:5]) or 'no contact info'
+            tracer.snapshot_scene('after_waypoint_check_modeB', self)
+            tracer.event('ompl_attempt', attempt=0, perturb='none',
+                         mode='B',
+                         bad_wp=bad_idx,
+                         n_wps=len(traj.joint_trajectory.points),
+                         contacts=[{
+                             'a': c.contact_body_1,
+                             'b': c.contact_body_2,
+                             'depth_mm': c.depth * 1000,
+                         } for c in bad_contacts[:10]])
+            tracer.event('ompl_exhausted', n_attempts=1, mode='B',
+                         bad_wp=bad_idx,
+                         n_wps=len(traj.joint_trajectory.points))
+            self._append_log(
+                f'  OMPL Mode B: plan valid per OMPL, but our post-check '
+                f'found wp[{bad_idx}/{len(traj.joint_trajectory.points)}] '
+                f'invalid: {contact_summary}', 'warn')
+            self._last_motion_status = {
+                'ok': False, 'outcome': 'ompl_mode_b',
+                'msg': (f'OMPL Mode B: post-check rejected wp[{bad_idx}/'
+                        f'{len(traj.joint_trajectory.points)}]: '
+                        f'{contact_summary}'),
+                'bad_wp': bad_idx}
+            on_complete_event.set()
+            return False
+
+        tracer.event('ompl_validated', attempt=0, perturb='none',
+                     n_wps=len(traj.joint_trajectory.points))
+        self._append_log(
+            f'  OMPL validated ({len(traj.joint_trajectory.points)} wps)')
         self._execute_full_trajectory(
-            trajectory.joint_trajectory, on_complete_event)
+            traj.joint_trajectory, on_complete_event)
         return True
 
     def _ompl_plan_sync(self, start_joint_dict, target_joint_dict, tolerance=0.01):
         """Blocking OMPL plan call. Returns RobotTrajectory or None.
 
         tolerance: joint goal tolerance (rad). Default 0.01 matches the
-        _cmd_plan_execute interface. Larger tolerance (0.02) combined with
-        small goal perturbations is used by the retry wrapper to explore
-        different OMPL tree topologies while keeping the arm's final pose
-        within the original tolerance band.
+        _cmd_plan_execute interface.
         """
         req = GetMotionPlan.Request()
         mpr = MotionPlanRequest()
@@ -4040,7 +5124,12 @@ class SOArm101ControlGUI(Node):
         mpr.pipeline_id = 'ompl'
         attempts_var = getattr(self, '_planning_attempts_var', None)
         mpr.num_planning_attempts = attempts_var.get() if attempts_var else 50
-        mpr.allowed_planning_time = 5.0
+        # 10s (was 5s). Phase 9 data: tier1 check sometimes rejects the
+        # linear-interp path at a 0.03mm cup-rim clip, and the 5s OMPL
+        # budget was not always enough for RRTConnect to find an alternative.
+        # One-shot plan → 10s keeps worst-case latency ≤10s (vs the old
+        # retry loop's 50s) while drastically reducing sampling variance.
+        mpr.allowed_planning_time = 10.0
         vel_scale = self.velocity_scale_var.get() \
             if hasattr(self, 'velocity_scale_var') else 0.5
         mpr.max_velocity_scaling_factor = vel_scale
@@ -4092,15 +5181,74 @@ class SOArm101ControlGUI(Node):
                 return False
         return True
 
+    def _trajectory_first_invalid_with_contacts(self, joint_trajectory):
+        """Find the first invalid waypoint AND its contacts (for diagnostics).
+        Returns (index, contacts_list) or (None, []) if all valid.
+
+        Phase 9: includes gripper_joint in the checked state. OMPL's plan
+        carries gripper_joint through the trajectory (or uses live value
+        if the plan doesn't modify it). Defaulting to 0 caused our post-
+        validation to disagree with OMPL's internal checker on jaw-world
+        collisions.
+        """
+        if not joint_trajectory.points:
+            return 0, []
+        if not MOVEIT_AVAILABLE or not hasattr(self, 'validity_client') \
+                or not self.validity_client.service_is_ready():
+            return None, []
+        with self.joint_lock:
+            gj_live = self._actual_positions.get(
+                GRIPPER_JOINT_NAME,
+                self.joint_positions.get(GRIPPER_JOINT_NAME, 0.0))
+        names = list(joint_trajectory.joint_names)
+        for i, pt in enumerate(joint_trajectory.points):
+            wp_map = dict(zip(names, pt.positions))
+            gj = wp_map.get(GRIPPER_JOINT_NAME, gj_live)
+            req = GetStateValidity.Request()
+            rs = RobotState()
+            rs.joint_state.name = list(ALL_JOINT_NAMES)
+            rs.joint_state.position = [
+                wp_map.get(n, 0.0) for n in ARM_JOINT_NAMES] + [float(gj)]
+            req.robot_state = rs
+            req.group_name = 'arm'
+            future = self.validity_client.call_async(req)
+            self._wait_future(future, timeout_sec=1.0)
+            if future.result() is None:
+                continue
+            if not future.result().valid:
+                return i, list(future.result().contacts)
+        return None, []
+
     def _execute_full_trajectory(self, joint_trajectory, on_complete_event):
         """Send a pre-validated multi-waypoint JointTrajectory to arm_controller.
 
         Sets on_complete_event when controller reports goal result (or on any
         failure/timeout).
         """
+        n_wps = len(joint_trajectory.points) if joint_trajectory.points else 0
+        tracer.event('execute_start', n_wps=n_wps, source='full_trajectory')
+        # DIAG: dump every trajectory to /tmp for post-hoc waypoint validity
+        # replay. Overwrites each call — last trajectory wins.
+        try:
+            import json as _json
+            _dump = {
+                'joint_names': list(joint_trajectory.joint_names),
+                'points': [
+                    {'t': p.time_from_start.sec + p.time_from_start.nanosec * 1e-9,
+                     'positions': list(p.positions)}
+                    for p in joint_trajectory.points],
+            }
+            with open('/tmp/last_arm_trajectory.json', 'w') as _f:
+                _json.dump(_dump, _f)
+        except Exception:
+            pass
         if not self.arm_action_client.server_is_ready():
             self._append_log(
                 'arm_controller action server not ready', 'warn')
+            tracer.event('execute_done', outcome='action_server_not_ready')
+            self._last_motion_status = {
+                'ok': False, 'outcome': 'action_server_not_ready',
+                'msg': 'arm_controller action server not ready'}
             on_complete_event.set()
             return
 
@@ -4129,15 +5277,44 @@ class SOArm101ControlGUI(Node):
         goal.trajectory = joint_trajectory
 
         def _on_result(result_future):
+            try:
+                res = result_future.result()
+                ec = getattr(getattr(res, 'result', None), 'error_code', None)
+                tracer.event('execute_done',
+                             outcome='completed',
+                             error_code=(ec if ec is not None else None))
+                # FollowJointTrajectory.Result.SUCCESSFUL = 0
+                ok = (ec is None) or (ec == 0)
+                self._last_motion_status = {
+                    'ok': ok,
+                    'outcome': 'completed' if ok else 'trajectory_error',
+                    'msg': (f'trajectory complete ({n_wps} wps)' if ok
+                            else f'trajectory error_code={ec}'),
+                    'error_code': ec}
+            except Exception as e:
+                tracer.event('execute_done', outcome='result_exception',
+                             error=repr(e))
+                self._last_motion_status = {
+                    'ok': False, 'outcome': 'result_exception',
+                    'msg': f'result callback exception: {e!r}'}
             on_complete_event.set()
 
         def _on_accept(send_future):
             try:
                 gh = send_future.result()
-            except Exception:
+            except Exception as e:
+                tracer.event('execute_done', outcome='send_exception',
+                             error=repr(e))
+                self._last_motion_status = {
+                    'ok': False, 'outcome': 'send_exception',
+                    'msg': f'action send_goal exception: {e!r}'}
                 on_complete_event.set()
                 return
             if not gh.accepted:
+                tracer.event('execute_done', outcome='goal_rejected')
+                self._last_motion_status = {
+                    'ok': False, 'outcome': 'goal_rejected',
+                    'msg': 'arm action server rejected the goal'}
                 on_complete_event.set()
                 return
             with self._arm_goal_lock:
@@ -4290,7 +5467,6 @@ class SOArm101ControlGUI(Node):
                     'topic may be down', 'warn')
                 self._drop_refresh_event = None
                 return
-            # Re-add collisions + markers atomically from fresh data
             self._add_cup_collision_objects()
             self._publish_cup_visual_markers()
             self.root.after(0, self._populate_drop_list)
@@ -4324,14 +5500,21 @@ class SOArm101ControlGUI(Node):
         self._append_log(f'Drop target {name_hint!r} not found in list', 'warn')
 
     def _cmd_drop_point(self):
-        """Rotate shoulder_pan to face the selected drop target. ARM-02."""
+        """Rotate shoulder_pan to face the selected drop target. ARM-02.
+
+        Phase 9: now routes through the validated motion primitive (tier1
+        linear-interp + OMPL fallback) instead of raw _execute_trajectory.
+        The previous implementation dispatched joint targets directly to
+        the controller with ZERO collision validation — which allowed the
+        usb_camera link to plow through the cup rim at large wrist_flex
+        angles. With the held-lego world-pose tracker in place, this now
+        also validates the carried block's swept volume against cups/
+        other legos/ground during the pan rotation.
+        """
         result = self._get_selected_drop_pose()
         if result is None:
             return
         name, x, y, z = result
-
-        # No workspace bounds check — drop_point only rotates pan (always valid).
-        # geometric_ik in drop_sweep will catch truly unreachable targets.
 
         evt = threading.Event()
         self._motion_event = evt
@@ -4345,11 +5528,26 @@ class SOArm101ControlGUI(Node):
         target['wrist_roll'] = -math.pi / 2
         self._append_log(
             f'Drop Point: pan={math.degrees(pan):.1f}\u00b0 wrist_roll=-90\u00b0 toward {name}')
-        self._execute_trajectory(target, duration_s=1.0,
-                                 on_complete=evt.set)
+        # tier1 linear-interp + OMPL fallback. Validates every waypoint
+        # against cups, world legos, ground, AND the held-lego world copy.
+        self._joint_space_collision_free_execute(
+            target, on_complete_event=evt, duration_s=1.0)
 
     def _cmd_drop_sweep(self):
-        """IK-planned drop sweep: geometric IK → collision check → MoveIt path."""
+        """IK-planned drop sweep: geometric IK → collision check → MoveIt path.
+
+        Phase 9: the IK target represents the **jaw-gap center** (where the
+        held block actually sits), not tcp_link. Previously we passed the
+        cup's (x, y, z+127mm) directly as tcp_link target, which placed the
+        fixed jaw tip above the cup — but the block was offset by ~half the
+        jaw gap from tcp. The dropped block missed the cup center.
+
+        Now: we derive the current jaw gap from gripper_joint (the same
+        linear model _gripper_angle_for_object uses), compute the offset
+        from gap-center to tcp (fixed-jaw direction, same convention as
+        _compute_jaw_offset), and shift the IK target accordingly. Net
+        effect: the gap center (block center) ends up at the cup target.
+        """
         result = self._get_selected_drop_pose()
         if result is None:
             return
@@ -4358,24 +5556,83 @@ class SOArm101ControlGUI(Node):
         evt = threading.Event()
         self._motion_event = evt
 
-        # Drop target: 30mm above cup rim. Cup is ~97mm tall → 127mm above base.
-        target_z = z + 0.127
+        # Drop target for the GAP CENTER at (cup_rim_height + hover). Since
+        # /drop_poses publishes cup BODY-CENTER (z = cup_base + half_height),
+        # the rim is at z + half_height and the gap target is at
+        # z + half_height + HOVER_ABOVE_RIM. The hover is user-tunable via
+        # the "Hover above rim (m)" spinbox in the Grasp tab Drop section
+        # (defaults to 0.030).
+        hover = getattr(self, '_drop_hover_above_rim_var', None)
+        hover_m = hover.get() if hover is not None else 0.030
+        gap_x, gap_y = float(x), float(y)
+        gap_z = float(z) + CUP_BODY_HEIGHT_M / 2.0 + hover_m
 
+        # Convert gap-center target → tcp_link target by offsetting along
+        # the fixed-jaw direction. Arm-forward at pan is (cos(pan), -sin(pan))
+        # in world XY; the true perpendiculars are (+sin, +cos) and
+        # (-sin, -cos). At grip_angle=π/4 and wrist_roll=-π/2, FK across the
+        # full reachable pan range (-110° to +124°) shows the gripper's local
+        # jaw-opening axis projects to (+sin(pan), +cos(pan)) in world with
+        # dot = +1.000 everywhere — confirmed empirically against URDF-FK.
+        # That axis points from the block (midway between jaws) toward the
+        # fixed jaw (tcp_link side), so: tcp_target = cup + half_gap *
+        # (+sin(pan), +cos(pan)). The prior formula used (-sin, +cos), which
+        # is NOT perpendicular to arm-forward (dot = -sin(2*pan), nonzero
+        # everywhere except pan=0/±π/2) — it produced a ~5.5 mm radial-outward
+        # component at off-axis pans that pushed IK into a region where the
+        # one-shot Newton refinement in geometric_ik fails to converge,
+        # compounding the wrong-direction shift with a ~7.7 mm IK residual.
+        from so_arm101_control.compute_workspace import X_PAN
+        pan = math.atan2(-gap_y, gap_x - X_PAN)
+        # Live jaw gap from current gripper_joint (updated by grasp_open).
+        with self.joint_lock:
+            gj = self._actual_positions.get(
+                GRIPPER_JOINT_NAME,
+                self.joint_positions.get(GRIPPER_JOINT_NAME, 0.0))
+        jaw_gap = BASELINE_JAW_GAP + JAW_GAP_RATE * gj
+        half_gap = jaw_gap / 2.0
+        dx = half_gap * math.sin(pan)
+        dy = half_gap * math.cos(pan)
+        target_x = gap_x + dx
+        target_y = gap_y + dy
+        target_z = gap_z  # Z unchanged — gap axis is horizontal
+
+        tracer.event('drop_sweep_start',
+                     drop_name=name,
+                     gap_target=(gap_x, gap_y, gap_z),
+                     tcp_target=(target_x, target_y, target_z),
+                     jaw_gap_mm=jaw_gap * 1000,
+                     gripper_joint=gj)
+        tracer.snapshot_scene('drop_sweep_start', self)
+        def _close_on_drop_done():
+            evt.wait(timeout=30.0)
+            tracer.event('drop_sweep_done')
+        threading.Thread(target=_close_on_drop_done, daemon=True).start()
         self._append_log(
-            f'Drop Sweep: IK for ({x:.3f}, {y:.3f}, {target_z:.3f}) above {name}')
+            f'Drop Sweep: gap=({gap_x:.3f},{gap_y:.3f},{gap_z:.3f})mm '
+            f'→ tcp=({target_x:.3f},{target_y:.3f},{target_z:.3f}) '
+            f'(jaw_gap={jaw_gap*1000:.1f}mm, half-offset by {half_gap*1000:.1f}mm)')
 
         grip_deg = getattr(self, '_drop_grip_angle_var', None)
         grip_angle = math.radians(grip_deg.get() if grip_deg else 45)
         self._plan_collision_free_execute(
-            x, y, target_z,
+            target_x, target_y, target_z,
             grip_angle=grip_angle,
             wrist_roll=-math.pi / 2,
             on_complete=evt)
 
     def _cmd_drop_release(self):
         """Open gripper to release held object into cup. ARM-04.
-        Re-selects the last grasped object so gripper opens to the correct width."""
+
+        SYNCHRONOUS: does not return until (a) gripper-open motion has
+        completed, and (b) the attached-collision-object has been removed
+        from the planning scene. This is required so the subsequent
+        grasp_home plans against a scene without the phantom attached
+        block — the async version raced with grasp_home's OMPL call and
+        caused deterministic Mode A failures (ec=-2) on the return leg.
+        """
         last = getattr(self, '_last_grasped_object', None)
+        tracer.event('drop_release_start', last_grasped=last)
         if last and hasattr(self, 'obj_listbox'):
             for i in range(self.obj_listbox.size()):
                 if self.obj_listbox.get(i).split('  ')[0] == last:
@@ -4383,6 +5640,21 @@ class SOArm101ControlGUI(Node):
                     self.obj_listbox.selection_set(i)
                     break
         self._cmd_gripper_open_for_object()
+        # Wait for the gripper-open motion to complete. _cmd_gripper_open_for_object
+        # assigned a fresh Event to self._motion_event — capture it before waiting
+        # so a later trigger-service callback that clears the attribute can't
+        # swap it out from under us.
+        evt = getattr(self, '_motion_event', None)
+        if evt is not None:
+            evt.wait(timeout=10.0)
+        # Synchronously detach the AttachedCollisionObject. Returning from
+        # this service guarantees the next grasp_home sees a clean scene.
+        self._ensure_lego_state()
+        if self._attached_lego_name:
+            try:
+                self._detach_lego_sync()
+            except Exception as exc:
+                self._append_log(f'Detach step errored: {exc}', 'warn')
 
     def _cmd_grasp_select(self):
         """Select an object in the listbox by name (via ik_target param) or first item.
@@ -4503,7 +5775,10 @@ class SOArm101ControlGUI(Node):
         threading.Thread(target=_send, daemon=True).start()
 
     def _cmd_gripper_close_for_object(self):
-        """Close gripper to the object's width minus threshold."""
+        """Close gripper to the object's width minus threshold.
+        On success, attach the object to tcp_link as an AttachedCollisionObject
+        so MoveIt plans subsequent motions aware of the carried-block envelope.
+        """
         obj_name = self._get_selected_object_name()
         bbox = self.objects_bbox.get(obj_name) if obj_name else None
         if not bbox:
@@ -4516,7 +5791,13 @@ class SOArm101ControlGUI(Node):
         evt = threading.Event()
         self._motion_event = evt
         def _send():
-            self._send_gripper_goal(close_angle, duration_s=duration, blocking=True)
+            ok = self._send_gripper_goal(close_angle, duration_s=duration, blocking=True)
+            # Phase 9: attach to tcp_link after physical closure succeeds
+            if ok is not False:
+                try:
+                    self._attach_lego_to_gripper(obj_name)
+                except Exception as exc:
+                    self._append_log(f'Attach step errored: {exc}', 'warn')
             evt.set()
         threading.Thread(target=_send, daemon=True).start()
 
@@ -4529,6 +5810,30 @@ class SOArm101ControlGUI(Node):
         obj_name = text.split('  ')[0]
         # Remember the grasped object so drop_release can open for it later
         self._last_grasped_object = obj_name
+        # Forensic trace: open a new cycle scoped grasp_move -> grasp_home.
+        # If a prior cycle is still open, it's force-closed with outcome='abandoned'.
+        with self.joint_lock:
+            _entry_joints = {n: self._actual_positions.get(
+                n, self.joint_positions.get(n, 0.0)) for n in ARM_JOINT_NAMES}
+        tracer.open_cycle(
+            obj_name=obj_name,
+            grasp_topic=self._grasp_topic_var.get().strip(),
+            cross=bool(self._grasp_cross_var.get()),
+            entry_joints=_entry_joints,
+        )
+        # Reset detach-seen flag for the new cycle. Cycle closes on the
+        # first grasp_home_done AFTER detach (post-drop return).
+        self._cycle_detach_seen = False
+        tracer.snapshot_scene('grasp_move_start', self)
+        # Phase 9: remove the target-being-grasped from the world collision
+        # scene so MoveIt's FC-1 reachability check doesn't flag 'gripper vs
+        # target-lego' as a collision (the gripper is SUPPOSED to touch it).
+        # If grasp_move ultimately fails, the next _objects_callback (>3mm
+        # movement in sim) will trigger _add_lego_collision_objects and
+        # restore it; for same-scene failures we also trigger a resync in
+        # the failure paths below.
+        self._ensure_lego_state()
+        self._remove_single_lego_from_world(obj_name)
         with self.objects_lock:
             pos = self.objects_data.get(obj_name)
         if pos is None:
@@ -4538,9 +5843,16 @@ class SOArm101ControlGUI(Node):
         topic = self._grasp_topic_var.get().strip()
         z_offset = 0.05 if topic == '/drop_poses' else 0.0
 
-        # Use Object Z override if set, otherwise use detected z
+        # Use Object Z override if set, otherwise use detected z + half-height
+        # so tcp lands at the block's side-center (vertical mid-height), not at
+        # its bottom. This matches the physical grasp: jaws pinch around the
+        # block's midline, placing block-center at tcp_link.Z.
         obj_z_override = self._grasp_obj_z_var.get()
-        base_z = obj_z_override if abs(obj_z_override) > 1e-4 else pos['z']
+        if abs(obj_z_override) > 1e-4:
+            base_z = obj_z_override
+        else:
+            bbox_sz = self.objects_bbox.get(obj_name, {}).get('sz', 0.0)
+            base_z = pos['z'] + float(bbox_sz) / 2.0
         target_z = base_z + z_offset
         action = 'drop' if topic == '/drop_poses' else 'grab'
 
@@ -4597,23 +5909,54 @@ class SOArm101ControlGUI(Node):
                 poses_to_check.append(('final', tx, ty, target_z))
 
             # Workspace bbox check first — fast reject for clearly-out-of-reach.
+            gate_a_results = []
             for stage, px, py, pz in poses_to_check:
                 ok, reason = check_grasp_reachable(px, py, pz, ground_z=ground_z)
+                gate_a_results.append({
+                    'stage': stage, 'x': px, 'y': py, 'z': pz,
+                    'ok': ok, 'reason': reason,
+                })
                 if not ok:
                     self._append_log(
                         f'Grasp rejected ({stage}): {reason} '
                         f'({px:.3f}, {py:.3f}, {pz:.3f})', 'warn')
+                    # Phase 9: grasp failed — restore lego to world scene
+                    self._add_lego_collision_objects()
+                    tracer.event('gate_a_done', per_stage=gate_a_results)
+                    tracer.close_cycle('grasp_unreachable_workspace',
+                                       stage=stage, reason=reason,
+                                       target=(px, py, pz))
+                    self._last_motion_status = {
+                        'ok': False, 'outcome': 'grasp_unreachable_workspace',
+                        'msg': (f'Gate A reject @ {stage} '
+                                f'({px:.3f}, {py:.3f}, {pz:.3f}): {reason}')}
                     evt.set()
                     return
+            tracer.event('gate_a_done', per_stage=gate_a_results)
 
             # Find a yaw where geometric_ik returns solutions for BOTH stages.
             # Using a single yaw across stages avoids mid-grasp wrist twists.
-            yaw_used, stage_sols = find_reachable_grasp_yaw(
+            yaw_used, stage_sols, dbg_lines = find_reachable_grasp_yaw(
                 poses_to_check, obj_yaw)
+            tracer.event('gate_b_done',
+                         yaw_requested=obj_yaw,
+                         yaw_used=yaw_used,
+                         stage_sols={k: [dict(s) for s in v]
+                                     for k, v in (stage_sols or {}).items()},
+                         dbg_lines=list(dbg_lines or []))
             if yaw_used is None:
                 self._append_log(
                     f'Grasp unreachable: no geometric IK at any yaw for '
                     f'{[s[0] for s in poses_to_check]} stages', 'warn')
+                for line in dbg_lines:
+                    self._append_log(line, 'warn')
+                self._add_lego_collision_objects()
+                tracer.close_cycle('grasp_unreachable_ik',
+                                   dbg_lines=list(dbg_lines or []))
+                self._last_motion_status = {
+                    'ok': False, 'outcome': 'grasp_unreachable_ik',
+                    'msg': (f'Gate B reject: no geometric IK at any yaw for '
+                            f'stages {[s[0] for s in poses_to_check]}')}
                 evt.set()
                 return
             if yaw_used != obj_yaw:
@@ -4625,11 +5968,17 @@ class SOArm101ControlGUI(Node):
 
             # Collision-check each stage's solutions, stop at first valid.
             validated = {}
+            gate_c_attempts = []
             for stage, px, py, pz in poses_to_check:
                 found = False
                 for i, sol in enumerate(stage_sols[stage]):
                     config = 'elbow-up' if i == 0 else 'elbow-down'
-                    if self._check_state_valid(sol):
+                    valid = self._check_state_valid(sol)
+                    gate_c_attempts.append({
+                        'stage': stage, 'config': config,
+                        'sol': dict(sol), 'valid': bool(valid),
+                    })
+                    if valid:
                         validated[stage] = sol
                         self._append_log(
                             f'  {stage}: {config}, '
@@ -4638,13 +5987,26 @@ class SOArm101ControlGUI(Node):
                         break
                     self._append_log(
                         f'  {stage}: {config} collides', 'warn')
-
                 if not found:
                     self._append_log(
                         f'Grasp unreachable ({stage}): all solutions collide '
                         f'({px:.3f}, {py:.3f}, {pz:.3f})', 'warn')
+                    self._add_lego_collision_objects()
+                    tracer.event('gate_c_done',
+                                 attempts=gate_c_attempts,
+                                 validated={k: dict(v) for k, v in validated.items()})
+                    tracer.close_cycle('gate_c_all_collide',
+                                       stage=stage, target=(px, py, pz))
+                    self._last_motion_status = {
+                        'ok': False, 'outcome': 'gate_c_all_collide',
+                        'msg': (f'Gate C reject @ {stage} '
+                                f'({px:.3f}, {py:.3f}, {pz:.3f}): '
+                                f'all IK solutions collide')}
                     evt.set()
                     return
+            tracer.event('gate_c_done',
+                         attempts=gate_c_attempts,
+                         validated={k: dict(v) for k, v in validated.items()})
 
             # All stages validated — execute
             duration = self._grasp_arm_duration
@@ -4663,6 +6025,12 @@ class SOArm101ControlGUI(Node):
                 if getattr(self, '_gui_ready', False):
                     self.root.after(0, _apply_final)
             else:
+                # Validated dict has no 'final' stage — this shouldn't happen
+                # if gate C passed, but guard anyway.
+                self._last_motion_status = {
+                    'ok': False, 'outcome': 'no_final_stage',
+                    'msg': ('Gate C passed but no final-stage solution '
+                            'recorded — logic bug')}
                 evt.set()  # nothing to execute
 
         threading.Thread(target=_prevalidate_and_execute, daemon=True).start()
@@ -5000,7 +6368,10 @@ class SOArm101ControlGUI(Node):
 def main(args=None):
     rclpy.init(args=args, signal_handler_options=rclpy.SignalHandlerOptions.NO)
     node = SOArm101ControlGUI()
-    executor = MultiThreadedExecutor()
+    # Explicit thread count — default is multiprocessing.cpu_count() which can
+    # leave too few free threads when service handlers block on .wait()
+    # (Phase 9 sync-refresh pattern). 4 threads is ample headroom.
+    executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
 
     def _shutdown_handler(signum, frame):
