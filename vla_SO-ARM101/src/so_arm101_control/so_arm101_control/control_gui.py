@@ -3312,12 +3312,17 @@ class SOArm101ControlGUI(Node):
 
     def _qs_sync_grasp_listbox(self, obj_name):
         """Mirror the Quickstart selection into the Grasp tab's obj_listbox
-        so every _cmd_* downstream reads the same selection.
+        so every _cmd_* downstream reads the same selection. Waits for
+        population if the listbox is empty (_cmd_grasp_refresh populates
+        asynchronously via root.after — 0.5 s was not enough).
         """
         if not hasattr(self, 'obj_listbox') or self.obj_listbox.size() == 0:
-            # Populate if empty
             self._cmd_grasp_refresh()
-            time.sleep(0.5)
+            deadline = time.time() + 3.0
+            while time.time() < deadline and (
+                    not hasattr(self, 'obj_listbox') or
+                    self.obj_listbox.size() == 0):
+                time.sleep(0.1)
         for i in range(self.obj_listbox.size()):
             if self.obj_listbox.get(i).split('  ')[0] == obj_name:
                 self.obj_listbox.selection_clear(0, tk.END)
@@ -3326,9 +3331,15 @@ class SOArm101ControlGUI(Node):
         return False
 
     def _qs_sync_drop_listbox(self, drop_name):
+        """Same pattern for the drop listbox — _cmd_drop_refresh waits up
+        to 2 s for fresh /drop_poses, so wait that long for population."""
         if not hasattr(self, '_drop_listbox') or self._drop_listbox.size() == 0:
             self._cmd_drop_refresh()
-            time.sleep(0.5)
+            deadline = time.time() + 3.0
+            while time.time() < deadline and (
+                    not hasattr(self, '_drop_listbox') or
+                    self._drop_listbox.size() == 0):
+                time.sleep(0.1)
         for i in range(self._drop_listbox.size()):
             entry = self._drop_listbox.get(i).split(' [')[0]
             if entry == drop_name:
@@ -5216,14 +5227,12 @@ class SOArm101ControlGUI(Node):
     def _cmd_grasp_home(self):
         """Move arm to grasp-ready home: gripper pointing down.
 
-        Dispatches the motion through the same OMPL-planned path the FK-tab
-        "Plan & Execute" button uses — _cmd_plan_execute(target=...) — since
-        both commands have joint-space targets and there is no reason to
-        maintain a separate motion pipeline for home. The previous tier1
-        joint-space-interp + hardcoded-intermediate-fallback + OMPL-last-
-        resort machinery inside _joint_space_collision_free_execute remains
-        available to the drop_sweep / drop_point / grasp_approach callers
-        that benefit from deterministic straight-line motion.
+        Routes through _joint_space_collision_free_execute (tier1 per-
+        waypoint validity check + OMPL fallback) — same discipline as
+        drop_sweep / drop_point. Previously used _cmd_plan_execute which
+        only ran OMPL one-shot without the 2%-resolution pre-check, so a
+        trajectory that clipped the held lego against a cup could slip
+        through OMPL's sampling gap.
         """
         target = {name: 0.0 for name in ARM_JOINT_NAMES}
         target['wrist_flex'] = math.pi / 2
@@ -5245,8 +5254,13 @@ class SOArm101ControlGUI(Node):
                 tracer.close_cycle('completed')
                 self._cycle_detach_seen = False
         threading.Thread(target=_emit_home_done, daemon=True).start()
-        # Same MoveIt OMPL pipeline as the FK tab's Plan & Execute button.
-        self._cmd_plan_execute(target=target, on_complete=evt)
+        # Refresh attached-body pose so the held-lego envelope is accurate
+        # for the tier1 waypoint validity check (no-op if nothing attached).
+        self._refresh_attached_pose()
+        # tier1 joint-space interpolation with per-waypoint validity check
+        # (51 wps, 2% resolution) + OMPL fallback if direct path collides.
+        self._joint_space_collision_free_execute(
+            target, on_complete_event=evt, duration_s=3.0)
 
     def _joint_space_collision_free_execute(self, target, on_complete_event,
                                              duration_s=3.0, waypoints=50):
