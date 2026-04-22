@@ -5284,6 +5284,23 @@ class SOArm101ControlGUI(Node):
         # Keep MoveIt's attached-body envelope in sync with reality so the
         # plan respects the currently-held lego (no-op if none attached).
         self._refresh_attached_pose()
+        # Advance self.joint_positions + publish Goal State so RViz's
+        # Planning Request ghost snaps to the TARGET pose before execution.
+        # Without this, the ghost stays at the live-robot pose while the
+        # real robot moves to the target — inverse of what the user expects.
+        # _cmd_plan_execute did this pair; the tier1 path skipped it.
+        with self.joint_lock:
+            for n in ARM_JOINT_NAMES:
+                if n in target:
+                    self.joint_positions[n] = target[n]
+        # Sync sliders so they track the goal too (so the RViz panel's
+        # interactive markers land on the goal, not stay at current).
+        for n in ARM_JOINT_NAMES:
+            if n in target and n in self.sliders:
+                self.sliders[n].set(target[n])
+                if n in self.slider_labels:
+                    self.slider_labels[n].config(text=f'{target[n]:.3f}')
+        self._publish_goal_state()
         return self._ompl_plan_validate_execute(target, on_complete_event)
 
     def _joint_space_collision_free_execute_LEGACY_TIER1(
