@@ -3138,18 +3138,14 @@ class SOArm101ControlGUI(Node):
         """Return the /drop_poses child_frame_id of the cup matching this
         lego's color, or None if it can't be inferred.
 
-        Per project convention (CLAUDE.md § Robot Facts):
-          red  → drop_0
-          green→ drop_1
-          blue → drop_2
-
-        TODO(aldrin): implement this 4-line mapping. Return a string like
-        "drop_1", or None when the color prefix isn't recognised (so the
-        caller can surface a clean error instead of picking the wrong cup).
-
-        Called with names like "red_2x3", "green_2x4", "blue_2x2".
+        Per CLAUDE.md § Robot Facts the ArUco marker ID mapping is
+        red → 0, green → 1, blue → 2.
         """
-        return None  # TODO: implement
+        if not lego_name:
+            return None
+        color = lego_name.split('_', 1)[0].lower()
+        return {'red': 'drop_0', 'green': 'drop_1',
+                'blue': 'drop_2'}.get(color)
 
     def _build_quickstart_tab(self, notebook):
         frame = ttk.Frame(notebook)
@@ -3172,7 +3168,7 @@ class SOArm101ControlGUI(Node):
         self._register_button(
             top_bar, text='🔄  Refresh all (objects + drops)',
             tab='Quickstart', section='Top',
-            command=self._qs_refresh_all,
+            command=self._cmd_qs_refresh_all,
         ).pack(fill=tk.X, ipady=4)
 
         # ===== BODY: two columns =====
@@ -3198,17 +3194,17 @@ class SOArm101ControlGUI(Node):
         self._register_button(
             ctrl_row, text='▶ Play',
             tab='Quickstart', section='Player',
-            command=self._qs_play,
+            command=self._cmd_qs_play,
         ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2), ipady=2)
         self._register_button(
             ctrl_row, text='⏸ Pause',
             tab='Quickstart', section='Player',
-            command=self._qs_pause,
+            command=self._cmd_qs_pause,
         ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 2), ipady=2)
         self._register_button(
             ctrl_row, text='⏮ Restart',
             tab='Quickstart', section='Player',
-            command=self._qs_restart,
+            command=self._cmd_qs_restart,
         ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0), ipady=2)
         status_row = ttk.Frame(ctrl_frame)
         status_row.pack(fill=tk.X, padx=5, pady=(0, 5))
@@ -3240,11 +3236,11 @@ class SOArm101ControlGUI(Node):
         # Initial populate — use refresh_all so legos AND drops get a fresh
         # pass on first tab build. Deferred via root.after so the grasp tab
         # (source of the legacy listbox) is already constructed.
-        self.root.after(800, self._qs_refresh_all)
+        self.root.after(800, self._cmd_qs_refresh_all)
 
     # ---- Quickstart helpers ----
 
-    def _qs_refresh_all(self):
+    def _cmd_qs_refresh_all(self):
         """Hit both Grasp-tab refresh buttons (objects AND drops), then
         repopulate our local listbox once the topic subscriptions have
         received fresh data. Non-blocking — schedules the local repopulate
@@ -3436,7 +3432,7 @@ class SOArm101ControlGUI(Node):
 
     # ---- Player controls ----
 
-    def _qs_play(self):
+    def _cmd_qs_play(self):
         """Play: start the lifecycle from the first step, OR resume from pause."""
         if self._qs_state == 'paused':
             self._qs_set_status('Running')
@@ -3455,7 +3451,7 @@ class SOArm101ControlGUI(Node):
         self._qs_thread = threading.Thread(target=self._qs_run, daemon=True)
         self._qs_thread.start()
 
-    def _qs_pause(self):
+    def _cmd_qs_pause(self):
         if self._qs_state != 'running':
             self._append_log('Quickstart Pause: not running', 'warn')
             return
@@ -3463,7 +3459,7 @@ class SOArm101ControlGUI(Node):
         self._qs_state = 'paused'
         self._qs_set_status('Paused')
 
-    def _qs_restart(self):
+    def _cmd_qs_restart(self):
         """Abort current cycle and return to idle. Does NOT restart a new
         cycle automatically — user presses Play again (intentional, so a
         mid-motion abort doesn't race into a fresh motion command).
@@ -3480,7 +3476,7 @@ class SOArm101ControlGUI(Node):
             # before the first selection-dependent step. Sleep past the
             # root.after(1200) repopulate delay in _qs_refresh_all.
             self._qs_set_status('Running', step='refreshing objects + drops')
-            self.root.after(0, self._qs_refresh_all)
+            self.root.after(0, self._cmd_qs_refresh_all)
             time.sleep(1.5)
 
             self._qs_set_status('Running', step='(starting)')
@@ -4778,18 +4774,34 @@ class SOArm101ControlGUI(Node):
             if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
                 self._append_log('apply_planning_scene not available for attach', 'warn')
                 return
-            # Explicit attach: supply the BOX geometry + link-local pose
-            # (block_in_tcp) computed above from TF + Isaac's last-known pose.
-            # This pins the attached body to our measured offset instead of
-            # letting MoveIt auto-derive from a potentially-stale world pose
-            # at attach time. In the same scene diff, REMOVE the world copy
-            # atomically so there's no duplicate lego lingering at the
-            # pre-grasp table position.
+            # Two-phase apply — Humble quirk: any REMOVE of a non-existent id
+            # in the diff returns success=False for the ENTIRE call, even if
+            # every ADD succeeded. _remove_single_lego_from_world ran on a
+            # background thread before us and usually completed, so bundling
+            # a world REMOVE in the same diff as our attach ADD would poison
+            # the response flag.  Split: phase 1 fires the world REMOVE
+            # (ignore result, idempotent), phase 2 does the attached ADD
+            # with explicit block_in_tcp pose — response flag is trustworthy.
             name_id = f'lego_{obj_name}'
-            scene = PlanningSceneMsg()
-            scene.is_diff = True
-            scene.robot_state.is_diff = True
 
+            # Phase 1: world REMOVE (best-effort; ignore the success flag)
+            rm_scene = PlanningSceneMsg()
+            rm_scene.is_diff = True
+            rm = CollisionObject()
+            rm.id = name_id
+            rm.operation = CollisionObject.REMOVE
+            rm_scene.world.collision_objects.append(rm)
+            try:
+                fut = self._apply_scene_client.call_async(
+                    ApplyPlanningScene.Request(scene=rm_scene))
+                self._wait_future(fut, timeout_sec=3.0)
+            except Exception:
+                pass  # idempotent — world may have been clean already
+
+            # Phase 2: attached ADD with explicit link-local pose
+            add_scene = PlanningSceneMsg()
+            add_scene.is_diff = True
+            add_scene.robot_state.is_diff = True
             aco = AttachedCollisionObject()
             aco.link_name = 'tcp_link'
             aco.object.id = name_id
@@ -4810,21 +4822,14 @@ class SOArm101ControlGUI(Node):
             block_pose.orientation.w = float(aqw)
             aco.object.primitive_poses.append(block_pose)
             aco.touch_links = ['tcp_link', 'gripper', 'jaw']
-            scene.robot_state.attached_collision_objects.append(aco)
+            add_scene.robot_state.attached_collision_objects.append(aco)
 
-            # Atomic world REMOVE so the pre-grasp table-pose copy doesn't
-            # ghost in the scene while the attached copy is in use.
-            rm = CollisionObject()
-            rm.id = name_id
-            rm.operation = CollisionObject.REMOVE
-            scene.world.collision_objects.append(rm)
-
-            # Claim attached-state BEFORE the apply so that a racing
+            # Claim attached-state BEFORE the apply so a racing
             # /objects_poses_sim → _add_lego_collision_objects hop doesn't
             # re-add the world copy underneath us. Rolled back on failure.
             prev_attached = self._attached_lego_name
             self._attached_lego_name = obj_name
-            if not _apply_scene(scene, 'attach_lego'):
+            if not _apply_scene(add_scene, 'attach_lego'):
                 self._attached_lego_name = prev_attached
                 return
 
