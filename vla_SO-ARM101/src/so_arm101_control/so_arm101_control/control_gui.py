@@ -5264,30 +5264,32 @@ class SOArm101ControlGUI(Node):
 
     def _joint_space_collision_free_execute(self, target, on_complete_event,
                                              duration_s=3.0, waypoints=50):
-        """Joint-space straight-line motion with per-waypoint collision check.
-
-        ONE IK path discipline: motion is joint-space interpolation from the
-        live joint state to `target`; collision is validated by MoveIt's
-        /check_state_validity at N waypoints. No OMPL sampling involved.
-
-        If the direct path has any invalid waypoint, a sequence of analytically
-        safe intermediates is tried in order (cheapest first):
-          1. Lift wrist_flex to 0 (raises jaw off cup rim, keeps pan/lift/elbow)
-          2. Retract whole arm to 'forward-extended' pose (all zeros, keep pan)
-          3. Retract + zero wrist_roll
-
-        If any intermediate yields clean stage1+stage2, execute those two as a
-        chained FollowJointTrajectory (stage1 → on_complete triggers stage2).
-
-        Args:
-            target: dict of joint_name -> radians (values for arm joints).
-            on_complete_event: threading.Event — .set() when last stage finishes.
-            duration_s: total motion duration (split across stages if routed).
-            waypoints: N for interpolation check granularity (50 = 2% steps).
-
-        Returns True if a clean path was found and execution scheduled.
-        Returns False if no direct + intermediate path was collision-free.
+        """ALWAYS OMPL path. Previously this had a tier1 fast path that did
+        linear joint-interp + per-waypoint /check_state_validity and
+        short-circuited OMPL when the direct path looked clean. Problem:
+        tier1 validated a LINEAR path, but then dispatched just (start, end,
+        duration) to ros2_control's FollowJointTrajectory, which interpolates
+        with splines — physical trajectory diverged from validated path,
+        allowing arm to clip cups between waypoints. Also meant no Planning
+        Request Goal State ghost for motions that took the shortcut (drop_sweep
+        visually looked like "no plan"). Now every motion goes through
+        /plan_kinematic_path so OMPL is the source of truth for both the
+        validation AND the executed waypoint sequence, and the orange ghost
+        fires consistently.
         """
+        # Every motion = arm-group plan. Switch the RViz panel so the Goal
+        # State ghost highlights the right group (gripper_command set it to
+        # 'gripper' — without this, grasp_home and drops keep no ghost).
+        self._select_planning_group('arm')
+        # Keep MoveIt's attached-body envelope in sync with reality so the
+        # plan respects the currently-held lego (no-op if none attached).
+        self._refresh_attached_pose()
+        return self._ompl_plan_validate_execute(target, on_complete_event)
+
+    def _joint_space_collision_free_execute_LEGACY_TIER1(
+            self, target, on_complete_event, duration_s=3.0, waypoints=50):
+        """Legacy tier1-first path kept for reference. Do not call — see the
+        new version above for the always-OMPL discipline."""
         with self.joint_lock:
             current = {n: self._actual_positions.get(n, self.joint_positions.get(n, 0.0))
                        for n in ARM_JOINT_NAMES}
