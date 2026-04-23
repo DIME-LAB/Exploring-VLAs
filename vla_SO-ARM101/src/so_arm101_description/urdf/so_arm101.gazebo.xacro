@@ -148,4 +148,50 @@
     </sensor>
   </gazebo>
 
+  <!-- Top camera (tabletop top-down view for pick-and-place datasets).
+       Resolution 640x480 @ 30 fps R8G8B8 to match the real-flow RealSense top
+       camera (see LEROBOT_GUIDE.md). Mounted to a fixed top_camera_link 60 cm
+       above world origin, rotated so the optical axis points -Z (down). -->
+  <link name="top_camera_link">
+    <inertial>
+      <mass value="0.01"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
+    </inertial>
+    <visual>
+      <geometry><box size="0.04 0.04 0.02"/></geometry>
+      <material name="top_camera_black"><color rgba="0.1 0.1 0.1 1"/></material>
+    </visual>
+  </link>
+
+  <joint name="top_camera_joint" type="fixed">
+    <parent link="world"/>
+    <child link="top_camera_link"/>
+    <!-- 60 cm above origin; rpy rotates camera +X (image forward) to -Z world. -->
+    <origin xyz="0 0 0.6" rpy="0 1.5708 0"/>
+  </joint>
+
+  <gazebo reference="top_camera_link">
+    <sensor name="top_camera" type="camera">
+      <pose>0 0 0 0 0 0</pose>
+      <always_on>1</always_on>
+      <update_rate>30</update_rate>
+      <visualize>true</visualize>
+      <ignition_frame_id>top_camera_link</ignition_frame_id>
+      <camera name="top_camera">
+        <horizontal_fov>1.2</horizontal_fov>
+        <image>
+          <width>640</width>
+          <height>480</height>
+          <format>R8G8B8</format>
+        </image>
+        <clip>
+          <near>0.05</near>
+          <far>5.0</far>
+        </clip>
+      </camera>
+      <topic>top_camera</topic>
+      <camera_info_topic>top_camera/camera_info</camera_info_topic>
+    </sensor>
+  </gazebo>
+
 </robot>
