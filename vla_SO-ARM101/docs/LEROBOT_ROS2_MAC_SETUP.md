@@ -1,10 +1,18 @@
 # LeRobot + ROS2 Integration on macOS (Apple Silicon)
 
 Living guide for the lerobot + ROS2 camera/dataset work inside `Exploring-VLAs`.
-We'll keep appending sections as each piece is wired up. The target is a
-single unified data path: sim frames (Gazebo) and real frames (USB) both enter
-lerobot recording via ROS2 topics, producing datasets ready for SmolVLA / Pi0.5
-co-training.
+The target is a single unified data path: sim frames (Gazebo) and real frames
+(USB) both enter lerobot recording via ROS2 topics, producing datasets ready
+for SmolVLA / Pi0.5 co-training.
+
+## Who this doc serves (pick your path)
+
+| If you want to... | Read sections |
+|---|---|
+| Bring up the **SO-ARM101 Gazebo sim stack** with nothing else | `Setup from scratch on Mac` (steps 1–4). Then run `stack_start.sh gz`. Everything after that is optional. |
+| **Record a lerobot v3 dataset** end-to-end (sim or real) | `Setup from scratch on Mac` → `Record a dataset from scratch (end-to-end runbook)` |
+| Debug a **stuck controller / missing topic** | `Known gotchas` + `SO-ARM101 topic reference` |
+| Set up the **real SO-ARM101** on ROS2 topics (V2-REAL-UNIFIED) | Not yet documented — Linux follow-up. `jointstatereader` package already bridges real hardware; see scope plan in REQUIREMENTS.md |
 
 ## Target
 
