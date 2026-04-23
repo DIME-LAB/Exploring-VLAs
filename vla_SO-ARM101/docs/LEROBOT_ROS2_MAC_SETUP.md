@@ -41,8 +41,8 @@ SO-ARM101 (sim or real)   →  ROS2 topics  →  lerobot-record  →  HF dataset
 |---|---|
 | `Exploring-VLAs/lerobot/` | Fork of huggingface/lerobot with PR #866 applied (submodule) |
 | `Exploring-VLAs/vla_SO-ARM101/` | SO-ARM101 ROS2 stack (URDF, MoveIt, control GUI, Gazebo) |
-| `Exploring-VLAs/docs/` | Cross-package integration docs — this file lives here |
-| `Exploring-VLAs/LEROBOT_GUIDE.md` | Reference guide from the Windows / RTX4090 flow (untracked) |
+| `Exploring-VLAs/vla_SO-ARM101/docs/` | SO-ARM101 docs — **this file lives here** alongside `AGENT_DEBUG_GUIDE.md` and `grasp_pipeline.md` |
+| `Exploring-VLAs/LEROBOT_GUIDE.md` | Reference guide from the Windows / RTX4090 flow (untracked, reference only — not Mac-specific) |
 | `…/ros2/lerobot/` (outside this repo) | Smoke-test pixi env + scripts on Mac |
 
 The pixi env for lerobot is **intentionally outside `Exploring-VLAs`** — it's
@@ -222,7 +222,7 @@ Reference: `vla_SO-ARM101/README.md` and `vla_SO-ARM101/docs/AGENT_DEBUG_GUIDE.m
 3. **`lerobot-record` end-to-end.** Once the Robot backend is in, record ≥3 episodes via the CLI using `--robot.cameras="{ wrist: {type: ros2, topic: /wrist_camera, ...} }"`.
 4. **Real-arm parity.** Verify the existing OpenCV/RealSense paths in PR #866 still work on the Windows/4090 side — i.e. the lerobot fork is usable in both worlds.
 5. **Dataset quality.** Run `compute_stats` explicitly, load with a real SmolVLA config and dry-run one batch through the dataloader.
-6. **Linux setup.** Separate section here (or a sibling file under `docs/`) once we move to Linux for training. The key differences we expect: no RoboStack (use apt ROS2), no numpy/cv_bridge ABI drama, FastDDS often fine.
+6. **Linux setup.** Separate section here (or a sibling `LEROBOT_ROS2_LINUX_SETUP.md` in this same `vla_SO-ARM101/docs/` folder) once we move to Linux for training. The key differences we expect: no RoboStack (use apt ROS2), no numpy/cv_bridge ABI drama, FastDDS often fine.
 
 ---
 
