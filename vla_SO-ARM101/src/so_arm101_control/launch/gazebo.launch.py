@@ -138,6 +138,9 @@ def generate_launch_description():
             '/clock@rosgraph_msgs/msg/Clock@gz.msgs.Clock',
             '/wrist_camera@sensor_msgs/msg/Image[gz.msgs.Image',
             '/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo',
+            # Top camera (added Phase 2, REQ OBS-03) — 640x480 @ 30fps top-down
+            '/top_camera@sensor_msgs/msg/Image[gz.msgs.Image',
+            '/top_camera/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo',
         ],
         output='screen',
     )
