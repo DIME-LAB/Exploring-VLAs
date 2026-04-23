@@ -1,0 +1,38 @@
+[workspace]
+authors = ["Aldrin Inbaraj <aaugus11@asu.edu>"]
+channels = ["robostack-jazzy", "conda-forge"]
+name = "lerobot-smoke"
+platforms = ["osx-arm64"]
+version = "0.1.0"
+description = "Pixi env for smoke-testing lerobot PR #866 ROS2 camera backend on macOS ARM64"
+
+[tasks]
+
+[dependencies]
+python = "3.12.*"
+pip = "*"
+
+# ROS2 Jazzy Python bindings — minimal subset for ROS2Camera
+ros-jazzy-rclpy = "*"
+ros-jazzy-cv-bridge = "*"
+ros-jazzy-sensor-msgs = "*"
+ros-jazzy-sensor-msgs-py = "*"
+ros-jazzy-std-msgs = "*"
+ros-jazzy-geometry-msgs = "*"
+ros-jazzy-image-transport = "*"
+ros-jazzy-ros2cli = "*"            # ros2 topic pub/echo/list
+ros-jazzy-ros2topic = "*"          # `ros2 topic list/echo`
+ros-jazzy-rmw-cyclonedds-cpp = "*"  # macOS-friendly DDS, localhost-only config
+
+# Image I/O
+opencv = "*"
+ffmpeg = "*"
+numpy = "<2"        # cv_bridge binary ABI is numpy 1.x
+pillow = "*"
+
+# After `pixi install`, run this inside the env to install lerobot:
+#   pixi run pip install -e /path/to/Exploring-VLAs/lerobot
+#   pixi run pip install "numpy<2" "datasets<4"
+# (Path-based editable installs through pixi break because our repo path
+#  contains a space. So we leave lerobot to a manual pip step and pin
+#  the two packages it otherwise pulls to incompatible versions.)
