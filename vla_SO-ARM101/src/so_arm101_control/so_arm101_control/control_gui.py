@@ -75,6 +75,23 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
+# Trajectory post-check result
+# ---------------------------------------------------------------------------
+# Honest encoding of what _trajectory_first_invalid_with_contacts actually
+# measured. Previous return was (idx, contacts) which conflated "no info"
+# with "all clear" and gave no visibility into sub-segment coverage.
+from collections import namedtuple
+_TrajCheckResult = namedtuple(
+    '_TrajCheckResult',
+    ['ok', 'bad_wp', 'bad_subidx', 'sub_t', 'contacts', 'n_wps', 'n_sub'])
+
+# Sub-segment subsamples between consecutive waypoints during post-check.
+# Module-level so a hot-reload picks up changes (class-level constants are
+# not copied by _patch_methods — only methods are).
+TRAJ_SUBSEGMENT_SAMPLES = 20
+
+
+# ---------------------------------------------------------------------------
 # Hot reload helpers
 # ---------------------------------------------------------------------------
 
@@ -193,6 +210,76 @@ def _load_cup_mesh():
     except Exception as e:
         print(f'[cup_mesh] Failed to load cup.stl: {e}')
         return None, False
+
+
+# Per-size lego STL meshes. 8-vertex box primitives exported from the Isaac Sim
+# lego USDs (assets/legos/lego_*_<size>.usd) with origin at the bbox center so
+# /objects_poses_sim pose (= body center) drives MoveIt mesh_pose directly.
+# Color is not part of the geometry (studs etc. are absent; we want the
+# collision envelope, not the visual), so one STL per size serves all colors.
+_LEGO_SIZES = ('2x2', '2x3', '2x4')
+
+
+# Vertical clearance between grasp TCP (fixed-jaw tip) and the block's top face.
+# The gripper link's collision mesh has some downward-facing geometry below
+# tcp_link (servo housing, jaw hinge). Without clearance, /check_state_validity
+# flags gripper-vs-world-lego contact at grasp pose (~77 µm tangent penetration
+# via FCL narrow-phase), which then poisons every subsequent OMPL plan with
+# "start state in collision" (ec=-2). This is NOT a USD-fix compensation —
+# it's the physical clearance needed between the gripper's lower-facing link
+# geometry and the block's upper face. If the gripper hardware is ever
+# redesigned with a cleaner TCP profile, this can drop to 0; if the block
+# collision envelope is ever padded or grown, this should grow accordingly.
+_GRIPPER_TCP_CLEARANCE_ABOVE_BLOCK_M = 0.00165
+
+
+def _load_lego_mesh(size):
+    """Load lego_{size}.stl as a shape_msgs/Mesh for MoveIt collision objects.
+
+    Returns (ShapeMesh, success). Per-size cache on the function object.
+    Unlike cups, the STL is already authored in meters with its origin at
+    the same point /objects_poses_sim publishes, so no scale or padding is
+    applied. Mirrors _load_cup_mesh's search order (src-tree first, then
+    installed share dir).
+    """
+    cache = getattr(_load_lego_mesh, '_cached', {})
+    if size in cache:
+        return cache[size], True
+    try:
+        import trimesh
+        stl_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            '..', 'so_arm101_description', 'meshes', 'lego', f'lego_{size}.stl')
+        if not os.path.isfile(stl_path):
+            from ament_index_python.packages import get_package_share_directory
+            stl_path = os.path.join(
+                get_package_share_directory('so_arm101_description'),
+                'meshes', 'lego', f'lego_{size}.stl')
+        raw = trimesh.load(stl_path)
+        mesh = ShapeMesh()
+        for v in raw.vertices:
+            pt = Point()
+            pt.x = float(v[0]); pt.y = float(v[1]); pt.z = float(v[2])
+            mesh.vertices.append(pt)
+        for f in raw.faces:
+            tri = MeshTriangle()
+            tri.vertex_indices = [int(f[0]), int(f[1]), int(f[2])]
+            mesh.triangles.append(tri)
+        cache[size] = mesh
+        _load_lego_mesh._cached = cache
+        print(f'[lego_mesh] Loaded {size}: {len(mesh.triangles)} triangles, {len(mesh.vertices)} vertices')
+        return mesh, True
+    except Exception as e:
+        print(f'[lego_mesh] Failed to load lego_{size}.stl: {e}')
+        return None, False
+
+
+def _lego_size_from_name(name):
+    """Extract '2x2'/'2x3'/'2x4' from a block name like 'red_2x3'."""
+    for s in _LEGO_SIZES:
+        if name.endswith(s):
+            return s
+    return None
 
 
 def _normalize_grasp_yaw(yaw, pan):
@@ -773,6 +860,12 @@ class SOArm101ControlGUI(Node):
                     self._motion_event = None
                     self._cmd_error = None
                     self._last_motion_status = None
+                    # Tag the next trajectory dump with this cmd's name so
+                    # post-hoc log analysis can match dumps to commands.
+                    # _cmd_foo → tag 'foo'. Anything _execute_full_trajectory
+                    # writes from here until the next _cmd_* gets this tag.
+                    if method_name.startswith('_cmd_'):
+                        self._last_motion_tag = method_name[5:]
                     getattr(self, method_name)()
                     # Check if the command signaled failure synchronously
                     # (geometric IK reject, missing service, etc). Async
@@ -2468,6 +2561,14 @@ class SOArm101ControlGUI(Node):
 
         When level is 'warn' or 'error', also sets _cmd_error so the
         trigger service callback can report success=False.
+
+        ALSO routes to the node's rclpy logger so every GUI-level motion
+        event (Attached, Detached, Grasp Home, OMPL post-check, etc.)
+        lands in the launch rosout log with a wall-clock timestamp.
+        Without this, those events only existed in the in-memory Tk log
+        buffer (ring-truncated to a few dozen lines), making post-hoc
+        reconstruction of a run impossible. If you're grep'ing
+        /tmp/so_arm101_mtc.log for a sequence, these lines are now there.
         """
         import datetime
         timestamp = datetime.datetime.now().strftime('%H:%M:%S')
@@ -2475,6 +2576,18 @@ class SOArm101ControlGUI(Node):
 
         if level in ('warn', 'error'):
             self._cmd_error = text
+
+        # Persist to rosout. Use the level mapping so grep-by-severity works.
+        try:
+            logger = self.get_logger()
+            if level == 'error':
+                logger.error(text)
+            elif level == 'warn':
+                logger.warn(text)
+            else:
+                logger.info(text)
+        except Exception:
+            pass  # Node may not be fully initialized during teardown
 
         def _do_append():
             if not hasattr(self, '_process_log'):
@@ -2541,6 +2654,28 @@ class SOArm101ControlGUI(Node):
 
             # Patch all methods on this running instance
             _patch_methods(self, new_mod.SOArm101ControlGUI)
+
+            # Register any newly-added _cmd_* methods as Trigger services.
+            # Without this, new debug services introduced via hot-reload stay
+            # callable as Python methods but are invisible to ROS2 service calls.
+            existing_names = set()
+            for s in self._debug_services:
+                sn = getattr(s, 'srv_name', '') or ''
+                existing_names.add(sn.rsplit('/', 1)[-1])
+            new_count = 0
+            for name in sorted(dir(self)):
+                if not name.startswith('_cmd_'):
+                    continue
+                srv_name = name[5:]
+                if srv_name in existing_names:
+                    continue
+                cb = self._make_trigger_callback(name)
+                srv = self.create_service(Trigger, f'~/{srv_name}', cb)
+                self._debug_services.append(srv)
+                new_count += 1
+            if new_count:
+                self._append_log(
+                    f'HOT RELOAD: registered {new_count} new _cmd_* service(s)', 'info')
 
             src_label = ' (from src/)' if src_dir else ' (from build/)'
             self._append_log(f'HOT RELOAD: logic reloaded{src_label}', 'info')
@@ -3260,6 +3395,33 @@ class SOArm101ControlGUI(Node):
         # repopulates after ~500 ms — wait a bit longer for safety.
         self.root.after(1200, self._qs_refresh_objects)
 
+    def _cmd_qs_select(self):
+        """Select an entry in the Quickstart listbox by name (ik_target param)
+        or first item. Mirrors _cmd_grasp_select but targets _qs_listbox so
+        _cmd_qs_play passes its _qs_get_selected_object() guard when driven
+        headlessly over ROS services.
+        """
+        if not hasattr(self, '_qs_listbox') or self._qs_listbox.size() == 0:
+            self._append_log('Quickstart: no objects to select — run qs_refresh_all first', 'warn')
+            self._cmd_error = 'qs listbox empty'
+            return
+        name_hint = self.get_parameter('ik_target').get_parameter_value().string_value.strip()
+        target_idx = 0
+        if name_hint and '=' not in name_hint:
+            matched = False
+            for i in range(self._qs_listbox.size()):
+                if self._qs_listbox.get(i).split('  ')[0] == name_hint:
+                    target_idx = i
+                    matched = True
+                    break
+            if not matched:
+                self._append_log(f'Quickstart: "{name_hint}" not in listbox — defaulting to first', 'warn')
+        self._qs_listbox.selection_clear(0, tk.END)
+        self._qs_listbox.selection_set(target_idx)
+        self._qs_listbox.see(target_idx)
+        picked = self._qs_listbox.get(target_idx).split('  ')[0]
+        self._append_log(f'Quickstart selected: {picked}')
+
     def _qs_refresh_objects(self):
         """Populate the Quickstart listbox from the shared objects_data dict
         (same source as the Grasp tab's listbox). Preserves selection if the
@@ -3352,8 +3514,18 @@ class SOArm101ControlGUI(Node):
         """Wait for the most recent _cmd_* to complete, gated on pause.
 
         The existing _cmd_* handlers set self._motion_event when they fire
-        a motion. We just poll that event, honoring pause (pause blocks)
-        and abort (abort breaks out early).
+        a motion. Event firing means "something finished" — it does NOT mean
+        success. The verdict is in self._last_motion_status (set by
+        _ompl_plan_validate_execute on both the OK path and the Mode B /
+        plan-failed paths). Without consulting it, a Mode B post-check
+        rejection silently propagates as "step passed" and the runner
+        marches into the next step — which is how the cup-knocking plans
+        used to execute anyway after being flagged.
+
+        Returns True only when the event fires AND status.ok is truthy
+        (or status is missing entirely — e.g. for synchronous _cmd_*s that
+        never call _ompl_plan_validate_execute, like gripper_open/close
+        which just clear a wait flag).
         """
         evt = getattr(self, '_motion_event', None)
         if evt is None:
@@ -3366,6 +3538,14 @@ class SOArm101ControlGUI(Node):
             if not self._qs_resume_evt.wait(timeout=0.2):
                 continue
             if evt.wait(timeout=0.2):
+                status = getattr(self, '_last_motion_status', None)
+                if status is not None and status.get('ok') is False:
+                    # Surface WHY we halted so the log trail reads end-to-end.
+                    outcome = status.get('outcome', 'unknown')
+                    msg = status.get('msg', '')
+                    self._append_log(
+                        f'Quickstart: step failed ({outcome}): {msg}', 'err')
+                    return False
                 return True
         return False
 
@@ -3422,9 +3602,19 @@ class SOArm101ControlGUI(Node):
                     f'Quickstart: "{drop}" not in drop listbox', 'err')
                 return False
 
-        # Clear motion event before dispatch so _qs_wait_for_step waits
-        # for THIS step's completion, not a stale one.
+        # Clear motion event AND last motion status before dispatch so
+        # _qs_wait_for_step reads THIS step's verdict, not the previous
+        # step's (or the previous run's — which can leak across qs_play
+        # invocations because _last_motion_status is an instance attr,
+        # not a per-call local). _make_trigger_callback at line ~845
+        # does the same clear on the ROS-service entry path; QS calls
+        # handlers directly, so we need to clear here too.
         self._motion_event = threading.Event()
+        self._last_motion_status = None
+        self._cmd_error = None
+        # Tag the next trajectory dump with this step's cmd name.
+        if method_name.startswith('_cmd_'):
+            self._last_motion_tag = method_name[5:]
 
         handler = getattr(self, method_name, None)
         if handler is None:
@@ -4329,6 +4519,84 @@ class SOArm101ControlGUI(Node):
         if count > 0:
             self._append_log(f'Drop targets refreshed: {count} found')
 
+    def _acm_allow_ground_rest(self, obj_ids):
+        """Update the ACM so each object id in obj_ids is allowed to touch
+        `ground_plane`. Physically legitimate: legos and cups REST on the
+        table surface (which is what `ground_plane` actually models — its
+        top face is at z=0, coincident with lego/cup bottom faces). Without
+        these ACM entries, every resting object is flagged as colliding
+        with ground_plane at wp[0] of every plan, and attached legos
+        inherit the same contact at grasp time.
+
+        Mirrors the one-off `base ↔ ground_plane` allowance that
+        `_cmd_toggle_ground_plane` installs (control_gui.py ~6997-7000) —
+        this is the symmetric entry for everything else that legitimately
+        rests on the surface.
+
+        Idempotent: adding an id already allowed is a no-op.
+        """
+        if not MOVEIT_AVAILABLE or not hasattr(self, '_get_scene_client'):
+            return
+        if not obj_ids:
+            return
+        if not self._get_scene_client.wait_for_service(timeout_sec=3.0):
+            return
+        if not self._apply_scene_client.wait_for_service(timeout_sec=3.0):
+            return
+
+        get_req = GetPlanningSceneSrv.Request()
+        get_req.components.components = 128  # ALLOWED_COLLISION_MATRIX
+        future = self._get_scene_client.call_async(get_req)
+        self._wait_future(future, timeout_sec=3.0)
+        if future.result() is None:
+            return
+        acm = future.result().scene.allowed_collision_matrix
+
+        if 'ground_plane' not in acm.entry_names:
+            # ground_plane row doesn't exist yet — _cmd_toggle_ground_plane
+            # installs it on startup; if it hasn't run we can't wire anything
+            # up yet. Caller will get another chance on the next add.
+            return
+        gp_idx = acm.entry_names.index('ground_plane')
+
+        changed = False
+        for obj_id in obj_ids:
+            if obj_id in acm.entry_names:
+                idx = acm.entry_names.index(obj_id)
+                if not acm.entry_values[idx].enabled[gp_idx]:
+                    acm.entry_values[idx].enabled[gp_idx] = True
+                    changed = True
+                if not acm.entry_values[gp_idx].enabled[idx]:
+                    acm.entry_values[gp_idx].enabled[idx] = True
+                    changed = True
+            else:
+                # Extend every existing row with one more column for obj_id,
+                # defaulting to disallow contact.
+                for entry in acm.entry_values:
+                    entry.enabled.append(False)
+                # Flip the ground_plane row's new column to allow contact.
+                acm.entry_values[gp_idx].enabled[-1] = True
+                # New row for obj_id: disallow everything except ground_plane
+                # (allowed) and self (harmless, conventionally true).
+                row = AllowedCollisionEntry()
+                row.enabled = [False] * len(acm.entry_names)
+                row.enabled[gp_idx] = True
+                row.enabled.append(True)  # self-entry
+                acm.entry_names.append(obj_id)
+                acm.entry_values.append(row)
+                changed = True
+
+        if not changed:
+            return
+
+        acm_scene = PlanningSceneMsg()
+        acm_scene.is_diff = True
+        acm_scene.allowed_collision_matrix = acm
+        req = ApplyPlanningScene.Request()
+        req.scene = acm_scene
+        fut = self._apply_scene_client.call_async(req)
+        self._wait_future(fut, timeout_sec=5.0)
+
     def _add_cup_collision_objects(self):
         """Add cup collision objects to MoveIt planning scene from _drop_data.
 
@@ -4397,6 +4665,10 @@ class SOArm101ControlGUI(Node):
             if future.result() is not None and future.result().success:
                 label = 'mesh' if mesh_ok else 'cylinder'
                 self._append_log(f'Added {len(drop_items)} cup collision objects ({label})')
+                # Cups physically rest on the table (= ground_plane top at
+                # z=0). Allow the rest-contact in the ACM so post-checks
+                # don't flag every wp[0] as invalid.
+                self._acm_allow_ground_rest(self._cup_collision_names)
             else:
                 self._append_log('Failed to add cup collision objects', 'warn')
 
@@ -4430,16 +4702,11 @@ class SOArm101ControlGUI(Node):
     # ------------------------------------------------------------------
     # Phase 9: lego block collision tracking in MoveIt planning scene
     # ------------------------------------------------------------------
-    # Blocks enter the scene at grasp_refresh as BOX CollisionObjects (world).
+    # Blocks enter the scene at grasp_refresh as world CollisionObjects.
     # On successful gripper_close_for_object they convert to AttachedCollisionObject
     # on tcp_link — MoveIt then tracks the carried block's world pose via FK, so
     # plans during drop_sweep respect the full carried-block envelope.
     # On drop_release the attached object is removed from the scene entirely.
-    #
-    # 15% padding compensates for: (a) grasp slip during gripper close, (b) lego
-    # stud height not captured by the world-aligned bbox, (c) execution tracking
-    # error on the cup-rim approach. Matches the cup's 5% padding principle.
-    _LEGO_COLLISION_PADDING = 1.15
 
     @staticmethod
     def _pose7_to_mat(x, y, z, qx, qy, qz, qw):
@@ -4494,10 +4761,13 @@ class SOArm101ControlGUI(Node):
             self._attached_lego_name = None
 
     def _add_lego_collision_objects(self):
-        """Add BOX CollisionObjects for every detected block to the planning scene.
+        """Add mesh CollisionObjects for every detected block to the planning scene.
 
-        Keyed `lego_{name}`. Pose from /objects_poses_sim, dimensions from
-        /objects_bbox_sim. Mirrors _add_cup_collision_objects.
+        Keyed `lego_{name}`. Pose from /objects_poses_sim, geometry from the
+        per-size lego STL (`_load_lego_mesh`). Mirrors _add_cup_collision_objects.
+        The STL origin was preserved from the Isaac Sim USD prim origin so
+        no Z shift is applied to the published pose — unlike cups, which
+        publish body-center and need mesh_pose.z = pos['z'] − H/2.
         """
         self._ensure_lego_state()
         if not MOVEIT_AVAILABLE or not hasattr(self, '_apply_scene_client'):
@@ -4509,8 +4779,7 @@ class SOArm101ControlGUI(Node):
                 return
             with self.objects_lock:
                 blocks = dict(self.objects_data)
-            bboxes = dict(self.objects_bbox)
-            if not blocks or not bboxes:
+            if not blocks:
                 return
             # Snapshot cup positions so we can filter legos that have landed
             # inside one. An in-cup lego is already covered by the cup's own
@@ -4568,9 +4837,6 @@ class SOArm101ControlGUI(Node):
                 rm.operation = CollisionObject.REMOVE
                 remove_scene.world.collision_objects.append(rm)
             for name, pose in blocks.items():
-                bbox = bboxes.get(name)
-                if not bbox:
-                    continue
                 lego_id = f'lego_{name}'
                 # Skip the currently-held one — it's tracked by the held-lego
                 # world-pose syncer at 10Hz. Adding an outdated pose here
@@ -4587,28 +4853,26 @@ class SOArm101ControlGUI(Node):
                     skipped_in_cup.append(name)
                     _remove_diff(lego_id)  # unconditional REMOVE
                     continue
+                size = _lego_size_from_name(name)
+                if size is None:
+                    continue
+                lego_mesh, mesh_ok = _load_lego_mesh(size)
+                if not mesh_ok:
+                    continue
                 co = CollisionObject()
                 co.header.frame_id = 'base'
-                co.id = f'lego_{name}'
+                co.id = lego_id
                 co.operation = CollisionObject.ADD
-                box = SolidPrimitive()
-                box.type = SolidPrimitive.BOX
-                box.dimensions = [float(bbox['sx']), float(bbox['sy']), float(bbox['sz'])]
                 p = Pose()
                 p.position.x = float(pose['x'])
                 p.position.y = float(pose['y'])
-                # Isaac Sim reports the block origin at its CENTER (verified
-                # empirically: all three brick sizes report z≈8mm on ground,
-                # matching the 12.78mm-tall block's center, not half-height
-                # above bottom). The previous "+ sz/2" produced a 6.4mm
-                # upward offset that baked into every planning/validity call.
                 p.position.z = float(pose['z'])
                 p.orientation.x = float(pose.get('qx', 0.0))
                 p.orientation.y = float(pose.get('qy', 0.0))
                 p.orientation.z = float(pose.get('qz', 0.0))
                 p.orientation.w = float(pose.get('qw', 1.0))
-                co.primitives.append(box)
-                co.primitive_poses.append(p)
+                co.meshes.append(lego_mesh)
+                co.mesh_poses.append(p)
                 add_scene.world.collision_objects.append(co)
                 added.append(co.id)
             if not add_scene.world.collision_objects and not remove_scene.world.collision_objects:
@@ -4637,6 +4901,10 @@ class SOArm101ControlGUI(Node):
                 self._lego_collision_names = added
                 note = f' (skipped {len(skipped_in_cup)} in-cup: {skipped_in_cup})' if skipped_in_cup else ''
                 self._append_log(f'Added {len(added)} lego collision objects{note}')
+                # Legos physically rest on the table (= ground_plane top at
+                # z=0). Allow the rest-contact in the ACM so post-checks
+                # don't flag every wp[0] as invalid.
+                self._acm_allow_ground_rest(added)
             else:
                 reason = 'timeout' if res is None else 'server success=False'
                 self._append_log(
@@ -4809,7 +5077,14 @@ class SOArm101ControlGUI(Node):
             except Exception:
                 pass  # idempotent — world may have been clean already
 
-            # Phase 2: attached ADD with explicit link-local pose
+            # Phase 2: attached ADD with explicit link-local pose.
+            # Mesh collision (matches world-CO path in _add_lego_collision_objects).
+            size = _lego_size_from_name(obj_name)
+            lego_mesh, mesh_ok = _load_lego_mesh(size) if size else (None, False)
+            if not mesh_ok:
+                self._append_log(
+                    f'Attach failed: no mesh for lego size of {obj_name}', 'warn')
+                return
             add_scene = PlanningSceneMsg()
             add_scene.is_diff = True
             add_scene.robot_state.is_diff = True
@@ -4818,11 +5093,7 @@ class SOArm101ControlGUI(Node):
             aco.object.id = name_id
             aco.object.header.frame_id = 'tcp_link'
             aco.object.operation = CollisionObject.ADD
-            prim = SolidPrimitive()
-            prim.type = SolidPrimitive.BOX
-            prim.dimensions = [float(bbox['sx']), float(bbox['sy']),
-                               float(bbox['sz'])]
-            aco.object.primitives.append(prim)
+            aco.object.meshes.append(lego_mesh)
             block_pose = Pose()
             block_pose.position.x = float(ax)
             block_pose.position.y = float(ay)
@@ -4831,7 +5102,7 @@ class SOArm101ControlGUI(Node):
             block_pose.orientation.y = float(aqy)
             block_pose.orientation.z = float(aqz)
             block_pose.orientation.w = float(aqw)
-            aco.object.primitive_poses.append(block_pose)
+            aco.object.mesh_poses.append(block_pose)
             aco.touch_links = ['tcp_link', 'gripper', 'jaw']
             add_scene.robot_state.attached_collision_objects.append(aco)
 
@@ -4843,6 +5114,15 @@ class SOArm101ControlGUI(Node):
             if not _apply_scene(add_scene, 'attach_lego'):
                 self._attached_lego_name = prev_attached
                 return
+
+            # A freshly-grasped object inherits the table-level pose from
+            # which it was picked up — its bottom face is at z=0, touching
+            # ground_plane. MoveIt treats attached objects as part of the
+            # robot's collision volume, so attached_lego ↔ ground_plane
+            # becomes a robot-world contact and gets reported unless we
+            # declare it allowed. Same ACM row as the world copy uses; the
+            # id is the same in both cases.
+            self._acm_allow_ground_rest([name_id])
 
             if name_id in self._lego_collision_names:
                 self._lego_collision_names.remove(name_id)
@@ -4859,7 +5139,18 @@ class SOArm101ControlGUI(Node):
                 f'({bbox["sx"]*1000:.0f}×{bbox["sy"]*1000:.0f}×{bbox["sz"]*1000:.0f}mm) '
                 f'offset=({ax*1000:+.1f},{ay*1000:+.1f},{az*1000:+.1f})mm')
 
-        threading.Thread(target=_apply, daemon=True).start()
+        # SYNCHRONOUS: attach MUST complete before the caller signals its
+        # motion-done event. Previously this dispatched _apply on a daemon
+        # thread and returned immediately, so _cmd_gripper_close_for_object
+        # fired evt.set() while the attach's phase-1 REMOVE + phase-2 ADD
+        # were still in flight. The QS runner advanced to "Grasp Home",
+        # planned it, and the post-check ran against a scene that still
+        # had the world copy of the lego at its table pose — producing the
+        # classic lego_*↔ground_plane(d=0.0mm) false-positive at wp[0].
+        # Running _apply inline makes the attach a synchronous barrier.
+        # Callers are already on a background thread (_send in
+        # _cmd_gripper_close_for_object), so there's no Tk deadlock risk.
+        _apply()
         return True
 
     # ------------------------------------------------------------------
@@ -4935,22 +5226,22 @@ class SOArm101ControlGUI(Node):
         add_scene = PlanningSceneMsg()
         add_scene.is_diff = True
         add_scene.robot_state.is_diff = True
+        size = _lego_size_from_name(obj_name)
+        lego_mesh, mesh_ok = _load_lego_mesh(size) if size else (None, False)
+        if not mesh_ok:
+            return False
         aco = AttachedCollisionObject()
         aco.link_name = 'tcp_link'
         aco.object.id = name_id
         aco.object.header.frame_id = 'tcp_link'
         aco.object.operation = CollisionObject.ADD
-        prim = SolidPrimitive()
-        prim.type = SolidPrimitive.BOX
-        prim.dimensions = [float(bbox['sx']), float(bbox['sy']),
-                           float(bbox['sz'])]
-        aco.object.primitives.append(prim)
+        aco.object.meshes.append(lego_mesh)
         pose = Pose()
         pose.position.x = float(ax); pose.position.y = float(ay)
         pose.position.z = float(az)
         pose.orientation.x = float(aqx); pose.orientation.y = float(aqy)
         pose.orientation.z = float(aqz); pose.orientation.w = float(aqw)
-        aco.object.primitive_poses.append(pose)
+        aco.object.mesh_poses.append(pose)
         aco.touch_links = ['tcp_link', 'gripper', 'jaw']
         add_scene.robot_state.attached_collision_objects.append(aco)
 
@@ -5254,9 +5545,6 @@ class SOArm101ControlGUI(Node):
                 tracer.close_cycle('completed')
                 self._cycle_detach_seen = False
         threading.Thread(target=_emit_home_done, daemon=True).start()
-        # Refresh attached-body pose so the held-lego envelope is accurate
-        # for the tier1 waypoint validity check (no-op if nothing attached).
-        self._refresh_attached_pose()
         # tier1 joint-space interpolation with per-waypoint validity check
         # (51 wps, 2% resolution) + OMPL fallback if direct path collides.
         self._joint_space_collision_free_execute(
@@ -5281,9 +5569,6 @@ class SOArm101ControlGUI(Node):
         # State ghost highlights the right group (gripper_command set it to
         # 'gripper' — without this, grasp_home and drops keep no ghost).
         self._select_planning_group('arm')
-        # Keep MoveIt's attached-body envelope in sync with reality so the
-        # plan respects the currently-held lego (no-op if none attached).
-        self._refresh_attached_pose()
         # Advance self.joint_positions + publish Goal State so RViz's
         # Planning Request ghost snaps to the TARGET pose before execution.
         # Without this, the ghost stays at the live-robot pose while the
@@ -5451,42 +5736,49 @@ class SOArm101ControlGUI(Node):
             return False
 
         tracer.snapshot_scene('after_ompl_returns', self)
-        bad_idx, bad_contacts = self._trajectory_first_invalid_with_contacts(
+        chk = self._trajectory_first_invalid_with_contacts(
             traj.joint_trajectory)
-        if bad_idx is not None:
+        if not chk.ok:
             contact_summary = '; '.join(
                 f'{c.contact_body_1}↔{c.contact_body_2}(d={c.depth*1000:.1f}mm)'
-                for c in bad_contacts[:5]) or 'no contact info'
+                for c in chk.contacts[:5]) or 'no contact info'
+            where = (f'wp[{chk.bad_wp}]' if chk.bad_subidx is None
+                     else f'wp[{chk.bad_wp}→{chk.bad_wp + 1}] sub-t={chk.sub_t:.2f}')
             tracer.snapshot_scene('after_waypoint_check_modeB', self)
             tracer.event('ompl_attempt', attempt=0, perturb='none',
                          mode='B',
-                         bad_wp=bad_idx,
-                         n_wps=len(traj.joint_trajectory.points),
+                         bad_wp=chk.bad_wp, bad_subidx=chk.bad_subidx,
+                         sub_t=chk.sub_t,
+                         n_wps=chk.n_wps, n_sub=chk.n_sub,
                          contacts=[{
                              'a': c.contact_body_1,
                              'b': c.contact_body_2,
                              'depth_mm': c.depth * 1000,
-                         } for c in bad_contacts[:10]])
+                         } for c in chk.contacts[:10]])
             tracer.event('ompl_exhausted', n_attempts=1, mode='B',
-                         bad_wp=bad_idx,
-                         n_wps=len(traj.joint_trajectory.points))
+                         bad_wp=chk.bad_wp,
+                         n_wps=chk.n_wps)
             self._append_log(
-                f'  OMPL Mode B: plan valid per OMPL, but our post-check '
-                f'found wp[{bad_idx}/{len(traj.joint_trajectory.points)}] '
-                f'invalid: {contact_summary}', 'warn')
+                f'  OMPL post-check: {where} invalid '
+                f'(checked {chk.n_wps} wps + {chk.n_sub} sub-states): '
+                f'{contact_summary}', 'warn')
             self._last_motion_status = {
                 'ok': False, 'outcome': 'ompl_mode_b',
-                'msg': (f'OMPL Mode B: post-check rejected wp[{bad_idx}/'
-                        f'{len(traj.joint_trajectory.points)}]: '
-                        f'{contact_summary}'),
-                'bad_wp': bad_idx}
+                'msg': (f'post-check rejected {where}: {contact_summary}'),
+                'bad_wp': chk.bad_wp, 'bad_subidx': chk.bad_subidx,
+                'sub_t': chk.sub_t}
             on_complete_event.set()
             return False
 
         tracer.event('ompl_validated', attempt=0, perturb='none',
-                     n_wps=len(traj.joint_trajectory.points))
+                     n_wps=chk.n_wps, n_sub=chk.n_sub)
+        # Honest log: we checked every waypoint AND N intermediate states
+        # per segment. "Validated" here means collision-free at discrete
+        # sample points under the current /planning_scene, NOT proof of
+        # clearance at infinitesimal resolution — see TRAJ_SUBSEGMENT_SAMPLES.
         self._append_log(
-            f'  OMPL validated ({len(traj.joint_trajectory.points)} wps)')
+            f'  OMPL post-check: {chk.n_wps} wps + {chk.n_sub} sub-states '
+            f'clear ({TRAJ_SUBSEGMENT_SAMPLES}/seg)')
         self._execute_full_trajectory(
             traj.joint_trajectory, on_complete_event)
         return True
@@ -5560,43 +5852,168 @@ class SOArm101ControlGUI(Node):
                 return False
         return True
 
-    def _trajectory_first_invalid_with_contacts(self, joint_trajectory):
-        """Find the first invalid waypoint AND its contacts (for diagnostics).
-        Returns (index, contacts_list) or (None, []) if all valid.
+    def _trajectory_first_invalid_with_contacts(self, joint_trajectory,
+                                                 subsamples=None):
+        """Find first invalid state on a trajectory. Checks every waypoint
+        AND `subsamples` interpolated states between each consecutive pair.
+        Returns a dict on failure or {'ok': True, 'n_wps': N, 'n_sub': M}
+        on success. Legacy callers that unpacked (idx, contacts) continue
+        to work via the 2-tuple properties wrapper below.
 
-        Phase 9: includes gripper_joint in the checked state. OMPL's plan
-        carries gripper_joint through the trajectory (or uses live value
-        if the plan doesn't modify it). Defaulting to 0 caused our post-
-        validation to disagree with OMPL's internal checker on jaw-world
-        collisions.
+        Phase 9: includes gripper_joint in the checked state (OMPL carries
+        it through the trajectory; defaulting to 0 made post-validation
+        disagree with OMPL's internal checker on jaw-world collisions).
+
+        Post-Phase-9 fix: the original implementation only probed waypoints.
+        A 37-wp 106° pan sweep has ~2.9° joint motion per segment, which
+        is larger than the angular cross-section a cup subtends at arm
+        reach. Straight-line joint interp between two clear waypoints
+        routinely swept through a cup. We now subsample each segment.
         """
         if not joint_trajectory.points:
-            return 0, []
+            return _TrajCheckResult(ok=False, bad_wp=0, bad_subidx=None,
+                                    sub_t=0.0, contacts=[], n_wps=0, n_sub=0)
         if not MOVEIT_AVAILABLE or not hasattr(self, 'validity_client') \
                 or not self.validity_client.service_is_ready():
-            return None, []
+            # No checker available — can't prove anything; treat as "ok"
+            # so we don't block execution on missing infra (same as before).
+            return _TrajCheckResult(ok=True, bad_wp=None, bad_subidx=None,
+                                    sub_t=0.0, contacts=[],
+                                    n_wps=len(joint_trajectory.points),
+                                    n_sub=0)
+        if subsamples is None:
+            # Use the module-level default (hot-reloadable).
+            subsamples = TRAJ_SUBSEGMENT_SAMPLES
         with self.joint_lock:
             gj_live = self._actual_positions.get(
                 GRIPPER_JOINT_NAME,
                 self.joint_positions.get(GRIPPER_JOINT_NAME, 0.0))
         names = list(joint_trajectory.joint_names)
-        for i, pt in enumerate(joint_trajectory.points):
-            wp_map = dict(zip(names, pt.positions))
-            gj = wp_map.get(GRIPPER_JOINT_NAME, gj_live)
+
+        def _probe(joints_map):
+            gj = joints_map.get(GRIPPER_JOINT_NAME, gj_live)
             req = GetStateValidity.Request()
             rs = RobotState()
             rs.joint_state.name = list(ALL_JOINT_NAMES)
             rs.joint_state.position = [
-                wp_map.get(n, 0.0) for n in ARM_JOINT_NAMES] + [float(gj)]
+                joints_map.get(n, 0.0) for n in ARM_JOINT_NAMES] + [float(gj)]
+            rs.is_diff = True
             req.robot_state = rs
             req.group_name = 'arm'
             future = self.validity_client.call_async(req)
             self._wait_future(future, timeout_sec=1.0)
-            if future.result() is None:
+            return future.result()
+
+        pts = joint_trajectory.points
+        total_sub = 0
+        for i, pt in enumerate(pts):
+            wp_map = dict(zip(names, pt.positions))
+            res = _probe(wp_map)
+            if res is None:
                 continue
-            if not future.result().valid:
-                return i, list(future.result().contacts)
-        return None, []
+            if not res.valid:
+                return _TrajCheckResult(
+                    ok=False, bad_wp=i, bad_subidx=None, sub_t=0.0,
+                    contacts=list(res.contacts), n_wps=len(pts),
+                    n_sub=total_sub)
+            # Sub-segment check between this waypoint and the next one.
+            if subsamples > 0 and i + 1 < len(pts):
+                next_map = dict(zip(names, pts[i + 1].positions))
+                for k in range(1, subsamples):
+                    t = k / float(subsamples)
+                    mid = {n: (1.0 - t) * wp_map.get(n, 0.0)
+                              + t * next_map.get(n, 0.0)
+                           for n in ARM_JOINT_NAMES}
+                    mid[GRIPPER_JOINT_NAME] = (
+                        (1.0 - t) * wp_map.get(GRIPPER_JOINT_NAME, gj_live)
+                        + t * next_map.get(GRIPPER_JOINT_NAME, gj_live))
+                    sub_res = _probe(mid)
+                    total_sub += 1
+                    if sub_res is None:
+                        continue
+                    if not sub_res.valid:
+                        return _TrajCheckResult(
+                            ok=False, bad_wp=i, bad_subidx=k, sub_t=t,
+                            contacts=list(sub_res.contacts),
+                            n_wps=len(pts), n_sub=total_sub)
+        return _TrajCheckResult(ok=True, bad_wp=None, bad_subidx=None,
+                                sub_t=0.0, contacts=[], n_wps=len(pts),
+                                n_sub=total_sub)
+
+    def _cmd_validate_last_trajectory(self):
+        """Re-run the sub-segment post-check on the most recently executed
+        trajectory (/tmp/last_arm_trajectory.json) against the CURRENT
+        /planning_scene and log detailed results.
+
+        Purpose: close the blind spot where the pre-execution post-check
+        said "all clear" but the physical motion still contacted a cup.
+        This service replays the same check so we can (a) reproduce the
+        verdict after the fact, (b) test with different subsample counts,
+        (c) confirm the scene contains the cups we expect before blaming
+        the checker.
+
+        Reports to GUI log:
+          - trajectory file path, wps, n_sub checked
+          - first invalid state (if any): waypoint index + sub-t + contacts
+          - full contact list written to /tmp/trajectory_validation_report.json
+        """
+        import json as _json
+        import os as _os
+        path = getattr(self, '_last_trajectory_path',
+                       '/tmp/last_arm_trajectory.json')
+        if not _os.path.isfile(path):
+            self._append_log(f'validate_last_trajectory: no file at {path}', 'warn')
+            self._cmd_error = 'no last trajectory'
+            return
+        try:
+            dump = _json.load(open(path))
+        except Exception as e:
+            self._append_log(f'validate_last_trajectory: load failed: {e}', 'err')
+            self._cmd_error = f'load failed: {e}'
+            return
+
+        # Rebuild a minimal JointTrajectory for the existing checker.
+        from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+        jt = JointTrajectory()
+        jt.joint_names = list(dump.get('joint_names', []))
+        for pt in dump.get('points', []):
+            jp = JointTrajectoryPoint()
+            jp.positions = [float(x) for x in pt['positions']]
+            jt.points.append(jp)
+
+        chk = self._trajectory_first_invalid_with_contacts(jt)
+        report = {
+            'file': path,
+            'n_wps': chk.n_wps,
+            'n_sub_checked': chk.n_sub,
+            'subsamples_per_segment': TRAJ_SUBSEGMENT_SAMPLES,
+            'ok': chk.ok,
+        }
+        if chk.ok:
+            self._append_log(
+                f'validate_last_trajectory OK: {chk.n_wps} wps + {chk.n_sub} '
+                f'sub-states clear (file={_os.path.basename(path)})')
+        else:
+            where = (f'wp[{chk.bad_wp}]' if chk.bad_subidx is None
+                     else f'wp[{chk.bad_wp}→{chk.bad_wp + 1}] sub-t={chk.sub_t:.2f}')
+            contacts = [{'a': c.contact_body_1, 'b': c.contact_body_2,
+                         'depth_mm': float(c.depth) * 1000.0}
+                        for c in chk.contacts]
+            summary = '; '.join(
+                f'{c["a"]}↔{c["b"]}(d={c["depth_mm"]:.1f}mm)'
+                for c in contacts[:5]) or 'no contact info'
+            report['first_invalid'] = {
+                'bad_wp': chk.bad_wp, 'bad_subidx': chk.bad_subidx,
+                'sub_t': chk.sub_t, 'contacts': contacts}
+            self._append_log(
+                f'validate_last_trajectory FAIL: {where} '
+                f'(checked {chk.n_wps} wps + {chk.n_sub} sub-states): '
+                f'{summary} (file={_os.path.basename(path)})', 'warn')
+        try:
+            with open('/tmp/trajectory_validation_report.json', 'w') as f:
+                _json.dump(report, f, indent=2)
+        except Exception:
+            pass
 
     def _execute_full_trajectory(self, joint_trajectory, on_complete_event):
         """Send a pre-validated multi-waypoint JointTrajectory to arm_controller.
@@ -5606,19 +6023,66 @@ class SOArm101ControlGUI(Node):
         """
         n_wps = len(joint_trajectory.points) if joint_trajectory.points else 0
         tracer.event('execute_start', n_wps=n_wps, source='full_trajectory')
-        # DIAG: dump every trajectory to /tmp for post-hoc waypoint validity
-        # replay. Overwrites each call — last trajectory wins.
+        # DIAG: dump every executed trajectory to disk for post-hoc replay.
+        # Writes to both /tmp/arm_traj/{timestamp}.json (history, never
+        # overwritten) and /tmp/last_arm_trajectory.json (convenience pointer
+        # for the /validate_last_trajectory debug service). Previously the
+        # history wasn't kept — a post-drop return-home overwrote the drop-
+        # point trajectory before we could inspect why cups were knocked.
         try:
             import json as _json
+            import os as _os
+            from datetime import datetime as _dt
+            # Snapshot planning-scene context so replay can reconstruct
+            # EXACTLY what the post-check saw. Without this, when we replay
+            # a trajectory later we're validating it against whatever the
+            # scene looks like NOW, not what it looked like at plan time —
+            # which is how we got stuck guessing whether attach was pending
+            # or cups had been displaced prior.
+            _attached = list(getattr(self, '_attached_lego_name', None) or [])
+            if isinstance(_attached, str) or _attached == []:
+                _attached = [self._attached_lego_name] if self._attached_lego_name else []
+            with getattr(self, '_drop_lock', __import__('threading').Lock()):
+                _drops = dict(getattr(self, '_drop_data', {}))
+            with getattr(self, 'joint_lock', __import__('threading').Lock()):
+                _joints = {n: float(self._actual_positions.get(
+                    n, self.joint_positions.get(n, 0.0)))
+                           for n in ALL_JOINT_NAMES}
             _dump = {
                 'joint_names': list(joint_trajectory.joint_names),
                 'points': [
                     {'t': p.time_from_start.sec + p.time_from_start.nanosec * 1e-9,
                      'positions': list(p.positions)}
                     for p in joint_trajectory.points],
+                # Reconstruction context — snapshot at execute time (the
+                # post-check has just approved the plan against this scene).
+                'scene_at_plan_time': {
+                    'wall_clock': _dt.now().isoformat(timespec='milliseconds'),
+                    'attached_lego_name': self._attached_lego_name,
+                    'drop_data': _drops,
+                    'actual_joints': _joints,
+                    'motion_tag': getattr(self, '_last_motion_tag', 'motion'),
+                },
             }
+            _hist_dir = '/tmp/arm_traj'
+            _os.makedirs(_hist_dir, exist_ok=True)
+            _stamp = _dt.now().strftime('%Y%m%dT%H%M%S_%f')[:-3]
+            _tag = getattr(self, '_last_motion_tag', 'motion')
+            _hist_path = _os.path.join(_hist_dir, f'{_stamp}_{_tag}.json')
+            with open(_hist_path, 'w') as _f:
+                _json.dump(_dump, _f, default=str)
             with open('/tmp/last_arm_trajectory.json', 'w') as _f:
-                _json.dump(_dump, _f)
+                _json.dump(_dump, _f, default=str)
+            self._last_trajectory_path = _hist_path
+            # One compact line to rosout so post-run grep can locate this
+            # trajectory instantly by tag + timestamp.
+            try:
+                self.get_logger().info(
+                    f'TRAJ_DUMP path={_hist_path} tag={_tag} '
+                    f'attached={self._attached_lego_name or "none"} '
+                    f'n_wps={len(joint_trajectory.points)}')
+            except Exception:
+                pass
         except Exception:
             pass
         if not self.arm_action_client.server_is_ready():
@@ -5898,9 +6362,6 @@ class SOArm101ControlGUI(Node):
         evt = threading.Event()
         self._motion_event = evt
 
-        # Refresh attached-body pose so MoveIt collision geometry reflects
-        # physics-induced drift since grasp close (jaw compliance, settle).
-        self._refresh_attached_pose()
 
         from so_arm101_control.compute_workspace import X_PAN
         pan = math.atan2(-y, x - X_PAN)
@@ -5939,9 +6400,6 @@ class SOArm101ControlGUI(Node):
         evt = threading.Event()
         self._motion_event = evt
 
-        # Refresh attached-body pose so MoveIt collision geometry reflects
-        # physics-induced drift since grasp close (jaw compliance, settle).
-        self._refresh_attached_pose()
 
         # Drop target for the GAP CENTER at (cup_rim_height + hover). Since
         # /drop_poses publishes cup BODY-CENTER (z = cup_base + half_height),
@@ -6278,16 +6736,21 @@ class SOArm101ControlGUI(Node):
         topic = self._grasp_topic_var.get().strip()
         z_offset = 0.05 if topic == '/drop_poses' else 0.0
 
-        # Use Object Z override if set, otherwise use detected z + half-height
-        # so tcp lands at the block's side-center (vertical mid-height), not at
-        # its bottom. This matches the physical grasp: jaws pinch around the
-        # block's midline, placing block-center at tcp_link.Z.
+        # Grasp TCP target Z = block center + half_height (→ block top)
+        # + _GRIPPER_TCP_CLEARANCE_ABOVE_BLOCK_M (gripper-geometry clearance
+        # so the gripper link's downward-facing collision mesh does not
+        # tangent-penetrate the block's world collision object at grasp
+        # pose). See _GRIPPER_TCP_CLEARANCE_ABOVE_BLOCK_M definition for
+        # rationale. pos['z'] is the block bbox-center published by
+        # /objects_poses_sim (post 2026-04-22 lego USD origin fix).
         obj_z_override = self._grasp_obj_z_var.get()
         if abs(obj_z_override) > 1e-4:
             base_z = obj_z_override
         else:
             bbox_sz = self.objects_bbox.get(obj_name, {}).get('sz', 0.0)
-            base_z = pos['z'] + float(bbox_sz) / 2.0
+            base_z = (pos['z']
+                      + float(bbox_sz) / 2.0
+                      + _GRIPPER_TCP_CLEARANCE_ABOVE_BLOCK_M)
         target_z = base_z + z_offset
         action = 'drop' if topic == '/drop_poses' else 'grab'
 
@@ -6809,14 +7272,50 @@ def main(args=None):
     executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
 
+    # Tracks whether a prior signal already armed the force-exit timer, so
+    # a repeated SIGTERM doesn't double-arm and so we can distinguish
+    # "handler never fired" (cosmetic script race) from "handler fired but
+    # Tk deadlocked" (real bug — force-exit wins).
+    _shutdown_state = {'armed': False}
+
     def _shutdown_handler(signum, frame):
         node.running = False
-        # Tell tkinter to quit from its own thread
+        # Tell tkinter to quit from its own event loop. root.after(0, ...)
+        # is the only thread-safe way to drive the Tk interpreter from a
+        # signal handler (which runs on the main thread, not the Tk thread).
         if hasattr(node, 'root'):
             try:
                 node.root.after(0, node._on_close)
             except Exception:
                 pass
+
+        # BELT-AND-SUSPENDERS: historically the restart script would send
+        # SIGTERM, this handler would fire, Tk's event loop would NOT pick
+        # up the after() callback in time (blocked on an X server round-trip
+        # or a slow widget repaint), the script would time out, warn "X11
+        # processes still alive (NOT force-killing)," and the next launch's
+        # control_gui would SIGSEGV trying to take over the occupied display
+        # + duplicate ROS2 node name. We were leaking processes on every
+        # restart and producing the "RViz without GUI / GUI without RViz"
+        # failure modes. This timer forces the process to die within ~2.5s
+        # of the first signal even if Tk is wedged — the restart script
+        # can then trust that SIGTERM actually killed the process.
+        if _shutdown_state['armed']:
+            return
+        _shutdown_state['armed'] = True
+
+        def _force_exit():
+            # Give the Tk path ~2.5s to land cleanly. After that, os._exit
+            # bypasses atexit/destructors but that's ACCEPTABLE here: the
+            # process is already being torn down by SIGTERM and we own all
+            # its external state (no uncommitted files, sockets handed off
+            # to the OS). Clean-exit would be nicer but deadlocked-forever
+            # is strictly worse.
+            import os
+            os._exit(0)
+
+        import threading as _t
+        _t.Timer(2.5, _force_exit).start()
 
     signal.signal(signal.SIGINT, _shutdown_handler)
     signal.signal(signal.SIGTERM, _shutdown_handler)
