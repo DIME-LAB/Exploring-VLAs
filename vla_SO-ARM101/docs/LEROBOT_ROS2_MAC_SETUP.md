@@ -68,6 +68,8 @@ below when written.
 
 ## Setup from scratch on Mac (Apple Silicon)
 
+> **For the general ROS2-on-Mac bootstrap** (pixi install, RoboStack, CycloneDDS config, workspace layout, platform gotchas) see the project-agnostic [`ROS2_MAC_SETUP.md`](./ROS2_MAC_SETUP.md). The sections below cover lerobot-specific extras on top of that base.
+
 ### 1. Prerequisites
 
 - pixi installed (`curl -fsSL https://pixi.sh/install.sh | bash`)
@@ -341,6 +343,102 @@ Rerun spawns with video panels for both cameras. **To see action/state plots:** 
 - `inbarajaldrin/so_arm101_sim_base_yaw_v0` — Phase 5 motion test (3 episodes, automated base-yaw + gripper sweep)
 
 Both pass `verify_parity.py` against `arjunsinghyadav2/blue_sort_black_bg_colored_cups_v1_440ep`.
+
+---
+
+## Record a dataset on REAL hardware (end-to-end runbook)
+
+Same `so101_ros2` Robot + Teleop plugins, same `record.sh`, same `verify_parity.py` as the sim runbook — only the **producers** change. Sim gets `/joint_states`, `/joint_commands`, and camera frames from Gazebo; real gets them from a Feetech-driven leader/follower serial bridge and a USB camera.
+
+### 0. Prerequisites (real-only additions)
+
+Everything from the sim runbook's "0. Prerequisites" still applies. On top:
+
+- SO-ARM101 **leader** + **follower** arms on two USB cables (typically `/dev/ttyACM1` = leader, `/dev/ttyACM0` = follower). Baud 1 000 000. No USB hub recommended.
+- **USB wrist camera** on `/dev/video0`-equivalent (macOS uses AVFoundation device indices; `cam 0` is usually the built-in, `cam 1+` are USB).
+- macOS may prompt for **camera permission** the first time — accept it in *System Settings → Privacy & Security → Camera*.
+- macOS may need **terminal USB permissions** for the ACM devices; if `/dev/ttyACM*` doesn't appear, try unplug/replug or a different cable.
+
+### 1. Start the camera publisher
+
+```bash
+pixi run --manifest-path /tmp/mac-env/pixi.toml bash -c "
+  source /tmp/soarm-ws/install/setup.bash
+  ros2 launch so_arm101_bringup real_cameras.launch.py \
+    wrist_idx:=0 enable_top:=false"
+```
+
+`so_arm101_bringup` is self-contained (ported from `aruco_camera_localizer/camera_publisher.py`). Add `top_idx:=<N>` + `enable_top:=true` if you have a second USB camera for the top view.
+
+### 2. Start jointstatereader (dual-publish mode)
+
+```bash
+pixi run --manifest-path /tmp/mac-env/pixi.toml bash -c "
+  source /tmp/soarm-ws/install/setup.bash
+  ros2 run jointstatereader joint_state_reader --ros-args \
+    -p leader_port:=/dev/ttyACM1 \
+    -p follower_port:=/dev/ttyACM0 \
+    -p publish_source:=follower \
+    -p publish_commands:=true \
+    -p mirror_to_follower:=true"
+```
+
+Semantics (see Phase 6 PLAN.md, D1):
+- `publish_source=follower` → `/joint_states` carries **follower** position (what the arm did) — matches sim's `/joint_states` contract.
+- `publish_commands=true` → `/joint_commands` publisher is active and carries **leader** position (what the operator commanded) — matches sim's `/joint_commands` action stream.
+- `mirror_to_follower=true` → legacy USB teleop: leader position is written straight to follower servos. Keep this on unless a policy or control node is driving the follower via topic.
+
+### 3. Record (same command as sim, `--mode real`)
+
+```bash
+bash mac-env/scripts/record.sh \
+  --mode=real \
+  --dataset.repo_id=<user>/<dataset-name>_real \
+  --dataset.num_episodes=3 --dataset.episode_time_s=30 \
+  --dataset.single_task="<your task description>" \
+  --dataset.push_to_hub=true
+```
+
+`--mode=real` maps to `--robot.type=so101_follower --teleop.type=so101_leader` via `lerobot-record-mode.sh`. If you need the ROS2 plugin path against real topics instead (rare), pass `--mode=sim` — the plugin is topic-agnostic; only the producer identity changes.
+
+### 4. Verify parity
+
+```bash
+pixi run --manifest-path /tmp/mac-env/pixi.toml \
+  python mac-env/scripts/verify_parity.py \
+    --ours <user>/<dataset-name>_real \
+    --target arjunsinghyadav2/blue_sort_black_bg_colored_cups_v1_440ep
+```
+
+Expect PASS. Any field mismatch points at a real-producer config drift, not a record-pipeline bug.
+
+### 5. One-shot alternative — `record_one_shot.sh`
+
+For `record.sh` / `record_sim.sh` the cleanup is manual: after record exits, the camera publisher + jointstatereader keep running. `record_one_shot.sh` wraps the whole setup+record+teardown cycle:
+
+```bash
+bash mac-env/scripts/record_one_shot.sh --real -- \
+  --mode=real \
+  --dataset.repo_id=<user>/<dataset-name>_real \
+  --dataset.num_episodes=3 --dataset.single_task="<task>"
+```
+
+Starts `camera_publisher` + `jointstatereader`, runs `record.sh`, SIGINTs every child on exit. Override serial ports / camera index via env: `CAMERA_ID=0 LEADER_PORT=/dev/ttyACM1 FOLLOWER_PORT=/dev/ttyACM0 bash record_one_shot.sh --real -- ...`.
+
+### 6. Troubleshooting (real-only additions)
+
+| Symptom | Fix |
+|---|---|
+| `/dev/ttyACM*` not found | unplug/replug; some chips enumerate as `tty.usbmodem*` on macOS — `ls /dev/tty.usb*` and update `-p *_port:=` accordingly |
+| `jointstatereader` warns `Could not connect` repeatedly | port name wrong OR the arm needs a power cycle; baud is hardcoded to 1 000 000 (override via `-p baud_rate:=...`) |
+| `read_errors_leader` / `_follower` counters climbing | serial contention — raise `-p inter_servo_delay_s:=0.004` (default 0.002); unplug/replug the affected arm |
+| OpenCV "not authorized to capture video" | macOS camera permission — accept the first prompt, then rerun |
+| `camera_publisher` warns `driver gave WxH` mismatching requested | AVFoundation downgraded to a supported mode — expected on some cams; recorded frames are at the actual resolution the log reports |
+| Dataset recorded with shape `(1080, 1920, 3)` instead of `(480, 640, 3)` | camera ignored the `--width`/`--height` flags; some cams only accept native modes. Accept (schema still valid) or switch camera |
+
+### `record.sh` rename (2026-04-23)
+
+The wrapper used to be called `record_sim.sh`; it's now `record.sh` (one name for both modes) with `record_sim.sh` kept as a back-compat symlink. Existing scripts and commits that reference `record_sim.sh` continue to work unchanged.
 
 ---
 

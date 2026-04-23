@@ -1,16 +1,26 @@
 #!/usr/bin/env bash
-# record_sim.sh — one-liner wrapper around lerobot-record-mode.sh for sim mode.
+# record.sh — one-liner wrapper around lerobot-record-mode.sh (defaults: sim).
 #
 # Sets the right env vars (CycloneDDS, RMW, KMP) and the two-camera config,
 # then dispatches to lerobot-record-mode.sh --mode sim with sensible defaults.
 # Any extra flags you pass override the defaults (draccus takes the last value).
+# For real hardware, pass `--mode real` (or set --robot.type / --teleop.type
+# explicitly) — the so101_ros2 plugin contract is identical, only the
+# producers change.
 #
 # Usage:
-#   bash record_sim.sh --dataset.repo_id=<user>/<repo> --dataset.num_episodes=5 [other flags]
+#   bash record.sh --dataset.repo_id=<user>/<repo> --dataset.num_episodes=5 [other flags]
 #
-# Before running: `bash stack_start.sh headless` (or gz/rviz/all) so the
+# Back-compat: `record_sim.sh` is a symlink to this file — existing docs and
+# scripts that invoke `record_sim.sh` keep working.
+#
+# Before running (sim): `bash stack_start.sh headless` (or gz/rviz/all) so the
 # sim topics are live. During recording, drive the arm via control_gui
 # (or a script publishing to /joint_commands).
+#
+# Before running (real): see vla_SO-ARM101/docs/LEROBOT_ROS2_MAC_SETUP.md —
+# camera_publisher + jointstatereader with publish_source=follower replace
+# Gazebo as the topic producers.
 #
 # Defaults (override via explicit flags):
 #   --robot.robot_type=so_follower      # dataset robot_type parity
