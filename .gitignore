@@ -49,3 +49,16 @@ frames_*.gv
 # Optional simulator crash dumps
 *.nvdbg
 *.nv-gpudmp
+
+# Secrets — never commit. Tokens live in ~/.cache/huggingface/token
+# (managed by `hf auth login`) or in a shell-sourced .env file that
+# stays OUTSIDE the repo. If you create a local .env for convenience,
+# the patterns below keep it untracked.
+.env
+.env.*
+!.env.example
+*.token
+*.secret
+hf_*.txt
+**/token
+**/token.json
