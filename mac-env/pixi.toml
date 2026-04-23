@@ -1,10 +1,10 @@
 [workspace]
 authors = ["Aldrin Inbaraj <aaugus11@asu.edu>"]
 channels = ["robostack-jazzy", "conda-forge"]
-name = "lerobot-smoke"
+name = "mac-env"
 platforms = ["osx-arm64"]
 version = "0.1.0"
-description = "Pixi env for smoke-testing lerobot PR #866 ROS2 camera backend on macOS ARM64"
+description = "Unified Mac (Apple Silicon) env for SO-ARM101 × LeRobot: runs Gazebo sim, bridges to ROS2 topics, and records with lerobot-record"
 
 [tasks]
 
@@ -12,27 +12,71 @@ description = "Pixi env for smoke-testing lerobot PR #866 ROS2 camera backend on
 python = "3.12.*"
 pip = "*"
 
-# ROS2 Jazzy Python bindings — minimal subset for ROS2Camera
-ros-jazzy-rclpy = "*"
-ros-jazzy-cv-bridge = "*"
+# --- ROS2 core + CLI ----------------------------------------------------
+ros-jazzy-desktop = "*"            # rclpy + rviz + core CLIs
+ros-jazzy-ros2cli = "*"
+ros-jazzy-ros2topic = "*"
+ros-jazzy-rmw-cyclonedds-cpp = "*" # macOS-friendly DDS
+colcon-common-extensions = "*"     # colcon build for SO-ARM101 packages
+
+# --- Gazebo Harmonic + ros2_control bridge ------------------------------
+ros-jazzy-ros-gz = "*"
+ros-jazzy-ros-gz-sim = "*"
+ros-jazzy-ros-gz-bridge = "*"
+ros-jazzy-gz-ros2-control = "*"
+
+# --- ros2_control + controllers ----------------------------------------
+ros-jazzy-ros2-control = "*"
+ros-jazzy-ros2-controllers = "*"
+ros-jazzy-controller-manager = "*"
+ros-jazzy-joint-trajectory-controller = "*"
+ros-jazzy-joint-state-broadcaster = "*"
+ros-jazzy-gripper-controllers = "*"
+
+# --- MoveIt 2 -----------------------------------------------------------
+ros-jazzy-moveit = "*"
+ros-jazzy-moveit-ros-move-group = "*"
+ros-jazzy-moveit-ros-visualization = "*"
+ros-jazzy-moveit-kinematics = "*"
+ros-jazzy-moveit-planners-ompl = "*"
+ros-jazzy-pilz-industrial-motion-planner = "*"
+# pick-ik is NOT on RoboStack Jazzy for osx-arm64 — must be colcon-built from source
+# (https://github.com/PickNikRobotics/pick_ik). Only needed when launching MoveIt;
+# topic-level Gazebo verification works without it.
+
+# --- URDF / xacro / transforms ------------------------------------------
+ros-jazzy-xacro = "*"
+ros-jazzy-robot-state-publisher = "*"
+ros-jazzy-joint-state-publisher = "*"
+ros-jazzy-joint-state-publisher-gui = "*"
+ros-jazzy-tf2-ros = "*"
+ros-jazzy-tf2-tools = "*"
+ros-jazzy-tf-transformations = "*"
+
+# --- Vision / transport / bridging --------------------------------------
+ros-jazzy-cv-bridge = "*"           # present but our ROS2Camera doesn't use it
+ros-jazzy-image-transport = "*"
 ros-jazzy-sensor-msgs = "*"
 ros-jazzy-sensor-msgs-py = "*"
 ros-jazzy-std-msgs = "*"
 ros-jazzy-geometry-msgs = "*"
-ros-jazzy-image-transport = "*"
-ros-jazzy-ros2cli = "*"            # ros2 topic pub/echo/list
-ros-jazzy-ros2topic = "*"          # `ros2 topic list/echo`
-ros-jazzy-rmw-cyclonedds-cpp = "*"  # macOS-friendly DDS, localhost-only config
 
-# Image I/O
+# --- Image I/O (for lerobot-side) ---------------------------------------
 opencv = "*"
 ffmpeg = "*"
-numpy = "<2"        # cv_bridge binary ABI is numpy 1.x
 pillow = "*"
+# numpy: left unpinned — lerobot upstream requires >=2.0; our ROS2Camera
+# decodes sensor_msgs/Image without cv_bridge so numpy 2 is fine.
 
-# After `pixi install`, run this inside the env to install lerobot:
-#   pixi run pip install -e /path/to/Exploring-VLAs/lerobot
-#   pixi run pip install "numpy<2" "datasets<4"
+# After `pixi install`, run this inside the env:
+#   pixi run pip install -e ../lerobot
 # (Path-based editable installs through pixi break because our repo path
-#  contains a space. So we leave lerobot to a manual pip step and pin
-#  the two packages it otherwise pulls to incompatible versions.)
+#  contains a space. So we leave lerobot to a manual pip step.)
+#
+# colcon-build the SO-ARM101 stack into mac-env/ws:
+#   cd mac-env && mkdir -p ws/src && cd ws/src && \
+#     ln -s ../../../vla_SO-ARM101/src/so_arm101_description . && \
+#     ln -s ../../../vla_SO-ARM101/src/so_arm101_moveit_config . && \
+#     ln -s ../../../vla_SO-ARM101/src/so_arm101_control . && \
+#     ln -s ../../../vla_SO-ARM101/src/jointstatereader .
+#   cd mac-env/ws && pixi run colcon build --symlink-install

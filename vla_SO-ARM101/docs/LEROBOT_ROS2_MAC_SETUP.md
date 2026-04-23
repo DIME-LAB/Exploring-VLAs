@@ -25,10 +25,12 @@ SO-ARM101 (sim or real)   →  ROS2 topics  →  lerobot-record  →  HF dataset
 | Submodule in `Exploring-VLAs/lerobot` | ✅ | remotes: `origin` = user fork, `yadunund`, `upstream` = huggingface/lerobot |
 | Rebase onto upstream main (Phase 1 — FOUND-01) | ✅ | `ros2-camera-on-main` branched off `upstream/main`, planning cherry-picked |
 | ROS2 camera ported to new layout (FOUND-02) | ✅ | `src/lerobot/cameras/ros2/` — matches zmq subpackage pattern |
-| Pixi env inside this repo (FOUND-03) | ✅ | `Exploring-VLAs/mac-env/` — Python 3.12 + ROS2 Jazzy + CycloneDDS + lerobot editable |
+| Pixi env inside this repo (FOUND-03) | ✅ | `Exploring-VLAs/mac-env/` (Python 3.12 + ROS2 Jazzy + Gazebo + MoveIt + CycloneDDS + lerobot editable). Env **installs at `/tmp/mac-env`** because RoboStack conda can't live at a spaced path — see bootstrap section below. |
 | L1 smoke on rebased tree | ✅ | 10 unique `(480, 640, 3) uint8` frames, connect <0.1s, `async_read(timeout_ms)` verified |
 | L2 smoke (v2.1 dataset) | ✅ | historical — was run on PR #866 branch; will re-run as v3 in Phase 4 |
-| URDF joint rename + top camera (Phase 2) | ☐ | |
+| Phase 2: top camera SDF + bridge (FOUND-04, OBS-03) | ✅ | `top_camera` sensor added to `so_arm101.gazebo.xacro`, bridge added to `gazebo.launch.py`. FOUND-04 was a no-op — URDF was already using HF-canonical joint names. |
+| Phase 2: runtime verification on Mac | ✅ | Live Gazebo published `/wrist_camera`, `/top_camera`, `/joint_states`, `/clock`, `/tf`, etc. RViz confirmed both camera feeds. User verified visually. |
+| Stack start/stop/restart/status scripts | ✅ | `mac-env/scripts/stack_*.sh` with 4 modes: `headless` / `gz` / `rviz` / `all` |
 | ROS2 Robot + Teleop BYOH plugins (Phase 3) | ☐ | |
 | `lerobot-record --mode sim` end-to-end (Phase 4) | ☐ | |
 | Pick-and-place + schema parity (Phase 5) | ☐ | |
@@ -76,55 +78,68 @@ below when written.
   cd ..
   ```
 
-### 2. Pixi env (inside Exploring-VLAs)
+### 2. Bootstrap — one command does the whole env
+
+RoboStack conda packages (shebangs, colcon's `local_setup.sh`) break when the
+env lives at a path with spaces — and our repo sits under `…/untitled folder/…`.
+Workaround: the pixi env is materialized at **`/tmp/mac-env`** (spaceless copy
+of the committed `mac-env/pixi.toml`), and the colcon workspace at
+**`/tmp/soarm-ws`** (symlinks to `vla_SO-ARM101/src/`). One script handles it:
 
 ```bash
-cd mac-env
-pixi install           # builds .pixi/envs/default (Python 3.12 + ROS2 Jazzy + CycloneDDS)
+bash mac-env/scripts/bootstrap.sh
 ```
 
-Key conda deps (see `mac-env/pixi.toml`):
+What `bootstrap.sh` does (first-time ~10–15 min; idempotent on re-run):
+1. Copy `pixi.toml` + `pixi.lock` + `cyclonedds.xml` to `/tmp/mac-env/`.
+2. `pixi install` → `/tmp/mac-env/.pixi/envs/default` (Python 3.12, ROS2 Jazzy desktop, Gazebo Harmonic, MoveIt, CycloneDDS, full toolchain).
+3. Create `/tmp/soarm-ws/src/` with symlinks to the four SO-ARM101 packages and `colcon build`.
+4. `pip install -e ../lerobot` into the pixi env (for Phase 4 recording).
+
+### 3. Key conda deps (reference — `mac-env/pixi.toml` is authoritative)
+
 - `python=3.12`, `opencv`, `ffmpeg`, `numpy` (let lerobot pin ≥2.0), `pillow`
-- `ros-jazzy-rclpy`, `ros-jazzy-sensor-msgs-py`, `ros-jazzy-std-msgs`, `ros-jazzy-geometry-msgs`
-- `ros-jazzy-ros2cli`, `ros-jazzy-ros2topic`
-- `ros-jazzy-rmw-cyclonedds-cpp` — FastDDS fails discovery on macOS
+- `ros-jazzy-desktop`, `ros-jazzy-ros-gz`, `ros-jazzy-gz-ros2-control`
+- `ros-jazzy-ros2-control`, `ros-jazzy-ros2-controllers`, `ros-jazzy-joint-trajectory-controller`, `ros-jazzy-joint-state-broadcaster`, `ros-jazzy-gripper-controllers`
+- `ros-jazzy-moveit` + `ros-jazzy-pilz-industrial-motion-planner`
+- `ros-jazzy-xacro`, `ros-jazzy-robot-state-publisher`, `ros-jazzy-tf2-*`
+- `ros-jazzy-rmw-cyclonedds-cpp` (FastDDS fails discovery on macOS)
+- `colcon-common-extensions`
 
-`cv_bridge` is intentionally **not required at runtime** — the ROS2 camera
-decodes `sensor_msgs/Image` with pure numpy (works under numpy ≥ 2.0 where
-cv_bridge's conda binaries break). The package can stay installed via
-`ros-jazzy-cv-bridge` but nothing in our code imports it.
+**Not on RoboStack osx-arm64 (known):** `ros-jazzy-pick-ik`. SO-ARM101's MoveIt
+config references it; we skip pick-ik and let MoveIt fall back — topic-level
+verification works without it. Source-build is a future task.
 
-### 3. Install the rebased lerobot fork editable
+**`cv_bridge` at runtime:** present via conda but not imported by our code.
+Our `ROS2Camera` decodes `sensor_msgs/Image` with pure numpy (works under
+numpy ≥ 2.0 where cv_bridge's conda binaries break).
 
-pixi + editable path fails when the repo path contains a space ("untitled
-folder"), so lerobot is installed via pip inside the pixi env:
+### 4. Running the stack
 
-```bash
-# From inside mac-env/
-pixi run pip install -e ../lerobot
-```
+All four scripts live in `mac-env/scripts/` and handle env vars, `/tmp` paths,
+and single-instance enforcement internally. Invoke from anywhere:
 
-Verify imports:
-```bash
-pixi run python -c "from lerobot.cameras.ros2 import ROS2Camera, ROS2CameraConfig; print('ok')"
-```
+| Script | What it does |
+|---|---|
+| `stack_start.sh [MODE]` | Launch ONE stack; refuses if anything's running. Mode: `headless` (default) · `gz` (Gazebo GUI) · `rviz` (RViz only) · `all` (both). Aliases: `record`→headless, `sim`→gz, `full`→all. |
+| `stack_stop.sh` | SIGINT the launch then SIGKILL stragglers by exact name. Never broad wildcards. |
+| `stack_restart.sh [MODE]` | `stack_stop.sh` then `stack_start.sh`, forwarding the mode. |
+| `stack_status.sh` | List running SO-ARM / Gazebo / smoke processes; exit code = process count. |
+| `verify_sim_topics.sh` | Launch headless, wait 45 s, assert `/wrist_camera` + `/top_camera` + `/joint_states` + `/clock` publish, then shut down. |
 
-Upstream main requires `numpy>=2.0` (for opencv-python-headless compatibility);
-we no longer need the `numpy<2` pin that PR #866 required.
-`datasets<4` is likewise no longer needed — upstream moved to `LeRobotDataset v3`
-and the pre-v3 `torch.stack(hf_dataset["timestamp"])` bug is gone.
+Log file: `/tmp/soarm_stack.log`. Pidfile: `/tmp/soarm_stack.pid`.
 
-### 4. Runtime env vars (required)
-
+Runtime env vars (set by the scripts; listed here for reference):
 ```bash
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-export CYCLONEDDS_URI="file://$PWD/cyclonedds.xml"     # from inside mac-env/
-export KMP_DUPLICATE_LIB_OK=TRUE                        # torch 2.10 + conda libomp co-exist
+export CYCLONEDDS_URI="file:///tmp/mac-env/cyclonedds.xml"
+export KMP_DUPLICATE_LIB_OK=TRUE                                # torch 2.10 + conda libomp co-exist
+export AMENT_PYTHON_EXECUTABLE=/tmp/mac-env/.pixi/envs/default/bin/python
 ```
 
-The `cyclonedds.xml` ships with the repo (`mac-env/cyclonedds.xml`) and restricts
-DDS discovery to `lo0`. Don't use FastDDS on macOS — discovery silently fails
-between separate Python processes.
+The `cyclonedds.xml` ships with the repo (`mac-env/cyclonedds.xml`, copied to
+`/tmp/mac-env/` by bootstrap) and restricts DDS discovery to `lo0`. Don't use
+FastDDS on macOS — discovery silently fails between separate Python processes.
 
 ---
 
@@ -240,5 +255,6 @@ Reference: `vla_SO-ARM101/README.md` and `vla_SO-ARM101/docs/AGENT_DEBUG_GUIDE.m
 
 ## Changelog
 
+- **2026-04-23 (late)** Phase 2 done. Top camera SDF sensor added to `so_arm101.gazebo.xacro`; `/top_camera` + `/top_camera/camera_info` bridges in `gazebo.launch.py`. FOUND-04 (URDF joint rename) was already canonical — no-op. Runtime verification on Mac: live Gazebo published all expected topics; cameras visible in RViz. Pixi env expanded to full sim stack (ros-jazzy-desktop + ros-gz + ros2-control + moveit). Env materialized at `/tmp/mac-env` to work around RoboStack's spaced-path issues. Stack `start/stop/restart/status/verify` scripts shipped in `mac-env/scripts/`. User's March 2026-era macOS compat fixes (`gz sim -s`/`-g` split, `GZ_SIM_SYSTEM_PLUGIN_PATH`, `controller_manager/spawner` instead of `ros2 control load_controller`, tkinter on main thread, joint acceleration limits) committed together as one commit.
 - **2026-04-23** Phase 1 done. Rebased fork onto upstream main (`ros2-camera-on-main` branch). ROS2 camera ported to `src/lerobot/cameras/ros2/` (new layout). Dropped `cv_bridge` runtime dependency in favor of pure-numpy `Image` decoding (numpy 2 compat). Pixi env moved inside repo at `mac-env/`. L1 smoke green on rebased tree.
 - **2026-04-22** Initial smoke-tests passing (L1, L2). Submodule, pixi env, CycloneDDS config, two smoke scripts committed. Fork = `inbarajaldrin/lerobot @ ros2_camera` (PR #866 snapshot).
