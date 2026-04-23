@@ -9,7 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/_lib.sh"
 
 ps aux | \
-  grep -iE "ros2 launch|gz sim|parameter_bridge|move_group|robot_state_publisher|control_gui|spawner|smoke_l|smoke_p" | \
+  grep -iE "ros2 launch|gz sim|parameter_bridge|move_group|robot_state_publisher|control_gui|rviz2|spawner|smoke_l|smoke_p" | \
   grep -v grep | \
   awk '{printf "%-7s %-8s %s %s %s\n", $2, $10, $11, $12, $13}'
 

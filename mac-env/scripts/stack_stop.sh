@@ -21,6 +21,7 @@ for pat in \
   "move_group" \
   "robot_state_publisher" \
   "control_gui" \
+  "rviz2" \
   "spawner.py" \
   "spawner " \
   "ros2 launch" \
@@ -40,9 +41,9 @@ rm -f "$STACK_PIDFILE"
 
 REMAIN=$(stack_running_count)
 if [ "$REMAIN" -eq 0 ]; then
-  echo "== [CLEAN] no SO-ARM101 / Gazebo / smoke processes running =="
+  echo "== [CLEAN] no SO-ARM101 / Gazebo / RViz / smoke processes running =="
 else
   echo "== [WARN] $REMAIN processes still running =="
-  ps aux | grep -iE "ros2 launch|gz sim|parameter_bridge|move_group|robot_state_publisher|control_gui|smoke_l|smoke_p" | \
+  ps aux | grep -iE "ros2 launch|gz sim|parameter_bridge|move_group|robot_state_publisher|control_gui|rviz2|smoke_l|smoke_p" | \
     grep -v grep | awk '{print "    pid=" $2, $11, $12}'
 fi

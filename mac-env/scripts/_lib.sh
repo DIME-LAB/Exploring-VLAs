@@ -44,6 +44,6 @@ stack_preflight() {
 # Count running SO-ARM101 / Gazebo / smoke-test processes.
 stack_running_count() {
   ps aux | \
-    grep -iE "ros2 launch|gz sim|parameter_bridge|move_group|robot_state_publisher|control_gui|smoke_l|smoke_p" | \
+    grep -iE "ros2 launch|gz sim|parameter_bridge|move_group|robot_state_publisher|control_gui|rviz2|smoke_l|smoke_p" | \
     grep -v grep | wc -l | tr -d ' '
 }
