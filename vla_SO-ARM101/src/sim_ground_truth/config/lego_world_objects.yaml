@@ -1,0 +1,34 @@
+# Object catalog for sim_ground_truth/ground_truth_publisher.
+#
+# `objects` — graspable-item catalog. Keys are Gazebo model names (match
+# `<model name="...">` in the world SDF). Values are physical bounding-box
+# dimensions in meters (sx, sy, sz = full extents). These match the
+# <box><size> tags in lego_world.sdf so control_gui gets the same numbers
+# it would see from aruco_camera_localizer on the real side.
+# Published as /objects_poses_sim (TFMessage) + /objects_bbox_sim (JSON).
+#
+# `drop_entities` — drop-pose link names. Match `<link name="...">` inside
+# the cup models in lego_world.sdf. Each listed link's world pose is
+# republished on /drop_poses (TFMessage) with child_frame_id = link name.
+# Mirrors isaac-sim-mcp@so-arm101 phase 01 convention (drop_red / drop_green
+# / drop_blue). No sizes here — the drop contract is pose-only, like
+# aruco_camera_localizer's publish_drop_poses on the real side.
+
+objects:
+  red_lego_2x4:
+    sx: 0.032
+    sy: 0.016
+    sz: 0.011
+  green_lego_2x3:
+    sx: 0.024
+    sy: 0.016
+    sz: 0.011
+  blue_lego_2x2:
+    sx: 0.016
+    sy: 0.016
+    sz: 0.011
+
+drop_entities:
+  - drop_red
+  - drop_green
+  - drop_blue

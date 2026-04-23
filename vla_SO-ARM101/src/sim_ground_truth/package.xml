@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>sim_ground_truth</name>
+  <version>0.0.0</version>
+  <description>Publishes Gazebo sim ground-truth object poses + bounding boxes on the same topic contract that aruco_camera_localizer uses on real hardware. control_gui sees identical data in sim and real, no branching.</description>
+  <maintainer email="aldrininbarajjunk@gmail.com">Aldrin Inbaraj</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>tf2_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <!-- gz.transport13 + gz.msgs10 come from RoboStack's ros-jazzy-ros-gz metapackage. -->
+  <exec_depend>ros_gz</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

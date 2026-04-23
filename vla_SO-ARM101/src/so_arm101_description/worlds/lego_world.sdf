@@ -173,6 +173,133 @@
       </link>
     </model>
 
+    <!--
+      Drop containers — colored cups for sim/real-parity grasp-and-drop work.
+      Mirrors isaac-sim-mcp@so-arm101 phase 01 naming (cup_red / cup_green /
+      cup_blue). Each cup is a static cylinder; the ArUco marker position
+      sits on the +X face at 45% of cup height, normal pointing radially
+      outward.
+
+      `drop_<color>` are published as **sibling top-level models** (not
+      child links) — Gazebo's Pose_V publishes child-link poses relative
+      to the parent model, but top-level models get absolute world poses.
+      Isaac Sim does the equivalent with wrapper Xform prims. The
+      sim_ground_truth publisher filters the gz.transport pose_v stream
+      on `drop_red/green/blue` and republishes on `/drop_poses` (TFMessage)
+      matching the contract aruco_camera_localizer uses on the real side.
+      Drop-height offset math (above rim, inward to cup center) stays in
+      the control package — identical contract sim and real share.
+
+      Marker world poses derived from cup pose + local offset:
+         cup_red   (0.18, -0.10, 0.025) + (+0.025, 0, -0.0025) = (0.205, -0.10, 0.0225)
+         cup_green (0.25, -0.10, 0.025) + (+0.025, 0, -0.0025) = (0.275, -0.10, 0.0225)
+         cup_blue  (0.32, -0.10, 0.025) + (+0.025, 0, -0.0025) = (0.345, -0.10, 0.0225)
+      rpy (0, pi/2, 0) on each drop_<color> rotates local +Z (marker normal)
+      to world +X.
+    -->
+
+    <!-- Red cup: 50mm dia, 50mm tall. -->
+    <model name="cup_red">
+      <static>true</static>
+      <pose>0.18 -0.10 0.025 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <cylinder>
+              <radius>0.025</radius>
+              <length>0.050</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <cylinder>
+              <radius>0.025</radius>
+              <length>0.050</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.9 0.1 0.1 1</ambient>
+            <diffuse>0.9 0.1 0.1 1</diffuse>
+            <specular>0.3 0.1 0.1 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="drop_red">
+      <static>true</static>
+      <pose>0.205 -0.10 0.0225 0 1.5708 0</pose>
+      <link name="link"/>
+    </model>
+
+    <!-- Green cup: 50mm dia, 50mm tall. -->
+    <model name="cup_green">
+      <static>true</static>
+      <pose>0.25 -0.10 0.025 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <cylinder>
+              <radius>0.025</radius>
+              <length>0.050</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <cylinder>
+              <radius>0.025</radius>
+              <length>0.050</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.1 0.8 0.1 1</ambient>
+            <diffuse>0.1 0.8 0.1 1</diffuse>
+            <specular>0.1 0.3 0.1 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="drop_green">
+      <static>true</static>
+      <pose>0.275 -0.10 0.0225 0 1.5708 0</pose>
+      <link name="link"/>
+    </model>
+
+    <!-- Blue cup: 50mm dia, 50mm tall. -->
+    <model name="cup_blue">
+      <static>true</static>
+      <pose>0.32 -0.10 0.025 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <cylinder>
+              <radius>0.025</radius>
+              <length>0.050</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <cylinder>
+              <radius>0.025</radius>
+              <length>0.050</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.1 0.1 0.9 1</ambient>
+            <diffuse>0.1 0.1 0.9 1</diffuse>
+            <specular>0.1 0.1 0.3 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="drop_blue">
+      <static>true</static>
+      <pose>0.345 -0.10 0.0225 0 1.5708 0</pose>
+      <link name="link"/>
+    </model>
+
     <!-- GUI (only used when not running headless) -->
     <gui fullscreen="0">
       <plugin filename="MinimalScene" name="3D View">
