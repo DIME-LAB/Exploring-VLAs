@@ -69,6 +69,8 @@ below when written.
 ## Setup from scratch on Mac (Apple Silicon)
 
 > **For the general ROS2-on-Mac bootstrap** (pixi install, RoboStack, CycloneDDS config, workspace layout, platform gotchas) see the project-agnostic [`ROS2_MAC_SETUP.md`](./ROS2_MAC_SETUP.md). The sections below cover lerobot-specific extras on top of that base.
+>
+> **Adapting this stack to a different arm?** See [`lerobot/ROS2_PLUGINS.md`](../../lerobot/ROS2_PLUGINS.md) for the two-tier plugin architecture (generic camera plugin vs per-arm Robot/Teleop plugin) and the step-by-step workflow for authoring a new `<arm>_ros2` plugin pair.
 
 ### 1. Prerequisites
 
