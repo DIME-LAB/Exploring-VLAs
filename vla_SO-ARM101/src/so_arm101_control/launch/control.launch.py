@@ -85,21 +85,21 @@ def generate_launch_description():
         Node(
             package='controller_manager',
             executable='spawner',
-            arguments=['joint_state_broadcaster'],
+            arguments=['joint_state_broadcaster', '--controller-manager-timeout', '60'],
             output='screen',
         ),
 
         Node(
             package='controller_manager',
             executable='spawner',
-            arguments=['arm_controller'],
+            arguments=['arm_controller', '--controller-manager-timeout', '60'],
             output='screen',
         ),
 
         Node(
             package='controller_manager',
             executable='spawner',
-            arguments=['gripper_controller'],
+            arguments=['gripper_controller', '--controller-manager-timeout', '60'],
             output='screen',
         ),
 
