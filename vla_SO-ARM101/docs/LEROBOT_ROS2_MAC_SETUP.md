@@ -32,8 +32,8 @@ SO-ARM101 (sim or real)   →  ROS2 topics  →  lerobot-record  →  HF dataset
 | Phase 2: runtime verification on Mac | ✅ | Live Gazebo published `/wrist_camera`, `/top_camera`, `/joint_states`, `/clock`, `/tf`, etc. RViz confirmed both camera feeds. User verified visually. |
 | Stack start/stop/restart/status scripts | ✅ | `mac-env/scripts/stack_*.sh` with 4 modes: `headless` / `gz` / `rviz` / `all` |
 | ROS2 Robot + Teleop BYOH plugins (Phase 3) | ✅ | `src/lerobot/robots/so101_ros2/` + `src/lerobot/teleoperators/so101_ros2/`. Dual-camera verified live: `/wrist_camera` + `/top_camera` both 640×480 rgb8 through the plugin, `/joint_states` @ 20 Hz with `gripper_joint → gripper` remap, arm tracks goals on `/arm_controller/joint_trajectory`. `mac-env/scripts/lerobot-record-mode.sh --mode sim\|real` shim in place. |
-| `lerobot-record --mode sim` end-to-end (Phase 4) | ☐ | |
-| Pick-and-place + schema parity (Phase 5) | ☐ | |
+| `lerobot-record --mode sim` end-to-end (Phase 4) | ✅ | Live record produces v3 datasets; `inbarajaldrin/so_arm101_sim_smoke_v0` pushed to Hub; 9-feature schema equality vs real target PASS; rerun integration live. |
+| Pick-and-place + schema parity (Phase 5) | ✅ | `verify_parity.py` in `.planning/checks/` (exits 0 on match, 1 on drift + readable diff). `inbarajaldrin/so_arm101_sim_base_yaw_v0` (3 episodes, 527 frames, action ±90° yaw sweep) verified against the real target — PASS. Full pick-and-place trajectory deferred to the Linux+IsaacSim side (Mac Gazebo lacks the necessary contact physics tuning for reliable grasp). |
 | Linux setup notes | ☐ | to be written when we move there |
 
 ---
@@ -208,6 +208,131 @@ Reload via `LeRobotDataset(...)` returns `sample[0]["observation.images.top"]` a
 > produced in Phase 4 using the `lerobot-record` CLI rather than this smoke
 > script. Keep this script as a reference for the feature-key contract, not as
 > the recording path.
+
+---
+
+## Record a dataset from scratch (end-to-end runbook)
+
+This is the canonical path a fresh user follows to go from a just-cloned repo to a recorded `LeRobotDataset v3` pushed to Hugging Face. Every command is copy-pasteable. If a step fails, the **Known gotchas** section below has the fix.
+
+### 0. Prerequisites (one time)
+
+```bash
+# Pixi on PATH
+export PATH="$HOME/.pixi/bin:$PATH"
+
+# Clone with submodules
+git clone <your-fork> Exploring-VLAs && cd Exploring-VLAs
+git submodule update --init --recursive
+
+# Bootstrap: materialize pixi env at /tmp/mac-env + build colcon ws at /tmp/soarm-ws
+# (one-time; ~10-15 min first run)
+bash mac-env/scripts/bootstrap.sh
+
+# CRITICAL: pin numpy<2 so controller spawners don't die on macOS Accelerate ILP64
+pixi run --manifest-path /tmp/mac-env/pixi.toml \
+  pip install --force-reinstall --no-deps 'numpy<2'
+
+# Install rerun (for --display_data=true live view + lerobot-dataset-viz replay)
+pixi run --manifest-path /tmp/mac-env/pixi.toml pip install rerun-sdk
+# If rerun install bumps numpy again, re-pin:
+pixi run --manifest-path /tmp/mac-env/pixi.toml \
+  pip install --force-reinstall --no-deps 'numpy<2'
+
+# HF write-scoped token (token is persisted to ~/.cache/huggingface/token, outside the repo)
+pixi run --manifest-path /tmp/mac-env/pixi.toml hf auth login
+```
+
+### 1. Start the sim stack
+
+```bash
+# Options: headless (no GUI), gz (Gazebo GUI), rviz, all
+bash mac-env/scripts/stack_start.sh headless
+
+# Verify all processes up — expect ~7 including gz sim, bridge, move_group,
+# control_gui, robot_state_publisher
+bash mac-env/scripts/stack_status.sh
+```
+
+**What to look for:** `control_gui` python process alive (it spawns after controllers — if it's missing, the controller chain is broken; check `/tmp/soarm_stack.log` for numpy import errors from the spawners).
+
+### 2. Start a motion driver
+
+Two options. Pick one.
+
+**Option A — interactive (human in the loop):** open the Gazebo GUI mode (`stack_start.sh gz`), click through the control_gui tkinter window, drive the arm by hand.
+
+**Option B — automated (reproducible, no human):** run the base-yaw sweep driver in a second terminal. It publishes to both `/arm_controller/joint_trajectory` (moves the arm) and `/joint_commands` (captured as `action` column).
+
+```bash
+export CYCLONEDDS_URI=file:///tmp/mac-env/cyclonedds.xml
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+pixi run --manifest-path /tmp/mac-env/pixi.toml \
+  python mac-env/scripts/drive_base_yaw_sweep.py
+# Leave running — Ctrl-C after recording.
+```
+
+### 3. Record the dataset
+
+In a third terminal:
+
+```bash
+bash mac-env/scripts/record_sim.sh \
+  --dataset.repo_id=<your-hf-user>/<dataset-name> \
+  --dataset.num_episodes=3 \
+  --dataset.episode_time_s=15 \
+  --dataset.single_task="Your task string here" \
+  --dataset.push_to_hub=true
+```
+
+`record_sim.sh` sets the CycloneDDS/RMW/KMP env, wires up both cameras (`/wrist_camera` + `/top_camera` @ 640×480), passes `--robot.robot_type=so_follower` (parity override — matches the real target dataset's `meta/info.json`), enables `use_degrees=true` (parity — real dataset stores joint positions in degrees), and enables `--display_data=true` for a live rerun viewer.
+
+Any flag you append overrides a default (e.g. `--display_data=false` to disable rerun).
+
+### 4. Stop the driver + stack
+
+```bash
+# Ctrl-C the driver (or kill by PID)
+bash mac-env/scripts/stack_stop.sh
+```
+
+### 5. Verify schema parity against the real target dataset
+
+```bash
+pixi run --manifest-path /tmp/mac-env/pixi.toml python \
+  lerobot/.planning/checks/verify_parity.py \
+  --ours   <your-hf-user>/<dataset-name> \
+  --target arjunsinghyadav2/blue_sort_black_bg_colored_cups_v1_440ep
+# Exit 0 = schema matches. Exit 1 = drift; readable diff printed.
+```
+
+Every feature key, dtype, shape, joint name, `codebase_version`, `fps`, and `robot_type` must match. The script does not compare task string, episode count, or pixel content — those legitimately differ.
+
+### 6. Replay / visualize the recorded dataset
+
+```bash
+pixi run --manifest-path /tmp/mac-env/pixi.toml \
+  lerobot-dataset-viz --repo-id=<your-hf-user>/<dataset-name> --episode-index=0
+```
+
+Rerun spawns with video panels for both cameras. **To see action/state plots:** in the rerun left panel, expand the `action` and `state` entries, right-click → "Add to new space view" → Time Series.
+
+### 7. Troubleshooting quick table
+
+| Symptom | Fix |
+|---|---|
+| `controller_manager: No clock received` spams the log; `/joint_states` at 0 Hz | Python spawners crashed on `import numpy` — pin `numpy<2` per step 0 and `stack_stop.sh && stack_start.sh` |
+| `--robot.type: invalid choice: 'so101_ros2'` | Wrong lerobot install path; make sure `lerobot/src/lerobot/scripts/lerobot_record.py` has `so101_ros2` in its import block |
+| `/wrist_camera` at 0 Hz (topic exists but no frames) | `so_arm101.gazebo.xacro` should attach the sensor to `usb_camera` (not `camera_link` — that's a geometry-less URDF convention frame); rebuild `so_arm101_description` |
+| `push_to_hub` 403 | Token lacks Write scope — regenerate at https://huggingface.co/settings/tokens, rerun `hf auth login` |
+| `verify_parity.py` FAIL on `action`/`observation.state` names | `use_degrees` or `joint_name_map` in plugin config got out of sync with the real dataset's naming; check `.planning/real_dataset_probe/PARITY_CONTRACT.md` |
+
+### Reference datasets produced by this runbook
+
+- `inbarajaldrin/so_arm101_sim_smoke_v0` — Phase 4 smoke (2 episodes, synthetic `/joint_commands`)
+- `inbarajaldrin/so_arm101_sim_base_yaw_v0` — Phase 5 motion test (3 episodes, automated base-yaw + gripper sweep)
+
+Both pass `verify_parity.py` against `arjunsinghyadav2/blue_sort_black_bg_colored_cups_v1_440ep`.
 
 ---
 
