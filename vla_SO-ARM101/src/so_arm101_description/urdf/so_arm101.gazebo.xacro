@@ -123,10 +123,16 @@
     </material>
   </gazebo>
 
-  <!-- Wrist camera sensor (Ignition Gazebo) -->
-  <gazebo reference="camera_link">
+  <!-- Wrist camera. Re-parented from `camera_link` to `usb_camera` because
+       Gazebo Harmonic's Ogre2 won't create a render context for a sensor on
+       a geometry-less link (camera_link is a bare ROS-convention frame — no
+       <visual>/<collision>). The URDF transform from usb_camera to
+       camera_link (xyz="0 0.0139 0" rpy="1.5708 0 1.5708") is folded into
+       this sensor's <pose>. `ignition_frame_id` stays `camera_link` so
+       downstream /wrist_camera Image messages carry the original frame_id. -->
+  <gazebo reference="usb_camera">
     <sensor name="wrist_camera" type="camera">
-      <pose>0 0 0 0 0 0</pose>
+      <pose>0 0.0139 0 1.5708 0 1.5708</pose>
       <always_on>1</always_on>
       <update_rate>30</update_rate>
       <visualize>true</visualize>
@@ -134,8 +140,11 @@
       <camera name="wrist_camera">
         <horizontal_fov>1.7453</horizontal_fov>
         <image>
-          <width>1280</width>
-          <height>720</height>
+          <!-- 640x480 matches the real RealSense wrist view and keeps macOS
+               Ogre2 render rate above 10 Hz. Raise to 1280x720 only if a
+               downstream recording needs it and you're OK with ~0.5 Hz. -->
+          <width>640</width>
+          <height>480</height>
           <format>R8G8B8</format>
         </image>
         <clip>
