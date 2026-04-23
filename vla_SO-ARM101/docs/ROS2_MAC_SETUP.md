@@ -133,15 +133,26 @@ On first access:
 
 ## The four repos (in this project)
 
-| Repo | Role |
-| --- | --- |
-| `vla_SO-ARM101/` | Robot description, Gazebo world, MoveIt config, `control_gui`, `jointstatereader`, `so_arm101_bringup`, `sim_ground_truth` |
-| `lerobot/` | The Hugging Face `lerobot` fork (rebased to upstream main) with our `so101_ros2` Robot + Teleop plugins |
-| `aruco_camera_localizer/` | Real-side object localization (ArUco/YOLO) — publishes `/objects_poses`, `/objects_bbox` consumed by `control_gui` |
-| `RoboSort/` | Mobile-robot side (JETANK) — separate product line, bootstrapped together for infra reuse |
+| Repo | Where it lives | How bootstrap gets it |
+| --- | --- | --- |
+| `vla_SO-ARM101/` | In-tree dir inside Exploring-VLAs | Included in the clone |
+| `lerobot/` | Git submodule of Exploring-VLAs | `git submodule update --init --recursive` |
+| `aruco_camera_localizer/` | External — cloned by `bootstrap.sh` to `/tmp/aruco_camera_localizer` | Cloned on `bash bootstrap.sh` |
+| `RoboSort/` | Separate product line; bring up independently if needed | Not part of this bootstrap |
+
+**Why aruco_camera_localizer is not a submodule:** git's submodule-add
+invokes an internal pack-index step that fails on macOS when the
+containing repo path has spaces (this project's parent dir
+`~/Documents/Projects/untitled folder/` is the typical culprit). Rather
+than fight it, `bootstrap.sh` clones the aruco repo to `/tmp` (spaceless)
+and symlinks it into the colcon workspace — same user-facing outcome,
+no submodule-internals failure. Override the branch or URL via
+`ARUCO_URL=... ARUCO_BRANCH=... bash bootstrap.sh`.
 
 The bootstrap symlinks every package under `/tmp/soarm-ws/src/`, so
-`colcon build` builds them all in one pass. Each repo keeps its own git
+`colcon build` builds them all in one pass (SO-ARM101 description +
+MoveIt + control_gui + jointstatereader + so_arm101_bringup +
+sim_ground_truth + aruco_camera_localizer). Each repo keeps its own git
 history.
 
 ## Quick sanity checks after bootstrap

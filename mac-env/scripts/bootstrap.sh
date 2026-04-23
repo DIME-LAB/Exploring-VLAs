@@ -16,12 +16,23 @@ MAC_ENV_SRC="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$MAC_ENV_SRC/.." && pwd)"
 VLA_SRC="$REPO_ROOT/vla_SO-ARM101/src"
 
+# aruco_camera_localizer is managed outside Exploring-VLAs (submodule-add
+# into a spaced path hits a known git pack-index bug on macOS). We clone
+# it into the spaceless /tmp side by URL below and symlink into the
+# workspace, keeping bootstrap self-contained without needing the user to
+# `git clone` manually.
+ARUCO_URL="${ARUCO_URL:-https://github.com/inbarajaldrin/aruco_camera_localizer.git}"
+ARUCO_BRANCH="${ARUCO_BRANCH:-robosort}"
+ARUCO_SRC="/tmp/aruco_camera_localizer"
+
 echo "== mac-env source:    $MAC_ENV_SRC"
 echo "== vla_SO-ARM101 src: $VLA_SRC"
+echo "== aruco_localizer:   $ARUCO_SRC (branch: $ARUCO_BRANCH)"
 
 if [ ! -d "$VLA_SRC/so_arm101_description" ]; then
   echo "ERROR: $VLA_SRC/so_arm101_description not found." >&2
   echo "       Are you running from Exploring-VLAs? Submodules initialized?" >&2
+  echo "       Try: git submodule update --init --recursive" >&2
   exit 1
 fi
 
@@ -39,15 +50,37 @@ export PATH="$HOME/.pixi/bin:$PATH"
 ( cd /tmp/mac-env && pixi install )
 
 echo ""
+echo "== 2b. clone aruco_camera_localizer to $ARUCO_SRC =="
+if [ ! -d "$ARUCO_SRC/aruco_camera_localizer" ]; then
+  git clone --depth 1 -b "$ARUCO_BRANCH" "$ARUCO_URL" "$ARUCO_SRC" || {
+    echo "WARN: aruco_camera_localizer clone failed. Real-hardware vision" >&2
+    echo "      won't build. Retry: git clone -b $ARUCO_BRANCH $ARUCO_URL $ARUCO_SRC" >&2
+  }
+else
+  ( cd "$ARUCO_SRC" && git pull --ff-only 2>&1 | tail -3 ) || echo "  (fetch skipped)"
+fi
+
+echo ""
 echo "== 3. set up colcon workspace at /tmp/soarm-ws =="
 mkdir -p /tmp/soarm-ws/src
 cd /tmp/soarm-ws/src
-for pkg in so_arm101_description so_arm101_moveit_config so_arm101_control jointstatereader; do
-  if [ ! -e "$pkg" ]; then
+
+# vla_SO-ARM101 packages (sim + real-hw bringup + sim ground truth).
+for pkg in so_arm101_description so_arm101_moveit_config so_arm101_control \
+           jointstatereader so_arm101_bringup sim_ground_truth; do
+  if [ -d "$VLA_SRC/$pkg" ] && [ ! -e "$pkg" ]; then
     ln -sf "$VLA_SRC/$pkg" .
     echo "  linked $pkg"
   fi
 done
+
+# aruco_camera_localizer (real-side vision — ArUco + YOLO pose detection).
+# Lives at the top level of Exploring-VLAs as a submodule.
+if [ -d "$ARUCO_SRC/aruco_camera_localizer" ] && [ ! -e "aruco_camera_localizer" ]; then
+  ln -sf "$ARUCO_SRC" aruco_camera_localizer
+  echo "  linked aruco_camera_localizer"
+fi
+
 cd /tmp/soarm-ws
 
 echo ""
