@@ -3131,6 +3131,27 @@ class SOArm101ControlGUI(Node):
 
         self._register_button(arm_col, text='Home', tab='Grasp', section='Arm',
                               command=self._cmd_grasp_home).pack(fill=tk.X, padx=5, pady=2)
+
+        # grasp_home velocity_scale override. 0.0 = no override (use the
+        # planning default); anything > 0 swaps velocity_scale_var for
+        # just the grasp_home plan, then restores. Lets the lag-vs-speed
+        # knob live in the GUI so it's tunable without ros2 param set.
+        # Mirrors home_velocity_scale ROS2 parameter via _cmd_apply_home_speed.
+        home_speed_row = tk.Frame(arm_col)
+        home_speed_row.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(home_speed_row, text='Home speed scale:',
+                 anchor='w').pack(side=tk.LEFT)
+        self._home_speed_var = tk.DoubleVar(value=0.0)
+        self._register_spinbox(home_speed_row, label='Home speed scale',
+                               tab='Grasp', section='Arm',
+                               textvariable=self._home_speed_var,
+                               from_=0.0, to=1.0, increment=0.05,
+                               format='%.2f', width=6).pack(side=tk.LEFT, padx=(5, 0))
+        self._register_button(home_speed_row, text='Apply', tab='Grasp',
+                              section='Arm',
+                              command=self._cmd_apply_home_speed).pack(
+                              side=tk.LEFT, padx=(5, 0))
+
         self._grasp_move_btn = self._register_button(
             arm_col, text='Move to Grab', tab='Grasp', section='Arm',
             command=self._cmd_grasp_move)
@@ -3776,22 +3797,6 @@ class SOArm101ControlGUI(Node):
                                from_=0, to=50, increment=5, width=5).pack(side=tk.LEFT, padx=(5, 0))
         self._register_button(pad_row, text='Apply', tab='RViz', section='Cups',
                               command=self._cmd_apply_collision_padding).pack(side=tk.LEFT, padx=(5, 0))
-
-        # grasp_home velocity_scale override. 0.0 = no override (use the
-        # planning default); anything > 0 swaps velocity_scale_var for
-        # just the grasp_home plan, then restores. Lets the lag-vs-speed
-        # knob live in the GUI so it's tunable without ros2 param set.
-        speed_row = tk.Frame(cup_frame)
-        speed_row.pack(fill=tk.X, padx=5, pady=2)
-        tk.Label(speed_row, text='Home speed scale:', anchor='w').pack(side=tk.LEFT)
-        self._home_speed_var = tk.DoubleVar(value=0.0)
-        self._register_spinbox(speed_row, label='Home speed scale',
-                               tab='RViz', section='Cups',
-                               textvariable=self._home_speed_var,
-                               from_=0.0, to=1.0, increment=0.05,
-                               format='%.2f', width=6).pack(side=tk.LEFT, padx=(5, 0))
-        self._register_button(speed_row, text='Apply', tab='RViz', section='Cups',
-                              command=self._cmd_apply_home_speed).pack(side=tk.LEFT, padx=(5, 0))
 
         # --- Planning ---
         plan_frame = ttk.LabelFrame(frame, text='Planning')
