@@ -3790,11 +3790,11 @@ class SOArm101ControlGUI(Node):
         pad_row = tk.Frame(cup_frame)
         pad_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(pad_row, text='Collision padding %:', anchor='w').pack(side=tk.LEFT)
-        self._collision_padding_var = tk.IntVar(value=0)
+        self._collision_padding_var = tk.IntVar(value=1)
         self._register_spinbox(pad_row, label='Collision padding %',
                                tab='RViz', section='Cups',
                                textvariable=self._collision_padding_var,
-                               from_=0, to=50, increment=5, width=5).pack(side=tk.LEFT, padx=(5, 0))
+                               from_=0, to=50, increment=1, width=5).pack(side=tk.LEFT, padx=(5, 0))
         self._register_button(pad_row, text='Apply', tab='RViz', section='Cups',
                               command=self._cmd_apply_collision_padding).pack(side=tk.LEFT, padx=(5, 0))
 
