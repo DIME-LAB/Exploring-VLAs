@@ -23,9 +23,18 @@ arm_controller:
       - wrist_roll
     command_interfaces:
       - position
+      - velocity
     state_interfaces:
       - position
       - velocity
+    # With both position + velocity command interfaces, JTC writes both
+    # per-tick from the planner's JointTrajectoryPoint.positions[] and
+    # .velocities[]. Isaac's action graph reads velocityCommand off
+    # /joint_states and writes it to UsdPhysics.DriveAPI.targetVelocity,
+    # giving the PhysX PD drive the feed-forward term that eliminates
+    # the B*v/K steady-state ramp lag (~0.9 deg wrist_flex lag measured
+    # pre-fix, causing ~2.5mm TCP tracking error during drop_sweep).
+    open_loop_control: false
 
 gripper_controller:
   ros__parameters:

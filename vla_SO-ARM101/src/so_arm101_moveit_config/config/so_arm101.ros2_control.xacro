@@ -11,6 +11,7 @@
             </hardware>
             <joint name="shoulder_pan">
                 <command_interface name="position"/>
+                <command_interface name="velocity"/>
                 <state_interface name="position">
                   <param name="initial_value">${initial_positions['shoulder_pan']}</param>
                 </state_interface>
@@ -18,6 +19,7 @@
             </joint>
             <joint name="shoulder_lift">
                 <command_interface name="position"/>
+                <command_interface name="velocity"/>
                 <state_interface name="position">
                   <param name="initial_value">${initial_positions['shoulder_lift']}</param>
                 </state_interface>
@@ -25,6 +27,7 @@
             </joint>
             <joint name="elbow_flex">
                 <command_interface name="position"/>
+                <command_interface name="velocity"/>
                 <state_interface name="position">
                   <param name="initial_value">${initial_positions['elbow_flex']}</param>
                 </state_interface>
@@ -32,6 +35,7 @@
             </joint>
             <joint name="wrist_flex">
                 <command_interface name="position"/>
+                <command_interface name="velocity"/>
                 <state_interface name="position">
                   <param name="initial_value">${initial_positions['wrist_flex']}</param>
                 </state_interface>
@@ -39,6 +43,7 @@
             </joint>
             <joint name="wrist_roll">
                 <command_interface name="position"/>
+                <command_interface name="velocity"/>
                 <state_interface name="position">
                   <param name="initial_value">${initial_positions['wrist_roll']}</param>
                 </state_interface>
@@ -46,6 +51,7 @@
             </joint>
             <joint name="gripper_joint">
                 <command_interface name="position"/>
+                <command_interface name="velocity"/>
                 <state_interface name="position">
                   <param name="initial_value">${initial_positions['gripper_joint']}</param>
                 </state_interface>
