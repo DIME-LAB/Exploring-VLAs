@@ -2377,6 +2377,36 @@ class SOArm101ControlGUI(Node):
         n_pts = len(robot_trajectory.joint_trajectory.points)
         self._append_log(f'Plan found ({pt:.3f}s), {n_pts} points')
 
+        # Mode B post-check — subsamples between waypoints for collisions
+        # OMPL's ~3.6°-spaced discrete check can miss. Same discipline the
+        # grasp path runs at _ompl_plan_validate_execute (line 5883).
+        # Without this, OMPL-validated trajectories can still clip cups at
+        # sub-segment states and get executed. Parity closed 2026-04-24.
+        chk = self._trajectory_first_invalid_with_contacts(
+            robot_trajectory.joint_trajectory)
+        if not chk.ok:
+            contact_summary = '; '.join(
+                f'{c.contact_body_1}↔{c.contact_body_2}(d={c.depth*1000:.1f}mm)'
+                for c in chk.contacts[:5]) or 'no contact info'
+            where = (f'wp[{chk.bad_wp}]' if chk.bad_subidx is None
+                     else f'wp[{chk.bad_wp}→{chk.bad_wp + 1}] sub-t={chk.sub_t:.2f}')
+            self._set_status(f'Plan rejected by Mode B: {where}')
+            self._append_log(
+                f'  Mode B rejected {where} '
+                f'({chk.n_wps} wps + {chk.n_sub} subs): {contact_summary}',
+                'warn')
+            self.root.after(0, lambda: self.execute_btn.config(state=tk.NORMAL))
+            self._last_motion_status = {
+                'ok': False, 'outcome': 'plan_mode_b_rejected',
+                'msg': f'Mode B rejected {where}: {contact_summary}',
+                'bad_wp': chk.bad_wp, 'bad_subidx': chk.bad_subidx,
+                'sub_t': chk.sub_t}
+            if on_complete:
+                on_complete.set()
+            return
+        self._append_log(
+            f'  Mode B validated ({chk.n_wps} wps + {chk.n_sub} subs clear)')
+
         # Display trajectory in RViz
         from moveit_msgs.msg import DisplayTrajectory
         display_msg = DisplayTrajectory()
@@ -3790,11 +3820,11 @@ class SOArm101ControlGUI(Node):
         pad_row = tk.Frame(cup_frame)
         pad_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(pad_row, text='Collision padding %:', anchor='w').pack(side=tk.LEFT)
-        self._collision_padding_var = tk.IntVar(value=1)
+        self._collision_padding_var = tk.IntVar(value=0)
         self._register_spinbox(pad_row, label='Collision padding %',
                                tab='RViz', section='Cups',
                                textvariable=self._collision_padding_var,
-                               from_=0, to=50, increment=1, width=5).pack(side=tk.LEFT, padx=(5, 0))
+                               from_=0, to=50, increment=5, width=5).pack(side=tk.LEFT, padx=(5, 0))
         self._register_button(pad_row, text='Apply', tab='RViz', section='Cups',
                               command=self._cmd_apply_collision_padding).pack(side=tk.LEFT, padx=(5, 0))
 
