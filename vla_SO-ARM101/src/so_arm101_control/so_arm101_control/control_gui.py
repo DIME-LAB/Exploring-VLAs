@@ -466,6 +466,7 @@ class SOArm101ControlGUI(Node):
         self.joint_lock = threading.Lock()
         # Actual robot state — always updated from /joint_states, never blocked
         self._actual_positions = {name: 0.0 for name in ALL_JOINT_NAMES}
+        self._actual_velocities = {name: 0.0 for name in ALL_JOINT_NAMES}
         self._initial_sync_done = False  # True after first /joint_states received
 
         # Track last sent arm positions
@@ -812,13 +813,18 @@ class SOArm101ControlGUI(Node):
     # ------------------------------------------------------------------
 
     def _build_arm_btn_row(self, parent, *, tab, reset_cmd):
-        """Build the `[Reset Arm] [Randomize]` button row into `parent`.
+        """Build the `[Reset Arm] [Reset Grasp Home] [Randomize]` button row.
 
         tab: 'FK' or 'IK' — used for dump_services tagging.
         reset_cmd: which command 'Reset Arm' invokes (different on FK vs IK).
         """
         self._register_button(parent, text='Reset Arm', tab=tab, section='Arm',
                               command=reset_cmd).pack(side=tk.LEFT, padx=5)
+        if tab == 'FK':
+            self._register_button(parent, text='Reset Grasp Home', tab=tab,
+                                  section='Arm',
+                                  command=self._cmd_reset_grasp_home).pack(
+                side=tk.LEFT, padx=5)
         randomize_cmd = (self._cmd_randomize_arm if tab == 'FK'
                          else self._cmd_ik_randomize)
         self._register_button(parent, text='Randomize', tab=tab, section='Arm',
@@ -1761,6 +1767,13 @@ class SOArm101ControlGUI(Node):
             for i, name in enumerate(msg.name):
                 if name in self._actual_positions and i < len(msg.position):
                     self._actual_positions[name] = msg.position[i]
+            # Velocities — used by _wait_arm_at_rest() to synchronize
+            # TF+block-pose reads at attach-time (avoids Layer-B-lag
+            # baked into AttachedCollisionObject.mesh_poses[0]).
+            if msg.velocity:
+                for i, name in enumerate(msg.name):
+                    if i < len(msg.velocity):
+                        self._actual_velocities[name] = msg.velocity[i]
         # On first message, seed joint_positions from actual robot state
         if not self._initial_sync_done:
             self._initial_sync_done = True
@@ -2002,6 +2015,29 @@ class SOArm101ControlGUI(Node):
         self._publish_goal_state()
         self.status_var.set('Arm zeroed')
 
+    def _cmd_reset_grasp_home(self):
+        """Set slider targets to the grasp-home pose (gripper pointing down).
+
+        Mirrors _cmd_zero_arm: sets joint_positions + sliders + goal state,
+        but with the grasp_home config instead of zeros. Does NOT execute
+        motion — only stages the target (same discipline as Reset Arm).
+        """
+        from so_arm101_control.compute_workspace import WRIST_ROLL_URDF_PITCH
+        target = {name: 0.0 for name in ARM_JOINT_NAMES}
+        target['wrist_flex'] = math.pi / 2
+        target['wrist_roll'] = -math.pi / 2 + WRIST_ROLL_URDF_PITCH
+        self._slider_driven = True
+        self._select_planning_group('arm')
+        with self.joint_lock:
+            for name in ARM_JOINT_NAMES:
+                self.joint_positions[name] = target[name]
+        for name in ARM_JOINT_NAMES:
+            if name in self.sliders:
+                self.sliders[name].set(target[name])
+                self.slider_labels[name].config(text=f'{target[name]:.3f}')
+        self._publish_goal_state()
+        self.status_var.set('Grasp home target staged')
+
     def _cmd_gripper_zero(self):
         """Reset gripper to zero (closed)."""
         self._gripper_command(0.0)
@@ -2218,6 +2254,17 @@ class SOArm101ControlGUI(Node):
             if on_complete:
                 on_complete.set()
             return
+
+        # If a lego is attached, re-snap its tcp_link-local pose from Isaac's
+        # current /objects_poses_sim reading. Arm should be at rest here (any
+        # previous motion has completed), so the re-seat happens on synchronized
+        # TF+pose streams — no Layer-B-lag baked in. Fixes the "attached lego
+        # offset from gripper" RViz visualization bug.
+        if getattr(self, '_attached_lego_name', None):
+            try:
+                self._refresh_attached_pose()
+            except Exception as exc:
+                self._append_log(f'refresh_attached_pose failed: {exc}', 'warn')
 
         self.root.after(0, lambda: self.execute_btn.config(state=tk.DISABLED))
         self._set_status('Planning...')
@@ -2999,7 +3046,7 @@ class SOArm101ControlGUI(Node):
             side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
         self._register_button(topic_row, text='Update Topic', tab='Grasp', section='Topic',
                               command=self._cmd_grasp_update_topic).pack(side=tk.RIGHT, padx=(2, 0))
-        self._register_button(topic_row, text='Refresh', tab='Grasp', section='Topic',
+        self._register_button(topic_row, text='Refresh Objects', tab='Grasp', section='Topic',
                               command=self._cmd_grasp_refresh).pack(side=tk.RIGHT, padx=(2, 0))
 
         opts_row = tk.Frame(topic_frame)
@@ -3176,7 +3223,7 @@ class SOArm101ControlGUI(Node):
             side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
         self._register_button(drop_topic_row, text='Update Drop Topic', tab='Grasp', section='Drop Source',
                               command=self._drop_btn_update_topic).pack(side=tk.RIGHT, padx=(2, 0))
-        self._register_button(drop_topic_row, text='Refresh', tab='Grasp', section='Drop Source',
+        self._register_button(drop_topic_row, text='Refresh Drops', tab='Grasp', section='Drop Source',
                               command=self._cmd_drop_refresh).pack(side=tk.RIGHT, padx=(2, 0))
 
         drop_list_frame = ttk.LabelFrame(frame, text='Drop Targets')
@@ -4471,8 +4518,9 @@ class SOArm101ControlGUI(Node):
     def _drop_callback(self, msg):
         """Populate _drop_data from /drop_poses TFMessage.
 
-        If _cmd_drop_refresh is waiting on a fresh-data event, signal it
-        once the incoming message has been stored.
+        Cache-only. _cmd_drop_refresh republishes visuals and collisions
+        on a fixed time delay (matching _cmd_grasp_refresh); no event
+        signaling happens here.
         """
         with self._drop_lock:
             for tf in msg.transforms:
@@ -4486,10 +4534,6 @@ class SOArm101ControlGUI(Node):
                     'qz': tf.transform.rotation.z,
                     'qw': tf.transform.rotation.w,
                 }
-        # Cup collision objects updated on manual refresh (_cmd_drop_refresh).
-        evt = getattr(self, '_drop_refresh_event', None)
-        if evt is not None and not evt.is_set():
-            evt.set()
 
     def _update_drop_topic(self, topic='/drop_poses'):
         """Switch drop subscription to topic."""
@@ -4968,6 +5012,38 @@ class SOArm101ControlGUI(Node):
 
         threading.Thread(target=_apply, daemon=True).start()
 
+    def _wait_arm_at_rest(self, timeout_sec=1.5, vel_threshold_rad_s=0.02,
+                           dwell_sec=0.15):
+        """Block until all arm joint velocities are below threshold for
+        dwell_sec continuous time. Returns True if settled, False on timeout.
+
+        Purpose: synchronize the TF and /objects_poses_sim streams before
+        reading them in _attach_lego_to_gripper / _refresh_attached_pose.
+        When the arm is moving, Layer-B lag (documented in
+        isaac-sim-mcp/docs/DEBUG-GUIDE.md § 4) makes /joint_states-derived
+        TF disagree with Isaac physics' object poses — baking a 10-50 mm
+        offset into the attached lego's mesh_poses[0] that then looks like
+        the block hovering offset from the gripper in RViz. Waiting for
+        zero-velocity eliminates the mismatch.
+        """
+        import time
+        t0 = time.time()
+        settled_since = None
+        while time.time() - t0 < timeout_sec:
+            with self.joint_lock:
+                velocities = [abs(self._actual_velocities.get(n, 0.0))
+                              for n in ARM_JOINT_NAMES]
+            max_vel = max(velocities) if velocities else 0.0
+            if max_vel < vel_threshold_rad_s:
+                if settled_since is None:
+                    settled_since = time.time()
+                elif time.time() - settled_since >= dwell_sec:
+                    return True
+            else:
+                settled_since = None
+            time.sleep(0.02)
+        return False
+
     def _attach_lego_to_gripper(self, obj_name):
         """On successful grasp close, convert world CO → AttachedCollisionObject.
 
@@ -4983,6 +5059,15 @@ class SOArm101ControlGUI(Node):
         if not bbox:
             self._append_log(f'Attach skipped: no bbox for {obj_name}', 'warn')
             return False
+        # Wait for arm to settle so TF (from /joint_states) and block pose
+        # (from /objects_poses_sim) reflect the same static state — prevents
+        # Layer-B-lag from baking a visible offset into the attached
+        # collision object (see _wait_arm_at_rest docstring).
+        settled = self._wait_arm_at_rest(timeout_sec=1.5)
+        if not settled:
+            self._append_log(
+                'Attach: arm still moving after 1.5s wait — offset may be '
+                'inaccurate', 'warn')
         with self.objects_lock:
             block = dict(self.objects_data.get(obj_name, {}))
         if not block:
@@ -5114,6 +5199,10 @@ class SOArm101ControlGUI(Node):
             if not _apply_scene(add_scene, 'attach_lego'):
                 self._attached_lego_name = prev_attached
                 return
+            self._append_log(
+                f'Attach OK: {obj_name} → tcp_link at '
+                f'({ax*1000:+.1f}, {ay*1000:+.1f}, {az*1000:+.1f}) mm '
+                f'(magnitude {dist_mm:.1f} mm)', 'info')
 
             # A freshly-grasped object inherits the table-level pose from
             # which it was picked up — its bottom face is at z=0, touching
@@ -5182,6 +5271,11 @@ class SOArm101ControlGUI(Node):
         bbox = self.objects_bbox.get(obj_name)
         if not bbox:
             return False
+        # Synchronize TF and block pose streams — same rationale as
+        # _attach_lego_to_gripper. If arm still has residual velocity,
+        # refresh produces an offset-biased pose identical to the original
+        # attach bug we're fixing.
+        self._wait_arm_at_rest(timeout_sec=0.8)
         with self.objects_lock:
             block = dict(self.objects_data.get(obj_name, {}))
         if not block:
@@ -6262,60 +6356,27 @@ class SOArm101ControlGUI(Node):
         self._update_drop_topic(topic)
 
     def _cmd_drop_refresh(self):
-        """Refresh drop listbox + cup collision objects + visual markers from
-        a FRESH /drop_poses message.
+        """Resync cup state from /drop_poses. Mirrors _cmd_grasp_refresh:
+        remove current collision objects, schedule repopulate + re-add +
+        marker republish at fixed delays. Never clears _drop_data — the
+        /drop_poses subscription refills it at ~12 Hz so ≥6 messages have
+        arrived by the 500 ms scheduled read.
 
-        Sequence-against-fresh-data pattern (Phase 7 Plan 07-02 / D-06):
-          1. Snapshot current cup names (stale_names).
-          2. Remove those cups' collision objects + delete their markers.
-          3. Invalidate _drop_data, arm _drop_refresh_event.
-          4. Wait on a background thread for the next /drop_poses message
-             (up to 2.0s — _drop_callback sets the event when it arrives).
-          5. On fresh data: re-add collisions + publish markers atomically.
-          6. On timeout: log + leave scene empty (user sees the truth).
-
-        Replaces the old root.after(500/600/700) chain.
+        Previously used a threading.Event + 2 s timeout pattern which
+        silently left stale latched markers in RViz when /drop_poses had
+        a brief gap (publisher restart, live-sync action graph re-init).
+        Reverted to time-delay symmetry with grasp_refresh for robustness.
         """
-        # Snapshot cups that existed before the refresh
-        with self._drop_lock:
-            stale_names = list(self._drop_data.keys())
-
-        # Remove old collisions + markers so the scene is clean during wait
+        if not hasattr(self, '_drop_listbox'):
+            return
+        if tracer.is_active():
+            tracer.close_cycle('user_canceled',
+                               note='drop_refresh while cycle open')
         self._remove_cup_collision_objects()
-        if getattr(self, '_cup_visual_pub', None) is not None and stale_names:
-            ma = MarkerArray()
-            for i in range(len(stale_names)):
-                m = VisMarker()
-                m.header.frame_id = 'base'
-                m.ns = 'cup_visual'
-                m.id = i
-                m.action = VisMarker.DELETE
-                ma.markers.append(m)
-            self._cup_visual_pub.publish(ma)
-
-        # Arm the fresh-data event and invalidate _drop_data
-        with self._drop_lock:
-            self._drop_data.clear()
-        self._drop_refresh_event = threading.Event()
-
-        # Update the listbox to empty immediately
-        self.root.after(0, self._populate_drop_list)
-
-        def _wait_and_publish():
-            evt = self._drop_refresh_event
-            got_fresh = evt.wait(timeout=2.0) if evt is not None else False
-            if not got_fresh:
-                self._append_log(
-                    'Drop refresh: no /drop_poses message within 2.0s — '
-                    'topic may be down', 'warn')
-                self._drop_refresh_event = None
-                return
-            self._add_cup_collision_objects()
-            self._publish_cup_visual_markers()
-            self.root.after(0, self._populate_drop_list)
-            self._drop_refresh_event = None
-
-        threading.Thread(target=_wait_and_publish, daemon=True).start()
+        if getattr(self, '_gui_ready', False):
+            self.root.after(500, self._populate_drop_list)
+            self.root.after(700, self._add_cup_collision_objects)
+            self.root.after(900, self._refresh_display_markers)
 
     def _cmd_drop_select(self):
         """Select a drop target by name (via ik_target param).
