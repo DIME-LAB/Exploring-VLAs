@@ -603,6 +603,11 @@ class SOArm101ControlGUI(Node):
         self.declare_parameter('jaw_open_clearance_mm', JAW_OPEN_CLEARANCE_M * 1000)
         self.declare_parameter('jaw_close_clearance_mm', JAW_CLOSE_CLEARANCE_M * 1000)
         self.declare_parameter('tcp_clearance_mm', TCP_CLEARANCE_M * 1000)
+        # Velocity scale override for _cmd_grasp_home only. When > 0,
+        # replaces self.velocity_scale_var for this motion's plan. 0 =
+        # no override (use the Tk default). Tunable live via ros2 param
+        # set so speed-vs-lag experiments can be driven without rebuilds.
+        self.declare_parameter('home_velocity_scale', 0.0)
         # Parameters for widget registry services (~/get_widget_value, ~/set_widget_value)
         self.declare_parameter('widget_id', '')
         self.declare_parameter('widget_value', '')
@@ -3772,6 +3777,22 @@ class SOArm101ControlGUI(Node):
         self._register_button(pad_row, text='Apply', tab='RViz', section='Cups',
                               command=self._cmd_apply_collision_padding).pack(side=tk.LEFT, padx=(5, 0))
 
+        # grasp_home velocity_scale override. 0.0 = no override (use the
+        # planning default); anything > 0 swaps velocity_scale_var for
+        # just the grasp_home plan, then restores. Lets the lag-vs-speed
+        # knob live in the GUI so it's tunable without ros2 param set.
+        speed_row = tk.Frame(cup_frame)
+        speed_row.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(speed_row, text='Home speed scale:', anchor='w').pack(side=tk.LEFT)
+        self._home_speed_var = tk.DoubleVar(value=0.0)
+        self._register_spinbox(speed_row, label='Home speed scale',
+                               tab='RViz', section='Cups',
+                               textvariable=self._home_speed_var,
+                               from_=0.0, to=1.0, increment=0.05,
+                               format='%.2f', width=6).pack(side=tk.LEFT, padx=(5, 0))
+        self._register_button(speed_row, text='Apply', tab='RViz', section='Cups',
+                              command=self._cmd_apply_home_speed).pack(side=tk.LEFT, padx=(5, 0))
+
         # --- Planning ---
         plan_frame = ttk.LabelFrame(frame, text='Planning')
         plan_frame.pack(fill=tk.X, padx=10, pady=5)
@@ -5507,6 +5528,18 @@ class SOArm101ControlGUI(Node):
         self._add_cup_collision_objects()
         self.root.after(300, self._refresh_display_markers)
 
+    def _cmd_apply_home_speed(self):
+        """Sync _home_speed_var into the home_velocity_scale ROS2 param so
+        _cmd_grasp_home picks it up on the next motion. 0.0 = no override
+        (use the planning default velocity_scale_var); values in (0, 1.0]
+        override velocity_scale for the grasp_home plan only.
+        """
+        from rclpy.parameter import Parameter as RclParam
+        v = float(self._home_speed_var.get())
+        self.set_parameters([RclParam('home_velocity_scale', RclParam.Type.DOUBLE, v)])
+        label = 'no override' if v <= 0.0 else f'{v:.2f}'
+        self._append_log(f'Home speed scale: {label}')
+
     def _refresh_display_markers(self):
         """Republish visual markers based on current toggle state."""
         if getattr(self, '_show_visual_var', None) and self._show_visual_var.get():
@@ -5639,10 +5672,22 @@ class SOArm101ControlGUI(Node):
                 tracer.close_cycle('completed')
                 self._cycle_detach_seen = False
         threading.Thread(target=_emit_home_done, daemon=True).start()
-        # tier1 joint-space interpolation with per-waypoint validity check
-        # (51 wps, 2% resolution) + OMPL fallback if direct path collides.
+        # Speed override: if home_velocity_scale param > 0, temporarily
+        # swap velocity_scale_var for this motion's plan, then restore.
+        # Lets the speed-vs-lag experiment sweep grasp_home speed live
+        # via `ros2 param set` without affecting other motions.
+        hvs = float(self.get_parameter('home_velocity_scale').value)
+        saved_vs = None
+        if hvs > 0.0 and hasattr(self, 'velocity_scale_var'):
+            saved_vs = self.velocity_scale_var.get()
+            self.velocity_scale_var.set(hvs)
+            self._append_log(f'  velocity_scale override: {hvs:.2f} (was {saved_vs:.2f})')
+
         self._joint_space_collision_free_execute(
             target, on_complete_event=evt, duration_s=3.0)
+
+        if saved_vs is not None:
+            self.velocity_scale_var.set(saved_vs)
 
     def _joint_space_collision_free_execute(self, target, on_complete_event,
                                              duration_s=3.0, waypoints=50):
