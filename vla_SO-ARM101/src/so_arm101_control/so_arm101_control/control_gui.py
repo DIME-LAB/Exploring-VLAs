@@ -169,7 +169,9 @@ CUP_BODY_HEIGHT_M = 0.0965
 # at close-in grasp positions, but the lego-in-cup scene filter + sync
 # detach + one-shot OMPL together are now the primary correctness levers;
 # padding returns to its original safety-margin role.
-_CUP_COLLISION_PADDING = 1.0  # real cup geometry — MoveIt 2.5.9 honest collision
+_CUP_COLLISION_PADDING = 1.05  # 5% default pad — absorbs the multi-mm
+# tracking-lag-induced overshoot during fast pan motions (e.g. post-drop
+# grasp_home sweeps 107° at 36°/s, which exceeded the 1% margin in testing).
 
 
 def _load_cup_mesh():
@@ -541,6 +543,13 @@ class SOArm101ControlGUI(Node):
         # holds the name currently held by the gripper (or None when table-bound).
         self._lego_collision_names = []
         self._attached_lego_name = None
+        # Measured attach offset in tcp_link frame, in meters (ax, ay, az).
+        # Populated by _attach_lego_to_gripper from the physical grasp result;
+        # used by _cmd_drop_sweep to compute the gap→tcp shift from the
+        # actual block-in-tcp pose rather than the theoretical half_gap. Lets
+        # off-center grasps drop cleanly instead of relying on OMPL to find a
+        # tortuous path around the 1-3 mm cup-wall clip.
+        self._attached_lego_tcp_offset = None
         # MoveIt 2.5.9 correctly reports AttachedCollisionObject ↔ world
         # CollisionObject collisions (the 2.5.8 skip-bug that required the
         # 10 Hz held-lego world-pose tracker is gone — verified via
@@ -2165,7 +2174,8 @@ class SOArm101ControlGUI(Node):
     # ------------------------------------------------------------------
 
     def _plan_collision_free_execute(self, x, y, z, grip_angle,
-                                            wrist_roll, on_complete=None):
+                                            wrist_roll, on_complete=None,
+                                            lock_pan=None, duration_s=3.0):
         """Solve geometric IK, then plan a collision-free path via MoveIt.
 
         Full pipeline: geometric_ik → collision check on solutions →
@@ -2177,6 +2187,14 @@ class SOArm101ControlGUI(Node):
                 0 = horizontal, π/4 = 45° down, π/2 = straight down.
             wrist_roll: fixed wrist_roll angle (radians).
             on_complete: optional threading.Event to set when done.
+            lock_pan: optional shoulder_pan value (radians) to overwrite in
+                the chosen IK solution before dispatch. Used by drop_sweep
+                to keep the base joint at drop_point's pan — geometric IK
+                on the half_gap-shifted tcp_target gives a slightly
+                different pan than the cup-center pan drop_point used,
+                producing a visible ~1° base yaw during the sweep that has
+                no physical justification. Mirrors the "single yaw across
+                stages" pattern in find_reachable_grasp_yaw (line 7212).
         Returns immediately; execution is async.
         """
         from so_arm101_control.compute_workspace import geometric_ik
@@ -2189,6 +2207,13 @@ class SOArm101ControlGUI(Node):
         if not solutions:
             self._append_log(
                 f'IK: no solution for ({x:.3f}, {y:.3f}, {z:.3f})', 'warn')
+            # Write status BEFORE on_complete.set() so QS runner's
+            # _qs_wait_for_step sees the failure verdict (not a stale None
+            # that reads as success).
+            self._last_motion_status = {
+                'ok': False, 'outcome': 'ik_no_solution',
+                'msg': (f'geometric IK returned no solutions for '
+                        f'({x:.3f}, {y:.3f}, {z:.3f})')}
             if on_complete:
                 on_complete.set()
             return
@@ -2205,9 +2230,36 @@ class SOArm101ControlGUI(Node):
 
         if chosen is None:
             self._append_log('IK: all solutions collide', 'warn')
+            self._last_motion_status = {
+                'ok': False, 'outcome': 'ik_all_collide',
+                'msg': 'all geometric IK solutions collided with scene'}
             if on_complete:
                 on_complete.set()
             return
+
+        # Optional pan-lock: overwrite the IK-chosen shoulder_pan with the
+        # caller-provided value. drop_sweep uses this to suppress the
+        # visible base yaw caused by IK solving on the shifted tcp_target
+        # vs. drop_point's cup-center pan. Re-validate with locked pan
+        # since the small angular difference can move the gripper into
+        # a new collision (rare but possible \u2014 surface as ik_pan_lock_collide).
+        if lock_pan is not None:
+            ik_pan = chosen['shoulder_pan']
+            chosen['shoulder_pan'] = float(lock_pan)
+            delta_deg = math.degrees(lock_pan - ik_pan)
+            self._append_log(
+                f'  pan-lock: {math.degrees(ik_pan):+.2f}\u00b0 \u2192 '
+                f'{math.degrees(lock_pan):+.2f}\u00b0 (\u0394{delta_deg:+.2f}\u00b0)')
+            if not self._check_state_valid(chosen):
+                self._append_log(
+                    'IK: pan-locked solution collides', 'warn')
+                self._last_motion_status = {
+                    'ok': False, 'outcome': 'ik_pan_lock_collide',
+                    'msg': (f'pan-locked IK solution at '
+                            f'{math.degrees(lock_pan):.1f}\u00b0 collides')}
+                if on_complete:
+                    on_complete.set()
+                return
 
         self._append_log(
             f'IK target: pan={math.degrees(chosen["shoulder_pan"]):.1f}\u00b0 '
@@ -2222,7 +2274,7 @@ class SOArm101ControlGUI(Node):
         if on_complete is None:
             on_complete = threading.Event()
         self._joint_space_collision_free_execute(
-            chosen, on_complete_event=on_complete, duration_s=3.0)
+            chosen, on_complete_event=on_complete, duration_s=duration_s)
 
     # ------------------------------------------------------------------
     # FK tab Plan & Execute (MoveIt collision-aware path planning)
@@ -2859,7 +2911,7 @@ class SOArm101ControlGUI(Node):
         self._jaw_open_clearance_var.set(state.get('jaw_open_clearance', 5.0))
         self._jaw_close_clearance_var.set(state.get('jaw_close_clearance', 0.0))
         self._tcp_clearance_var.set(state.get('tcp_clearance', 1.0))
-        self._drop_hover_above_rim_var.set(state.get('drop_hover_above_rim', 0.030))
+        self._drop_hover_above_rim_var.set(state.get('drop_hover_above_rim', 0.050))
 
         # Repopulate listbox from current objects_data
         self._populate_object_list()
@@ -3297,7 +3349,10 @@ class SOArm101ControlGUI(Node):
         drop_dur_row = tk.Frame(drop_frame)
         drop_dur_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(drop_dur_row, text='Sweep duration (s):', anchor='w').pack(side=tk.LEFT)
-        self._drop_duration_var = tk.DoubleVar(value=5.0)
+        # 3.0 s default matches grasp_home / grasp_move / drop_point —
+        # gives the controller time to track the wrist_flex sweep without
+        # accumulating the multi-degree lag that bites at higher rates.
+        self._drop_duration_var = tk.DoubleVar(value=3.0)
         self._register_spinbox(drop_dur_row, label='Sweep Duration (s)',
                                tab='Grasp', section='Drop',
                                textvariable=self._drop_duration_var,
@@ -3313,7 +3368,13 @@ class SOArm101ControlGUI(Node):
         drop_hover_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(drop_hover_row, text='Hover above rim (m):',
                  anchor='w').pack(side=tk.LEFT)
-        self._drop_hover_above_rim_var = tk.DoubleVar(value=0.030)
+        # Default 50 mm: gives the attached block's bounding box clearance
+        # above the cup rim during the wrist_flex sweep (90°→45°). At 30 mm,
+        # the block swept arc clipped cup walls at 1-3 mm; OMPL used to
+        # paper over this with tortuous paths, deterministic planner
+        # surfaces it honestly. User-tunable if a specific lego/cup combo
+        # needs more/less clearance.
+        self._drop_hover_above_rim_var = tk.DoubleVar(value=0.050)
         self._register_spinbox(drop_hover_row, label='Hover Above Rim (m)',
                                tab='Grasp', section='Drop',
                                textvariable=self._drop_hover_above_rim_var,
@@ -3820,7 +3881,11 @@ class SOArm101ControlGUI(Node):
         pad_row = tk.Frame(cup_frame)
         pad_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(pad_row, text='Collision padding %:', anchor='w').pack(side=tk.LEFT)
-        self._collision_padding_var = tk.IntVar(value=0)
+        # 5% default — matches the global _CUP_COLLISION_PADDING=1.05.
+        # Absorbs the multi-mm tracking-lag overshoot during fast pan
+        # motions (post-drop grasp_home, etc). 1% wasn't enough; 5%
+        # confirmed clean by user in repeated cycles.
+        self._collision_padding_var = tk.IntVar(value=5)
         self._register_spinbox(pad_row, label='Collision padding %',
                                tab='RViz', section='Cups',
                                textvariable=self._collision_padding_var,
@@ -5251,9 +5316,16 @@ class SOArm101ControlGUI(Node):
             # /objects_poses_sim → _add_lego_collision_objects hop doesn't
             # re-add the world copy underneath us. Rolled back on failure.
             prev_attached = self._attached_lego_name
+            prev_offset = self._attached_lego_tcp_offset
             self._attached_lego_name = obj_name
+            # Snapshot physical grasp offset in tcp_link frame. drop_sweep
+            # reads this to place the block center at the cup target, not
+            # tcp_link — the 1-2 mm delta between measured |ax| and the
+            # theoretical half_gap is exactly what OMPL used to flail on.
+            self._attached_lego_tcp_offset = (float(ax), float(ay), float(az))
             if not _apply_scene(add_scene, 'attach_lego'):
                 self._attached_lego_name = prev_attached
+                self._attached_lego_tcp_offset = prev_offset
                 return
             self._append_log(
                 f'Attach OK: {obj_name} → tcp_link at '
@@ -5423,6 +5495,7 @@ class SOArm101ControlGUI(Node):
         """
         self._ensure_lego_state()
         self._attached_lego_name = None
+        self._attached_lego_tcp_offset = None
         if not MOVEIT_AVAILABLE or not hasattr(self, '_apply_scene_client'):
             return
 
@@ -5447,6 +5520,7 @@ class SOArm101ControlGUI(Node):
             future = self._apply_scene_client.call_async(req)
             self._wait_future(future, timeout_sec=5.0)
             self._attached_lego_name = None
+            self._attached_lego_tcp_offset = None
             self._append_log('Detached all legos (force cleanup)')
 
         threading.Thread(target=_apply, daemon=True).start()
@@ -5504,6 +5578,7 @@ class SOArm101ControlGUI(Node):
         except Exception as exc:
             self._append_log(f'Detach apply exception: {exc}', 'warn')
         self._attached_lego_name = None
+        self._attached_lego_tcp_offset = None
         self._cycle_detach_seen = True
         tracer.event('release_applied', obj_name=name)
         self._append_log(f'Detached {obj_id}')
@@ -5718,49 +5793,241 @@ class SOArm101ControlGUI(Node):
             self.velocity_scale_var.set(hvs)
             self._append_log(f'  velocity_scale override: {hvs:.2f} (was {saved_vs:.2f})')
 
+        # grasp_home: deterministic-only (tier1 linear + tier2 retract-pan-settle).
+        # OMPL fallback disabled — RRTConnect's RNG variance has produced cup-
+        # clipping trajectories from far-pan start poses. If both tiers fail,
+        # surface loudly rather than roll the dice.
         self._joint_space_collision_free_execute(
-            target, on_complete_event=evt, duration_s=3.0)
+            target, on_complete_event=evt, duration_s=3.0,
+            allow_ompl_fallback=False)
 
         if saved_vs is not None:
             self.velocity_scale_var.set(saved_vs)
 
+    # Tier-2 intermediate pose — all non-pan joints lifted above the cup
+    # plane. shoulder_pan is held at whatever the current segment needs
+    # (start_pan for the retract, target_pan for the settle).
+    _NEUTRAL_NON_PAN_JOINTS = {
+        'shoulder_lift': -0.2,
+        'elbow_flex': 0.0,
+        'wrist_flex': math.pi / 2,
+        'wrist_roll': -math.pi / 2,
+    }
+
     def _joint_space_collision_free_execute(self, target, on_complete_event,
-                                             duration_s=3.0, waypoints=50):
-        """ALWAYS OMPL path. Previously this had a tier1 fast path that did
-        linear joint-interp + per-waypoint /check_state_validity and
-        short-circuited OMPL when the direct path looked clean. Problem:
-        tier1 validated a LINEAR path, but then dispatched just (start, end,
-        duration) to ros2_control's FollowJointTrajectory, which interpolates
-        with splines — physical trajectory diverged from validated path,
-        allowing arm to clip cups between waypoints. Also meant no Planning
-        Request Goal State ghost for motions that took the shortcut (drop_sweep
-        visually looked like "no plan"). Now every motion goes through
-        /plan_kinematic_path so OMPL is the source of truth for both the
-        validation AND the executed waypoint sequence, and the orange ghost
-        fires consistently.
+                                             duration_s=3.0, waypoints=50,
+                                             allow_ompl_fallback=True):
+        """Tiered deterministic planner with opt-in OMPL fallback.
+
+        Tier 1: linear joint-space interp, per-waypoint validity check.
+            Dispatches the SAME (waypoints+1)-point trajectory it validated
+            via _execute_full_trajectory — so FollowJointTrajectory's spline
+            only interpolates between closely-spaced validated points. This
+            is what broke the old tier1 (_LEGACY_TIER1 below): it validated
+            N points but executed (start, end, duration), so the controller's
+            spline could diverge and clip cups between.
+        Tier 2: retract-pan-settle decomposition. Three linear sub-segments
+            (retract above cup plane, pan across, settle to target). Handles
+            the common "need to pan past a cup" case geometrically, without
+            sampling.
+        Fallback: OMPL via _ompl_plan_validate_execute. Opt-in per caller
+            through allow_ompl_fallback. grasp_home passes False —
+            RRTConnect's RNG variance has produced cup-clipping plans from
+            far-pan start poses, and deterministic tiers must suffice.
+
+        Both tiers share _check_state_valid_with_contacts with the Mode B
+        OMPL post-check, so there is no planner-vs-check coherence gap.
         """
         # Every motion = arm-group plan. Switch the RViz panel so the Goal
         # State ghost highlights the right group (gripper_command set it to
         # 'gripper' — without this, grasp_home and drops keep no ghost).
         self._select_planning_group('arm')
-        # Advance self.joint_positions + publish Goal State so RViz's
-        # Planning Request ghost snaps to the TARGET pose before execution.
-        # Without this, the ghost stays at the live-robot pose while the
-        # real robot moves to the target — inverse of what the user expects.
-        # _cmd_plan_execute did this pair; the tier1 path skipped it.
+        # Snapshot current (physics) positions before advancing
+        # self.joint_positions to the target — tier1/tier2 interpolate from
+        # the physical start, not from the freshly-overwritten slider target.
         with self.joint_lock:
+            current = {n: self._actual_positions.get(
+                n, self.joint_positions.get(n, 0.0))
+                       for n in ARM_JOINT_NAMES}
             for n in ARM_JOINT_NAMES:
                 if n in target:
                     self.joint_positions[n] = target[n]
-        # Sync sliders so they track the goal too (so the RViz panel's
-        # interactive markers land on the goal, not stay at current).
+        # Sync sliders so RViz's interactive markers land on the goal.
         for n in ARM_JOINT_NAMES:
             if n in target and n in self.sliders:
                 self.sliders[n].set(target[n])
                 if n in self.slider_labels:
                     self.slider_labels[n].config(text=f'{target[n]:.3f}')
         self._publish_goal_state()
-        return self._ompl_plan_validate_execute(target, on_complete_event)
+
+        target_full = {n: target.get(n, current[n]) for n in ARM_JOINT_NAMES}
+
+        # Already-at-target short-circuit (0.5° tol on every joint).
+        ALREADY_AT_TARGET_TOL = math.radians(0.5)
+        max_delta = max(abs(target_full[n] - current[n]) for n in ARM_JOINT_NAMES)
+        if max_delta < ALREADY_AT_TARGET_TOL:
+            self._append_log(
+                f'  already at target (max Δ={math.degrees(max_delta):.2f}° '
+                f'< 0.5°) — no motion dispatched')
+            tracer.event('tier1_noop',
+                         max_delta_deg=math.degrees(max_delta),
+                         target=dict(target_full), current=dict(current))
+            self._last_motion_status = {
+                'ok': True, 'outcome': 'already_at_target',
+                'msg': (f'already at target '
+                        f'(max Δ={math.degrees(max_delta):.2f}°)')}
+            on_complete_event.set()
+            return True
+
+        # Tier 1: linear joint-space interp + per-waypoint check.
+        traj = self._plan_linear_joint_path(
+            current, target_full, duration_s, n_samples=waypoints)
+        if traj is not None:
+            tracer.event('planner_used', which='linear',
+                         n_wps=len(traj.points))
+            self._append_log(
+                f'  tier1 linear: {len(traj.points)} wps clean, executing')
+            self._execute_full_trajectory(traj, on_complete_event)
+            return True
+
+        # Tier 2: retract-pan-settle decomposition.
+        traj2 = self._plan_retract_pan_settle(
+            current, target_full, duration_s, n_samples=waypoints)
+        if traj2 is not None:
+            tracer.event('planner_used', which='retract_pan_settle',
+                         n_wps=len(traj2.points))
+            self._append_log(
+                f'  tier2 retract-pan-settle: {len(traj2.points)} wps clean, '
+                f'executing')
+            self._execute_full_trajectory(traj2, on_complete_event)
+            return True
+
+        # Fallback: OMPL (opt-in).
+        if not allow_ompl_fallback:
+            tracer.event('planner_used', which='none')
+            self._append_log(
+                '  REFUSED: tier1 + tier2 both collided; OMPL fallback '
+                'disabled (deterministic-only mode)', 'err')
+            self._last_motion_status = {
+                'ok': False, 'outcome': 'tiered_planner_exhausted',
+                'msg': ('tier1 linear and tier2 retract-pan-settle both '
+                        'collided; OMPL fallback disabled')}
+            on_complete_event.set()
+            return False
+
+        tracer.event('planner_used', which='ompl_fallback')
+        self._append_log(
+            '  tier1 + tier2 both collided; falling back to OMPL')
+        return self._ompl_plan_validate_execute(target_full, on_complete_event)
+
+    def _plan_linear_joint_path(self, current, target_full, duration_s,
+                                 n_samples=50):
+        """Deterministic linear joint-space interp + per-waypoint check.
+
+        Builds an (n_samples+1)-point JointTrajectory with monotonic
+        time_from_start. Validates every waypoint with
+        _check_state_valid_with_contacts (same checker the OMPL Mode B
+        post-check uses — no coherence gap).
+
+        Returns a JointTrajectory on success, None on first collision.
+        Pure float arithmetic: q_i = start + (i/N) * (target - start) —
+        same input always produces the same output.
+        """
+        jt = JointTrajectory()
+        jt.joint_names = list(ARM_JOINT_NAMES)
+        for i in range(n_samples + 1):
+            alpha = i / n_samples
+            q = {n: current[n] + alpha * (target_full[n] - current[n])
+                 for n in ARM_JOINT_NAMES}
+            valid, contacts = self._check_state_valid_with_contacts(q)
+            if not valid:
+                summary = '; '.join(
+                    f'{c.contact_body_1}↔{c.contact_body_2}'
+                    f'(d={c.depth*1000:.1f}mm)'
+                    for c in contacts[:3]) or 'no contact info'
+                self._append_log(
+                    f'  tier1 linear: wp[{i}]/α={alpha:.2f} collides — '
+                    f'{summary}', 'warn')
+                return None
+            pt = JointTrajectoryPoint()
+            pt.positions = [q[n] for n in ARM_JOINT_NAMES]
+            t = alpha * duration_s
+            pt.time_from_start.sec = int(t)
+            pt.time_from_start.nanosec = int((t - int(t)) * 1e9)
+            jt.points.append(pt)
+        return jt
+
+    def _plan_retract_pan_settle(self, current, target_full, duration_s,
+                                   n_samples=50):
+        """Tier 2: three-segment geometric decomposition.
+
+        Seg A: (current) → (current_pan, NEUTRAL)   [retract above cup plane]
+        Seg B: (current_pan, NEUTRAL) → (target_pan, NEUTRAL)  [pan across]
+        Seg C: (target_pan, NEUTRAL) → (target)     [settle to final config]
+
+        Each sub-segment runs through _plan_linear_joint_path. On success,
+        segments are concatenated into one JointTrajectory with adjusted
+        time_from_start; duplicate joining waypoints are dropped.
+
+        Returns None on any sub-segment collision — the caller then falls
+        through to OMPL (or reports failure, if fallback disabled).
+        """
+        neutral_at_start = {
+            n: current[n] if n == 'shoulder_pan'
+            else self._NEUTRAL_NON_PAN_JOINTS[n]
+            for n in ARM_JOINT_NAMES}
+        neutral_at_target = {
+            n: target_full[n] if n == 'shoulder_pan'
+            else self._NEUTRAL_NON_PAN_JOINTS[n]
+            for n in ARM_JOINT_NAMES}
+
+        # Degenerate case: current already at neutral non-pan → seg A is
+        # a no-op and the whole decomposition reduces to a pan + settle
+        # that's essentially the direct path tier1 already rejected.
+        if all(abs(current[n] - neutral_at_start[n]) < math.radians(2.0)
+               for n in ARM_JOINT_NAMES if n != 'shoulder_pan'):
+            self._append_log(
+                '  tier2: already near neutral, decomposition degenerate',
+                'warn')
+            return None
+
+        seg_dur = duration_s / 3.0
+        seg_samples = max(10, n_samples // 3)
+
+        jt_a = self._plan_linear_joint_path(
+            current, neutral_at_start, seg_dur, n_samples=seg_samples)
+        if jt_a is None:
+            self._append_log('  tier2: seg A (retract) collides', 'warn')
+            return None
+        jt_b = self._plan_linear_joint_path(
+            neutral_at_start, neutral_at_target, seg_dur,
+            n_samples=seg_samples)
+        if jt_b is None:
+            self._append_log('  tier2: seg B (pan across) collides', 'warn')
+            return None
+        jt_c = self._plan_linear_joint_path(
+            neutral_at_target, target_full, seg_dur, n_samples=seg_samples)
+        if jt_c is None:
+            self._append_log('  tier2: seg C (settle) collides', 'warn')
+            return None
+
+        concat = JointTrajectory()
+        concat.joint_names = list(ARM_JOINT_NAMES)
+        t_offset = 0.0
+        for seg_idx, jt in enumerate([jt_a, jt_b, jt_c]):
+            for pt_idx, pt in enumerate(jt.points):
+                if seg_idx > 0 and pt_idx == 0:
+                    continue  # drop duplicate of prev segment's end point
+                new_pt = JointTrajectoryPoint()
+                new_pt.positions = list(pt.positions)
+                t_local = (pt.time_from_start.sec
+                           + pt.time_from_start.nanosec * 1e-9)
+                t = t_local + t_offset
+                new_pt.time_from_start.sec = int(t)
+                new_pt.time_from_start.nanosec = int((t - int(t)) * 1e9)
+                concat.points.append(new_pt)
+            t_offset += seg_dur
+        return concat
 
     def _joint_space_collision_free_execute_LEGACY_TIER1(
             self, target, on_complete_event, duration_s=3.0, waypoints=50):
@@ -6515,8 +6782,13 @@ class SOArm101ControlGUI(Node):
             f'Drop Point: pan={math.degrees(pan):.1f}\u00b0 wrist_roll=-90\u00b0 toward {name}')
         # tier1 linear-interp + OMPL fallback. Validates every waypoint
         # against cups, world legos, ground, AND the held-lego world copy.
+        # duration 3.0 s: matches grasp_home / grasp_move; the prior 1.0 s
+        # default put pan rotation at ~107°/s (1.87 rad/s) — beyond the PD
+        # drive's tracking envelope per the forum-findings note, and a key
+        # cause of lego-vs-cup contact during the pan-to-cup sweep with a
+        # carried block.
         self._joint_space_collision_free_execute(
-            target, on_complete_event=evt, duration_s=1.0)
+            target, on_complete_event=evt, duration_s=3.0)
 
     def _cmd_drop_sweep(self):
         """IK-planned drop sweep: geometric IK → collision check → MoveIt path.
@@ -6542,43 +6814,51 @@ class SOArm101ControlGUI(Node):
         self._motion_event = evt
 
 
-        # Drop target for the GAP CENTER at (cup_rim_height + hover). Since
+        # Drop target for the BLOCK CENTER at (cup_rim_height + hover).
         # /drop_poses publishes cup BODY-CENTER (z = cup_base + half_height),
-        # the rim is at z + half_height and the gap target is at
-        # z + half_height + HOVER_ABOVE_RIM. The hover is user-tunable via
-        # the "Hover above rim (m)" spinbox in the Grasp tab Drop section
-        # (defaults to 0.030).
+        # so rim is at z + half_height and the block target is
+        # z + half_height + HOVER_ABOVE_RIM. Default raised 30 → 50 mm so the
+        # attached block clears the cup wall during the wrist_flex sweep
+        # (previously OMPL papered over 1-3 mm mid-trajectory cup clips via
+        # tortuous paths; deterministic planner refuses those correctly, so
+        # we need actual geometric clearance).
         hover = getattr(self, '_drop_hover_above_rim_var', None)
-        hover_m = hover.get() if hover is not None else 0.030
+        hover_m = hover.get() if hover is not None else 0.050
         gap_x, gap_y = float(x), float(y)
         gap_z = float(z) + CUP_BODY_HEIGHT_M / 2.0 + hover_m
 
-        # Convert gap-center target → tcp_link target by offsetting along
-        # the fixed-jaw direction. Arm-forward at pan is (cos(pan), -sin(pan))
-        # in world XY; the true perpendiculars are (+sin, +cos) and
-        # (-sin, -cos). At grip_angle=π/4 and wrist_roll=-π/2, FK across the
-        # full reachable pan range (-110° to +124°) shows the gripper's local
-        # jaw-opening axis projects to (+sin(pan), +cos(pan)) in world with
-        # dot = +1.000 everywhere — confirmed empirically against URDF-FK.
-        # That axis points from the block (midway between jaws) toward the
-        # fixed jaw (tcp_link side), so: tcp_target = cup + half_gap *
-        # (+sin(pan), +cos(pan)). The prior formula used (-sin, +cos), which
-        # is NOT perpendicular to arm-forward (dot = -sin(2*pan), nonzero
-        # everywhere except pan=0/±π/2) — it produced a ~5.5 mm radial-outward
-        # component at off-axis pans that pushed IK into a region where the
-        # one-shot Newton refinement in geometric_ik fails to converge,
-        # compounding the wrong-direction shift with a ~7.7 mm IK residual.
+        # Convert block-center target → tcp_link target by offsetting along
+        # the fixed-jaw direction. At grip_angle=π/4 and wrist_roll=-π/2, FK
+        # across the reachable pan range (-110° to +124°) shows the gripper's
+        # local jaw-opening axis projects to (+sin(pan), +cos(pan)) in world
+        # with dot = +1.000 everywhere — block→fixed_jaw direction.
+        #
+        # Shift magnitude: use the MEASURED |ax| from the physical attach
+        # (block_in_tcp.x, set by _attach_lego_to_gripper). Fallback to the
+        # theoretical half_gap only when no attach offset is available (e.g.
+        # dry-run drop_sweep with empty gripper). The measured offset is what
+        # the planning scene sees for collision, so matching it eliminates
+        # the 1-2 mm target-vs-reality drift that surfaced as cup-wall
+        # penetration under the deterministic planner.
         from so_arm101_control.compute_workspace import X_PAN
         pan = math.atan2(-gap_y, gap_x - X_PAN)
-        # Live jaw gap from current gripper_joint (updated by grasp_open).
         with self.joint_lock:
             gj = self._actual_positions.get(
                 GRIPPER_JOINT_NAME,
                 self.joint_positions.get(GRIPPER_JOINT_NAME, 0.0))
         jaw_gap = BASELINE_JAW_GAP + JAW_GAP_RATE * gj
         half_gap = jaw_gap / 2.0
-        dx = half_gap * math.sin(pan)
-        dy = half_gap * math.cos(pan)
+        attach_offset = getattr(self, '_attached_lego_tcp_offset', None)
+        if attach_offset is not None:
+            # ax is negative (block sits at -tcp_x from tcp_link origin).
+            # -ax is the positive distance block→tcp along jaw-opening axis.
+            shift_mag = -float(attach_offset[0])
+            shift_source = 'measured'
+        else:
+            shift_mag = half_gap
+            shift_source = 'theoretical'
+        dx = shift_mag * math.sin(pan)
+        dy = shift_mag * math.cos(pan)
         target_x = gap_x + dx
         target_y = gap_y + dy
         target_z = gap_z  # Z unchanged — gap axis is horizontal
@@ -6595,17 +6875,34 @@ class SOArm101ControlGUI(Node):
             tracer.event('drop_sweep_done')
         threading.Thread(target=_close_on_drop_done, daemon=True).start()
         self._append_log(
-            f'Drop Sweep: gap=({gap_x:.3f},{gap_y:.3f},{gap_z:.3f})mm '
+            f'Drop Sweep: gap=({gap_x:.3f},{gap_y:.3f},{gap_z:.3f})m '
             f'→ tcp=({target_x:.3f},{target_y:.3f},{target_z:.3f}) '
-            f'(jaw_gap={jaw_gap*1000:.1f}mm, half-offset by {half_gap*1000:.1f}mm)')
+            f'(shift={shift_mag*1000:.1f}mm [{shift_source}], '
+            f'hover={hover_m*1000:.0f}mm, jaw_gap={jaw_gap*1000:.1f}mm)')
 
         grip_deg = getattr(self, '_drop_grip_angle_var', None)
         grip_angle = math.radians(grip_deg.get() if grip_deg else 45)
+        # Lock shoulder_pan to the post-drop_point physical pan so the
+        # sweep is a pure wrist-tilt, not "tilt + 1° base yaw drift".
+        # See _plan_collision_free_execute(lock_pan=...) docstring.
+        with self.joint_lock:
+            locked_pan = self._actual_positions.get(
+                'shoulder_pan',
+                self.joint_positions.get('shoulder_pan', 0.0))
+        # Sweep duration from the GUI spinbox (Grasp tab → Drop section).
+        # 3.0 s default matches drop_point / grasp_home / grasp_move so
+        # the whole pick-drop cycle has consistent joint velocities. User
+        # can raise via the spinbox if a particular cup/lego combo needs
+        # gentler placement.
+        sweep_dur_var = getattr(self, '_drop_duration_var', None)
+        sweep_dur = float(sweep_dur_var.get()) if sweep_dur_var else 3.0
         self._plan_collision_free_execute(
             target_x, target_y, target_z,
             grip_angle=grip_angle,
             wrist_roll=-math.pi / 2,
-            on_complete=evt)
+            on_complete=evt,
+            lock_pan=locked_pan,
+            duration_s=sweep_dur)
 
     def _cmd_drop_release(self):
         """Open gripper to release held object into cup. ARM-04.
