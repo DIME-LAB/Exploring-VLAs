@@ -447,6 +447,39 @@ def _get_cup_stl_uri():
     return 'file://' + path if os.path.isfile(path) else ''
 
 
+# Phase 11-01: real-mode color → cup mapping. Inverse of _qs_auto_drop_for_lego.
+# Module-level so hot-reload picks up changes (class-level constants are NOT
+# copied by _patch_methods — only methods are; see comment at L89-90).
+REAL_COLOR_TO_CUP = {'red': 'drop_0', 'green': 'drop_1', 'blue': 'drop_2'}
+
+# Phase 11-01 followup: Drop Scan workflow tunables. Module-level for the
+# same hot-reload reason. Times in seconds, angles in radians, variance in m².
+DROP_SCAN_PAN_MIN_RAD = -math.pi / 2          # -90° (absolute lower bound)
+DROP_SCAN_PAN_MAX_RAD = math.pi / 2           # +90° (absolute upper bound)
+# Sweep direction: START → END in increments of STEP_SIGNED. To reverse the
+# sweep direction (e.g. start from +90° and go to -90°), swap START/END and
+# negate STEP_SIGNED. The MIN/MAX above stay constant — they're absolute
+# bounds used for the FOV in-range filter.
+DROP_SCAN_PAN_START_RAD = math.pi / 2         # +90° (begin sweep here)
+DROP_SCAN_PAN_END_RAD = -math.pi / 2          # −90° (finish sweep here)
+DROP_SCAN_PAN_STEP_SIGNED_RAD = -math.radians(5)  # negative = sweep right→left
+# Legacy alias kept for any existing downstream readers.
+DROP_SCAN_PAN_STEP_RAD = abs(DROP_SCAN_PAN_STEP_SIGNED_RAD)
+DROP_SCAN_INITIAL_DURATION_S = 3.5            # safe duration for 90° initial move
+DROP_SCAN_STEP_DURATION_S = 1.5               # per-5°-step duration; longer
+                                              # gives the weak drives time to
+                                              # actually converge wrist_roll
+                                              # back to its commanded value
+                                              # against shoulder_pan dynamic
+                                              # disturbance (was 0.4 = drift)
+DROP_SCAN_SETTLE_AFTER_STEP_S = 0.3           # let pose feed catch up
+DROP_SCAN_SAMPLE_PER_STEP_S = 0.3             # quick check for new cups
+DROP_SCAN_AVG_DURATION_S = 3.0                # full settle on detection
+DROP_SCAN_MIN_AVG_SAMPLES = 10                # need ≥N samples to trust avg
+DROP_SCAN_FOV_HALF_RAD = math.radians(25)     # cup must be within ±this of pan
+DROP_SCAN_MAX_XY_VARIANCE_M2 = (0.005)**2     # 5 mm xy std dev cap
+
+
 class SOArm101ControlGUI(Node):
     """ROS2 node with embedded Tkinter GUI for SO-ARM101 control."""
 
@@ -814,6 +847,17 @@ class SOArm101ControlGUI(Node):
                                   tab, section, writable=True)
         return widget
 
+    def _register_combobox(self, parent, *, label, textvariable, values,
+                           tab=None, section=None, **kwargs):
+        """ttk.Combobox (readonly). User picks one of `values`; current
+        selection is bound to `textvariable` (StringVar)."""
+        widget = ttk.Combobox(
+            parent, textvariable=textvariable, values=values,
+            state='readonly', **kwargs)
+        self._widget_registry_add(label, 'Combobox', widget, textvariable,
+                                  tab, section, writable=True)
+        return widget
+
     def _register_scale(self, parent, *, label, variable, from_, to,
                         tab=None, section=None, **kwargs):
         """tk.Scale (or ttk.Scale via _use_ttk=True). Writable; coerces to float."""
@@ -1175,6 +1219,10 @@ class SOArm101ControlGUI(Node):
                 text = widget.get(idx) if idx >= 0 else ''
                 items = [widget.get(i) for i in range(count)]
                 return text, f'index={idx}, count={count}, items=[{"|".join(items)}]'
+            if wtype == 'Combobox':
+                val = var.get() if var is not None else widget.get()
+                values = list(widget.cget('values') or ())
+                return f'{val}', f'values=[{"|".join(values)}]'
             if wtype == 'Notebook':
                 active = widget.select()
                 return widget.tab(active, 'text') if active else '', ''
@@ -1466,6 +1514,20 @@ class SOArm101ControlGUI(Node):
                     widget.select(tabs.index(raw))
                     outcome['ok'] = True
                     outcome['msg'] = f'switched to tab {raw}'
+                    return
+                if wtype == 'Combobox':
+                    values = list(widget.cget('values') or ())
+                    if raw not in values:
+                        outcome['msg'] = (
+                            f'{raw!r} not in combobox values '
+                            f'[{", ".join(values)}]')
+                        return
+                    if var is not None:
+                        var.set(raw)
+                    else:
+                        widget.set(raw)
+                    outcome['ok'] = True
+                    outcome['msg'] = f'selected {raw!r} in {wid}'
                     return
                 outcome['msg'] = f'unsupported widget type {wtype}'
             except Exception as e:
@@ -3912,6 +3974,20 @@ class SOArm101ControlGUI(Node):
             # camera looks down at workspace). Consumed by Run Real Pick
             # & Drop instead of the live /objects_poses_real feed.
             self._cached_lego_poses = {}
+        if not hasattr(self, '_real_selected_color_var'):
+            # Bound to the color dropdown in Real Test → Run.
+            # '' = nothing selected (also the empty-state when no color has
+            # both a cached lego AND a cached cup).
+            self._real_selected_color_var = tk.StringVar(value='')
+        if not hasattr(self, '_real_sweep_range_deg_var'):
+            # Drop Scan sweep range in degrees from start point. Default 90°
+            # (instead of full 180°) so the user can constrain the sweep to
+            # the side where cups are likely to be.
+            self._real_sweep_range_deg_var = tk.IntVar(value=90)
+        if not hasattr(self, '_real_sweep_reversed_var'):
+            # False = canonical direction (start at +90°, sweep right→left
+            # toward -90°). True = swap (start at -90°, sweep left→right).
+            self._real_sweep_reversed_var = tk.BooleanVar(value=False)
 
     def _build_real_test_tab(self, notebook):
         self._ensure_real_state()
@@ -3936,20 +4012,48 @@ class SOArm101ControlGUI(Node):
             command=self._cmd_gripper_open,
         ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0), ipady=3)
 
+        # Row 2: explicit wrist_roll set buttons. User picks +90° (markers
+        # in FOV / scan pose) or −90° (jaw-clearance / drop pose) BEFORE
+        # pressing Drop Scan. Drop Scan locks whatever wrist_roll is at
+        # the moment it starts and preserves it through the entire sweep.
         row2 = ttk.Frame(setup)
         row2.pack(fill=tk.X, padx=5, pady=4)
-        self._real_wrist_roll_btn = self._register_button(
-            row2, text=self._wrist_roll_btn_text(),
-            tab='Real Test', section='Setup',
-            command=self._cmd_real_toggle_wrist_roll_sign,
-        )
-        self._real_wrist_roll_btn.pack(
-            side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2), ipady=3)
         self._register_button(
-            row2, text='Drop Point Green  (scan pose)',
+            row2, text='Roll +90°  (scan pose)',
             tab='Real Test', section='Setup',
-            command=self._cmd_real_drop_point_green,
+            command=self._cmd_real_wrist_roll_plus,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2), ipady=3)
+        self._register_button(
+            row2, text='Roll −90°  (drop pose)',
+            tab='Real Test', section='Setup',
+            command=self._cmd_real_wrist_roll_minus,
         ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0), ipady=3)
+
+        # Row 3: sweep range + direction swap.
+        row3 = ttk.Frame(setup)
+        row3.pack(fill=tk.X, padx=5, pady=4)
+        tk.Label(row3, text='Sweep range (°):', anchor='w').pack(
+            side=tk.LEFT, padx=(0, 2))
+        self._register_spinbox(
+            row3, label='Sweep range (°)',
+            tab='Real Test', section='Setup',
+            textvariable=self._real_sweep_range_deg_var,
+            from_=5, to=180, increment=5, width=5,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        self._register_button(
+            row3, text='↔  Swap direction',
+            tab='Real Test', section='Setup',
+            command=self._cmd_real_swap_sweep_direction,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 0), ipady=2)
+
+        # Row 4: Drop Scan on its own row.
+        row4 = ttk.Frame(setup)
+        row4.pack(fill=tk.X, padx=5, pady=4)
+        self._register_button(
+            row4, text='▶  Drop Scan  (sweeps configured range, locks current roll)',
+            tab='Real Test', section='Setup',
+            command=self._cmd_real_drop_scan,
+        ).pack(fill=tk.X, expand=True, ipady=3)
 
         # ===== Section: Calibration =====
         # Two scan-then-cache pipelines, one per detection pass:
@@ -4003,15 +4107,72 @@ class SOArm101ControlGUI(Node):
             command=self._cmd_real_clear_cache,
         ).pack(side=tk.RIGHT, padx=(0, 3))
 
+        # ===== Section: Steps (manual debug) =====
+        # Individual step buttons that run ONE _QS_SEQUENCE step each, with
+        # the cache-pose re-injection + listbox selection that the full Run
+        # path does — but stop after the step. Lets you debug "why does
+        # grasp_move fail?" by stepping through grasp_open → grasp_move →
+        # close → ... without short-circuiting on the first failure.
+        # Each button shares the dropdown's selected color (closest cached
+        # lego of that color is picked) and forces real topics on entry.
+        steps = ttk.LabelFrame(frame, text='Steps  (manual debug)')
+        steps.pack(fill=tk.X, padx=10, pady=4)
+
+        steps_row1 = ttk.Frame(steps)
+        steps_row1.pack(fill=tk.X, padx=5, pady=(4, 2))
+        for label, cmd in [
+            ('Grasp Home',  self._cmd_real_grasp_home),
+            ('Grasp Open',  self._cmd_real_grasp_open),
+            ('Grasp Move',  self._cmd_real_grasp_move),
+            ('Grasp Close', self._cmd_real_grasp_close),
+        ]:
+            self._register_button(
+                steps_row1, text=label, tab='Real Test', section='Steps',
+                command=cmd,
+            ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2, ipady=2)
+
+        steps_row2 = ttk.Frame(steps)
+        steps_row2.pack(fill=tk.X, padx=5, pady=(2, 5))
+        for label, cmd in [
+            ('Drop Point',   self._cmd_real_drop_point),
+            ('Drop Sweep',   self._cmd_real_drop_sweep),
+            ('Release',      self._cmd_real_drop_release),
+        ]:
+            self._register_button(
+                steps_row2, text=label, tab='Real Test', section='Steps',
+                command=cmd,
+            ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2, ipady=2)
+
         # ===== Section: Run =====
+        # Color dropdown (populated by _real_refresh_color_dropdown from the
+        # intersection of cached lego colors AND cached cup colors) + a Run
+        # button that picks ONE lego of the selected color. Cycle is full
+        # _QS_SEQUENCE; on success the lego is evicted from cache and the
+        # dropdown shrinks accordingly.
         run_frame = ttk.LabelFrame(frame, text='Run')
         run_frame.pack(fill=tk.X, padx=10, pady=(4, 8))
 
-        self._register_button(
-            run_frame, text='▶  Run Real Pick & Drop',
+        color_row = ttk.Frame(run_frame)
+        color_row.pack(fill=tk.X, padx=5, pady=(4, 2))
+        tk.Label(color_row, text='Drop color:', anchor='w').pack(
+            side=tk.LEFT, padx=(0, 5))
+        self._real_color_combobox = self._register_combobox(
+            color_row, label='Real Test color',
             tab='Real Test', section='Run',
-            command=self._cmd_real_run_pick_drop,
-        ).pack(fill=tk.X, padx=5, pady=4, ipady=4)
+            textvariable=self._real_selected_color_var,
+            values=[], width=10,
+        )
+        self._real_color_combobox.pack(side=tk.LEFT)
+
+        self._real_run_button = self._register_button(
+            run_frame, text='▶  Pick & Drop Selected Color',
+            tab='Real Test', section='Run',
+            command=self._cmd_real_run_one_color,
+        )
+        self._real_run_button.pack(fill=tk.X, padx=5, pady=(2, 4), ipady=4)
+        # Start disabled — the first Refresh that yields a non-empty
+        # intersection re-enables it via _real_refresh_color_dropdown.
+        self._real_run_button.config(state='disabled')
 
         self._real_run_status_var = tk.StringVar(value='Idle')
         status_row = ttk.Frame(run_frame)
@@ -4022,11 +4183,11 @@ class SOArm101ControlGUI(Node):
             anchor='w', font=('TkDefaultFont', 9, 'bold'),
         ).pack(side=tk.LEFT, padx=(5, 0))
 
-        # Hint text — pre-flight assumption surface.
+        # Hint text — pre-flight assumption surface for the new flow.
         hint = (
-            'Pre-flight: set Grasp Topic = /objects_poses_real (Grasp tab) '
-            'and refresh objects.\nThen: Drop Point Green → Refresh Cups Pose '
-            '→ Run Real Pick & Drop.'
+            'Pre-flight: Drop Point Green → Refresh Cups Pose → Grasp Home '
+            '→ Refresh Legos Pose. Then pick a color and press Run. '
+            'Successful drops evict that lego from cache automatically.'
         )
         tk.Label(
             frame, text=hint, anchor='w', justify=tk.LEFT,
@@ -4034,42 +4195,434 @@ class SOArm101ControlGUI(Node):
             wraplength=900,
         ).pack(fill=tk.X, padx=12, pady=(8, 4))
 
+        # Self-recovery on hot-reload: instance cache survives a GUI rebuild,
+        # but the freshly-constructed combobox is initialized empty + button
+        # disabled. Re-run the dropdown helper so the rebuilt widget reflects
+        # the live cache state without forcing the user to press Refresh.
+        # Wrapped in root.after so it runs after the rest of the tab finishes
+        # building (helper accesses self._real_color_combobox).
+        self.root.after(0, self._real_refresh_color_dropdown)
+
     # ------------------------------------------------------------------
     # Real Test tab — command handlers
     # ------------------------------------------------------------------
 
-    def _wrist_roll_btn_text(self):
-        sign_glyph = '+' if self._drop_wrist_roll_sign >= 0 else '−'
-        return f'Wrist Roll {sign_glyph}  (toggle)'
-
     def _cmd_real_toggle_wrist_roll_sign(self):
-        """Flip _drop_wrist_roll_sign between +1 and -1.
+        """Deprecated by Roll +90° / Roll −90° buttons. Kept as stub so the
+        auto-registered ~/real_toggle_wrist_roll_sign service doesn't error
+        if invoked. Will be removed on next Phase 11 cleanup pass."""
+        self._append_log(
+            'Real: toggle_wrist_roll_sign deprecated — '
+            'use Roll +90° / Roll −90° buttons instead', 'warn')
 
-        +1 = optimal cup-markers-in-FOV pose for drop_point scan;
-        -1 = alternate scan pose for when + is occluded. Default +1.
-        Consumed by _cmd_drop_point's wrist_roll target.
+    # --- Drop Scan workflow (Phase 11-01 followup, replaces Drop Point Green) ---
+    # Sweeps shoulder_pan from -90° to +90° in small steps. At each step,
+    # samples /drop_poses_real briefly. When a not-yet-cached cup appears in
+    # the camera's view zone (target_pan derived from cup XY is within
+    # ±FOV_HALF of current sweep pan), the arm visual-servos to point at
+    # that cup, then averages the cup pose over AVG_DURATION seconds of
+    # nearly-stationary samples. Builds up _cached_cup_poses one cup at a
+    # time. Bookended by grasp_home before/after.
+
+    # Drop Scan tunables live at module level (DROP_SCAN_*) so hot-reload
+    # picks up changes — see comment at the top of this file about
+    # _patch_methods not copying class-level constants.
+
+    def _cmd_real_drop_scan(self):
+        """Replacement for Drop Point Green: sweep -90° → +90° on
+        shoulder_pan, detect each cup as it enters view, average its pose
+        over 3s, cache, push to scene + dropdown. Bookended by grasp_home.
+
+        Uses the existing Drop Topic flow (/drop_poses_real) as the
+        per-cup pose source — visual servoing is "single corrective pan
+        per detection," not continuous closed-loop.
         """
         self._ensure_real_state()
-        self._drop_wrist_roll_sign = -self._drop_wrist_roll_sign
-        btn = getattr(self, '_real_wrist_roll_btn', None)
-        if btn is not None:
-            btn.config(text=self._wrist_roll_btn_text())
+        if self._qs_state == 'running':
+            self._append_log(
+                'Real: drop_scan cannot start — a run is already in progress',
+                'warn')
+            return
+        threading.Thread(
+            target=self._real_drop_scan_thread, daemon=True).start()
+
+    def _real_drop_scan_thread(self):
+        try:
+            self._qs_abort_evt.clear()
+            self._qs_resume_evt.set()  # release pause gate (default unset)
+            self._qs_state = 'running'
+            self._real_set_status('Drop Scan', step='preparing')
+            self._append_log('Real drop_scan: starting')
+
+            # Force real topics so /drop_poses_real is what _drop_callback
+            # writes _drop_data from. (We don't read _drop_data directly —
+            # we sample via subscribe-once — but force keeps the rest of
+            # the system consistent for any downstream reader.)
+            self._real_ensure_real_topics()
+
+            # --- Phase 1: scan_home preserving CURRENT wrist_roll ---
+            # Drop Scan no longer flips wrist_roll itself — the user sets it
+            # via the Roll +90° / Roll −90° buttons BEFORE pressing Drop Scan.
+            # We capture wrist_roll at scan start and lock all sweep + return
+            # motions to that value.
+            with self.joint_lock:
+                scan_wrist_roll = self.joint_positions.get('wrist_roll', 0.0)
+            self._append_log(
+                f'Real drop_scan: locking wrist_roll = '
+                f'{math.degrees(scan_wrist_roll):+.1f}° for entire sweep')
+            self._real_set_status('Drop Scan', step='scan_home (preserve roll)')
+            if not self._real_scan_home_preserve_roll(scan_wrist_roll):
+                self._append_log(
+                    'Real drop_scan: scan_home failed', 'err')
+                self._real_set_status('Halted', step='scan_home failed')
+                return
+
+            from so_arm101_control.compute_workspace import X_PAN
+            visited_ids = set()
+
+            # --- Derive sweep parameters from UI vars ---
+            # range_deg sets how far from start the sweep goes; reversed_var
+            # picks which direction. Default: 90° from +90° start, going
+            # right→left (so end = 0°). Clamp range to [5, 180].
+            range_deg = max(5, min(180,
+                int(self._real_sweep_range_deg_var.get())))
+            range_rad = math.radians(range_deg)
+            reversed_dir = bool(self._real_sweep_reversed_var.get())
+            if reversed_dir:
+                sweep_start_rad = DROP_SCAN_PAN_MIN_RAD          # -90°
+                sweep_step_signed_rad = +DROP_SCAN_PAN_STEP_RAD  # +5°
+                sweep_end_rad = sweep_start_rad + range_rad
+            else:
+                sweep_start_rad = DROP_SCAN_PAN_MAX_RAD          # +90°
+                sweep_step_signed_rad = -DROP_SCAN_PAN_STEP_RAD  # -5°
+                sweep_end_rad = sweep_start_rad - range_rad
+            # Clamp end to absolute joint bounds (range_deg can drive it past).
+            sweep_end_rad = max(DROP_SCAN_PAN_MIN_RAD,
+                                min(DROP_SCAN_PAN_MAX_RAD, sweep_end_rad))
+            self._append_log(
+                f'Real drop_scan: range={range_deg}° '
+                f'direction={"left→right" if reversed_dir else "right→left"} '
+                f'start={math.degrees(sweep_start_rad):+.1f}° '
+                f'end={math.degrees(sweep_end_rad):+.1f}°')
+
+            # --- Phase 2a: move to sweep start with safe duration ---
+            # The initial move from home (pan=0) to start is up to 90° of
+            # travel — send with a generous duration so we don't exceed the
+            # drive's tracking envelope (~30°/s sustained per CLAUDE.md).
+            # Subsequent 5° increments use the short duration safely.
+            self._real_set_status(
+                'Drop Scan',
+                step=f'moving to sweep start ({math.degrees(sweep_start_rad):+.0f}°)')
+            self._append_log(
+                f'Real drop_scan: moving to start pan='
+                f'{math.degrees(sweep_start_rad):+.1f}°')
+            if not self._real_drop_scan_motion(
+                    self._real_drop_scan_pan_target(
+                        sweep_start_rad, scan_wrist_roll),
+                    3.5):
+                self._append_log(
+                    'Real drop_scan: initial move to start failed', 'err')
+                self._real_set_status('Halted', step='initial pan failed')
+                return
+
+            # --- Phase 2b: sweep start → end in step_signed increments ---
+            # Loop continues while signed remaining distance is non-negative
+            # (works in both directions since step_signed carries the sign).
+            pan = sweep_start_rad
+            first_iter = True
+            sweep_sign = 1.0 if sweep_step_signed_rad > 0 else -1.0
+            while sweep_sign * (sweep_end_rad - pan) >= -1e-6:
+                if self._qs_abort_evt.is_set():
+                    self._append_log('Real drop_scan: aborted', 'warn')
+                    self._real_set_status('Aborted')
+                    return
+                self._real_set_status(
+                    'Drop Scan',
+                    step=f'sweep pan={math.degrees(pan):+.1f}° '
+                         f'cached={len(visited_ids)}/3')
+                # Skip motion on first iter — we're already at pan_min from
+                # the initial move above. Subsequent iters do the small step.
+                if not first_iter:
+                    target = self._real_drop_scan_pan_target(
+                        pan, scan_wrist_roll)
+                    if not self._real_drop_scan_motion(
+                            target, DROP_SCAN_STEP_DURATION_S):
+                        self._append_log(
+                            f'Real drop_scan: pan motion to '
+                            f'{math.degrees(pan):+.1f}° failed', 'err')
+                        self._real_set_status('Halted', step='pan motion failed')
+                        return
+                first_iter = False
+                time.sleep(DROP_SCAN_SETTLE_AFTER_STEP_S)
+
+                # Sample briefly — looking for new cups in view zone
+                samples = self._real_sample_drop_poses(
+                    DROP_SCAN_SAMPLE_PER_STEP_S)
+                for drop_id, pose_list in samples.items():
+                    if drop_id in visited_ids:
+                        continue
+                    if not pose_list:
+                        continue
+                    # Compute target pan from latest sample
+                    p = pose_list[-1]
+                    target_pan = math.atan2(-p['y'], p['x'] - X_PAN)
+                    # In view zone? (within ±FOV_HALF of current pan)
+                    if abs(target_pan - pan) > DROP_SCAN_FOV_HALF_RAD:
+                        continue
+                    # Out of pan range? skip
+                    if (target_pan < DROP_SCAN_PAN_MIN_RAD or
+                            target_pan > DROP_SCAN_PAN_MAX_RAD):
+                        continue
+                    self._append_log(
+                        f'Real drop_scan: detected {drop_id} → target_pan='
+                        f'{math.degrees(target_pan):+.1f}° (sweep at '
+                        f'{math.degrees(pan):+.1f}°)')
+                    self._real_set_status(
+                        'Drop Scan',
+                        step=f'settling on {drop_id}')
+
+                    # Visual servo: single corrective pan to target
+                    servo_target = self._real_drop_scan_pan_target(
+                        target_pan, scan_wrist_roll)
+                    if not self._real_drop_scan_motion(
+                            servo_target, DROP_SCAN_STEP_DURATION_S + 0.1):
+                        self._append_log(
+                            f'Real drop_scan: servo to {drop_id} failed', 'warn')
+                        continue
+                    time.sleep(0.3)  # let arm settle before averaging
+
+                    # 3-sec average
+                    avg_samples = self._real_sample_drop_poses(
+                        DROP_SCAN_AVG_DURATION_S, filter_id=drop_id)
+                    drop_samples = avg_samples.get(drop_id, [])
+                    if len(drop_samples) < DROP_SCAN_MIN_AVG_SAMPLES:
+                        self._append_log(
+                            f'Real drop_scan: {drop_id} settle failed — only '
+                            f'{len(drop_samples)} samples '
+                            f'(need ≥{DROP_SCAN_MIN_AVG_SAMPLES})', 'warn')
+                        # Resume sweep from servoed pan
+                        pan = target_pan
+                        continue
+                    avg_pose, xy_var = self._real_average_pose_samples(
+                        drop_samples)
+                    if xy_var > DROP_SCAN_MAX_XY_VARIANCE_M2:
+                        self._append_log(
+                            f'Real drop_scan: {drop_id} xy variance '
+                            f'{xy_var*1e6:.1f} mm² too high — skipping cache',
+                            'warn')
+                        pan = target_pan
+                        continue
+                    self._cached_cup_poses[drop_id] = avg_pose
+                    visited_ids.add(drop_id)
+                    self._append_log(
+                        f'Real drop_scan: cached {drop_id} '
+                        f'(avg {len(drop_samples)} samples, '
+                        f'xy_std={1000*math.sqrt(xy_var):.2f} mm)')
+                    pan = target_pan  # resume from servoed pos
+
+                pan += DROP_SCAN_PAN_STEP_SIGNED_RAD
+
+            # --- Phase 3: push cached to MoveIt + visual + dropdown ---
+            self._real_set_status('Drop Scan', step='applying scene')
+            self._remove_cup_collision_objects()
+            time.sleep(0.5)  # planning-scene monitor round-trip
+            if self._cached_cup_poses:
+                self._add_cup_collision_objects(
+                    cups_dict=dict(self._cached_cup_poses))
+                self._publish_cup_visual_markers(
+                    cups_dict=dict(self._cached_cup_poses))
+            # Mirror into _drop_data + listbox so existing flows pick up.
+            with self._drop_lock:
+                self._drop_data.update(self._cached_cup_poses)
+            self.root.after(0, self._populate_drop_list)
+            # Status label per cup
+            def _update_label():
+                marks = []
+                for n in ('drop_0', 'drop_1', 'drop_2'):
+                    glyph = '✓' if n in self._cached_cup_poses else '✗'
+                    marks.append(f'{n}:{glyph}')
+                if hasattr(self, '_real_cups_status_var'):
+                    self._real_cups_status_var.set(
+                        'Cups: ' + '   '.join(marks))
+            self.root.after(0, _update_label)
+            self._real_refresh_color_dropdown()
+            self._append_log(
+                f'Real drop_scan: cached {len(visited_ids)} cup(s): '
+                f'{sorted(visited_ids)}')
+
+            # --- Phase 4: return to scan_home (preserve scan-start wrist_roll) ---
+            self._real_set_status('Drop Scan', step='scan_home (return)')
+            if not self._real_scan_home_preserve_roll(scan_wrist_roll):
+                self._append_log('Real drop_scan: return scan_home failed',
+                                 'warn')
+            self._real_set_status(
+                'Complete', step=f'✓ {len(visited_ids)} cup(s) cached')
+        finally:
+            self._qs_state = 'idle'
+
+    # --- Drop scan helpers ---
+
+    def _real_drop_scan_pan_target(self, pan_rad, wrist_roll_rad):
+        """Build a joint target with shoulder_pan = pan_rad and wrist_roll
+        LOCKED at `wrist_roll_rad` (the captured-at-scan-start value, NOT
+        the live current value). Other arm joints fixed at scan-home values
+        (shoulder_lift=0, elbow_flex=0, wrist_flex=π/2).
+
+        Locking wrist_roll to a captured constant — rather than reading
+        current /joint_states each step — prevents drift from compounding
+        across the 36-step sweep. The controller must keep correcting back
+        to the captured value rather than capturing whatever drift occurred."""
+        target = {n: 0.0 for n in ARM_JOINT_NAMES}
+        target['wrist_flex'] = math.pi / 2
+        target['wrist_roll'] = float(wrist_roll_rad)
+        target['shoulder_pan'] = float(pan_rad)
+        return target
+
+    def _real_scan_home_preserve_roll(self, wrist_roll_rad=None):
+        """Move arm to a scan-ready pose (pan=0, lift=0, elbow=0, wrist_flex=π/2)
+        but PRESERVE wrist_roll at `wrist_roll_rad` (defaults to current value
+        from /joint_states). Used by Drop Scan so whatever wrist_roll the user
+        set via the Roll +90° / Roll −90° buttons is honored throughout the
+        sweep — drop_scan no longer flips the wrist itself.
+
+        Safe duration computed from max joint delta (~30°/s sustained on the
+        SO-ARM101 drives, min 1.5s).
+        """
+        with self.joint_lock:
+            current = dict(self.joint_positions)
+        if wrist_roll_rad is None:
+            wrist_roll_rad = current['wrist_roll']
+        target = {n: 0.0 for n in ARM_JOINT_NAMES}
+        target['wrist_flex'] = math.pi / 2
+        target['wrist_roll'] = float(wrist_roll_rad)
+        max_delta = max(abs(target[n] - current[n]) for n in ARM_JOINT_NAMES)
+        SAFE_RATE_RAD_PER_S = math.radians(30)
+        duration = max(1.5, max_delta / SAFE_RATE_RAD_PER_S + 0.5)
         self._append_log(
-            f'Real: wrist_roll sign = {self._drop_wrist_roll_sign:+d}')
+            f'Real: scan_home (preserve wrist_roll='
+            f'{math.degrees(wrist_roll_rad):+.1f}°, '
+            f'max_Δ={math.degrees(max_delta):.1f}°, dur={duration:.1f}s)')
+        return bool(self._send_arm_goal(
+            target, duration_s=duration, blocking=True))
+
+    def _real_set_wrist_roll(self, target_rad):
+        """Move ONLY wrist_roll to target_rad; all other joints stay at
+        current /joint_states values. Safe duration based on the wrist_roll
+        delta (other joints have ~0 delta so they don't bound it). Updates
+        `_drop_wrist_roll_sign` for back-compat with code still reading it.
+        """
+        self._ensure_real_state()
+        with self.joint_lock:
+            current = dict(self.joint_positions)
+        target = dict(current)
+        target['wrist_roll'] = float(target_rad)
+        delta = abs(target_rad - current['wrist_roll'])
+        SAFE_RATE_RAD_PER_S = math.radians(30)
+        duration = max(1.5, delta / SAFE_RATE_RAD_PER_S + 0.5)
+        self._drop_wrist_roll_sign = 1 if target_rad >= 0 else -1
+        self._append_log(
+            f'Real: wrist_roll → {math.degrees(target_rad):+.1f}° '
+            f'(Δ={math.degrees(delta):.1f}°, dur={duration:.1f}s)')
+        return bool(self._send_arm_goal(
+            target, duration_s=duration, blocking=True))
+
+    def _cmd_real_swap_sweep_direction(self):
+        """Toggle the Drop Scan sweep direction. False (default) = canonical
+        right→left starting at +90°. True = swap, left→right starting at -90°.
+        Read by `_real_drop_scan_thread` at scan start."""
+        self._ensure_real_state()
+        new_val = not self._real_sweep_reversed_var.get()
+        self._real_sweep_reversed_var.set(new_val)
+        direction = 'left→right (start -90°)' if new_val else 'right→left (start +90°)'
+        self._append_log(f'Real: sweep direction → {direction}')
+
+    def _cmd_real_wrist_roll_plus(self):
+        """Move wrist_roll to +90° (markers-in-FOV / scan pose)."""
+        threading.Thread(
+            target=self._real_set_wrist_roll, args=(math.pi / 2,),
+            daemon=True).start()
+
+    def _cmd_real_wrist_roll_minus(self):
+        """Move wrist_roll to −90° (jaw-clearance / drop pose)."""
+        threading.Thread(
+            target=self._real_set_wrist_roll, args=(-math.pi / 2,),
+            daemon=True).start()
+
+    def _real_drop_scan_motion(self, target, duration_s):
+        """Send arm goal blocking. Returns True on success."""
+        self._append_log(
+            f'  drop_scan_motion: dispatching pan='
+            f'{math.degrees(target["shoulder_pan"]):+.1f}° dur={duration_s:.1f}s')
+        ok = bool(self._send_arm_goal(
+            target, duration_s=duration_s, blocking=True))
+        self._append_log(
+            f'  drop_scan_motion: returned ok={ok}')
+        return ok
+
+    def _real_sample_drop_poses(self, duration_s, filter_id=None):
+        """Subscribe to /drop_poses_real for `duration_s`, collect all
+        TF transforms by child_frame_id. Returns {drop_id: [pose_dict, ...]}.
+        Each pose_dict has 'x','y','z','qx','qy','qz','qw'.
+        If filter_id is given, only collect that drop_id (saves work)."""
+        samples = {}
+        def _cb(msg):
+            for tf in msg.transforms:
+                fid = tf.child_frame_id
+                if filter_id is not None and fid != filter_id:
+                    continue
+                samples.setdefault(fid, []).append({
+                    'x': tf.transform.translation.x,
+                    'y': tf.transform.translation.y,
+                    'z': tf.transform.translation.z,
+                    'qx': tf.transform.rotation.x,
+                    'qy': tf.transform.rotation.y,
+                    'qz': tf.transform.rotation.z,
+                    'qw': tf.transform.rotation.w,
+                })
+        sub = self.create_subscription(
+            TFMessage, '/drop_poses_real', _cb, 50,
+            callback_group=self._sub_cb_group)
+        try:
+            time.sleep(duration_s)
+        finally:
+            self.destroy_subscription(sub)
+        return samples
+
+    def _real_average_pose_samples(self, samples):
+        """Component-wise mean of xyz + normalized-mean quaternion. Returns
+        (avg_pose_dict, xy_variance_m2). Quaternion sign-flips canonicalized
+        before averaging to handle the q=-q ambiguity (otherwise opposite
+        signs cancel)."""
+        n = len(samples)
+        sx = sum(s['x'] for s in samples) / n
+        sy = sum(s['y'] for s in samples) / n
+        sz = sum(s['z'] for s in samples) / n
+        # xy variance (squared 2D distance from mean)
+        xy_var = sum((s['x']-sx)**2 + (s['y']-sy)**2 for s in samples) / n
+        # Quat mean: canonicalize sign vs first sample to avoid ±q cancellation
+        ref = samples[0]
+        qx = qy = qz = qw = 0.0
+        for s in samples:
+            sign = 1.0 if (s['qw']*ref['qw'] + s['qx']*ref['qx'] +
+                           s['qy']*ref['qy'] + s['qz']*ref['qz']) >= 0 else -1.0
+            qx += sign * s['qx']
+            qy += sign * s['qy']
+            qz += sign * s['qz']
+            qw += sign * s['qw']
+        norm = math.sqrt(qx*qx + qy*qy + qz*qz + qw*qw) or 1.0
+        return ({
+            'x': sx, 'y': sy, 'z': sz,
+            'qx': qx/norm, 'qy': qy/norm, 'qz': qz/norm, 'qw': qw/norm,
+        }, xy_var)
 
     def _cmd_real_drop_point_green(self):
-        """Move arm to scan pose: drop_point on the green cup (drop_1).
-
-        At this pose with wrist_roll = sign·(-π/2) the wrist camera sees
-        all three cup ArUco markers in one frame, so Refresh Cups Pose
-        can capture all cup positions in a single subscribe-once read.
-        """
-        if not self._qs_sync_drop_listbox('drop_1'):
-            self._append_log(
-                'Real: drop_1 not in drop listbox — Refresh Cups Pose first '
-                '(or set Drop Topic to a topic that publishes drop_1).', 'warn')
-            return
-        self._cmd_drop_point()
+        """Deprecated by Drop Scan (Phase 11-01 followup). Kept as a
+        deprecation stub so the auto-registered ~/real_drop_point_green
+        service doesn't error if invoked during the transition. Will be
+        deleted on next Phase 11 cleanup pass."""
+        self._append_log(
+            'Real: drop_point_green is deprecated — use Drop Scan instead',
+            'warn')
 
     def _cmd_real_refresh_cups_pose(self):
         """Subscribe-once to /drop_poses_real, partial-merge captured
@@ -4079,6 +4632,14 @@ class SOArm101ControlGUI(Node):
         drop selection mirrors the cache.
         """
         self._ensure_real_state()
+        # Force all relevant topics to /*_real BEFORE the refresh so live
+        # callbacks during/after the refresh write real-source data into
+        # _drop_data / objects_data / objects_bbox. Without this, sim subs
+        # continuously overwrite _drop_data and any subsequent code path
+        # that publishes visual markers without an explicit cups_dict
+        # (e.g. _cmd_apply_collision_padding → _refresh_display_markers)
+        # would re-publish sim cup positions.
+        self._real_ensure_real_topics()
         threading.Thread(
             target=self._real_refresh_cups_thread, daemon=True).start()
 
@@ -4137,6 +4698,15 @@ class SOArm101ControlGUI(Node):
             time.sleep(0.5)
             self._add_cup_collision_objects(
                 cups_dict=dict(self._cached_cup_poses))
+            # Visual markers must use the SAME cached snapshot as the
+            # collision — without the explicit cups_dict, the publisher
+            # would read self._drop_data which the (sim) /drop_poses sub
+            # continuously overwrites, causing visual+collision divergence.
+            self._publish_cup_visual_markers(
+                cups_dict=dict(self._cached_cup_poses))
+            self._append_log(
+                f'Real: published cup visual markers from cache '
+                f'({len(self._cached_cup_poses)} cups)')
             # Status label: ✓ for cached, ✗ for missing.
             def _update_label():
                 marks = []
@@ -4146,6 +4716,7 @@ class SOArm101ControlGUI(Node):
                 self._real_cups_status_var.set(
                     'Cups: ' + '   '.join(marks))
             self.root.after(0, _update_label)
+            self._real_refresh_color_dropdown()
         finally:
             self.destroy_subscription(sub)
 
@@ -4163,6 +4734,9 @@ class SOArm101ControlGUI(Node):
         feed only contains whatever's near tcp_link.
         """
         self._ensure_real_state()
+        # Same reasoning as Refresh Cups Pose — force topics before the
+        # refresh so live callbacks during the cycle write real-source data.
+        self._real_ensure_real_topics()
         threading.Thread(
             target=self._real_refresh_legos_thread, daemon=True).start()
 
@@ -4211,8 +4785,8 @@ class SOArm101ControlGUI(Node):
             # Mirror into objects_data + listbox so existing grasp_move /
             # gripper_close_for_object flows (which read objects_data)
             # pick up the cache. Live /objects_poses_real callbacks may
-            # overwrite during the loop — re-injection per cycle in
-            # _real_pick_drop_thread guards against that.
+            # overwrite during the run — re-injection right before the
+            # cycle in _real_run_one_color_thread guards against that.
             with self.objects_lock:
                 self.objects_data.update(self._cached_lego_poses)
             self.root.after(0, self._populate_object_list)
@@ -4227,20 +4801,25 @@ class SOArm101ControlGUI(Node):
             time.sleep(0.5)
             self._add_lego_collision_objects(
                 legos_dict=dict(self._cached_lego_poses))
-            # Status label: total count + per-color breakdown.
-            def _update_label():
-                tally = {'red': 0, 'blue': 0, 'green': 0}
-                for name in self._cached_lego_poses:
-                    color = name.split('_', 1)[0].lower()
-                    if color in tally:
-                        tally[color] += 1
-                total = len(self._cached_lego_poses)
-                breakdown = '  '.join(f'{c}:{n}' for c, n in tally.items())
-                self._real_legos_status_var.set(
-                    f'Legos: {total} cached  ({breakdown})')
-            self.root.after(0, _update_label)
+            self.root.after(0, self._real_update_legos_status_label)
+            self._real_refresh_color_dropdown()
         finally:
             self.destroy_subscription(sub)
+
+    def _real_update_legos_status_label(self):
+        """Refresh the 'Legos: N cached  (red:R blue:B green:G)' label.
+        Extracted so the post-drop eviction path can reuse it without
+        duplicating the tally logic."""
+        tally = {'red': 0, 'blue': 0, 'green': 0}
+        for name in self._cached_lego_poses:
+            color = name.split('_', 1)[0].lower()
+            if color in tally:
+                tally[color] += 1
+        total = len(self._cached_lego_poses)
+        breakdown = '  '.join(f'{c}:{n}' for c, n in tally.items())
+        if hasattr(self, '_real_legos_status_var'):
+            self._real_legos_status_var.set(
+                f'Legos: {total} cached  ({breakdown})')
 
     def _cmd_real_clear_cache(self):
         """Clear every Real Test tab cache and reset to defaults.
@@ -4294,9 +4873,8 @@ class SOArm101ControlGUI(Node):
         self._delete_visual_markers()
 
         self._drop_wrist_roll_sign = 1
-        btn = getattr(self, '_real_wrist_roll_btn', None)
-        if btn is not None:
-            btn.config(text=self._wrist_roll_btn_text())
+        # Note: clearing the sign no longer touches a button — Roll +90° /
+        # Roll −90° are explicit-action buttons, not toggle indicators.
 
         if hasattr(self, '_real_cups_status_var'):
             self._real_cups_status_var.set('Cups: (none)')
@@ -4309,26 +4887,268 @@ class SOArm101ControlGUI(Node):
             f'Real: cleared all caches '
             f'({len(cached_cup_names)} cups, {len(cached_lego_names)} legos removed, '
             f'wrist_roll sign reset to +1)')
+        self._real_refresh_color_dropdown()
 
-    def _cmd_real_run_pick_drop(self):
-        """Real pick-drop loop: iterate cached legos and run each through
-        _QS_SEQUENCE with both lego AND cup poses sourced from caches —
-        NOT live /objects_poses_real or /drop_poses topics.
+    # --- Color-driven single-pick helper (Phase 11-01) ---
+    # Color → cup mapping lives at module level (REAL_COLOR_TO_CUP) so
+    # hot-reload picks up changes — class-level constants don't survive
+    # _patch_methods.
 
-        Pre-flight checked:
-          - Cup pose cache is non-empty (Refresh Cups Pose was called).
-          - Lego pose cache is non-empty (Refresh Legos Pose was called).
-          - No existing QS / Real run is in progress.
+    def _real_ensure_real_topics(self):
+        """Force Grasp Topic + BBox Topic + Drop Topic to /*_real equivalents
+        and re-subscribe so sim callbacks can't leak data into objects_data /
+        objects_bbox / _drop_data during a Real Test cycle (D-07).
 
-        Per-cycle protocol:
-          - Re-inject _cached_cup_poses[cup_name] into _drop_data and
-            _cached_lego_poses[lego_name] into objects_data right before
-            each cycle. A live subscription could overwrite mid-cycle, but
-            (a) the YOLOE feed only updates when arm is at home (camera
-            looks down), and (b) the localizer typically doesn't publish
-            during arm motion. Race is benign in practice.
+        ALWAYS re-subscribes (no idempotent skip) — the StringVar widget
+        value is NOT a reliable indicator of the actual subscription topic.
+        Hot-reload bug: `_build_grasp_tab` creates the initial subscription
+        on the build-time default (`/objects_poses_sim`) BEFORE
+        `_restore_gui_state` sets the StringVar back to the saved value;
+        no re-subscription is triggered by the restore. So after every
+        hot-reload, the widget can show `/objects_poses_real` while the
+        actual sub is still on `/objects_poses_sim`. Forcing every call
+        sidesteps this by re-creating subs from scratch — costs ~1 ms.
+
+        Must be called from the tk thread (touches StringVars + buttons).
+
+        Why this is essential:
+        - `_objects_callback` (sim sub) overwrites `objects_data` AND auto-
+          schedules `_add_lego_collision_objects` on >3 mm moves → sim
+          poses leak into both objects_data AND the MoveIt planning scene.
+        - `_bbox_callback` (sim sub) leaves `_lookup_bbox` returning sim
+          catalog values instead of YOLOE's real catalog.
+        - `_drop_callback` (sim sub) overwrites `_drop_data`, which
+          `_publish_cup_visual_markers` reads → visual cups in RViz show
+          sim positions instead of real-cached positions, causing
+          visual-vs-collision divergence in the user's view.
+        """
+        REAL_OBJECTS = '/objects_poses_real'
+        REAL_BBOX = '/objects_bbox_real'
+        REAL_DROP = '/drop_poses_real'
+
+        # --- Grasp Topic: always re-subscribe ---
+        prev_obj = self._grasp_topic_var.get().strip()
+        self._grasp_topic_var.set(REAL_OBJECTS)
+        self._cmd_grasp_update_topic()
+        self._append_log(
+            f'Real: forced grasp_topic {prev_obj!r} → {REAL_OBJECTS!r} '
+            '(re-subscribed)')
+
+        # --- BBox Topic: always re-subscribe ---
+        prev_bbox = self._bbox_topic_var.get().strip()
+        self._bbox_topic_var.set(REAL_BBOX)
+        if hasattr(self, 'bbox_sub') and self.bbox_sub is not None:
+            self.destroy_subscription(self.bbox_sub)
+        self.bbox_sub = self.create_subscription(
+            String, REAL_BBOX, self._bbox_callback, 1)
+        # Clear stale sim bbox; next /objects_bbox_real msg refills it
+        # within ~1 s (YOLOE publishes continuously).
+        self.objects_bbox = {}
+        self._append_log(
+            f'Real: forced bbox_topic {prev_bbox!r} → {REAL_BBOX!r} '
+            '(re-subscribed)')
+
+        # --- Drop Topic: always re-subscribe ---
+        prev_drop = self._drop_topic_var.get().strip()
+        self._drop_topic_var.set(REAL_DROP)
+        # _update_drop_topic clears _drop_data + removes cup collisions —
+        # those will be re-added by the next Refresh Cups Pose. The
+        # call ALSO publishes "Drop topic: ..." log line for visibility.
+        self._update_drop_topic(REAL_DROP)
+        self._append_log(
+            f'Real: forced drop_topic {prev_drop!r} → {REAL_DROP!r} '
+            '(re-subscribed)')
+
+    def _real_inject_active_pair(self, lego_name, cup_name):
+        """Re-inject the active lego + cup pose into objects_data and
+        _drop_data from the cache. Called BEFORE EACH _QS_SEQUENCE step
+        so a late real-topic callback (or any other writer) can't drift
+        the pose mid-cycle. Cheap (~µs) — idempotent .update() per call.
+        """
+        with self._drop_lock:
+            self._drop_data[cup_name] = dict(
+                self._cached_cup_poses[cup_name])
+        with self.objects_lock:
+            self.objects_data[lego_name] = dict(
+                self._cached_lego_poses[lego_name])
+
+    # --- Per-step debug buttons (Phase 11-01 followup) ---
+    # Each _cmd_real_<step> button runs ONE _QS_SEQUENCE step in real-mode
+    # so the user can debug step-by-step without losing the cache-pose
+    # injection guarantees. Auto-registered as ~/real_<step> services via
+    # the _cmd_* convention.
+
+    def _real_run_step(self, label, method_name, kwargs=None):
+        """Common dispatcher for individual Real Test step buttons.
+
+        Pre-flight: dropdown color is selected, at least one cached lego
+        of that color exists, and (for cup steps) the matching cup is
+        cached. Forces real topics, picks closest cached lego of color,
+        re-injects pose for active lego+cup, dispatches via
+        `_qs_execute_step` which handles obj_listbox / drop_listbox sync
+        per the existing per-step policies.
+
+        Runs the actual motion in a background thread so the GUI doesn't
+        freeze. Logs ✓/✗ outcome at completion.
         """
         self._ensure_real_state()
+        color = self._real_selected_color_var.get()
+        if not color:
+            self._append_log(
+                f'Real step "{label}": no color selected — pick one first',
+                'warn')
+            return
+        if not self._cached_lego_poses:
+            self._append_log(
+                f'Real step "{label}": lego cache empty — Refresh Legos first',
+                'err')
+            return
+        candidates = [
+            (math.hypot(p['x'], p['y']), name)
+            for name, p in self._cached_lego_poses.items()
+            if name.split('_', 1)[0].lower() == color
+        ]
+        if not candidates:
+            self._append_log(
+                f'Real step "{label}": no cached legos of color {color!r}',
+                'err')
+            return
+        candidates.sort()
+        _, lego = candidates[0]
+        cup_name = self._qs_auto_drop_for_lego(lego)
+
+        # Force real topics + re-inject (idempotent if already real).
+        self._real_ensure_real_topics()
+        if cup_name and cup_name in self._cached_cup_poses:
+            self._real_inject_active_pair(lego, cup_name)
+        else:
+            # Lego-only inject for steps that don't need a cup
+            with self.objects_lock:
+                self.objects_data[lego] = dict(
+                    self._cached_lego_poses[lego])
+        self.root.after(0, self._populate_object_list)
+        self.root.after(0, self._populate_drop_list)
+        self.root.after(0, self._qs_refresh_objects)
+
+        def _worker():
+            time.sleep(0.6)  # let tk flush listbox repopulation
+            if not self._qs_select_lego(lego):
+                self._append_log(
+                    f'Real step "{label}": {lego} not in qs listbox', 'err')
+                return
+            self._append_log(
+                f'Real step "{label}": {lego}'
+                + (f' → {cup_name}' if cup_name else ''))
+            ok = self._qs_execute_step(method_name, kwargs or {})
+            self._append_log(
+                f'Real step "{label}": {"✓" if ok else "✗"}')
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _cmd_real_grasp_home(self):
+        """Real-mode Grasp Home (debug step) — moves arm to home pose."""
+        self._real_run_step('grasp home', '_cmd_grasp_home')
+
+    def _cmd_real_grasp_open(self):
+        """Real-mode Grasp Open (debug step) — opens gripper sized for
+        the dropdown color's closest cached lego."""
+        self._real_run_step('grasp open', '_cmd_gripper_open_for_object')
+
+    def _cmd_real_grasp_move(self):
+        """Real-mode Grasp Move (debug step) — IK to dropdown color's
+        closest cached lego pose. Uses cached pose only, never live topic."""
+        self._real_run_step('grasp move', '_cmd_grasp_move')
+
+    def _cmd_real_grasp_close(self):
+        """Real-mode Grasp Close (debug step) — closes gripper on the
+        active lego, attaches to gripper if grasp succeeds."""
+        self._real_run_step('grasp close', '_cmd_gripper_close_for_object')
+
+    def _cmd_real_drop_point(self):
+        """Real-mode Drop Point (debug step) — pans arm to face the
+        cached cup matching the dropdown color."""
+        self._real_run_step('drop point', '_cmd_drop_point')
+
+    def _cmd_real_drop_sweep(self):
+        """Real-mode Drop Sweep (debug step) — IK-plans a sweep from
+        carry pose to over the cached cup. Requires a lego attached."""
+        self._real_run_step('drop sweep', '_cmd_drop_sweep')
+
+    def _cmd_real_drop_release(self):
+        """Real-mode Release (debug step) — opens gripper to release
+        the carried lego into the cup."""
+        self._real_run_step('release', '_cmd_drop_release')
+
+    def _real_refresh_color_dropdown(self):
+        """Recompute combobox values = intersection(cached lego colors,
+        cached cup colors) and update widget + Run button enable state.
+
+        Thread-safe — mutates tk widgets via root.after(0, ...). Called on
+        every cache mutation: refresh cups, refresh legos, clear cache,
+        post-drop evict.
+
+        Wraps the body in try/except so a silent failure (e.g. missing
+        attribute after partial hot-reload) surfaces in the log instead of
+        being swallowed by the daemon thread that called us.
+        """
+        try:
+            if not hasattr(self, '_real_color_combobox'):
+                # Tab not built yet (early hot-reload race) — no widget to update.
+                return
+            lego_colors = {
+                n.split('_', 1)[0].lower() for n in self._cached_lego_poses
+            }
+            lego_colors &= set(REAL_COLOR_TO_CUP)  # drop unknowns silently
+            cup_colors_present = {
+                color for color, cup_name in REAL_COLOR_TO_CUP.items()
+                if cup_name in self._cached_cup_poses
+            }
+            available = sorted(lego_colors & cup_colors_present)
+
+            def _apply():
+                cb = getattr(self, '_real_color_combobox', None)
+                btn = getattr(self, '_real_run_button', None)
+                if cb is None:
+                    return
+                cb['values'] = available
+                current = self._real_selected_color_var.get()
+                if available:
+                    if current not in available:
+                        self._real_selected_color_var.set(available[0])
+                    if btn is not None:
+                        btn.config(state='normal')
+                else:
+                    self._real_selected_color_var.set('')
+                    if btn is not None:
+                        btn.config(state='disabled')
+            self.root.after(0, _apply)
+            self._append_log(f'Real: dropdown colors = {available}')
+        except Exception as e:
+            self._append_log(
+                f'Real: dropdown refresh failed — {type(e).__name__}: {e}',
+                'err')
+
+    def _cmd_real_run_one_color(self):
+        """Single-pick handler — picks ONE lego of the dropdown's selected
+        color and runs it through the full _QS_SEQUENCE with cache-only
+        IK inputs (no live /objects_poses_real or /drop_poses topics
+        consulted mid-cycle).
+
+        Pre-flight checked:
+          - A color is selected in the dropdown.
+          - Cup pose cache is non-empty.
+          - Lego pose cache is non-empty.
+          - No existing QS / Real run is in progress.
+
+        On success: evicts the dropped lego from cache + dropdown shrinks.
+        On failure: cache untouched, user can Refresh + retry.
+        """
+        self._ensure_real_state()
+        color = self._real_selected_color_var.get()
+        if not color:
+            self._append_log(
+                'Real: no color selected — Refresh first, then pick a color',
+                'warn')
+            return
         if not self._cached_cup_poses:
             self._append_log(
                 'Real: cup pose cache is empty — Refresh Cups Pose first',
@@ -4345,104 +5165,117 @@ class SOArm101ControlGUI(Node):
                 'Real: a run is already in progress — '
                 'use Quickstart Restart to abort it first', 'warn')
             return
+        # Force real topics on the tk thread BEFORE spawning the worker.
+        # Worker thread re-injects from cache, but only the real-topic sub
+        # prevents sim callbacks from clobbering objects_data / planning
+        # scene between IK steps (D-07).
+        self._real_ensure_real_topics()
         threading.Thread(
-            target=self._real_pick_drop_thread, daemon=True).start()
+            target=self._real_run_one_color_thread,
+            args=(color,), daemon=True).start()
 
-    def _real_pick_drop_thread(self):
+    def _real_run_one_color_thread(self, color):
         try:
-            self._real_set_status('Running', step='preparing')
+            self._append_log(
+                'Real: single-pick mode — using cache only, '
+                'no live topic source')
+            self._real_set_status(f'Running ({color})', step='preparing')
             self._qs_abort_evt.clear()
             self._qs_resume_evt.set()
             self._qs_state = 'running'
 
-            # Iterate cached legos (frozen scan from grasp_home FOV) — NOT
-            # the live /objects_poses_real feed, which only contains
-            # whatever's currently in the wrist camera's view. Snapshot
-            # the keys so a concurrent Refresh Legos doesn't mutate our
-            # iteration order mid-loop.
-            legos = sorted(self._cached_lego_poses.keys())
-            if not legos:
+            # Pick the closest-to-base lego of the chosen color.
+            # Tiebreak: alphabetical on cache key for determinism.
+            candidates = [
+                (math.hypot(p['x'], p['y']), name, p)
+                for name, p in self._cached_lego_poses.items()
+                if name.split('_', 1)[0].lower() == color
+            ]
+            if not candidates:
                 self._append_log(
-                    'Real: lego cache emptied between pre-flight and run — '
-                    'Refresh Legos Pose and try again', 'err')
-                self._real_set_status('Error', step='cache empty')
+                    f'Real: no cached legos of color {color!r} '
+                    '(cache may have been mutated since dropdown refresh)',
+                    'err')
+                self._real_set_status('Error', step='no candidates')
                 return
-            self._append_log(
-                f'Real: starting pick-drop on {len(legos)} cached legos: {legos}')
+            candidates.sort(key=lambda t: (t[0], t[1]))
+            distance, lego, _pose = candidates[0]
 
-            # Inject all cached legos into objects_data once at the start
-            # so the Grasp tab listbox is populated before _qs_sync_grasp_listbox
-            # runs. Per-cycle re-injection inside the loop guards against
-            # any live YOLOE callback that may arrive during the cycle.
+            cup_name = self._qs_auto_drop_for_lego(lego)
+            if cup_name is None or cup_name not in self._cached_cup_poses:
+                # Defense-in-depth — dropdown filter should prevent this.
+                self._append_log(
+                    f'Real: {lego} → cup {cup_name!r} not in cache', 'err')
+                self._real_set_status('Error', step='cup missing')
+                return
+
+            self._append_log(
+                f'Real: picked {lego} (dist={distance:.3f} m, '
+                f'{len(candidates)} candidate(s) of color {color!r}) '
+                f'→ {cup_name}')
+
+            # Re-inject cached poses into the live data structures right
+            # before the cycle. _cmd_grasp_move / _cmd_drop_sweep read these,
+            # and a stray live-topic callback could otherwise overwrite
+            # them with whatever YOLOE last saw (which is partial — the
+            # camera no longer sees the full workspace once the arm leaves
+            # grasp_home). Cache is the authoritative source here.
+            with self._drop_lock:
+                self._drop_data[cup_name] = dict(
+                    self._cached_cup_poses[cup_name])
             with self.objects_lock:
                 self.objects_data.update(self._cached_lego_poses)
             self.root.after(0, self._populate_object_list)
+            self.root.after(0, self._populate_drop_list)
             self.root.after(0, self._qs_refresh_objects)
-            time.sleep(0.6)  # let listbox repopulate before first cycle
+            time.sleep(0.6)  # let tk flush listbox repopulation
 
-            for cycle_idx, lego in enumerate(legos, start=1):
-                if self._qs_abort_evt.is_set():
-                    break
-                cup_name = self._qs_auto_drop_for_lego(lego)
-                if cup_name is None:
-                    self._append_log(
-                        f'Real: skip {lego} — no cup mapping for color',
-                        'warn')
-                    continue
-                if cup_name not in self._cached_cup_poses:
-                    self._append_log(
-                        f'Real: skip {lego} — {cup_name} not in cache',
-                        'warn')
-                    continue
-
-                # Re-inject both cached poses right before the cycle so
-                # downstream _cmd_*s see the frozen scan, not a live-topic
-                # overwrite that may have arrived during the previous cycle.
-                with self._drop_lock:
-                    self._drop_data[cup_name] = dict(
-                        self._cached_cup_poses[cup_name])
-                with self.objects_lock:
-                    self.objects_data[lego] = dict(
-                        self._cached_lego_poses[lego])
-
-                # Select lego in qs_listbox so _qs_execute_step's policies
-                # (grasp_open/move/close, drop_point/sweep/release) all
-                # resolve to this lego.
-                if not self._qs_select_lego(lego):
-                    self._append_log(
-                        f'Real: skip {lego} — not in qs listbox', 'warn')
-                    continue
-
+            if not self._qs_select_lego(lego):
                 self._append_log(
-                    f'Real: cycle {cycle_idx}/{len(legos)} — {lego} → {cup_name}')
-                ok_all = True
-                for i, (label, method_name, kwargs) in enumerate(
-                        self._QS_SEQUENCE, start=1):
-                    if self._qs_abort_evt.is_set():
-                        ok_all = False
-                        break
-                    self._qs_resume_evt.wait()  # honor pause
-                    self._real_set_status(
-                        f'cycle {cycle_idx}/{len(legos)}',
-                        step=f'{i}/{len(self._QS_SEQUENCE)}: {label} ({lego})')
-                    ok = self._qs_execute_step(method_name, kwargs)
-                    if not ok:
-                        ok_all = False
-                        self._append_log(
-                            f'Real: cycle for {lego} halted at "{label}"',
-                            'err')
-                        break
-                if not ok_all:
-                    self._real_set_status(
-                        'Halted',
-                        step=f'cycle {cycle_idx}/{len(legos)} ({lego})')
-                    return
+                    f'Real: {lego} not in qs listbox after re-inject — '
+                    'check _qs_refresh_objects path', 'err')
+                self._real_set_status('Error', step='select failed')
+                return
+
+            ok_all = True
+            failed_label = None
+            for i, (label, method_name, kwargs) in enumerate(
+                    self._QS_SEQUENCE, start=1):
+                if self._qs_abort_evt.is_set():
+                    ok_all = False
+                    break
+                self._qs_resume_evt.wait()  # honor pause
+                # Defense in depth: re-inject cached poses RIGHT BEFORE
+                # each step so any stray callback (even from /objects_poses_real
+                # — YOLOE may have re-detected with a slightly drifted pose)
+                # can't influence the IK target. Cache is the only source.
+                self._real_inject_active_pair(lego, cup_name)
+                self._real_set_status(
+                    f'Running ({color})',
+                    step=f'{i}/{len(self._QS_SEQUENCE)}: {label} ({lego})')
+                ok = self._qs_execute_step(method_name, kwargs)
+                if not ok:
+                    ok_all = False
+                    failed_label = label
+                    self._append_log(
+                        f'Real: cycle for {lego} halted at "{label}"', 'err')
+                    break
 
             if self._qs_abort_evt.is_set():
-                self._real_set_status('Aborted')
+                self._real_set_status('Aborted', step=f'({lego})')
+                # No eviction — abort during a successful sequence still
+                # shouldn't strip the lego from cache (we don't know if the
+                # drop completed atomically).
+            elif ok_all:
+                self._real_set_status(
+                    'Complete', step=f'✓ {lego} → {cup_name}')
+                self._append_log(
+                    f'Real: cycle complete — {lego} dropped in {cup_name}')
+                self._real_evict_lego_from_cache(lego)
             else:
-                self._real_set_status('Complete', step='✓ done')
-                self._append_log('Real: pick-drop run complete')
+                self._real_set_status(
+                    'Halted', step=f'✗ {lego} at "{failed_label}"')
+                # No eviction (D-06).
         finally:
             self._qs_state = 'idle'
 
@@ -4452,6 +5285,46 @@ class SOArm101ControlGUI(Node):
             text = status if step is None else f'{status} — {step}'
             self._real_run_status_var.set(text)
         self.root.after(0, _update)
+
+    def _real_evict_lego_from_cache(self, lego_name):
+        """Remove a successfully-dropped lego from cache + planning scene.
+
+        Called only on the success path of _real_run_one_color_thread (D-05).
+        Failed cycles MUST NOT call this — leaving the lego cached lets
+        the user retry after a Refresh (D-06).
+
+        Steps:
+          1. Pop from _cached_lego_poses + objects_data (both must drop the
+             entry, else the listbox keeps showing a phantom block).
+          2. Wipe-then-push lego collisions in MoveIt scene with the now-
+             smaller cache. Same 500 ms gap as _real_refresh_legos_thread
+             (planning-scene monitor round-trip — see HANDOFF.json
+             anti-patterns: ApplyPlanningScene ADD-on-existing-id is not
+             cleanly idempotent).
+          3. Refresh listboxes + Legos status label + dropdown.
+        """
+        popped = self._cached_lego_poses.pop(lego_name, None)
+        if popped is None:
+            self._append_log(
+                f'Real: evict noop — {lego_name} not in cache', 'warn')
+            return
+        with self.objects_lock:
+            self.objects_data.pop(lego_name, None)
+        # Wipe-then-push to reflect the smaller cache. _add_lego_collision_objects
+        # writes _lego_collision_names from scratch so we don't need to
+        # surgically remove just one id.
+        self._remove_lego_collision_objects()
+        time.sleep(0.5)
+        if self._cached_lego_poses:
+            self._add_lego_collision_objects(
+                legos_dict=dict(self._cached_lego_poses))
+        self.root.after(0, self._populate_object_list)
+        self.root.after(0, self._qs_refresh_objects)
+        self.root.after(0, self._real_update_legos_status_label)
+        self._real_refresh_color_dropdown()
+        self._append_log(
+            f'Real: evicted {lego_name} from cache '
+            f'(remaining: {len(self._cached_lego_poses)})')
 
     def _qs_select_lego(self, lego_name):
         """Select a lego in the Quickstart listbox by name. Used by both
@@ -5212,10 +6085,18 @@ class SOArm101ControlGUI(Node):
         # Phase 9: rate-limited live sync — if any block moved >3mm since last
         # seen, schedule a lego-scene resync (but at most once per 0.5s).
         # Never resync while a lego is attached (its world entry is stale by design).
+        # Phase 11-01 followup: also skip resync while a Quickstart/Real run
+        # OR Drop Scan is active. During those flows the cached/frozen poses
+        # are the authoritative source — letting live PnP noise (especially
+        # angular-dependent during a pan sweep) re-add the legos at drifting
+        # base-frame coordinates makes the collision meshes appear to move
+        # with shoulder_pan even though they're physically stationary.
         if new_any_big_move:
             self._ensure_lego_state()
             if self._attached_lego_name:
                 return
+            if getattr(self, '_qs_state', 'idle') == 'running':
+                return  # frozen during run/scan — re-inject path owns the scene
             now = self.get_clock().now().nanoseconds / 1e9
             last = getattr(self, '_lego_sync_last_t', 0.0)
             if now - last > 0.5:
@@ -5816,7 +6697,19 @@ class SOArm101ControlGUI(Node):
         threading.Thread(target=_apply, daemon=True).start()
 
     def _remove_lego_collision_objects(self):
-        """Remove all lego_* collision objects from the world (not attached)."""
+        """Remove all lego_* collision objects from the world (not attached).
+
+        Queries the live planning scene for any `lego_*`-prefixed ids and
+        unions with `_lego_collision_names` before removing — defends
+        against orphan legos from earlier add cycles whose tracker was
+        overwritten by a subsequent add (the tracker is replaced wholesale
+        per add, so prior ids leak if not removed first).
+
+        Phase 11-01 followup: discovered when Real Test → Clear all caches
+        left 8 sim-named lego collisions in the planning scene because
+        they'd been added before the topic-switch fix landed and the
+        tracker was overwritten by the post-fix add of 5 real-named legos.
+        """
         self._ensure_lego_state()
         if not MOVEIT_AVAILABLE or not hasattr(self, '_apply_scene_client'):
             return
@@ -5824,20 +6717,43 @@ class SOArm101ControlGUI(Node):
         def _apply():
             if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
                 return
+            # Discover orphan lego_* ids in the live scene.
+            scene_lego_ids = set()
+            if hasattr(self, '_get_scene_client') and \
+                    self._get_scene_client.wait_for_service(timeout_sec=2.0):
+                get_req = GetPlanningSceneSrv.Request()
+                get_req.components.components = 8  # WORLD_OBJECT_NAMES
+                fut = self._get_scene_client.call_async(get_req)
+                self._wait_future(fut, timeout_sec=3.0)
+                if fut.result() is not None:
+                    for co in fut.result().scene.world.collision_objects:
+                        if co.id.startswith('lego_'):
+                            scene_lego_ids.add(co.id)
+            # Union of tracker + live discovery — remove everything.
+            tracked_ids = set(self._lego_collision_names)
+            all_ids = tracked_ids | scene_lego_ids
+            if not all_ids:
+                return
             scene = PlanningSceneMsg()
             scene.is_diff = True
-            for name in list(self._lego_collision_names):
+            for name in sorted(all_ids):
                 co = CollisionObject()
                 co.header.frame_id = 'base'
                 co.id = name
                 co.operation = CollisionObject.REMOVE
                 scene.world.collision_objects.append(co)
-            if scene.world.collision_objects:
-                req = ApplyPlanningScene.Request()
-                req.scene = scene
-                future = self._apply_scene_client.call_async(req)
-                self._wait_future(future, timeout_sec=5.0)
-                self._lego_collision_names.clear()
+            req = ApplyPlanningScene.Request()
+            req.scene = scene
+            future = self._apply_scene_client.call_async(req)
+            self._wait_future(future, timeout_sec=5.0)
+            self._lego_collision_names.clear()
+            # Log only if we caught orphans — silent in the normal case.
+            orphans = scene_lego_ids - tracked_ids
+            if orphans:
+                self._append_log(
+                    f'Removed {len(all_ids)} lego collision objects '
+                    f'(incl. {len(orphans)} orphan(s) not in tracker: '
+                    f'{sorted(orphans)})')
 
         threading.Thread(target=_apply, daemon=True).start()
 
@@ -6301,15 +7217,28 @@ class SOArm101ControlGUI(Node):
         self._append_log(f'Detached {obj_id}')
         return True
 
-    def _publish_cup_visual_markers(self):
-        """Publish colored cup meshes as RViz visual markers from _drop_data."""
+    def _publish_cup_visual_markers(self, cups_dict=None):
+        """Publish colored cup meshes as RViz visual markers.
+
+        Reads cup poses from `self._drop_data` by default. If `cups_dict`
+        is provided (e.g. real-mode cached cups from Refresh Cups Pose),
+        uses that snapshot instead — bypasses the live /drop_poses
+        subscription so the visual matches the user-frozen scan, not
+        whatever the live (potentially sim) topic is currently publishing.
+
+        Mirrors the cups_dict pattern in `_add_cup_collision_objects` so
+        visual + collision share the same source-of-truth in real mode.
+        """
         if not hasattr(self, '_cup_visual_pub'):
             from rclpy.qos import QoSProfile, DurabilityPolicy
             self._cup_visual_pub = self.create_publisher(
                 MarkerArray, '/cup_visual_markers_array',
                 QoSProfile(depth=5, durability=DurabilityPolicy.TRANSIENT_LOCAL))
-        with self._drop_lock:
-            drop_items = dict(self._drop_data)
+        if cups_dict is not None:
+            drop_items = dict(cups_dict)
+        else:
+            with self._drop_lock:
+                drop_items = dict(self._drop_data)
         if not drop_items:
             return
         scale = _CUP_STL_SCALE * _CUP_COLLISION_PADDING
