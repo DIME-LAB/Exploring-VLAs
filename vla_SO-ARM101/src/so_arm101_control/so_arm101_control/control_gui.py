@@ -277,7 +277,13 @@ def _load_lego_mesh(size):
 
 
 def _lego_size_from_name(name):
-    """Extract '2x2'/'2x3'/'2x4' from a block name like 'red_2x3'."""
+    """Extract '2x2'/'2x3'/'2x4' from a sim-style block name like 'red_2x3'.
+
+    Returns None for names without a size suffix (e.g. YOLOE-style 'red_0',
+    where size is unknown — vision can detect color but not size). Callers
+    must fall back to bbox catalog dims (`_lookup_bbox`) when None is
+    returned, NOT infer size from color.
+    """
     for s in _LEGO_SIZES:
         if name.endswith(s):
             return s
@@ -533,6 +539,16 @@ class SOArm101ControlGUI(Node):
         self._drop_lock = threading.Lock()
         self._drop_sub = None  # Created by _build_grasp_tab → _update_drop_topic
         self._cup_collision_names = []
+
+        # --- Real-mode pipeline (Real Test tab; scan-then-cache cup poses) ---
+        # +1 = optimal cup-markers-in-FOV pose for _cmd_drop_point; -1 = alternate
+        # when + is occluded. Toggled from Real Test tab, consumed by drop_point IK.
+        self._drop_wrist_roll_sign = 1
+        # child_frame_id ('drop_0'/'drop_1'/'drop_2') →
+        # {'translation': (x,y,z), 'rotation': (qx,qy,qz,qw)} in frame 'base'.
+        # Populated by Refresh Cups Pose (subscribe-once /drop_poses_real with
+        # partial-cache merge: missing markers keep their previous value).
+        self._cached_cup_poses = {}
         from rclpy.qos import QoSProfile, DurabilityPolicy
         self._cup_visual_pub = self.create_publisher(
             MarkerArray, '/cup_visual_markers_array',
@@ -1870,6 +1886,7 @@ class SOArm101ControlGUI(Node):
         self._build_arm_control_tab(notebook)
         self._build_grasp_tab(notebook)
         self._build_quickstart_tab(notebook)
+        self._build_real_test_tab(notebook)
         self._build_display_tab(notebook)
 
         # Auto-populate IK fields when switching to IK tab
@@ -2974,6 +2991,7 @@ class SOArm101ControlGUI(Node):
                 (self._build_arm_control_tab, 'IK'),
                 (self._build_grasp_tab, 'Grasp'),
                 (self._build_quickstart_tab, 'Quickstart'),
+                (self._build_real_test_tab, 'Real Test'),
                 (self._build_display_tab, 'RViz'),
             ]:
                 try:
@@ -3864,6 +3882,591 @@ class SOArm101ControlGUI(Node):
         finally:
             self._qs_state = 'idle'
 
+    # ------------------------------------------------------------------
+    # Tab: Real Test  (real-mode pipeline: YOLOE legos + ArUco cups)
+    # ------------------------------------------------------------------
+    # Mirrors the Quickstart flow but sources poses from the real-camera
+    # detection stack (/objects_poses_real, /drop_poses_real) instead of
+    # sim ground truth. Cups are detected ONCE per cycle at a scan pose
+    # and cached; legos refresh every cycle. Built in isolation here for
+    # end-to-end validation, will refactor into existing tabs once stable.
+
+    def _ensure_real_state(self):
+        """Lazy-init Real Test tab state vars on the live instance.
+
+        __init__ runs once per process, so when hot-reload introduces new
+        state vars they don't materialize on the running instance until
+        they're accessed. This helper is called at the top of the tab
+        builder and every _cmd_real_* handler so the running session
+        picks up the new vars without a full relaunch.
+        """
+        if not hasattr(self, '_drop_wrist_roll_sign'):
+            self._drop_wrist_roll_sign = 1
+        if not hasattr(self, '_cached_cup_poses'):
+            self._cached_cup_poses = {}
+        if not hasattr(self, '_cached_lego_poses'):
+            # Same shape as _cached_cup_poses + objects_data:
+            # {child_frame_id (e.g. 'red_lego_0') →
+            #  {'x','y','z','qx','qy','qz','qw'}} in frame 'base'.
+            # Populated by Refresh Legos Pose at grasp_home (where wrist
+            # camera looks down at workspace). Consumed by Run Real Pick
+            # & Drop instead of the live /objects_poses_real feed.
+            self._cached_lego_poses = {}
+
+    def _build_real_test_tab(self, notebook):
+        self._ensure_real_state()
+        frame = ttk.Frame(notebook)
+        notebook.add(frame, text='Real Test')
+
+        # ===== Section: Setup =====
+        # Three primitive motions used to position the arm before scanning,
+        # plus the wrist-roll sign toggle that decides which pose makes the
+        # cup ArUco markers visible to the wrist camera.
+        setup = ttk.LabelFrame(frame, text='Setup')
+        setup.pack(fill=tk.X, padx=10, pady=(8, 4))
+
+        row1 = ttk.Frame(setup)
+        row1.pack(fill=tk.X, padx=5, pady=4)
+        self._register_button(
+            row1, text='Grasp Home', tab='Real Test', section='Setup',
+            command=self._cmd_grasp_home,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2), ipady=3)
+        self._register_button(
+            row1, text='Open Gripper', tab='Real Test', section='Setup',
+            command=self._cmd_gripper_open,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0), ipady=3)
+
+        row2 = ttk.Frame(setup)
+        row2.pack(fill=tk.X, padx=5, pady=4)
+        self._real_wrist_roll_btn = self._register_button(
+            row2, text=self._wrist_roll_btn_text(),
+            tab='Real Test', section='Setup',
+            command=self._cmd_real_toggle_wrist_roll_sign,
+        )
+        self._real_wrist_roll_btn.pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2), ipady=3)
+        self._register_button(
+            row2, text='Drop Point Green  (scan pose)',
+            tab='Real Test', section='Setup',
+            command=self._cmd_real_drop_point_green,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0), ipady=3)
+
+        # ===== Section: Calibration =====
+        # Two scan-then-cache pipelines, one per detection pass:
+        #   - Cups via /drop_poses_real (ArUco), scanned at drop_point_green
+        #     pose where wrist camera sees all 3 cup markers in one frame.
+        #   - Legos via /objects_poses_real (YOLOE), scanned at grasp_home
+        #     pose where wrist camera looks down at the workspace. YOLOE
+        #     only sees what's in FOV at scan time — caching freezes that
+        #     view so the loop can iterate it even after the arm moves
+        #     away from home for grasp/drop motions.
+        #
+        # Each refresh partial-merges captured detections into its cache
+        # (missing markers/legos keep their previous cached value), pushes
+        # the merged cache to MoveIt as collision objects, and updates the
+        # corresponding live data structure (_drop_data / objects_data) +
+        # listbox so existing _cmd_* paths read the cached values.
+        cal = ttk.LabelFrame(frame, text='Calibration  (scan-then-cache)')
+        cal.pack(fill=tk.X, padx=10, pady=4)
+
+        self._register_button(
+            cal,
+            text='🔄  Refresh Cups Pose  (subscribe-once /drop_poses_real)',
+            tab='Real Test', section='Calibration',
+            command=self._cmd_real_refresh_cups_pose,
+        ).pack(fill=tk.X, padx=5, pady=(4, 1), ipady=3)
+
+        self._real_cups_status_var = tk.StringVar(value='Cups: (none)')
+        tk.Label(
+            cal, textvariable=self._real_cups_status_var,
+            anchor='w', font=('TkFixedFont', 9), fg='#333',
+        ).pack(fill=tk.X, padx=8, pady=(0, 4))
+
+        self._register_button(
+            cal,
+            text='🔄  Refresh Legos Pose  (subscribe-once /objects_poses_real)',
+            tab='Real Test', section='Calibration',
+            command=self._cmd_real_refresh_legos_pose,
+        ).pack(fill=tk.X, padx=5, pady=(4, 1), ipady=3)
+
+        self._real_legos_status_var = tk.StringVar(value='Legos: (none)')
+        tk.Label(
+            cal, textvariable=self._real_legos_status_var,
+            anchor='w', font=('TkFixedFont', 9), fg='#333',
+        ).pack(fill=tk.X, padx=8, pady=(0, 4))
+
+        clear_row = ttk.Frame(cal)
+        clear_row.pack(fill=tk.X, padx=5, pady=(2, 5))
+        self._register_button(
+            clear_row, text='Clear all caches',
+            tab='Real Test', section='Calibration',
+            command=self._cmd_real_clear_cache,
+        ).pack(side=tk.RIGHT, padx=(0, 3))
+
+        # ===== Section: Run =====
+        run_frame = ttk.LabelFrame(frame, text='Run')
+        run_frame.pack(fill=tk.X, padx=10, pady=(4, 8))
+
+        self._register_button(
+            run_frame, text='▶  Run Real Pick & Drop',
+            tab='Real Test', section='Run',
+            command=self._cmd_real_run_pick_drop,
+        ).pack(fill=tk.X, padx=5, pady=4, ipady=4)
+
+        self._real_run_status_var = tk.StringVar(value='Idle')
+        status_row = ttk.Frame(run_frame)
+        status_row.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(status_row, text='Status:', anchor='w').pack(side=tk.LEFT)
+        tk.Label(
+            status_row, textvariable=self._real_run_status_var,
+            anchor='w', font=('TkDefaultFont', 9, 'bold'),
+        ).pack(side=tk.LEFT, padx=(5, 0))
+
+        # Hint text — pre-flight assumption surface.
+        hint = (
+            'Pre-flight: set Grasp Topic = /objects_poses_real (Grasp tab) '
+            'and refresh objects.\nThen: Drop Point Green → Refresh Cups Pose '
+            '→ Run Real Pick & Drop.'
+        )
+        tk.Label(
+            frame, text=hint, anchor='w', justify=tk.LEFT,
+            fg='#555', font=('TkDefaultFont', 8),
+            wraplength=900,
+        ).pack(fill=tk.X, padx=12, pady=(8, 4))
+
+    # ------------------------------------------------------------------
+    # Real Test tab — command handlers
+    # ------------------------------------------------------------------
+
+    def _wrist_roll_btn_text(self):
+        sign_glyph = '+' if self._drop_wrist_roll_sign >= 0 else '−'
+        return f'Wrist Roll {sign_glyph}  (toggle)'
+
+    def _cmd_real_toggle_wrist_roll_sign(self):
+        """Flip _drop_wrist_roll_sign between +1 and -1.
+
+        +1 = optimal cup-markers-in-FOV pose for drop_point scan;
+        -1 = alternate scan pose for when + is occluded. Default +1.
+        Consumed by _cmd_drop_point's wrist_roll target.
+        """
+        self._ensure_real_state()
+        self._drop_wrist_roll_sign = -self._drop_wrist_roll_sign
+        btn = getattr(self, '_real_wrist_roll_btn', None)
+        if btn is not None:
+            btn.config(text=self._wrist_roll_btn_text())
+        self._append_log(
+            f'Real: wrist_roll sign = {self._drop_wrist_roll_sign:+d}')
+
+    def _cmd_real_drop_point_green(self):
+        """Move arm to scan pose: drop_point on the green cup (drop_1).
+
+        At this pose with wrist_roll = sign·(-π/2) the wrist camera sees
+        all three cup ArUco markers in one frame, so Refresh Cups Pose
+        can capture all cup positions in a single subscribe-once read.
+        """
+        if not self._qs_sync_drop_listbox('drop_1'):
+            self._append_log(
+                'Real: drop_1 not in drop listbox — Refresh Cups Pose first '
+                '(or set Drop Topic to a topic that publishes drop_1).', 'warn')
+            return
+        self._cmd_drop_point()
+
+    def _cmd_real_refresh_cups_pose(self):
+        """Subscribe-once to /drop_poses_real, partial-merge captured
+        transforms into _cached_cup_poses (missing markers keep their
+        previous cached value), push the merged set to MoveIt as collision
+        objects, and update _drop_data + _drop_listbox so the Grasp tab's
+        drop selection mirrors the cache.
+        """
+        self._ensure_real_state()
+        threading.Thread(
+            target=self._real_refresh_cups_thread, daemon=True).start()
+
+    def _real_refresh_cups_thread(self):
+        evt = threading.Event()
+        captured = {}
+
+        def _once_cb(msg):
+            if evt.is_set():
+                return
+            for tf in msg.transforms:
+                captured[tf.child_frame_id] = {
+                    'x': tf.transform.translation.x,
+                    'y': tf.transform.translation.y,
+                    'z': tf.transform.translation.z,
+                    'qx': tf.transform.rotation.x,
+                    'qy': tf.transform.rotation.y,
+                    'qz': tf.transform.rotation.z,
+                    'qw': tf.transform.rotation.w,
+                }
+            evt.set()
+
+        topic = '/drop_poses_real'
+        self._append_log(f'Real: subscribing once to {topic} (3s timeout)')
+        sub = self.create_subscription(
+            TFMessage, topic, _once_cb, 10,
+            callback_group=self._sub_cb_group)
+        try:
+            ok = evt.wait(timeout=3.0)
+            if not ok:
+                self._append_log(
+                    f'Real: no message on {topic} within 3s — is '
+                    'aruco_camera_localizer running and seeing markers?',
+                    'warn')
+                return
+            # Partial-cache merge: only update what was captured this scan.
+            self._cached_cup_poses.update(captured)
+            captured_names = sorted(captured.keys())
+            kept_previous = [
+                n for n in sorted(self._cached_cup_poses.keys())
+                if n not in captured]
+            self._append_log(
+                f'Real: refreshed cups: captured={captured_names}, '
+                f'kept_previous={kept_previous}, '
+                f'total_cached={len(self._cached_cup_poses)}')
+            # Mirror into _drop_data + listbox so existing drop_point/sweep/
+            # release flows (which read from _drop_data) pick up the cache.
+            with self._drop_lock:
+                self._drop_data.update(self._cached_cup_poses)
+            self.root.after(0, self._populate_drop_list)
+            # WIPE-then-PUSH mirrors _cmd_drop_refresh's working pattern —
+            # MoveIt's ApplyPlanningScene ADD-on-existing-id is not cleanly
+            # idempotent, so repeat refreshes silently fail without prior
+            # REMOVE. 500 ms gap = planning-scene monitor round-trip.
+            self._remove_cup_collision_objects()
+            time.sleep(0.5)
+            self._add_cup_collision_objects(
+                cups_dict=dict(self._cached_cup_poses))
+            # Status label: ✓ for cached, ✗ for missing.
+            def _update_label():
+                marks = []
+                for n in ('drop_0', 'drop_1', 'drop_2'):
+                    glyph = '✓' if n in self._cached_cup_poses else '✗'
+                    marks.append(f'{n}:{glyph}')
+                self._real_cups_status_var.set(
+                    'Cups: ' + '   '.join(marks))
+            self.root.after(0, _update_label)
+        finally:
+            self.destroy_subscription(sub)
+
+    def _cmd_real_refresh_legos_pose(self):
+        """Subscribe-once to /objects_poses_real, partial-merge captured
+        lego TFs into _cached_lego_poses (missing legos keep their previous
+        cached value), push the merged set to MoveIt as collision objects,
+        and update objects_data + obj_listbox so the Grasp tab's lego
+        selection mirrors the cache.
+
+        Run this AT GRASP_HOME pose — that's the only pose where the wrist
+        camera looks down at the workspace. YOLOE only sees what's in FOV
+        at scan time, which is why the cache is essential for the run loop:
+        once the arm leaves home for a grasp, the live /objects_poses_real
+        feed only contains whatever's near tcp_link.
+        """
+        self._ensure_real_state()
+        threading.Thread(
+            target=self._real_refresh_legos_thread, daemon=True).start()
+
+    def _real_refresh_legos_thread(self):
+        evt = threading.Event()
+        captured = {}
+
+        def _once_cb(msg):
+            if evt.is_set():
+                return
+            for tf in msg.transforms:
+                captured[tf.child_frame_id] = {
+                    'x': tf.transform.translation.x,
+                    'y': tf.transform.translation.y,
+                    'z': tf.transform.translation.z,
+                    'qx': tf.transform.rotation.x,
+                    'qy': tf.transform.rotation.y,
+                    'qz': tf.transform.rotation.z,
+                    'qw': tf.transform.rotation.w,
+                }
+            evt.set()
+
+        topic = '/objects_poses_real'
+        self._append_log(f'Real: subscribing once to {topic} (3s timeout)')
+        sub = self.create_subscription(
+            TFMessage, topic, _once_cb, 10,
+            callback_group=self._sub_cb_group)
+        try:
+            ok = evt.wait(timeout=3.0)
+            if not ok:
+                self._append_log(
+                    f'Real: no message on {topic} within 3s — is '
+                    'localize_yoloe running and seeing legos in FOV?',
+                    'warn')
+                return
+            # Partial-cache merge: only update what was captured this scan.
+            self._cached_lego_poses.update(captured)
+            captured_names = sorted(captured.keys())
+            kept_previous = [
+                n for n in sorted(self._cached_lego_poses.keys())
+                if n not in captured]
+            self._append_log(
+                f'Real: refreshed legos: captured={captured_names}, '
+                f'kept_previous={kept_previous}, '
+                f'total_cached={len(self._cached_lego_poses)}')
+            # Mirror into objects_data + listbox so existing grasp_move /
+            # gripper_close_for_object flows (which read objects_data)
+            # pick up the cache. Live /objects_poses_real callbacks may
+            # overwrite during the loop — re-injection per cycle in
+            # _real_pick_drop_thread guards against that.
+            with self.objects_lock:
+                self.objects_data.update(self._cached_lego_poses)
+            self.root.after(0, self._populate_object_list)
+            self.root.after(0, self._qs_refresh_objects)
+            # WIPE-then-PUSH mirrors _cmd_grasp_refresh's working pattern.
+            # MoveIt's ApplyPlanningScene ADD on an existing id is not
+            # cleanly idempotent — repeat refreshes silently fail unless
+            # the prior collision objects are removed first. The 500 ms
+            # gap is the round-trip the planning-scene monitor needs to
+            # see the REMOVE before the ADD lands against a clean state.
+            self._remove_lego_collision_objects()
+            time.sleep(0.5)
+            self._add_lego_collision_objects(
+                legos_dict=dict(self._cached_lego_poses))
+            # Status label: total count + per-color breakdown.
+            def _update_label():
+                tally = {'red': 0, 'blue': 0, 'green': 0}
+                for name in self._cached_lego_poses:
+                    color = name.split('_', 1)[0].lower()
+                    if color in tally:
+                        tally[color] += 1
+                total = len(self._cached_lego_poses)
+                breakdown = '  '.join(f'{c}:{n}' for c, n in tally.items())
+                self._real_legos_status_var.set(
+                    f'Legos: {total} cached  ({breakdown})')
+            self.root.after(0, _update_label)
+        finally:
+            self.destroy_subscription(sub)
+
+    def _cmd_real_clear_cache(self):
+        """Clear every Real Test tab cache and reset to defaults.
+
+        Inverse of both Refresh Cups Pose, Refresh Legos Pose, and the
+        wrist-roll toggle. Walks all state mutated by this tab's handlers
+        so no ghost state remains.
+
+        Cleared:
+          - _cached_cup_poses + _cached_lego_poses (the scan caches)
+          - _drop_data + objects_data entries that were mirrored from the
+            caches (selective by name — leaves entries from live topic
+            subscriptions alone, since those refill on the next message)
+          - drop_listbox + obj_listbox (re-populated from trimmed data)
+          - cup + lego collision objects in MoveIt planning scene
+          - cup visual markers in RViz (idempotent DELETE)
+          - _drop_wrist_roll_sign reset to +1 (default)
+          - Status labels (Cups + Legos + Run)
+
+        Not cleared:
+          - QS state (handled separately by Quickstart Restart)
+        """
+        self._ensure_real_state()
+        cached_cup_names = list(self._cached_cup_poses.keys())
+        cached_lego_names = list(self._cached_lego_poses.keys())
+
+        self._cached_cup_poses.clear()
+        self._cached_lego_poses.clear()
+
+        # Selectively pop the cached names from _drop_data / objects_data
+        # so the listboxes don't keep showing cups/legos we no longer trust.
+        # Live subscriptions will refill these on the next msg.
+        if cached_cup_names:
+            with self._drop_lock:
+                for name in cached_cup_names:
+                    self._drop_data.pop(name, None)
+            self.root.after(0, self._populate_drop_list)
+        if cached_lego_names:
+            with self.objects_lock:
+                for name in cached_lego_names:
+                    self.objects_data.pop(name, None)
+            self.root.after(0, self._populate_object_list)
+            self.root.after(0, self._qs_refresh_objects)
+
+        self._remove_cup_collision_objects()
+        self._remove_lego_collision_objects()
+        # Visual markers (RViz colored cups). Idempotent — publishes DELETE
+        # regardless of source (this tab's Refresh, sim's _cmd_drop_refresh,
+        # or never added). Doesn't depend on _show_visual_var; clearing the
+        # cache always clears the visual representation.
+        self._delete_visual_markers()
+
+        self._drop_wrist_roll_sign = 1
+        btn = getattr(self, '_real_wrist_roll_btn', None)
+        if btn is not None:
+            btn.config(text=self._wrist_roll_btn_text())
+
+        if hasattr(self, '_real_cups_status_var'):
+            self._real_cups_status_var.set('Cups: (none)')
+        if hasattr(self, '_real_legos_status_var'):
+            self._real_legos_status_var.set('Legos: (none)')
+        if hasattr(self, '_real_run_status_var'):
+            self._real_run_status_var.set('Idle')
+
+        self._append_log(
+            f'Real: cleared all caches '
+            f'({len(cached_cup_names)} cups, {len(cached_lego_names)} legos removed, '
+            f'wrist_roll sign reset to +1)')
+
+    def _cmd_real_run_pick_drop(self):
+        """Real pick-drop loop: iterate cached legos and run each through
+        _QS_SEQUENCE with both lego AND cup poses sourced from caches —
+        NOT live /objects_poses_real or /drop_poses topics.
+
+        Pre-flight checked:
+          - Cup pose cache is non-empty (Refresh Cups Pose was called).
+          - Lego pose cache is non-empty (Refresh Legos Pose was called).
+          - No existing QS / Real run is in progress.
+
+        Per-cycle protocol:
+          - Re-inject _cached_cup_poses[cup_name] into _drop_data and
+            _cached_lego_poses[lego_name] into objects_data right before
+            each cycle. A live subscription could overwrite mid-cycle, but
+            (a) the YOLOE feed only updates when arm is at home (camera
+            looks down), and (b) the localizer typically doesn't publish
+            during arm motion. Race is benign in practice.
+        """
+        self._ensure_real_state()
+        if not self._cached_cup_poses:
+            self._append_log(
+                'Real: cup pose cache is empty — Refresh Cups Pose first',
+                'err')
+            return
+        if not self._cached_lego_poses:
+            self._append_log(
+                'Real: lego pose cache is empty — Refresh Legos Pose first '
+                '(at grasp_home pose, where wrist camera sees workspace)',
+                'err')
+            return
+        if self._qs_state == 'running':
+            self._append_log(
+                'Real: a run is already in progress — '
+                'use Quickstart Restart to abort it first', 'warn')
+            return
+        threading.Thread(
+            target=self._real_pick_drop_thread, daemon=True).start()
+
+    def _real_pick_drop_thread(self):
+        try:
+            self._real_set_status('Running', step='preparing')
+            self._qs_abort_evt.clear()
+            self._qs_resume_evt.set()
+            self._qs_state = 'running'
+
+            # Iterate cached legos (frozen scan from grasp_home FOV) — NOT
+            # the live /objects_poses_real feed, which only contains
+            # whatever's currently in the wrist camera's view. Snapshot
+            # the keys so a concurrent Refresh Legos doesn't mutate our
+            # iteration order mid-loop.
+            legos = sorted(self._cached_lego_poses.keys())
+            if not legos:
+                self._append_log(
+                    'Real: lego cache emptied between pre-flight and run — '
+                    'Refresh Legos Pose and try again', 'err')
+                self._real_set_status('Error', step='cache empty')
+                return
+            self._append_log(
+                f'Real: starting pick-drop on {len(legos)} cached legos: {legos}')
+
+            # Inject all cached legos into objects_data once at the start
+            # so the Grasp tab listbox is populated before _qs_sync_grasp_listbox
+            # runs. Per-cycle re-injection inside the loop guards against
+            # any live YOLOE callback that may arrive during the cycle.
+            with self.objects_lock:
+                self.objects_data.update(self._cached_lego_poses)
+            self.root.after(0, self._populate_object_list)
+            self.root.after(0, self._qs_refresh_objects)
+            time.sleep(0.6)  # let listbox repopulate before first cycle
+
+            for cycle_idx, lego in enumerate(legos, start=1):
+                if self._qs_abort_evt.is_set():
+                    break
+                cup_name = self._qs_auto_drop_for_lego(lego)
+                if cup_name is None:
+                    self._append_log(
+                        f'Real: skip {lego} — no cup mapping for color',
+                        'warn')
+                    continue
+                if cup_name not in self._cached_cup_poses:
+                    self._append_log(
+                        f'Real: skip {lego} — {cup_name} not in cache',
+                        'warn')
+                    continue
+
+                # Re-inject both cached poses right before the cycle so
+                # downstream _cmd_*s see the frozen scan, not a live-topic
+                # overwrite that may have arrived during the previous cycle.
+                with self._drop_lock:
+                    self._drop_data[cup_name] = dict(
+                        self._cached_cup_poses[cup_name])
+                with self.objects_lock:
+                    self.objects_data[lego] = dict(
+                        self._cached_lego_poses[lego])
+
+                # Select lego in qs_listbox so _qs_execute_step's policies
+                # (grasp_open/move/close, drop_point/sweep/release) all
+                # resolve to this lego.
+                if not self._qs_select_lego(lego):
+                    self._append_log(
+                        f'Real: skip {lego} — not in qs listbox', 'warn')
+                    continue
+
+                self._append_log(
+                    f'Real: cycle {cycle_idx}/{len(legos)} — {lego} → {cup_name}')
+                ok_all = True
+                for i, (label, method_name, kwargs) in enumerate(
+                        self._QS_SEQUENCE, start=1):
+                    if self._qs_abort_evt.is_set():
+                        ok_all = False
+                        break
+                    self._qs_resume_evt.wait()  # honor pause
+                    self._real_set_status(
+                        f'cycle {cycle_idx}/{len(legos)}',
+                        step=f'{i}/{len(self._QS_SEQUENCE)}: {label} ({lego})')
+                    ok = self._qs_execute_step(method_name, kwargs)
+                    if not ok:
+                        ok_all = False
+                        self._append_log(
+                            f'Real: cycle for {lego} halted at "{label}"',
+                            'err')
+                        break
+                if not ok_all:
+                    self._real_set_status(
+                        'Halted',
+                        step=f'cycle {cycle_idx}/{len(legos)} ({lego})')
+                    return
+
+            if self._qs_abort_evt.is_set():
+                self._real_set_status('Aborted')
+            else:
+                self._real_set_status('Complete', step='✓ done')
+                self._append_log('Real: pick-drop run complete')
+        finally:
+            self._qs_state = 'idle'
+
+    def _real_set_status(self, status, step=None):
+        """Thread-safe status update for the Real Test tab."""
+        def _update():
+            text = status if step is None else f'{status} — {step}'
+            self._real_run_status_var.set(text)
+        self.root.after(0, _update)
+
+    def _qs_select_lego(self, lego_name):
+        """Select a lego in the Quickstart listbox by name. Used by both
+        the Real loop and as a generalization of the per-step QS policy.
+        Returns False if the listbox is empty or the name isn't present.
+        """
+        if not hasattr(self, '_qs_listbox') or self._qs_listbox.size() == 0:
+            return False
+        for i in range(self._qs_listbox.size()):
+            if self._qs_listbox.get(i).split('  ')[0] == lego_name:
+                self._qs_listbox.selection_clear(0, tk.END)
+                self._qs_listbox.selection_set(i)
+                return True
+        return False
+
     def _build_display_tab(self, notebook):
         frame = ttk.Frame(notebook)
         notebook.add(frame, text='RViz')
@@ -4632,6 +5235,78 @@ class SOArm101ControlGUI(Node):
         except json.JSONDecodeError:
             pass
 
+    def _lookup_bbox(self, name):
+        """Resolve a bbox dict for an object name with multi-tier fallback.
+
+        Three lookup tiers, tried in order:
+          1. Exact match (e.g. 'red_lego_2x4' from sim ground truth, or
+             'red' from a color-only catalog entry).
+          2. Color-only key (e.g. 'red_0' → 'red').
+          3. Any key starting with 'color_' (e.g. 'red_0' → 'red_2x4').
+             This handles the case where the catalog feeding our subscription
+             only has size-specific entries (no explicit color entries) —
+             the per-color size convention means any matching entry has the
+             right dims.
+
+        Two bbox topics exist (/objects_bbox_sim from Isaac Sim, /objects_bbox_real
+        from the YOLOE-side catalog) with different key sets. This function
+        is agnostic to which is feeding the subscription. Returns None only
+        when no key matches the color prefix at all.
+        """
+        if not name:
+            return None
+        # Tier 1: exact match.
+        bbox = self.objects_bbox.get(name)
+        if bbox:
+            return bbox
+        color = name.split('_', 1)[0].lower()
+        # Tier 2: color-only key (catalog has explicit 'red'/'green'/'blue').
+        bbox = self.objects_bbox.get(color)
+        if bbox:
+            return bbox
+        # Tier 3: any key starting with '<color>_' (size-specific entries).
+        prefix = f'{color}_'
+        for cat_name, cat_bbox in self.objects_bbox.items():
+            if cat_name.lower().startswith(prefix):
+                return cat_bbox
+        return None
+
+    def _build_lego_geometry(self, name):
+        """Resolve collision geometry for a lego by name.
+
+        Real-mode (YOLOE) detections have no size suffix because vision can
+        only recover color, not size. So this helper does NOT infer size
+        from color (that would bake a sim-only assumption into real code).
+        Instead:
+
+          1. If name has a size suffix (sim convention 'red_2x3'), try to
+             load the per-size STL mesh — most accurate geometry.
+          2. Otherwise (or if mesh load fails), fall back to a SolidPrimitive
+             box with dimensions read from the bbox catalog via _lookup_bbox.
+             The catalog is the user-owned config — anything that needs
+             dims should consult it, not infer from naming patterns.
+
+        Returns ('mesh', shape_msgs.Mesh) or ('box', SolidPrimitive) or
+        (None, None) when no entry matches.
+        """
+        size = _lego_size_from_name(name)
+        if size is not None:
+            lego_mesh, mesh_ok = _load_lego_mesh(size)
+            if mesh_ok:
+                return ('mesh', lego_mesh)
+        # Fallback: SolidPrimitive box from bbox catalog dims.
+        bbox = self._lookup_bbox(name)
+        if bbox is None:
+            return (None, None)
+        box = SolidPrimitive()
+        box.type = SolidPrimitive.BOX
+        box.dimensions = [
+            float(bbox.get('sx', 0.020)),
+            float(bbox.get('sy', 0.016)),
+            float(bbox.get('sz', 0.011)),
+        ]
+        return ('box', box)
+
     # ------------------------------------------------------------------
     # Drop target subscription + helpers
     # ------------------------------------------------------------------
@@ -4762,8 +5437,14 @@ class SOArm101ControlGUI(Node):
         fut = self._apply_scene_client.call_async(req)
         self._wait_future(fut, timeout_sec=5.0)
 
-    def _add_cup_collision_objects(self):
-        """Add cup collision objects to MoveIt planning scene from _drop_data.
+    def _add_cup_collision_objects(self, cups_dict=None):
+        """Add cup collision objects to MoveIt planning scene.
+
+        Reads cup poses from _drop_data by default. If cups_dict is provided
+        (e.g. real-mode cached cups from Refresh Cups Pose), uses that
+        snapshot instead — bypasses the live /drop_poses subscription so
+        the planning scene reflects the user-frozen scan, not whatever the
+        live topic is currently publishing.
 
         Uses the CAD cup mesh (via trimesh) for accurate collision geometry.
         Falls back to SolidPrimitive.CYLINDER if mesh loading fails.
@@ -4783,8 +5464,11 @@ class SOArm101ControlGUI(Node):
                 return
             scene = PlanningSceneMsg()
             scene.is_diff = True
-            with self._drop_lock:
-                drop_items = dict(self._drop_data)
+            if cups_dict is not None:
+                drop_items = dict(cups_dict)
+            else:
+                with self._drop_lock:
+                    drop_items = dict(self._drop_data)
             for name, pos in drop_items.items():
                 co = CollisionObject()
                 co.header.frame_id = 'base'
@@ -4925,11 +5609,18 @@ class SOArm101ControlGUI(Node):
         if not hasattr(self, '_attached_lego_name'):
             self._attached_lego_name = None
 
-    def _add_lego_collision_objects(self):
+    def _add_lego_collision_objects(self, legos_dict=None):
         """Add mesh CollisionObjects for every detected block to the planning scene.
 
-        Keyed `lego_{name}`. Pose from /objects_poses_sim, geometry from the
-        per-size lego STL (`_load_lego_mesh`). Mirrors _add_cup_collision_objects.
+        Reads block poses from objects_data by default. If legos_dict is
+        provided (e.g. real-mode cached legos from Refresh Legos Pose),
+        uses that snapshot instead — bypasses the live /objects_poses_real
+        subscription so the planning scene reflects the user-frozen scan,
+        not whatever the live topic is currently publishing (only the
+        legos in YOLOE's current FOV).
+
+        Keyed `lego_{name}`. Geometry from the per-size lego STL
+        (`_load_lego_mesh`). Mirrors _add_cup_collision_objects.
         The STL origin was preserved from the Isaac Sim USD prim origin so
         no Z shift is applied to the published pose — unlike cups, which
         publish body-center and need mesh_pose.z = pos['z'] − H/2.
@@ -4942,8 +5633,11 @@ class SOArm101ControlGUI(Node):
             if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
                 self._append_log('apply_planning_scene not available for legos', 'warn')
                 return
-            with self.objects_lock:
-                blocks = dict(self.objects_data)
+            if legos_dict is not None:
+                blocks = dict(legos_dict)
+            else:
+                with self.objects_lock:
+                    blocks = dict(self.objects_data)
             if not blocks:
                 return
             # Snapshot cup positions so we can filter legos that have landed
@@ -4980,6 +5674,7 @@ class SOArm101ControlGUI(Node):
             add_scene = PlanningSceneMsg(); add_scene.is_diff = True
             remove_scene = PlanningSceneMsg(); remove_scene.is_diff = True
             added = []
+            geom_kinds = {'mesh': 0, 'box': 0}
             skipped_in_cup = []
             # Idempotent-REMOVE pattern: for every lego we DON'T want in
             # the world scene (attached + in-cup), issue an unconditional
@@ -5018,11 +5713,8 @@ class SOArm101ControlGUI(Node):
                     skipped_in_cup.append(name)
                     _remove_diff(lego_id)  # unconditional REMOVE
                     continue
-                size = _lego_size_from_name(name)
-                if size is None:
-                    continue
-                lego_mesh, mesh_ok = _load_lego_mesh(size)
-                if not mesh_ok:
+                kind, geom = self._build_lego_geometry(name)
+                if kind is None:
                     continue
                 co = CollisionObject()
                 co.header.frame_id = 'base'
@@ -5036,8 +5728,14 @@ class SOArm101ControlGUI(Node):
                 p.orientation.y = float(pose.get('qy', 0.0))
                 p.orientation.z = float(pose.get('qz', 0.0))
                 p.orientation.w = float(pose.get('qw', 1.0))
-                co.meshes.append(lego_mesh)
-                co.mesh_poses.append(p)
+                if kind == 'mesh':
+                    co.meshes.append(geom)
+                    co.mesh_poses.append(p)
+                    geom_kinds['mesh'] += 1
+                else:  # 'box'
+                    co.primitives.append(geom)
+                    co.primitive_poses.append(p)
+                    geom_kinds['box'] += 1
                 add_scene.world.collision_objects.append(co)
                 added.append(co.id)
             if not add_scene.world.collision_objects and not remove_scene.world.collision_objects:
@@ -5065,7 +5763,17 @@ class SOArm101ControlGUI(Node):
             if res is not None and res.success:
                 self._lego_collision_names = added
                 note = f' (skipped {len(skipped_in_cup)} in-cup: {skipped_in_cup})' if skipped_in_cup else ''
-                self._append_log(f'Added {len(added)} lego collision objects{note}')
+                # Geometry-kind tally: mesh = sim-style names with size suffix
+                # (precise STL geometry); box = YOLOE-style names where size
+                # is unknown (bbox catalog dims, primitive box).
+                kind_summary = (
+                    f"{geom_kinds['mesh']} mesh + {geom_kinds['box']} box"
+                    if geom_kinds['mesh'] and geom_kinds['box']
+                    else 'mesh' if geom_kinds['mesh']
+                    else 'box')
+                self._append_log(
+                    f'Added {len(added)} lego collision objects '
+                    f'({kind_summary}){note}')
                 # Legos physically rest on the table (= ground_plane top at
                 # z=0). Allow the rest-contact in the ACM so post-checks
                 # don't flag every wp[0] as invalid.
@@ -5176,7 +5884,7 @@ class SOArm101ControlGUI(Node):
             return False
         if not MOVEIT_AVAILABLE or not hasattr(self, '_apply_scene_client'):
             return False
-        bbox = self.objects_bbox.get(obj_name)
+        bbox = self._lookup_bbox(obj_name)
         if not bbox:
             self._append_log(f'Attach skipped: no bbox for {obj_name}', 'warn')
             return False
@@ -5284,12 +5992,14 @@ class SOArm101ControlGUI(Node):
                 pass  # idempotent — world may have been clean already
 
             # Phase 2: attached ADD with explicit link-local pose.
-            # Mesh collision (matches world-CO path in _add_lego_collision_objects).
-            size = _lego_size_from_name(obj_name)
-            lego_mesh, mesh_ok = _load_lego_mesh(size) if size else (None, False)
-            if not mesh_ok:
+            # Geometry path matches world-CO path in _add_lego_collision_objects:
+            # mesh-by-size for sim names, primitive box from bbox catalog for
+            # YOLOE-style names where vision can't recover size.
+            kind, geom = self._build_lego_geometry(obj_name)
+            if kind is None:
                 self._append_log(
-                    f'Attach failed: no mesh for lego size of {obj_name}', 'warn')
+                    f'Attach failed: no geometry for {obj_name} '
+                    f'(no mesh, no bbox catalog entry)', 'warn')
                 return
             add_scene = PlanningSceneMsg()
             add_scene.is_diff = True
@@ -5299,7 +6009,6 @@ class SOArm101ControlGUI(Node):
             aco.object.id = name_id
             aco.object.header.frame_id = 'tcp_link'
             aco.object.operation = CollisionObject.ADD
-            aco.object.meshes.append(lego_mesh)
             block_pose = Pose()
             block_pose.position.x = float(ax)
             block_pose.position.y = float(ay)
@@ -5308,7 +6017,12 @@ class SOArm101ControlGUI(Node):
             block_pose.orientation.y = float(aqy)
             block_pose.orientation.z = float(aqz)
             block_pose.orientation.w = float(aqw)
-            aco.object.mesh_poses.append(block_pose)
+            if kind == 'mesh':
+                aco.object.meshes.append(geom)
+                aco.object.mesh_poses.append(block_pose)
+            else:  # 'box'
+                aco.object.primitives.append(geom)
+                aco.object.primitive_poses.append(block_pose)
             aco.touch_links = ['tcp_link', 'gripper', 'jaw']
             add_scene.robot_state.attached_collision_objects.append(aco)
 
@@ -5396,7 +6110,7 @@ class SOArm101ControlGUI(Node):
         if not MOVEIT_AVAILABLE or not hasattr(self, '_apply_scene_client'):
             return False
         obj_name = self._attached_lego_name
-        bbox = self.objects_bbox.get(obj_name)
+        bbox = self._lookup_bbox(obj_name)
         if not bbox:
             return False
         # Synchronize TF and block pose streams — same rationale as
@@ -5448,22 +6162,25 @@ class SOArm101ControlGUI(Node):
         add_scene = PlanningSceneMsg()
         add_scene.is_diff = True
         add_scene.robot_state.is_diff = True
-        size = _lego_size_from_name(obj_name)
-        lego_mesh, mesh_ok = _load_lego_mesh(size) if size else (None, False)
-        if not mesh_ok:
+        kind, geom = self._build_lego_geometry(obj_name)
+        if kind is None:
             return False
         aco = AttachedCollisionObject()
         aco.link_name = 'tcp_link'
         aco.object.id = name_id
         aco.object.header.frame_id = 'tcp_link'
         aco.object.operation = CollisionObject.ADD
-        aco.object.meshes.append(lego_mesh)
         pose = Pose()
         pose.position.x = float(ax); pose.position.y = float(ay)
         pose.position.z = float(az)
         pose.orientation.x = float(aqx); pose.orientation.y = float(aqy)
         pose.orientation.z = float(aqz); pose.orientation.w = float(aqw)
-        aco.object.mesh_poses.append(pose)
+        if kind == 'mesh':
+            aco.object.meshes.append(geom)
+            aco.object.mesh_poses.append(pose)
+        else:  # 'box'
+            aco.object.primitives.append(geom)
+            aco.object.primitive_poses.append(pose)
         aco.touch_links = ['tcp_link', 'gripper', 'jaw']
         add_scene.robot_state.attached_collision_objects.append(aco)
 
@@ -6777,9 +7494,20 @@ class SOArm101ControlGUI(Node):
             current = dict(self.joint_positions)
         target = dict(current)
         target['shoulder_pan'] = pan
-        target['wrist_roll'] = -math.pi / 2
+        # Drop point's wrist_roll is the SCAN orientation (camera reads
+        # cup ArUco markers), distinct from drop_sweep's release-orientation
+        # which stays at -\u03c0/2. Default +1 -> +\u03c0/2 (cup markers in FOV
+        # for the scan); toggle to -1 -> -\u03c0/2 as the alternate when the
+        # default is occluded. The button label matches the resulting sign:
+        # "Wrist Roll +" really means wrist_roll = +90\u00b0.
+        # getattr fallback: hot-reloaded sessions where __init__ pre-dates
+        # the attr's introduction get +1 without raising.
+        sign = getattr(self, '_drop_wrist_roll_sign', 1)
+        wrist_roll_target = sign * (math.pi / 2)
+        target['wrist_roll'] = wrist_roll_target
         self._append_log(
-            f'Drop Point: pan={math.degrees(pan):.1f}\u00b0 wrist_roll=-90\u00b0 toward {name}')
+            f'Drop Point: pan={math.degrees(pan):.1f}\u00b0 '
+            f'wrist_roll={math.degrees(wrist_roll_target):+.0f}\u00b0 toward {name}')
         # tier1 linear-interp + OMPL fallback. Validates every waypoint
         # against cups, world legos, ground, AND the held-lego world copy.
         # duration 3.0 s: matches grasp_home / grasp_move; the prior 1.0 s
@@ -7028,7 +7756,7 @@ class SOArm101ControlGUI(Node):
 
     def _get_grip_width(self, obj_name):
         """Return the grip width for the object, respecting cross-axis checkbox."""
-        bbox = self.objects_bbox.get(obj_name)
+        bbox = self._lookup_bbox(obj_name)
         if not bbox:
             return None
         cross = self._grasp_cross_var.get() if hasattr(self, '_grasp_cross_var') else False
@@ -7088,7 +7816,7 @@ class SOArm101ControlGUI(Node):
     def _cmd_gripper_open_for_object(self):
         """Open gripper to the angle matching the selected object's width."""
         obj_name = self._get_selected_object_name()
-        bbox = self.objects_bbox.get(obj_name) if obj_name else None
+        bbox = self._lookup_bbox(obj_name) if obj_name else None
         if not bbox:
             self._append_log('Grasp Open: no object selected or no bbox data')
             return
@@ -7111,7 +7839,7 @@ class SOArm101ControlGUI(Node):
         so MoveIt plans subsequent motions aware of the carried-block envelope.
         """
         obj_name = self._get_selected_object_name()
-        bbox = self.objects_bbox.get(obj_name) if obj_name else None
+        bbox = self._lookup_bbox(obj_name) if obj_name else None
         if not bbox:
             self._append_log('Grasp Close: no object selected or no bbox data')
             return
@@ -7185,7 +7913,7 @@ class SOArm101ControlGUI(Node):
         if abs(obj_z_override) > 1e-4:
             base_z = obj_z_override
         else:
-            bbox_sz = self.objects_bbox.get(obj_name, {}).get('sz', 0.0)
+            bbox_sz = (self._lookup_bbox(obj_name) or {}).get('sz', 0.0)
             base_z = (pos['z']
                       + float(bbox_sz) / 2.0
                       + _GRIPPER_TCP_CLEARANCE_ABOVE_BLOCK_M)
