@@ -5720,6 +5720,52 @@ class SOArm101ControlGUI(Node):
         )
         self._settings_calib_status.pack(fill=tk.X, anchor=tk.W, pady=(8, 0))
 
+        # ---- Detector Overlays ----------------------------------------
+        # Live-toggles for the "Merged Detection" cv2 window hosted by
+        # localize_aruco. The viewer composes (yoloe_base + aruco_layer)
+        # using two independent SetBool services on the bridge. Both
+        # default ON — uncheck to hide that detector's contribution.
+        # Wiring details in localizer_bridge.py:104-110 +
+        # merged_localization_aruco.py:380-391.
+        overlays = ttk.LabelFrame(
+            frame, text='Detector Overlays (Merged Detection viewer)',
+            padding=10,
+        )
+        overlays.pack(fill=tk.X, padx=10, pady=10)
+        tk.Label(
+            overlays,
+            text=(
+                'Toggle which detectors render in the Merged Detection '
+                'window. ArUco draws cup markers + object frames; YOLOE '
+                'draws lego bbox + 3D cuboid wireframe + orientation '
+                'axes. Both ON = merged view (default).'
+            ),
+            wraplength=440, justify=tk.LEFT, anchor=tk.W,
+        ).pack(fill=tk.X, anchor=tk.W)
+        self._aruco_overlay_var = tk.BooleanVar(value=True)
+        self._yoloe_overlay_var = tk.BooleanVar(value=True)
+        chk_row = ttk.Frame(overlays)
+        chk_row.pack(fill=tk.X, anchor=tk.W, pady=(8, 2))
+        ttk.Checkbutton(
+            chk_row, text='Show ArUco overlay',
+            variable=self._aruco_overlay_var,
+            command=lambda: self._cmd_set_overlay(
+                'aruco_viewer/aruco_overlay_enable',
+                self._aruco_overlay_var.get(), 'ArUco'),
+        ).pack(side=tk.LEFT, padx=(0, 16))
+        ttk.Checkbutton(
+            chk_row, text='Show YOLOE overlay',
+            variable=self._yoloe_overlay_var,
+            command=lambda: self._cmd_set_overlay(
+                'aruco_viewer/yoloe_overlay_enable',
+                self._yoloe_overlay_var.get(), 'YOLOE'),
+        ).pack(side=tk.LEFT)
+        self._overlay_status = tk.Label(
+            overlays, text='', justify=tk.LEFT, anchor=tk.W,
+            font=('Menlo', 10),
+        )
+        self._overlay_status.pack(fill=tk.X, anchor=tk.W, pady=(6, 0))
+
         # ---- Real Hardware Connection ---------------------------------
         # Two buttons that own the real-mode data layer:
         #   Connect   → jsr (write mode, accept_command_input=true)
@@ -6048,6 +6094,37 @@ class SOArm101ControlGUI(Node):
             self._real_conn_status.after(
                 0, lambda: self._real_conn_status.config(text=err, fg='red'))
             self._append_log(f'real disconnect failed: {e}', 'error')
+
+    def _cmd_set_overlay(self, service_name, enabled, label):
+        """Toggle aruco/yoloe overlay flags on the merged-detection viewer.
+
+        Calls localize_aruco's SetBool services live (no node restart).
+        Both services default ON — these checkboxes only matter once
+        localize_aruco is running (i.e. real mode + wrist cam plugged in).
+        Failure path: clear status message in red; checkbox stays where
+        the user clicked (cheap to retry — services are idempotent).
+        """
+        import subprocess
+        data_str = 'data: true' if enabled else 'data: false'
+        try:
+            r = subprocess.run(
+                ['ros2', 'service', 'call', '--no-daemon',
+                 f'/{service_name}', 'std_srvs/srv/SetBool', data_str],
+                capture_output=True, text=True, timeout=8.0)
+            if r.returncode == 0 and 'success=True' in r.stdout:
+                state = 'ON' if enabled else 'OFF'
+                self._overlay_status.config(
+                    text=f'{label} overlay → {state}', fg='green')
+            else:
+                # Service likely not advertised yet (real-mode stack not up,
+                # or wrist cam unplugged → camera/perception subgraph
+                # skipped per backend_real.launch.py:_resolve_cameras).
+                err = (r.stderr or r.stdout).strip()[:240]
+                self._overlay_status.config(
+                    text=f'{label} toggle failed: {err}', fg='red')
+        except Exception as e:
+            self._overlay_status.config(
+                text=f'{label} toggle failed: {e}', fg='red')
 
     def _cmd_apply_shim_speed(self):
         """Set trajectory_shim's velocity_scale ROS param at runtime.

@@ -163,14 +163,29 @@ def _resolve_cameras(context, *args, **kwargs):
         name='localize_yoloe',
         output='screen',
         # --headless: yoloe doesn't open its own cv2 viewer.
-        # (Flag name is --headless not --no-window despite help text
-        # talking about "no cv2.imshow"; verify in
-        # aruco_camera_localizer/aruco_camera_localizer/merged_localization_yoloe.py
-        # parser.add_argument line.) Aruco's "Merged Detection" window
-        # already shows the wrist-camera feed with overlays; yoloe still
-        # publishes annotated frames to /annotated_image (RViz-viewable).
+        #
+        # annotated_image_topic:='yoloe_annotated' routes yoloe's rich
+        # overlay frame (bbox + 3D cuboid wireframe + orientation axes)
+        # to the /yoloe_annotated topic. localize_aruco subscribes there
+        # via LocalizerBridge._yoloe_annotated_cb and uses the cached
+        # frame as the BASE for its "Merged Detection" window when
+        # /aruco_viewer/yoloe_overlay_enable is true (default). Without
+        # this remap, yoloe publishes to the bridge's default
+        # 'camera_annotated' and aruco's merged window can't find it,
+        # so the user only sees aruco overlays — that's the bug we're
+        # fixing here.
+        #
+        # The two SetBool services (/aruco_viewer/aruco_overlay_enable +
+        # /aruco_viewer/yoloe_overlay_enable) are advertised by aruco
+        # only (yoloe passes advertise_overlay_services=False inside
+        # start_ros_node), so no service-name collision. Live-toggle
+        # via the "Detector Overlays" checkboxes in control_gui's
+        # Settings tab.
         arguments=['--camera-topic', '/wrist_camera', '--headless'],
-        parameters=[{'use_sim_time': False}],
+        parameters=[{
+            'use_sim_time': False,
+            'annotated_image_topic': 'yoloe_annotated',
+        }],
     ))
     return actions
 
