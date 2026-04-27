@@ -43,7 +43,7 @@ people most often skip. Sweep it, or the Open Gripper button will refuse
 to move.
 
 Result: EEPROM updated + JSON saved to
-~/.cache/huggingface/lerobot/calibration/robots/so101_follower/
+~/.cache/huggingface/lerobot/calibration/robots/so_follower/
 
 You will need TWO physical interactions with the arm.
 

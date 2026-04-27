@@ -734,12 +734,27 @@ class JointStateReader(Node):
 
         Mirrors arm_trim.py's update_lerobot_json so EEPROM + JSON
         stay consistent regardless of which path made the change.
+
+        Path/key conventions (verified empirically 2026-04-27):
+          - JSON saves to .../robots/so_follower/ regardless of the
+            --robot.type CLI flag passed to lerobot-calibrate. The
+            directory name is decoupled from the type flag.
+          - JSON uses lerobot's canonical joint names — specifically
+            'gripper' (NOT URDF's 'gripper_joint'). Map URDF→lerobot
+            for any name that differs.
         """
         import json
         import os
+
+        # URDF→lerobot-JSON name map. Pass-through for joints that share
+        # the same name. Mirrors the inverse of trajectory_shim.py:64
+        # _NAME_REMAP.
+        urdf_to_lerobot = {'gripper_joint': 'gripper'}
+        json_key = urdf_to_lerobot.get(joint_name, joint_name)
+
         cal_dir = os.path.expanduser(
             '~/.cache/huggingface/lerobot/calibration/'
-            'robots/so101_follower/')
+            'robots/so_follower/')
         if not os.path.isdir(cal_dir):
             return f"calib dir missing: {cal_dir}"
         json_files = [f for f in os.listdir(cal_dir) if f.endswith('.json')]
@@ -748,10 +763,11 @@ class JointStateReader(Node):
         path = os.path.join(cal_dir, sorted(json_files)[-1])
         with open(path, 'r') as f:
             cal = json.load(f)
-        if joint_name not in cal:
-            return f"{joint_name!r} not in JSON keys ({list(cal.keys())})"
-        old = int(cal[joint_name].get('homing_offset', 0))
-        cal[joint_name]['homing_offset'] = old + delta_ticks
+        if json_key not in cal:
+            return (f"{json_key!r} (mapped from {joint_name!r}) not in "
+                    f"JSON keys ({list(cal.keys())})")
+        old = int(cal[json_key].get('homing_offset', 0))
+        cal[json_key]['homing_offset'] = old + delta_ticks
         # Backup BEFORE mutation (preserve old state on disk too).
         bak = path + '.bak'
         try:

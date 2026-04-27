@@ -6708,7 +6708,7 @@ class SOArm101ControlGUI(Node):
                 'Writes: Homing_Offset (reg 31), Min_Angle_Limit (reg 9), '
                 'Max_Angle_Limit (reg 11) to each servo\'s EEPROM, plus the '
                 'JSON at ~/.cache/huggingface/lerobot/calibration/robots/'
-                'so101_follower/my_awesome_follower_arm.json.'
+                'so_follower/my_awesome_follower_arm.json.'
             ),
             wraplength=660, justify=tk.LEFT, anchor=tk.W,
         )

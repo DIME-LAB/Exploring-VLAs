@@ -18,7 +18,7 @@ import serial
 
 PORT = '/dev/tty.usbmodem5A680088871'
 LEROBOT_JSON = os.path.expanduser(
-    '~/.cache/huggingface/lerobot/calibration/robots/so101_follower/'
+    '~/.cache/huggingface/lerobot/calibration/robots/so_follower/'
 )
 JOINT_NAMES = ['shoulder_pan', 'shoulder_lift', 'elbow_flex',
                'wrist_flex', 'wrist_roll', 'gripper']

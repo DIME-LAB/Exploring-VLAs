@@ -48,7 +48,7 @@ JOINT_NAMES = ['shoulder_pan', 'shoulder_lift', 'elbow_flex',
                'wrist_flex', 'wrist_roll', 'gripper']
 
 LEROBOT_CALIB_DIR = os.path.expanduser(
-    '~/.cache/huggingface/lerobot/calibration/robots/so101_follower/')
+    '~/.cache/huggingface/lerobot/calibration/robots/so_follower/')
 
 REG_HOMING_OFFSET = 31
 REG_TORQUE_ENABLE = 40
