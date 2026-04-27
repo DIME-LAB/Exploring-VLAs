@@ -12,6 +12,7 @@ import glob
 import math
 import os
 import random
+import shlex
 import shutil
 import signal
 import subprocess
@@ -6465,7 +6466,10 @@ class SOArm101ControlGUI(Node):
             self._settings_calib_status.config(
                 text=f'arm_finetune.sh not found at {script}', fg='red')
             return
-        cmd = f'bash {script} --skip-calibrate --skip-pid --skip-verify'
+        # shlex.quote single-quotes the path so spaces in the repo path
+        # ("untitled folder") don't split bash argv.
+        cmd = (f'bash {shlex.quote(script)} '
+               '--skip-calibrate --skip-pid --skip-verify')
         applescript = (
             f'tell application "Terminal" to do script "{cmd}"\n'
             f'tell application "Terminal" to activate'
@@ -6492,7 +6496,8 @@ class SOArm101ControlGUI(Node):
             self._settings_calib_status.config(
                 text=f'arm_finetune.sh not found at {script}', fg='red')
             return
-        cmd = f'bash {script}'
+        # shlex.quote handles the space in "untitled folder".
+        cmd = f'bash {shlex.quote(script)}'
         applescript = (
             f'tell application "Terminal" to do script "{cmd}"\n'
             f'tell application "Terminal" to activate'
@@ -6636,7 +6641,13 @@ class SOArm101ControlGUI(Node):
                     'error')
                 return
             port = port_var.get().strip() or self._DEFAULT_FOLLOWER_PORT
-            _open_terminal_with_cmd(f'PORT={port} bash {wrapper}')
+            # shlex.quote single-quotes the path so the space in
+            # "untitled folder" doesn't split the bash argv. Without
+            # this, bash sees `bash /Users/.../untitled` + leftover
+            # `folder/...` as separate args and errors with "no such
+            # file or directory" on the first half.
+            _open_terminal_with_cmd(
+                f'PORT={port} bash {shlex.quote(wrapper)}')
 
         ttk.Button(
             btn_row, text='Run calibration in Terminal',
