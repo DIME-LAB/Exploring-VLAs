@@ -131,6 +131,49 @@ On first access:
 - **Camera:** macOS prompts via a banner; accept it in *System Settings → Privacy & Security → Camera*.
 - **Serial (ACM):** nothing extra usually needed, but the device may enumerate as `/dev/tty.usbmodem*` instead of `/dev/ttyACM*` — check with `ls /dev/tty.usb*`.
 
+#### Camera permissions are per-app-bundle, not per-binary
+
+If `aruco_camera_localizer/camera_publisher` fails with
+
+    OpenCV: not authorized to capture video (status 0), requesting...
+    OpenCV: camera failed to properly initialize!
+
+— the issue is macOS TCC, not OpenCV. The python binary inherits the
+camera grant of *whichever app launched it* (the bundle), not its own.
+Same `cv2.VideoCapture(1)` will succeed under one host app and fail
+under another, depending on TCC state.
+
+| Host app | What it shows up as in Privacy & Security → Camera |
+| --- | --- |
+| Terminal.app   | "Terminal" (com.apple.Terminal) |
+| iTerm2         | "iTerm" |
+| VS Code        | "Visual Studio Code" |
+| Cursor         | "Cursor" |
+| Claude Code    | "Claude" or the bundle name shown when the OS prompted |
+
+`mac-env/scripts/camera_pipeline_start.sh` launches via Terminal.app,
+so **Terminal needs the Camera grant** for the camera_publisher node
+to work. To fix:
+
+1. Open *System Settings → Privacy & Security → Camera*.
+2. Toggle **Terminal** ON. If it isn't listed, the grant was never
+   prompted — the next paragraph fixes that.
+
+If Terminal is missing from the list (after a macOS update or fresh
+install), force the OS to re-prompt:
+
+    tccutil reset Camera com.apple.Terminal
+
+…then re-run the launcher. The next `cv2.VideoCapture` call will
+trigger a fresh "Allow / Deny" dialog, and Terminal will finally
+appear in the Camera list.
+
+**Why permissions sometimes "work last time but not this time":**
+macOS Sequoia (15.x) has reset Camera grants for some apps on minor
+point upgrades. If the launcher worked yesterday and fails today,
+re-grant Terminal in Privacy & Security, no other config change
+needed.
+
 ## The four repos (in this project)
 
 | Repo | Where it lives | How bootstrap gets it |

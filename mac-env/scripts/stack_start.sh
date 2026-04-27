@@ -1,21 +1,29 @@
 #!/usr/bin/env bash
-# stack_start.sh — launch the SO-ARM101 Gazebo + control stack (ONE instance).
+# stack_start.sh — launch the SO-ARM101 stack via stack.launch.py.
 #
 # Usage:
-#   bash mac-env/scripts/stack_start.sh [MODE]
+#   bash mac-env/scripts/stack_start.sh [--mode MODE] [--rviz] [--gazebo-gui]
+#   bash mac-env/scripts/stack_start.sh [LEGACY_POSITIONAL]    (back-compat)
 #
-# Modes (pick based on what you need to look at):
-#   headless   default. No windows. Server-only. Best for recording / CI.
-#              aliases: record, none
-#   gz         Gazebo GUI only (see the sim scene; no RViz).
-#              aliases: gazebo, sim
-#   rviz       RViz only (see camera feeds, TF, planning; Gazebo server headless).
-#   all        Gazebo GUI + RViz (full visual inspection).
-#              aliases: full, visual, inspect
-#   help       Show this help.
+# Modes (pick the BACKEND that produces /joint_states + /objects_* + /drop_*):
+#   gazebo  — gz sim + bridge + controllers + sim_ground_truth   (default)
+#   isaac   — Isaac Sim runs externally; this brings up only the core
+#             (RSP, move_group, control_gui). Connect Isaac separately.
+#   real    — jointstatereader (Feetech) + real_cameras + ArUco/YOLOE.
+#             Motion-execution shim NOT YET IMPLEMENTED — planning works,
+#             execution to the real arm doesn't, until that lands.
 #
-# No mode = headless. Visuals are opt-in — recording and automation don't need
-# them and benefit from the extra CPU.
+# Flags:
+#   --rviz         Launch RViz too (works in any mode).
+#   --gazebo-gui   In gazebo mode, also fork the Gazebo GUI client.
+#                  Without this, gazebo runs headless (server only).
+#
+# Legacy positional args (kept for back-compat with scripts/test_*.sh and
+# the cross-repo restart-control-stack.sh):
+#   headless | record | none  →  --mode gazebo                     (no GUI, no RViz)
+#   gz | gazebo | sim         →  --mode gazebo --gazebo-gui        (Gazebo GUI only)
+#   rviz                      →  --mode gazebo --rviz              (RViz, gazebo headless)
+#   all | full | visual       →  --mode gazebo --gazebo-gui --rviz (everything)
 #
 # Runs detached. View logs at /tmp/soarm_stack.log.
 
@@ -26,23 +34,71 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 stack_preflight
 
-MODE="${1:-headless}"
+MODE="gazebo"
+RVIZ_ARG="false"
+GAZEBO_GUI="false"
+
+# Argument parser — handles BOTH new flags and legacy positional arg.
+# We do this manually (not getopt) to keep both styles working in one
+# script without surprising users mid-migration.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --mode)        MODE="$2"; shift 2 ;;
+    --mode=*)      MODE="${1#*=}"; shift ;;
+    --rviz)        RVIZ_ARG="true"; shift ;;
+    --gazebo-gui)  GAZEBO_GUI="true"; shift ;;
+    --help|-h|help)
+      sed -n '3,30p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    # ---- Legacy positional arg ----
+    headless|record|none)
+      MODE="gazebo"; GAZEBO_GUI="false"; RVIZ_ARG="false"; shift ;;
+    gz|gazebo|sim)
+      MODE="gazebo"; GAZEBO_GUI="true";  RVIZ_ARG="false"; shift ;;
+    rviz)
+      MODE="gazebo"; GAZEBO_GUI="false"; RVIZ_ARG="true";  shift ;;
+    all|full|visual|inspect)
+      MODE="gazebo"; GAZEBO_GUI="true";  RVIZ_ARG="true";  shift ;;
+    *)
+      echo "ERROR: unknown argument '$1'. Try '--help'." >&2
+      exit 1 ;;
+  esac
+done
 
 case "$MODE" in
-  headless|record|none|'')
-    HEADLESS="true";  RVIZ_ARG="false"; MODE_PRETTY="headless" ;;
-  gz|gazebo|sim)
-    HEADLESS="false"; RVIZ_ARG="false"; MODE_PRETTY="gz (Gazebo GUI)" ;;
-  rviz)
-    HEADLESS="true";  RVIZ_ARG="true";  MODE_PRETTY="rviz (RViz only, Gazebo headless)" ;;
-  all|full|visual|inspect)
-    HEADLESS="false"; RVIZ_ARG="true";  MODE_PRETTY="all (Gazebo GUI + RViz)" ;;
-  help|-h|--help)
-    sed -n '3,19p' "$0" | sed 's/^# \{0,1\}//'
-    exit 0 ;;
+  gazebo|isaac|real) ;;
   *)
-    echo "ERROR: unknown mode '$MODE'. Use: headless | gz | rviz | all | help" >&2
+    echo "ERROR: --mode must be one of: gazebo, isaac, real (got '$MODE')" >&2
     exit 1 ;;
+esac
+
+# stack.launch.py uses `headless` to mean "no Gazebo GUI client". Our
+# user-facing flag is the inverse (--gazebo-gui = launch the client),
+# so flip it here.
+HEADLESS="true"
+[ "$GAZEBO_GUI" = "true" ] && HEADLESS="false"
+
+# Pretty mode label for the startup banner.
+case "$MODE" in
+  gazebo)
+    case "$GAZEBO_GUI:$RVIZ_ARG" in
+      true:true)   MODE_PRETTY="gazebo (Gazebo GUI + RViz)" ;;
+      true:false)  MODE_PRETTY="gazebo (Gazebo GUI, no RViz)" ;;
+      false:true)  MODE_PRETTY="gazebo (headless server + RViz)" ;;
+      false:false) MODE_PRETTY="gazebo (headless server, no RViz)" ;;
+    esac ;;
+  isaac)
+    if [ "$RVIZ_ARG" = "true" ]; then
+      MODE_PRETTY="isaac (RViz + control_gui; Isaac Sim runs externally)"
+    else
+      MODE_PRETTY="isaac (control_gui only; Isaac Sim runs externally)"
+    fi ;;
+  real)
+    if [ "$RVIZ_ARG" = "true" ]; then
+      MODE_PRETTY="real (jointstatereader + cameras + aruco + RViz)"
+    else
+      MODE_PRETTY="real (jointstatereader + cameras + aruco)"
+    fi ;;
 esac
 
 # Refuse to start if anything is already running.
@@ -67,7 +123,7 @@ nohup pixi run --manifest-path "$MAC_ENV_MANIFEST" bash -c "
   export CYCLONEDDS_URI='$CYCLONEDDS_URI'
   export KMP_DUPLICATE_LIB_OK='$KMP_DUPLICATE_LIB_OK'
   export AMENT_PYTHON_EXECUTABLE='$AMENT_PYTHON_EXECUTABLE'
-  exec ros2 launch so_arm101_control gazebo.launch.py headless:=$HEADLESS rviz:=$RVIZ_ARG
+  exec ros2 launch so_arm101_control stack.launch.py mode:=$MODE rviz:=$RVIZ_ARG headless:=$HEADLESS
 " > "$STACK_LOG" 2>&1 &
 
 LPID=$!
@@ -78,17 +134,30 @@ sleep 2
 CHILDREN=$(pgrep -P "$LPID" | wc -l | tr -d ' ')
 echo "launch has $CHILDREN direct children after 2s"
 
-case "$MODE_PRETTY" in
-  gz*|all*)
-    echo "  Gazebo GUI should appear as a macOS window within 10-30s." ;;
-esac
-case "$MODE_PRETTY" in
-  rviz*|all*)
-    echo "  RViz window will appear after controllers spawn (~30-40s)." ;;
-esac
-echo "  Control GUI (tkinter) appears in all modes after controllers spawn."
+if [ "$MODE" = "gazebo" ] && [ "$GAZEBO_GUI" = "true" ]; then
+  echo "  Gazebo GUI should appear as a macOS window within 10-30s."
+fi
+if [ "$RVIZ_ARG" = "true" ]; then
+  echo "  RViz window will appear within ~10-15s."
+fi
+echo "  Control GUI (tkinter) appears in all modes after init."
+
+if [ "$MODE" = "real" ]; then
+  echo ""
+  echo "  NOTE: real mode runs perception + state ingest only. Motion"
+  echo "        execution from control_gui to the real arm requires the"
+  echo "        trajectory_shim node, not yet implemented. Plans will succeed,"
+  echo "        execute action calls will time out."
+fi
+if [ "$MODE" = "isaac" ]; then
+  echo ""
+  echo "  NOTE: isaac mode launches no backend processes here. Make sure"
+  echo "        Isaac Sim is running externally and publishing /joint_states,"
+  echo "        /objects_poses_sim, /drop_poses on the same DDS domain."
+fi
 
 echo ""
 echo "Tail:    tail -f $STACK_LOG"
 echo "Status:  bash $SCRIPT_DIR/stack_status.sh"
 echo "Stop:    bash $SCRIPT_DIR/stack_stop.sh"
+echo "RViz:    bash $SCRIPT_DIR/rviz_attach.sh   # attach RViz post-launch"

@@ -25,6 +25,13 @@ for pat in \
   "spawner.py" \
   "spawner " \
   "ros2 launch" \
+  "joint_state_reader" \
+  "localize_aruco" \
+  "localize_yoloe" \
+  "camera_publisher" \
+  "ground_truth_publisher" \
+  "ee_pose_publisher" \
+  "camera_pose_publisher" \
   "smoke_publisher.py" \
   "smoke_l1_camera.py" \
   "smoke_l2_dataset.py"

@@ -42,6 +42,11 @@ Thumbs.db
 *.log
 *.tmp
 
+# Per-session handoff — rewritten each session, not committed.
+# Convention documented at the top of vla_SO-ARM101/HANDOFF.md.
+HANDOFF.md
+**/HANDOFF.md
+
 # TF graph outputs
 frames_*.pdf
 frames_*.gv

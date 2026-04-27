@@ -13,9 +13,10 @@ Scene snapshots are triggered at boundaries where staleness matters
 can diff them post-hoc to prove / disprove the "scene changed between
 plan and check" hypothesis for Mode B failures.
 
-Output directory:
-    /home/aaugus11/Documents/isaac-sim-mcp/.planning/phases/
-    09-collision-scene-completeness/traces/cycle_{ts}.json
+Output directory (override with $SOARM_TRACE_DIR):
+    Linux:  /home/aaugus11/Documents/isaac-sim-mcp/.planning/phases/
+            09-collision-scene-completeness/traces/cycle_{ts}.json
+    macOS:  /tmp/arm_traj/grasp_cycles/cycle_{ts}.json
 
 Hot-reload safe: state lives on the singleton which is re-created on
 module reimport; open cycles are dropped on reload (by design — a
@@ -26,14 +27,23 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
 
-TRACE_DIR = Path(
+_LINUX_TRACE_DIR = Path(
     '/home/aaugus11/Documents/isaac-sim-mcp/.planning/phases/'
     '09-collision-scene-completeness/traces'
+)
+_MAC_TRACE_DIR = Path('/tmp/arm_traj/grasp_cycles')
+
+TRACE_DIR = Path(
+    os.environ.get(
+        'SOARM_TRACE_DIR',
+        str(_MAC_TRACE_DIR if sys.platform == 'darwin' else _LINUX_TRACE_DIR),
+    )
 )
 
 

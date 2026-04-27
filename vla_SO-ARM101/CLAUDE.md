@@ -189,6 +189,55 @@ exit, so downstream consumers see only this-cycle counts.
   before dispatch. So the script harness and GUI buttons produce
   identical behavior.
 
+## TODO: cv2 toolbar crash on macOS (2026-04-27)
+
+`localize_aruco`'s "Merged Detection" cv2 window keeps the default OpenCV
+toolbar (zoom / save / copy / properties buttons), but **clicking any of
+those buttons crashes the process** on macOS due to a long-standing
+OpenCV-Qt threading bug — `NSUndoManager._endTopLevelGroupings` is called
+from the toolbar handler but is only legal on the AppKit main thread, and
+rclpy's daemon spin thread violates that assumption.
+
+References (all open / wontfix): opencv-python#134, opencv-python#376,
+opencv#18087, opencv#12903, opencv#22561.
+
+Mitigations in place today:
+- Press `s` in the window to save a timestamped PNG to `/tmp/aruco_captures/`
+  (custom keypress handler in `merged_localization_aruco.py`)
+- macOS `Cmd+Shift+4` for arbitrary screenshots
+
+Proper fix later: either (a) split the viewer into a separate
+single-threaded subprocess that doesn't share rclpy's runloop, or
+(b) replace cv2.imshow with a tk/Qt viewer we control. Until one of
+those lands, just don't click the toolbar buttons.
+
+## Camera resolution: 640×480 throughout (2026-04-27)
+
+Project-wide standard for all wrist + top cameras (sim and real) is
+**640×480** — set in `aruco_camera_localizer/config/robot_config.yaml`
+under `so_arm101.camera.width/height`. The decision rationale: YOLOE
+inference saturates 4 macOS cores at 720p but sits at ~100 % of a single
+core at 480p, and 480p is still plenty for ArUco marker detection +
+lego/cup color blobs at typical wrist-cam working distances.
+
+The earlier 1280×720 setting (committed before 2026-04-27) tried to
+match RealSense's native res for sim/real parity. We're explicitly
+choosing 480p over that parity for performance reasons; downstream
+consumers (lerobot dataset features, MoveIt planning scene, control_gui
+overlay scaling) all read intrinsics from this same yaml, so the matrix
+stays self-consistent.
+
+**TODO**: make sure every place in the pipeline that pins a
+resolution agrees with 640×480 — as of 2026-04-27 the live perception
+path does (single source of truth via this yaml), but verify on next
+pass:
+
+- `vla_SO-ARM101/src/so_arm101_description/worlds/lego_world.sdf` —
+  sim `wrist_camera` and `top_camera` sensor `<width>` / `<height>`
+- `vla_SO-ARM101/src/so_arm101_bringup/launch/real_cameras.launch.py` —
+  real cam publisher launch-arg defaults (`width:=640 height:=480`)
+- any lerobot `dataset_features` that pin width/height for recording
+
 ## Tracking-lag context
 
 `docs/notes/2026-04-24-forum-findings-tracking-lag.md` (in
