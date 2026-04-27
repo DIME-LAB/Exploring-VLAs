@@ -154,9 +154,17 @@ class JointStateReader(Node):
         # /joint_states pauses for ~1 sec, then resumes seamlessly.
         self._torque_reset_service = self.create_service(
             Trigger, '~/torque_reset', self._on_torque_reset)
+        # Companion services for freedrive: torque_off leaves the arm
+        # back-drivable indefinitely; torque_on anti-jolts and re-engages.
+        # Use these from the GUI's Freedrive button. The pair is a
+        # *stateful* alternative to the single-shot torque_reset cycle.
+        self._torque_off_service = self.create_service(
+            Trigger, '~/torque_off', self._on_torque_off)
+        self._torque_on_service = self.create_service(
+            Trigger, '~/torque_on', self._on_torque_on)
         self.get_logger().info(
-            f"Hosting service: ~/torque_reset (cycles follower torque, "
-            f"~1 s /joint_states blackout, no bus release)")
+            f"Hosting services: ~/torque_reset (cycle), ~/torque_off "
+            f"(freedrive), ~/torque_on (anti-jolt re-engage)")
 
         mode = (
             "usb-mirror-teleop" if self.mirror_to_follower
@@ -397,6 +405,89 @@ class JointStateReader(Node):
         except Exception as exc:
             response.success = False
             response.message = f"torque_reset failed: {exc}"
+            self.get_logger().error(response.message)
+        return response
+
+    # --------------------------------------------------------------- torque_off / torque_on (freedrive)
+    def _on_torque_off(self, request, response):
+        """Disengage torque on all 6 follower servos and STAY OFF.
+
+        Use as the "freedrive enter" primitive: arm becomes back-drivable
+        and you can hand-pose it. Caller is responsible for re-engaging
+        via ~/torque_on (the anti-jolt path) when done. Without re-engage
+        the servos draw no holding current and the arm sags under gravity.
+
+        SAFETY: caller must ensure the arm is in a rested / supported
+        pose before calling. Calling with arm extended in air → arm
+        falls under gravity → potential collision with workspace.
+        """
+        if self.follower_serial is None:
+            response.success = False
+            response.message = (
+                f"follower_serial not connected (port="
+                f"{self.follower_port_name}); nothing to torque-off")
+            self.get_logger().warn(response.message)
+            return response
+
+        REG_TORQUE_ENABLE = 40
+        try:
+            with self.follower_write_lock:
+                for i in range(len(self.joint_names)):
+                    self._write_servo_byte(
+                        self.follower_serial, i + 1, REG_TORQUE_ENABLE, 0)
+                    time.sleep(self.inter_servo_delay_s)
+            response.success = True
+            response.message = (
+                f"torque OFF on {self.follower_port_name} — arm is "
+                f"back-drivable. Re-engage via ~/torque_on when done.")
+            self.get_logger().info(response.message)
+        except Exception as exc:
+            response.success = False
+            response.message = f"torque_off failed: {exc}"
+            self.get_logger().error(response.message)
+        return response
+
+    def _on_torque_on(self, request, response):
+        """Re-engage torque on all 6 servos with anti-jolt.
+
+        Use as the "freedrive exit" primitive after ~/torque_off. Anti-jolt
+        first writes Goal_Position = Present_Position per servo so the
+        servo's PID error is zero when torque comes back, preventing the
+        arm from snapping to whatever Goal_Position was last commanded
+        (which may have drifted during the freedrive period if any
+        publisher wrote /joint_commands while torque was off).
+        """
+        if self.follower_serial is None:
+            response.success = False
+            response.message = (
+                f"follower_serial not connected (port="
+                f"{self.follower_port_name}); nothing to torque-on")
+            self.get_logger().warn(response.message)
+            return response
+
+        REG_TORQUE_ENABLE = 40
+        try:
+            with self.follower_write_lock:
+                # Anti-jolt: Goal_Position ← Present_Position per servo.
+                for i in range(len(self.joint_names)):
+                    sid = i + 1
+                    present = self._read_servo_position(self.follower_serial, sid)
+                    if present is not None:
+                        self._write_servo_goal(self.follower_serial, sid, present)
+                    time.sleep(self.inter_servo_delay_s)
+                # Torque on per servo.
+                for i in range(len(self.joint_names)):
+                    self._write_servo_byte(
+                        self.follower_serial, i + 1, REG_TORQUE_ENABLE, 1)
+                    time.sleep(self.inter_servo_delay_s)
+            response.success = True
+            response.message = (
+                f"torque ON on {self.follower_port_name} (6 servos, "
+                f"anti-jolt applied — arm holds current pose)")
+            self.get_logger().info(response.message)
+        except Exception as exc:
+            response.success = False
+            response.message = f"torque_on failed: {exc}"
             self.get_logger().error(response.message)
         return response
 

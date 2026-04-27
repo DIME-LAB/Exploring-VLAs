@@ -5913,6 +5913,34 @@ class SOArm101ControlGUI(Node):
             command=self._cmd_real_disconnect,
         )
         self._real_disconnect_btn.pack(side=tk.LEFT, padx=2)
+
+        # Freedrive toggle: torque off → arm becomes back-drivable, you
+        # hand-pose it → click again → anti-jolt re-engage. Sibling of
+        # Connect/Disconnect (which control bus ownership). Calls
+        # ~/torque_off and ~/torque_on on jointstatereader directly —
+        # the bus stays held by jsr the whole time, so /joint_states
+        # never blacks out and RViz mirrors the hand motion live.
+        self._freedrive_active = False
+        self._freedrive_btn = ttk.Button(
+            btn_row, text='Freedrive',
+            command=self._cmd_freedrive_toggle,
+        )
+        self._freedrive_btn.pack(side=tk.LEFT, padx=(12, 2))
+
+        # Help text just for the freedrive button — the warning matters.
+        tk.Label(
+            conn,
+            text=(
+                'Freedrive: torque-off so you can move the arm by hand. '
+                'BEFORE clicking, make sure the arm is in a rested pose '
+                '(supported by the workspace, not extended in the air) — '
+                'torque-off lets gravity pull it. Click again to re-engage '
+                '(anti-jolt: arm holds wherever you left it).'
+            ),
+            wraplength=440, justify=tk.LEFT, anchor=tk.W,
+            font=('Helvetica', 10), foreground='gray',
+        ).pack(fill=tk.X, anchor=tk.W, pady=(6, 0))
+
         self._real_conn_status = tk.Label(
             conn, text='Status: unknown — click a button to set state',
             justify=tk.LEFT, anchor=tk.W,
@@ -6163,6 +6191,90 @@ class SOArm101ControlGUI(Node):
         threading.Thread(
             target=self._real_disconnect_worker, daemon=True,
         ).start()
+
+    def _cmd_freedrive_toggle(self):
+        """Toggle the follower's torque on/off via jsr's services.
+
+        First click (entering freedrive): show a confirmation prompt
+        warning about rested-pose safety, then call ~/torque_off — arm
+        becomes back-drivable for hand-posing. Button label flips to
+        "Re-engage".
+
+        Second click (exiting freedrive): call ~/torque_on (anti-jolt
+        applied — Goal_Position ← Present_Position before torque comes
+        back, so any drift during freedrive doesn't cause a snap). Button
+        label flips back to "Freedrive".
+
+        jsr keeps running on the bus throughout — /joint_states never
+        blacks out, RViz mirrors the hand-driven motion live.
+        """
+        from tkinter import messagebox
+        if not self._freedrive_active:
+            ok = messagebox.askyesno(
+                'Enter Freedrive',
+                'Disengage torque on all 6 servos so you can move the '
+                'arm by hand.\n\n'
+                'BEFORE clicking YES: make sure the arm is in a rested '
+                'pose — supported by the workspace, not extended in '
+                'the air. Torque-off lets gravity pull it.\n\n'
+                'Continue?',
+                parent=self.root,
+            )
+            if not ok:
+                return
+            service = '/joint_state_reader/torque_off'
+            new_label = 'Re-engage'
+            new_state = True
+        else:
+            service = '/joint_state_reader/torque_on'
+            new_label = 'Freedrive'
+            new_state = False
+
+        self._real_conn_status.config(
+            text=f'Status: calling {service}…', fg='black')
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
+
+        def _worker():
+            import subprocess
+            try:
+                # ros2 service call doesn't accept --no-daemon (CLI
+                # rejects it). The macOS daemon hang doesn't affect
+                # one-shot service calls in practice.
+                r = subprocess.run(
+                    ['ros2', 'service', 'call', service,
+                     'std_srvs/srv/Trigger'],
+                    capture_output=True, text=True, timeout=8.0)
+                ok = (r.returncode == 0 and 'success=True' in r.stdout)
+                tail = (r.stdout + r.stderr).strip().split('\n')[-1][:240]
+                if ok:
+                    self._freedrive_active = new_state
+                    self.root.after(0, lambda: self._freedrive_btn.config(
+                        text=new_label))
+                    fg = 'orange' if new_state else 'green'
+                    label = ('FREEDRIVE ON — arm is back-drivable' if new_state
+                             else 'FREEDRIVE OFF — arm holds settled pose')
+                    self._real_conn_status.after(
+                        0, lambda: self._real_conn_status.config(
+                            text=f'Status: {label}\n  {tail}', fg=fg))
+                    self._append_log(f'{service} → {tail}')
+                else:
+                    self._real_conn_status.after(
+                        0, lambda: self._real_conn_status.config(
+                            text=f'Status: {service} FAILED\n  {tail}',
+                            fg='red'))
+                    self._append_log(
+                        f'{service} failed: {tail}', 'error')
+            except Exception as e:
+                self._real_conn_status.after(
+                    0, lambda: self._real_conn_status.config(
+                        text=f'Status: {service} exception\n  {e}',
+                        fg='red'))
+                self._append_log(f'{service} exception: {e}', 'error')
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _real_disconnect_worker(self):
         try:
