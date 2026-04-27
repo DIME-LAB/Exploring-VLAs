@@ -3581,7 +3581,7 @@ class SOArm101ControlGUI(Node):
         top_bar = ttk.Frame(frame)
         top_bar.pack(fill=tk.X, padx=10, pady=(8, 4))
         self._register_button(
-            top_bar, text='🔄  Refresh all (objects + drops)',
+            top_bar, text='Refresh all (objects + drops)',
             tab='Quickstart', section='Top',
             command=self._cmd_qs_refresh_all,
         ).pack(fill=tk.X, ipady=4)
@@ -3595,7 +3595,7 @@ class SOArm101ControlGUI(Node):
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 4))
         self._qs_listbox = tk.Listbox(
             left, height=16, exportselection=False,
-            font=('TkFixedFont', 10))
+            font=('Menlo', 10))
         self._qs_listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         # --- RIGHT column: player + steps ---
@@ -3607,17 +3607,17 @@ class SOArm101ControlGUI(Node):
         ctrl_row = ttk.Frame(ctrl_frame)
         ctrl_row.pack(fill=tk.X, padx=5, pady=5)
         self._register_button(
-            ctrl_row, text='▶ Play',
+            ctrl_row, text='Play',
             tab='Quickstart', section='Player',
             command=self._cmd_qs_play,
         ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2), ipady=2)
         self._register_button(
-            ctrl_row, text='⏸ Pause',
+            ctrl_row, text='Pause',
             tab='Quickstart', section='Player',
             command=self._cmd_qs_pause,
         ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 2), ipady=2)
         self._register_button(
-            ctrl_row, text='⏮ Restart',
+            ctrl_row, text='Restart',
             tab='Quickstart', section='Player',
             command=self._cmd_qs_restart,
         ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0), ipady=2)
@@ -4099,7 +4099,7 @@ class SOArm101ControlGUI(Node):
         row4 = ttk.Frame(setup)
         row4.pack(fill=tk.X, padx=5, pady=4)
         self._register_button(
-            row4, text='▶  Drop Scan  (sweeps configured range, locks current roll)',
+            row4, text='Drop Scan  (sweeps configured range, locks current roll)',
             tab='Real Test', section='Setup',
             command=self._cmd_real_drop_scan,
         ).pack(fill=tk.X, expand=True, ipady=3)
@@ -4124,7 +4124,7 @@ class SOArm101ControlGUI(Node):
 
         self._register_button(
             cal,
-            text='🔄  Refresh Cups Pose  (subscribe-once /drop_poses_real)',
+            text='Refresh Cups Pose  (subscribe-once /drop_poses_real)',
             tab='Real Test', section='Calibration',
             command=self._cmd_real_refresh_cups_pose,
         ).pack(fill=tk.X, padx=5, pady=(4, 1), ipady=3)
@@ -4132,12 +4132,12 @@ class SOArm101ControlGUI(Node):
         self._real_cups_status_var = tk.StringVar(value='Cups: (none)')
         tk.Label(
             cal, textvariable=self._real_cups_status_var,
-            anchor='w', font=('TkFixedFont', 9), fg='#333',
+            anchor='w', font=('Menlo', 9), fg='#333',
         ).pack(fill=tk.X, padx=8, pady=(0, 4))
 
         self._register_button(
             cal,
-            text='🔄  Refresh Legos Pose  (subscribe-once /objects_poses_real)',
+            text='Refresh Legos Pose  (subscribe-once /objects_poses_real)',
             tab='Real Test', section='Calibration',
             command=self._cmd_real_refresh_legos_pose,
         ).pack(fill=tk.X, padx=5, pady=(4, 1), ipady=3)
@@ -4145,7 +4145,7 @@ class SOArm101ControlGUI(Node):
         self._real_legos_status_var = tk.StringVar(value='Legos: (none)')
         tk.Label(
             cal, textvariable=self._real_legos_status_var,
-            anchor='w', font=('TkFixedFont', 9), fg='#333',
+            anchor='w', font=('Menlo', 9), fg='#333',
         ).pack(fill=tk.X, padx=8, pady=(0, 4))
 
         clear_row = ttk.Frame(cal)
@@ -4214,7 +4214,7 @@ class SOArm101ControlGUI(Node):
         self._real_color_combobox.pack(side=tk.LEFT)
 
         self._real_run_button = self._register_button(
-            run_frame, text='▶  Pick & Drop Selected Color',
+            run_frame, text='Pick & Drop Selected Color',
             tab='Real Test', section='Run',
             command=self._cmd_real_run_one_color,
         )

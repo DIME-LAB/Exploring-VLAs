@@ -37,6 +37,7 @@ stack_preflight
 MODE="gazebo"
 RVIZ_ARG="false"
 GAZEBO_GUI="false"
+EXTRA_LAUNCH_ARGS=()
 
 # Argument parser — handles BOTH new flags and legacy positional arg.
 # We do this manually (not getopt) to keep both styles working in one
@@ -59,6 +60,9 @@ while [ $# -gt 0 ]; do
       MODE="gazebo"; GAZEBO_GUI="false"; RVIZ_ARG="true";  shift ;;
     all|full|visual|inspect)
       MODE="gazebo"; GAZEBO_GUI="true";  RVIZ_ARG="true";  shift ;;
+    # ---- Launch-arg passthrough (e.g. follower_port:=/dev/tty..., read_only:=true) ----
+    *:=*)
+      EXTRA_LAUNCH_ARGS+=("$1"); shift ;;
     *)
       echo "ERROR: unknown argument '$1'. Try '--help'." >&2
       exit 1 ;;
@@ -123,7 +127,7 @@ nohup pixi run --manifest-path "$MAC_ENV_MANIFEST" bash -c "
   export CYCLONEDDS_URI='$CYCLONEDDS_URI'
   export KMP_DUPLICATE_LIB_OK='$KMP_DUPLICATE_LIB_OK'
   export AMENT_PYTHON_EXECUTABLE='$AMENT_PYTHON_EXECUTABLE'
-  exec ros2 launch so_arm101_control stack.launch.py mode:=$MODE rviz:=$RVIZ_ARG headless:=$HEADLESS
+  exec ros2 launch so_arm101_control stack.launch.py mode:=$MODE rviz:=$RVIZ_ARG headless:=$HEADLESS ${EXTRA_LAUNCH_ARGS[*]}
 " > "$STACK_LOG" 2>&1 &
 
 LPID=$!
