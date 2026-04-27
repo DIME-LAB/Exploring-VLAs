@@ -33,7 +33,7 @@ from geometry_msgs.msg import Point, Pose, PoseStamped, Vector3
 from tf2_msgs.msg import TFMessage
 from std_msgs.msg import String
 from visualization_msgs.msg import Marker as VisMarker, MarkerArray
-from std_srvs.srv import Trigger
+from std_srvs.srv import Trigger, SetBool
 from tf2_ros import Buffer as TfBuffer, TransformListener
 try:
     from moveit_msgs.srv import GetPositionIK, GetPositionFK, GetMotionPlan, GetStateValidity
@@ -4228,6 +4228,37 @@ class SOArm101ControlGUI(Node):
     # picks up changes — see comment at the top of this file about
     # _patch_methods not copying class-level constants.
 
+    def _set_yoloe_overlay(self, enable: bool, timeout_s: float = 0.5) -> bool:
+        """Toggle the merged-viewer YOLOE overlay via aruco_camera_localizer
+        service. Lazy-creates the client on first call so this works after
+        hot-reload (which doesn't re-run __init__). Best-effort — every
+        rclpy/tk failure path is swallowed because this is called from the
+        `finally` block of `_real_drop_scan_thread` and must never raise
+        (otherwise it masks the real exception or stalls cleanup)."""
+        try:
+            client = getattr(self, '_yoloe_overlay_client', None)
+            if client is None:
+                client = self.create_client(
+                    SetBool, '/aruco_viewer/yoloe_overlay_enable')
+                self._yoloe_overlay_client = client
+            if not client.wait_for_service(timeout_sec=timeout_s):
+                self._append_log(
+                    'YOLOE overlay toggle skipped — '
+                    '/aruco_viewer/yoloe_overlay_enable not advertised', 'warn')
+                return False
+            req = SetBool.Request()
+            req.data = bool(enable)
+            client.call_async(req)
+            return True
+        except Exception as e:
+            try:
+                self._append_log(
+                    f'YOLOE overlay toggle errored ({type(e).__name__}): {e}',
+                    'warn')
+            except Exception:
+                pass
+            return False
+
     def _cmd_real_drop_scan(self):
         """Replacement for Drop Point Green: sweep -90° → +90° on
         shoulder_pan, detect each cup as it enters view, average its pose
@@ -4243,6 +4274,15 @@ class SOArm101ControlGUI(Node):
                 'Real: drop_scan cannot start — a run is already in progress',
                 'warn')
             return
+        # Force real topics BEFORE spawning the worker thread. rclpy's
+        # destroy_subscription/create_subscription calls can race with
+        # MultiThreadedExecutor worker threads if they happen on a
+        # daemon thread mid-spin (InvalidHandle crash). The service-
+        # callback thread that's calling us here is still an executor
+        # worker thread but the idempotent-by-actual-topic logic in
+        # _real_ensure_real_topics now makes destroy/create a once-per-
+        # process event, so the race window collapses.
+        self._real_ensure_real_topics()
         threading.Thread(
             target=self._real_drop_scan_thread, daemon=True).start()
 
@@ -4253,24 +4293,40 @@ class SOArm101ControlGUI(Node):
             self._qs_state = 'running'
             self._real_set_status('Drop Scan', step='preparing')
             self._append_log('Real drop_scan: starting')
+            # Suppress YOLOE overlay in the wrist-camera view so the user
+            # sees only ArUco drawings during the sweep. Restored in finally.
+            self._set_yoloe_overlay(False)
 
-            # Force real topics so /drop_poses_real is what _drop_callback
-            # writes _drop_data from. (We don't read _drop_data directly —
-            # we sample via subscribe-once — but force keeps the rest of
-            # the system consistent for any downstream reader.)
-            self._real_ensure_real_topics()
+            # --- Phase 0: pre-scan setup (gripper open + canonical scan pose) ---
+            # The wrist must be at +90° wrist_roll (camera-down "scan pose")
+            # AND the gripper must be fully open before the sweep starts —
+            # otherwise we sweep with the previous run's residual orientation
+            # / a partially-closed gripper occluding markers. Hardcoded so the
+            # user can't accidentally launch a scan with the arm in drop pose.
+            SCAN_WRIST_ROLL_RAD = math.pi / 2  # +90° = scan pose
+            self._real_set_status('Drop Scan', step='opening gripper')
+            self._append_log('Real drop_scan: opening gripper before sweep')
+            self._cmd_gripper_open()
+            evt = getattr(self, '_motion_event', None)
+            if evt is not None:
+                evt.wait(timeout=5.0)
 
-            # --- Phase 1: scan_home preserving CURRENT wrist_roll ---
-            # Drop Scan no longer flips wrist_roll itself — the user sets it
-            # via the Roll +90° / Roll −90° buttons BEFORE pressing Drop Scan.
-            # We capture wrist_roll at scan start and lock all sweep + return
-            # motions to that value.
-            with self.joint_lock:
-                scan_wrist_roll = self.joint_positions.get('wrist_roll', 0.0)
+            self._real_set_status('Drop Scan', step='flipping wrist to scan pose')
+            self._append_log(
+                f'Real drop_scan: flipping wrist_roll → '
+                f'{math.degrees(SCAN_WRIST_ROLL_RAD):+.1f}° (scan pose)')
+            if not self._real_set_wrist_roll(SCAN_WRIST_ROLL_RAD):
+                self._append_log(
+                    'Real drop_scan: wrist_roll flip failed', 'err')
+                self._real_set_status('Halted', step='wrist_roll flip failed')
+                return
+
+            # --- Phase 1: scan_home, locking the scan-pose wrist_roll ---
+            scan_wrist_roll = SCAN_WRIST_ROLL_RAD
             self._append_log(
                 f'Real drop_scan: locking wrist_roll = '
                 f'{math.degrees(scan_wrist_roll):+.1f}° for entire sweep')
-            self._real_set_status('Drop Scan', step='scan_home (preserve roll)')
+            self._real_set_status('Drop Scan', step='scan_home')
             if not self._real_scan_home_preserve_roll(scan_wrist_roll):
                 self._append_log(
                     'Real drop_scan: scan_home failed', 'err')
@@ -4381,13 +4437,18 @@ class SOArm101ControlGUI(Node):
                         'Drop Scan',
                         step=f'settling on {drop_id}')
 
-                    # Visual servo: single corrective pan to target
+                    # Visual servo: single corrective pan to target. Once we
+                    # commit to servoing on a drop_id we never re-target it,
+                    # success or failure — otherwise a flaky cup keeps
+                    # pulling the sweep back and the scan never advances.
                     servo_target = self._real_drop_scan_pan_target(
                         target_pan, scan_wrist_roll)
                     if not self._real_drop_scan_motion(
                             servo_target, DROP_SCAN_STEP_DURATION_S + 0.1):
                         self._append_log(
-                            f'Real drop_scan: servo to {drop_id} failed', 'warn')
+                            f'Real drop_scan: servo to {drop_id} failed — '
+                            'marking visited, sweep continues', 'warn')
+                        visited_ids.add(drop_id)
                         continue
                     time.sleep(0.3)  # let arm settle before averaging
 
@@ -4399,7 +4460,9 @@ class SOArm101ControlGUI(Node):
                         self._append_log(
                             f'Real drop_scan: {drop_id} settle failed — only '
                             f'{len(drop_samples)} samples '
-                            f'(need ≥{DROP_SCAN_MIN_AVG_SAMPLES})', 'warn')
+                            f'(need ≥{DROP_SCAN_MIN_AVG_SAMPLES}) — '
+                            'marking visited, sweep continues', 'warn')
+                        visited_ids.add(drop_id)
                         # Resume sweep from servoed pan
                         pan = target_pan
                         continue
@@ -4408,8 +4471,9 @@ class SOArm101ControlGUI(Node):
                     if xy_var > DROP_SCAN_MAX_XY_VARIANCE_M2:
                         self._append_log(
                             f'Real drop_scan: {drop_id} xy variance '
-                            f'{xy_var*1e6:.1f} mm² too high — skipping cache',
-                            'warn')
+                            f'{xy_var*1e6:.1f} mm² too high — marking '
+                            'visited, sweep continues', 'warn')
+                        visited_ids.add(drop_id)
                         pan = target_pan
                         continue
                     self._cached_cup_poses[drop_id] = avg_pose
@@ -4446,9 +4510,17 @@ class SOArm101ControlGUI(Node):
                         'Cups: ' + '   '.join(marks))
             self.root.after(0, _update_label)
             self._real_refresh_color_dropdown()
-            self._append_log(
-                f'Real drop_scan: cached {len(visited_ids)} cup(s): '
-                f'{sorted(visited_ids)}')
+            # Report on the AUTHORITATIVE cache (visited_ids now includes
+            # cups that were attempted but rejected for high variance / low
+            # sample count, so it's not a "cached" count anymore).
+            cached_names = sorted(self._cached_cup_poses.keys())
+            attempted_only = sorted(visited_ids - set(cached_names))
+            summary = (
+                f'Real drop_scan: cached {len(cached_names)} cup(s): '
+                f'{cached_names}')
+            if attempted_only:
+                summary += f' (attempted but rejected: {attempted_only})'
+            self._append_log(summary)
 
             # --- Phase 4: return to scan_home (preserve scan-start wrist_roll) ---
             self._real_set_status('Drop Scan', step='scan_home (return)')
@@ -4456,8 +4528,10 @@ class SOArm101ControlGUI(Node):
                 self._append_log('Real drop_scan: return scan_home failed',
                                  'warn')
             self._real_set_status(
-                'Complete', step=f'✓ {len(visited_ids)} cup(s) cached')
+                'Complete',
+                step=f'✓ {len(self._cached_cup_poses)} cup(s) cached')
         finally:
+            self._set_yoloe_overlay(True)
             self._qs_state = 'idle'
 
     # --- Drop scan helpers ---
@@ -4864,6 +4938,22 @@ class SOArm101ControlGUI(Node):
             self.root.after(0, self._populate_object_list)
             self.root.after(0, self._qs_refresh_objects)
 
+        # Wipe the FULL sim-side state too — objects_data + _drop_data
+        # carry residual entries from any live subscription that fired
+        # since the last refresh. The user explicitly asked for clear
+        # cache to clear EVERYTHING (sim + real) so subsequent refreshes
+        # start from a known-empty state instead of inheriting half-stale
+        # poses that mix sim and real frames.
+        with self.objects_lock:
+            sim_lego_count = len(self.objects_data)
+            self.objects_data.clear()
+        with self._drop_lock:
+            sim_cup_count = len(self._drop_data)
+            self._drop_data.clear()
+        self.root.after(0, self._populate_object_list)
+        self.root.after(0, self._populate_drop_list)
+        self.root.after(0, self._qs_refresh_objects)
+
         self._remove_cup_collision_objects()
         self._remove_lego_collision_objects()
         # Visual markers (RViz colored cups). Idempotent — publishes DELETE
@@ -4871,6 +4961,11 @@ class SOArm101ControlGUI(Node):
         # or never added). Doesn't depend on _show_visual_var; clearing the
         # cache always clears the visual representation.
         self._delete_visual_markers()
+
+        # Reset subs back to sim defaults — without this, the next refresh
+        # button press in the Grasp/QS tab would still pull from /*_real
+        # because subs are sticky after a Real Test session.
+        self._sim_ensure_sim_topics()
 
         self._drop_wrist_roll_sign = 1
         # Note: clearing the sign no longer touches a button — Roll +90° /
@@ -4884,9 +4979,10 @@ class SOArm101ControlGUI(Node):
             self._real_run_status_var.set('Idle')
 
         self._append_log(
-            f'Real: cleared all caches '
-            f'({len(cached_cup_names)} cups, {len(cached_lego_names)} legos removed, '
-            f'wrist_roll sign reset to +1)')
+            f'Cleared ALL caches: real({len(cached_cup_names)} cups, '
+            f'{len(cached_lego_names)} legos) + '
+            f'sim({sim_cup_count} cups, {sim_lego_count} legos), '
+            f'collisions removed, subs reset to sim, wrist_roll sign reset')
         self._real_refresh_color_dropdown()
 
     # --- Color-driven single-pick helper (Phase 11-01) ---
@@ -4899,15 +4995,17 @@ class SOArm101ControlGUI(Node):
         and re-subscribe so sim callbacks can't leak data into objects_data /
         objects_bbox / _drop_data during a Real Test cycle (D-07).
 
-        ALWAYS re-subscribes (no idempotent skip) — the StringVar widget
-        value is NOT a reliable indicator of the actual subscription topic.
-        Hot-reload bug: `_build_grasp_tab` creates the initial subscription
-        on the build-time default (`/objects_poses_sim`) BEFORE
-        `_restore_gui_state` sets the StringVar back to the saved value;
-        no re-subscription is triggered by the restore. So after every
-        hot-reload, the widget can show `/objects_poses_real` while the
-        actual sub is still on `/objects_poses_sim`. Forcing every call
-        sidesteps this by re-creating subs from scratch — costs ~1 ms.
+        Idempotent based on the SUBSCRIPTION's own `topic_name`, NOT the
+        StringVar widget value. The widget can disagree with the live
+        subscription (the original D-07 finding — _build_grasp_tab inits
+        the sub on the sim default before _restore_gui_state flips the
+        StringVar to real, no auto-re-sub). Reading sub.topic_name
+        bypasses that. Re-subscribing every call is the previous
+        implementation but it races destroy_subscription/create_subscription
+        against MultiThreadedExecutor worker threads currently servicing
+        the same sub — produces `InvalidHandle: destruction was requested`
+        crashes mid-spin. The idempotent path makes the destroy/create
+        race a once-per-process event instead of once-per-scan.
 
         Must be called from the tk thread (touches StringVars + buttons).
 
@@ -4926,38 +5024,142 @@ class SOArm101ControlGUI(Node):
         REAL_BBOX = '/objects_bbox_real'
         REAL_DROP = '/drop_poses_real'
 
-        # --- Grasp Topic: always re-subscribe ---
-        prev_obj = self._grasp_topic_var.get().strip()
-        self._grasp_topic_var.set(REAL_OBJECTS)
-        self._cmd_grasp_update_topic()
-        self._append_log(
-            f'Real: forced grasp_topic {prev_obj!r} → {REAL_OBJECTS!r} '
-            '(re-subscribed)')
+        def _sub_topic(sub_attr):
+            sub = getattr(self, sub_attr, None)
+            if sub is None:
+                return None
+            try:
+                return sub.topic_name.lstrip('/').rstrip('/')
+            except Exception:
+                return None
 
-        # --- BBox Topic: always re-subscribe ---
-        prev_bbox = self._bbox_topic_var.get().strip()
-        self._bbox_topic_var.set(REAL_BBOX)
-        if hasattr(self, 'bbox_sub') and self.bbox_sub is not None:
-            self.destroy_subscription(self.bbox_sub)
-        self.bbox_sub = self.create_subscription(
-            String, REAL_BBOX, self._bbox_callback, 1)
-        # Clear stale sim bbox; next /objects_bbox_real msg refills it
-        # within ~1 s (YOLOE publishes continuously).
-        self.objects_bbox = {}
-        self._append_log(
-            f'Real: forced bbox_topic {prev_bbox!r} → {REAL_BBOX!r} '
-            '(re-subscribed)')
+        def _norm(topic):
+            return topic.lstrip('/').rstrip('/')
 
-        # --- Drop Topic: always re-subscribe ---
-        prev_drop = self._drop_topic_var.get().strip()
-        self._drop_topic_var.set(REAL_DROP)
-        # _update_drop_topic clears _drop_data + removes cup collisions —
-        # those will be re-added by the next Refresh Cups Pose. The
-        # call ALSO publishes "Drop topic: ..." log line for visibility.
-        self._update_drop_topic(REAL_DROP)
-        self._append_log(
-            f'Real: forced drop_topic {prev_drop!r} → {REAL_DROP!r} '
-            '(re-subscribed)')
+        # --- Grasp Topic: re-subscribe only if sub topic isn't already real ---
+        if _sub_topic('objects_sub') != _norm(REAL_OBJECTS):
+            prev_obj = self._grasp_topic_var.get().strip()
+            self._grasp_topic_var.set(REAL_OBJECTS)
+            self._cmd_grasp_update_topic()
+            self._append_log(
+                f'Real: forced grasp_topic {prev_obj!r} → {REAL_OBJECTS!r} '
+                '(re-subscribed)')
+        else:
+            # Sub already on real — just sync the widget StringVar so the UI
+            # doesn't lie about which topic is live.
+            if self._grasp_topic_var.get().strip() != REAL_OBJECTS:
+                self._grasp_topic_var.set(REAL_OBJECTS)
+
+        # --- BBox Topic: re-subscribe only if sub topic isn't already real ---
+        if _sub_topic('bbox_sub') != _norm(REAL_BBOX):
+            prev_bbox = self._bbox_topic_var.get().strip()
+            self._bbox_topic_var.set(REAL_BBOX)
+            if hasattr(self, 'bbox_sub') and self.bbox_sub is not None:
+                self.destroy_subscription(self.bbox_sub)
+            self.bbox_sub = self.create_subscription(
+                String, REAL_BBOX, self._bbox_callback, 1)
+            # Clear stale sim bbox; next /objects_bbox_real msg refills it
+            # within ~1 s (YOLOE publishes continuously).
+            self.objects_bbox = {}
+            self._append_log(
+                f'Real: forced bbox_topic {prev_bbox!r} → {REAL_BBOX!r} '
+                '(re-subscribed)')
+        else:
+            if self._bbox_topic_var.get().strip() != REAL_BBOX:
+                self._bbox_topic_var.set(REAL_BBOX)
+
+        # --- Drop Topic: re-subscribe only if sub topic isn't already real ---
+        if _sub_topic('_drop_sub') != _norm(REAL_DROP):
+            prev_drop = self._drop_topic_var.get().strip()
+            self._drop_topic_var.set(REAL_DROP)
+            # _update_drop_topic clears _drop_data + removes cup collisions —
+            # those will be re-added by the next Refresh Cups Pose. The
+            # call ALSO publishes "Drop topic: ..." log line for visibility.
+            self._update_drop_topic(REAL_DROP)
+            self._append_log(
+                f'Real: forced drop_topic {prev_drop!r} → {REAL_DROP!r} '
+                '(re-subscribed)')
+        else:
+            if self._drop_topic_var.get().strip() != REAL_DROP:
+                self._drop_topic_var.set(REAL_DROP)
+
+    def _sim_ensure_sim_topics(self):
+        """Mirror of `_real_ensure_real_topics` for the SIM side.
+
+        Force `objects_sub`, `bbox_sub`, and `_drop_sub` to the sim defaults
+        (`/objects_poses_sim`, `/objects_bbox_sim`, `/drop_poses`). Idempotent
+        on each sub's `topic_name` so the destroy/create race is at most a
+        once-per-process event.
+
+        Called from `_cmd_grasp_refresh` and `_cmd_drop_refresh` so that
+        sim refresh buttons reliably switch back to sim topics even after a
+        prior `_real_ensure_real_topics` swap. Without this, sim refresh
+        leaks: it clears objects_data + cup_collision and waits for the
+        live topic to refill — but the topic is still on `/*_real`, so
+        sim collision objects come from real-mode poses. Closes the
+        D-08 sim/real state-leak loop the user described.
+        """
+        SIM_OBJECTS = '/objects_poses_sim'
+        SIM_BBOX = '/objects_bbox_sim'
+        SIM_DROP = '/drop_poses'
+
+        def _sub_topic(sub_attr):
+            sub = getattr(self, sub_attr, None)
+            if sub is None:
+                return None
+            try:
+                return sub.topic_name.lstrip('/').rstrip('/')
+            except Exception:
+                return None
+
+        def _norm(topic):
+            return topic.lstrip('/').rstrip('/')
+
+        # Grasp Topic → /objects_poses_sim
+        if _sub_topic('objects_sub') != _norm(SIM_OBJECTS):
+            prev = self._grasp_topic_var.get().strip() \
+                if hasattr(self, '_grasp_topic_var') else ''
+            if hasattr(self, '_grasp_topic_var'):
+                self._grasp_topic_var.set(SIM_OBJECTS)
+            self._cmd_grasp_update_topic()
+            self._append_log(
+                f'Sim: forced grasp_topic {prev!r} → {SIM_OBJECTS!r} '
+                '(re-subscribed)')
+        elif hasattr(self, '_grasp_topic_var') \
+                and self._grasp_topic_var.get().strip() != SIM_OBJECTS:
+            self._grasp_topic_var.set(SIM_OBJECTS)
+
+        # BBox Topic → /objects_bbox_sim
+        if _sub_topic('bbox_sub') != _norm(SIM_BBOX):
+            prev = self._bbox_topic_var.get().strip() \
+                if hasattr(self, '_bbox_topic_var') else ''
+            if hasattr(self, '_bbox_topic_var'):
+                self._bbox_topic_var.set(SIM_BBOX)
+            if hasattr(self, 'bbox_sub') and self.bbox_sub is not None:
+                self.destroy_subscription(self.bbox_sub)
+            self.bbox_sub = self.create_subscription(
+                String, SIM_BBOX, self._bbox_callback, 1)
+            self.objects_bbox = {}
+            self._append_log(
+                f'Sim: forced bbox_topic {prev!r} → {SIM_BBOX!r} '
+                '(re-subscribed)')
+        elif hasattr(self, '_bbox_topic_var') \
+                and self._bbox_topic_var.get().strip() != SIM_BBOX:
+            self._bbox_topic_var.set(SIM_BBOX)
+
+        # Drop Topic → /drop_poses
+        if _sub_topic('_drop_sub') != _norm(SIM_DROP):
+            prev = self._drop_topic_var.get().strip() \
+                if hasattr(self, '_drop_topic_var') else ''
+            if hasattr(self, '_drop_topic_var'):
+                self._drop_topic_var.set(SIM_DROP)
+            self._update_drop_topic(SIM_DROP)
+            self._append_log(
+                f'Sim: forced drop_topic {prev!r} → {SIM_DROP!r} '
+                '(re-subscribed)')
+        elif hasattr(self, '_drop_topic_var') \
+                and self._drop_topic_var.get().strip() != SIM_DROP:
+            self._drop_topic_var.set(SIM_DROP)
 
     def _real_inject_active_pair(self, lego_name, cup_name):
         """Re-inject the active lego + cup pose into objects_data and
@@ -5280,11 +5482,23 @@ class SOArm101ControlGUI(Node):
             self._qs_state = 'idle'
 
     def _real_set_status(self, status, step=None):
-        """Thread-safe status update for the Real Test tab."""
+        """Thread-safe status update for the Real Test tab.
+
+        Mirrors `_append_log`'s `_gui_ready` guard so we never call
+        `root.after` from a daemon thread when the tk mainloop has exited
+        (or hasn't fully started). Without the guard, any failure inside a
+        `_real_*_thread` worker that touches the status label crashes the
+        worker with `RuntimeError: main thread is not in main loop` instead
+        of running the `finally` cleanup."""
+        if not getattr(self, '_gui_ready', False):
+            return
         def _update():
             text = status if step is None else f'{status} — {step}'
             self._real_run_status_var.set(text)
-        self.root.after(0, _update)
+        try:
+            self.root.after(0, _update)
+        except RuntimeError:
+            pass
 
     def _real_evict_lego_from_cache(self, lego_name):
         """Remove a successfully-dropped lego from cache + planning scene.
@@ -7368,12 +7582,20 @@ class SOArm101ControlGUI(Node):
         """Resync object state from /objects_poses_sim. Async — schedules
         listbox repopulate on the tk thread via root.after(500, ...).
         Callers that need guaranteed-fresh state should sleep ~1s after.
-        """
+
+        Forces sub topics back to sim before pulling — without this, a prior
+        Real Test session leaves `objects_sub` on /objects_poses_real and
+        the 500 ms refill grabs real-mode poses into the sim collision
+        scene (the D-08 leak the user reported)."""
         if not hasattr(self, 'obj_listbox'):
             return
         if tracer.is_active():
             tracer.close_cycle('user_canceled',
                                note='grasp_refresh while cycle open')
+        # Reset subs to sim BEFORE clearing — otherwise the next live
+        # callback could refill objects_data with real-mode data before
+        # the timed re-populate fires.
+        self._sim_ensure_sim_topics()
         with self.objects_lock:
             self.objects_data.clear()
         self.obj_listbox.delete(0, tk.END)
@@ -8355,16 +8577,16 @@ class SOArm101ControlGUI(Node):
         /drop_poses subscription refills it at ~12 Hz so ≥6 messages have
         arrived by the 500 ms scheduled read.
 
-        Previously used a threading.Event + 2 s timeout pattern which
-        silently left stale latched markers in RViz when /drop_poses had
-        a brief gap (publisher restart, live-sync action graph re-init).
-        Reverted to time-delay symmetry with grasp_refresh for robustness.
+        Forces sub topics back to sim before pulling so a prior Real Test
+        session can't leak /drop_poses_real data into the sim cup
+        collision scene.
         """
         if not hasattr(self, '_drop_listbox'):
             return
         if tracer.is_active():
             tracer.close_cycle('user_canceled',
                                note='drop_refresh while cycle open')
+        self._sim_ensure_sim_topics()
         self._remove_cup_collision_objects()
         if getattr(self, '_gui_ready', False):
             self.root.after(500, self._populate_drop_list)
@@ -8743,7 +8965,9 @@ class SOArm101ControlGUI(Node):
         return open_angle, close_angle
 
     def _cmd_gripper_open_for_object(self):
-        """Open gripper to the angle matching the selected object's width."""
+        """Open gripper to the angle matching the selected object's width.
+        After motion completes, switches the planning group back to 'arm'
+        so the next arm command renders correctly in RViz."""
         obj_name = self._get_selected_object_name()
         bbox = self._lookup_bbox(obj_name) if obj_name else None
         if not bbox:
@@ -8760,6 +8984,7 @@ class SOArm101ControlGUI(Node):
         def _send():
             self._send_gripper_goal(open_angle, duration_s=duration, blocking=True)
             evt.set()
+            self._select_planning_group('arm')
         threading.Thread(target=_send, daemon=True).start()
 
     def _cmd_gripper_close_for_object(self):
@@ -9036,7 +9261,23 @@ class SOArm101ControlGUI(Node):
         self._gripper_command(JOINT_LIMITS['gripper_joint'][0], execute=True)
 
     def _cmd_gripper_open(self):
-        self._gripper_command(JOINT_LIMITS['gripper_joint'][1], execute=True)
+        """Open gripper to JOINT_LIMITS max. Mirrors `_cmd_gripper_open_for_object`'s
+        motion-event pattern (background thread, blocking goal, evt.set()) so
+        callers can wait on completion. After the motion lands, switches the
+        planning group back to 'arm' so RViz's MotionPlanning panel shows the
+        orange arm goal-state ghost on the next arm command instead of leaving
+        it stuck on the gripper group."""
+        open_angle = JOINT_LIMITS['gripper_joint'][1]
+        duration = 1.0
+        self._append_log(f'Open Gripper: {math.degrees(open_angle):.1f}°')
+        self._gripper_command(open_angle, execute=False, duration_s=duration)
+        evt = threading.Event()
+        self._motion_event = evt
+        def _send():
+            self._send_gripper_goal(open_angle, duration_s=duration, blocking=True)
+            evt.set()
+            self._select_planning_group('arm')
+        threading.Thread(target=_send, daemon=True).start()
 
     def _cmd_gripper_open_range(self):
         """Open gripper to the range spinbox upper value (grasp tab)."""
