@@ -149,13 +149,31 @@ def _resolve_cameras(context, *args, **kwargs):
     # via arguments (the nodes use argparse, not just topic remap, so
     # ROS-level remapping doesn't reach them — they read their config
     # from CLI flags).
+    # Topic-name contract for real mode:
+    #   /objects_poses_real  ← yoloe lego detections (matches sim's
+    #                          /objects_poses_sim from sim_ground_truth)
+    #   /objects_bbox_real   ← bbox catalog (sx/sy/sz meters per name)
+    #   /drop_poses          ← aruco cup-marker detections (no _real
+    #                          suffix; same name in sim + real)
+    #   /aruco_poses         ← raw marker poses (debug/diagnostic)
+    # The bridge's defaults are the un-suffixed variants (/objects_poses,
+    # /objects_bbox) — control_gui's Grasp tab subscribes to the _real
+    # suffix in real mode, so without these remaps perception runs but
+    # never reaches the Grasp tab. Discovered 2026-04-27 while verifying
+    # the yoloe→aruco merged-window fix; perception was healthy
+    # (132 Hz on /objects_poses, 2 Hz on /objects_bbox) but the Grasp
+    # tab was silent.
+    real_topic_remap = {
+        'objects_poses_topic': '/objects_poses_real',
+        'objects_bbox_topic': '/objects_bbox_real',
+    }
     actions.append(Node(
         package='aruco_camera_localizer',
         executable='localize_aruco',
         name='localize_aruco',
         output='screen',
         arguments=['--camera-topic', '/wrist_camera'],
-        parameters=[{'use_sim_time': False}],
+        parameters=[{'use_sim_time': False, **real_topic_remap}],
     ))
     actions.append(Node(
         package='aruco_camera_localizer',
@@ -185,6 +203,12 @@ def _resolve_cameras(context, *args, **kwargs):
         parameters=[{
             'use_sim_time': False,
             'annotated_image_topic': 'yoloe_annotated',
+            # Both bridge processes (aruco + yoloe) own a publisher for
+            # objects_poses / objects_bbox — must remap on BOTH otherwise
+            # yoloe keeps publishing to the un-suffixed default, creating
+            # a parallel stream the Grasp tab never sees. See real_topic_remap
+            # comment above the localize_aruco Node.
+            **real_topic_remap,
         }],
     ))
     return actions
