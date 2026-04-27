@@ -206,4 +206,5 @@ near another cup" scenario.
 - `docs/LEROBOT_ROS2_MAC_SETUP.md` — record runbook (sim + real)
 - `docs/grasp_pipeline.md` — control_gui → MoveIt grasp flow
 - `docs/AGENT_DEBUG_GUIDE.md` — debugging the sim stack
+- `docs/GAZEBO_LINUX_LIMITATION.md` — Gazebo on Linux is broken by Phase 9's PD feed-forward yaml; revisit when needed
 - `../lerobot/ROS2_PLUGINS.md` — porting the `so101_ros2` plugin to a new arm
