@@ -639,16 +639,22 @@ class JointStateReader(Node):
                 delta_ticks = present - 2048
                 new_homing = old_homing + delta_ticks
 
-                # Sanity: Feetech Homing_Offset signed int16 range
-                # is roughly ±2047 in practical use. Reject big shifts
-                # (likely a misuse or readout glitch).
-                if abs(new_homing) > 2047:
+                # Sanity: Feetech Homing_Offset is a signed register; one
+                # documentation source restricts it to ±2047 (12-bit signed),
+                # another says int16 (±32767). Empirically the firmware
+                # accepts values up to ±4095 (= one full encoder rotation).
+                # Reject anything beyond that — clearly indicates a readout
+                # glitch or accumulated drift across many recenter calls.
+                if abs(new_homing) > 4095:
                     response.success = False
                     response.message = (
-                        f"{joint}: new_Homing_Offset={new_homing} out of "
-                        f"safe range. delta_ticks={delta_ticks}, "
-                        f"old_homing={old_homing}. Re-run lerobot-calibrate "
-                        f"and recheck.")
+                        f"{joint}: new_Homing_Offset={new_homing} exceeds "
+                        f"±4095 (one full rotation). delta_ticks="
+                        f"{delta_ticks}, old_homing={old_homing}. The EEPROM "
+                        f"has likely accumulated drift across multiple "
+                        f"recenter calls — re-run lerobot-calibrate to "
+                        f"fresh-burn the values, or sync EEPROM to JSON "
+                        f"first via mac-env/scripts/arm_trim.py.")
                     return response
 
                 # 4: write new homing offset
