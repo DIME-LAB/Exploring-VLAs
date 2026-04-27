@@ -6367,14 +6367,22 @@ class SOArm101ControlGUI(Node):
         intro = tk.Label(
             win,
             text=(
-                'Sequence:\n'
-                '  1. Stop jointstatereader and trajectory_shim (they hold '
-                'the serial port).\n'
-                '  2. Run lerobot-calibrate in a Terminal — follow its '
-                'prompts (move arm to home, sweep range of motion).\n'
-                '  3. Restart drivers when done.\n\n'
-                'lerobot writes Homing_Offset to each servo\'s EEPROM and '
-                'updates ~/.cache/huggingface/lerobot/.../my_awesome_follower_arm.json.'
+                'Click "Run calibration in Terminal" — it launches '
+                'mac-env/scripts/calibrate_arm.sh, which kills jsr, runs '
+                'lerobot-calibrate with project-correct flags '
+                '(KMP_DUPLICATE_LIB_OK=TRUE, --robot.type=so101_follower), '
+                'and restarts. Follow the on-screen prompts in Terminal.\n\n'
+                'CRITICAL during the "sweep range of motion" step: physically '
+                'move EVERY joint — including the gripper — through its full '
+                'range. Pump the gripper jaws open + closed twice. The Feetech '
+                'servo\'s firmware itself enforces Min/Max_Angle_Limit from '
+                'this sweep; skipping the gripper makes the Open-Gripper '
+                'button silently refuse to move (no error — the servo just '
+                'rejects out-of-range goals).\n\n'
+                'Writes: Homing_Offset (reg 31), Min_Angle_Limit (reg 9), '
+                'Max_Angle_Limit (reg 11) to each servo\'s EEPROM, plus the '
+                'JSON at ~/.cache/huggingface/lerobot/calibration/robots/'
+                'so101_follower/my_awesome_follower_arm.json.'
             ),
             wraplength=660, justify=tk.LEFT, anchor=tk.W,
         )
@@ -6400,24 +6408,18 @@ class SOArm101ControlGUI(Node):
         def _refresh_commands():
             port = port_var.get().strip() or self._DEFAULT_FOLLOWER_PORT
             cmds = (
-                "# 1. Stop drivers (port-holders)\n"
-                "pkill -f joint_state_reader\n"
-                "pkill -f trajectory_shim\n"
+                "# Single command — calibrate_arm.sh handles preflight,\n"
+                "# kills jsr_write itself, runs lerobot-calibrate with the\n"
+                "# right env (KMP_DUPLICATE_LIB_OK=TRUE) and robot type\n"
+                "# (so101_follower), then prints next-step instructions.\n"
                 "\n"
-                "# 2. Run lerobot-calibrate (interactive — follow prompts)\n"
-                "pixi run --manifest-path /tmp/mac-env/pixi.toml bash -c '\n"
-                "  source /tmp/soarm-ws/install/setup.bash &&\n"
-                f"  lerobot-calibrate \\\n"
-                f"    --robot.type=so101_follower \\\n"
-                f"    --robot.port={port} \\\n"
-                f"    --robot.id=my_awesome_follower_arm\n"
-                "'\n"
+                f"PORT={port} \\\n"
+                "  bash ~/Documents/Projects/untitled\\ folder/agents/ros2/\\\n"
+                "  repos/Exploring-VLAs/mac-env/scripts/calibrate_arm.sh\n"
                 "\n"
-                "# 3. Restart drivers (assumes /tmp/run_jsr_write.sh +\n"
-                "#                      /tmp/run_traj_shim.sh exist)\n"
-                "nohup /tmp/run_jsr_write.sh > /tmp/jsr_write.log 2>&1 &\n"
-                "sleep 3\n"
-                "nohup /tmp/run_traj_shim.sh > /tmp/traj_shim.log 2>&1 &\n"
+                "# Restart the stack after calibration:\n"
+                "bash mac-env/scripts/stack_stop.sh\n"
+                "bash mac-env/scripts/stack_start.sh --mode real --rviz\n"
             )
             cmd_text.configure(state=tk.NORMAL)
             cmd_text.delete('1.0', tk.END)
@@ -6454,26 +6456,37 @@ class SOArm101ControlGUI(Node):
                     f'open-terminal failed: {e}', 'error'
                 )
 
-        ttk.Button(
-            btn_row, text='Open step 1 (stop drivers) in Terminal',
-            command=lambda: _open_terminal_with_cmd(
-                'pkill -f joint_state_reader; pkill -f trajectory_shim; '
-                'echo Drivers stopped.'
-            ),
-        ).pack(side=tk.LEFT, padx=(0, 6))
+        # Single button: launch the wrapper. It already handles
+        # killing jsr (preflight), env vars (KMP_DUPLICATE_LIB_OK), and
+        # the right --robot.type/--robot.port flags. The wrapper's BANNER
+        # explicitly walks the user through the gripper sweep — which is
+        # the bit that gets skipped most often and silently disables the
+        # Open Gripper button afterwards.
+        repo_root = os.path.expanduser(
+            '~/Documents/Projects/untitled folder/agents/ros2/repos/Exploring-VLAs')
+        wrapper = os.path.join(repo_root, 'mac-env', 'scripts',
+                               'calibrate_arm.sh')
+
+        def _launch_wrapper():
+            if not os.path.exists(wrapper):
+                self._append_log(
+                    f'calibrate_arm.sh not found at {wrapper}',
+                    'error')
+                return
+            port = port_var.get().strip() or self._DEFAULT_FOLLOWER_PORT
+            _open_terminal_with_cmd(f'PORT={port} bash {wrapper}')
 
         ttk.Button(
-            btn_row, text='Open step 2 (calibrate) in Terminal',
-            command=lambda: _open_terminal_with_cmd(
-                "pixi run --manifest-path /tmp/mac-env/pixi.toml bash -c '"
-                "source /tmp/soarm-ws/install/setup.bash && "
-                f"lerobot-calibrate "
-                f"--robot.type=so101_follower "
-                f"--robot.port={port_var.get().strip() or self._DEFAULT_FOLLOWER_PORT} "
-                f"--robot.id=my_awesome_follower_arm"
-                "'"
-            ),
-        ).pack(side=tk.LEFT, padx=6)
+            btn_row, text='Run calibration in Terminal',
+            command=_launch_wrapper,
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        ttk.Label(
+            btn_row,
+            text='(The script will read its banner, then prompt you '
+                 'to position the arm + sweep ranges.)',
+            font=('Helvetica', 10), foreground='gray',
+        ).pack(side=tk.LEFT, padx=(2, 0))
 
         ttk.Button(
             btn_row, text='Close',

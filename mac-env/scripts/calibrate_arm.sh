@@ -28,9 +28,22 @@ cat <<'BANNER'
                   SO-ARM101 FOLLOWER ARM CALIBRATION
 ═══════════════════════════════════════════════════════════════════════════
 
-This will calibrate the joint zero-references and movement ranges.
-Result: Homing_Offset written to each servo's EEPROM + JSON saved to
-~/.cache/huggingface/lerobot/calibration/robots/so_follower/
+This will calibrate the joint zero-references AND movement ranges.
+
+What gets written to each servo's EEPROM:
+  reg 31  Homing_Offset       — joint-zero reference
+  reg  9  Min_Angle_Limit     — lowest allowed Goal_Position (in ticks)
+  reg 11  Max_Angle_Limit     — highest allowed Goal_Position (in ticks)
+
+⚠️  CRITICAL: the servo's firmware enforces Min_Angle_Limit / Max_Angle_Limit
+itself. If a joint isn't swept here, its Min == Max == current position,
+and the servo will SILENTLY REJECT every Goal_Position outside that range
+(no bus error, no log line — just no motion). The gripper is the joint
+people most often skip. Sweep it, or the Open Gripper button will refuse
+to move.
+
+Result: EEPROM updated + JSON saved to
+~/.cache/huggingface/lerobot/calibration/robots/so101_follower/
 
 You will need TWO physical interactions with the arm.
 
@@ -69,14 +82,22 @@ You MUST physically move every joint to its extremes. For each joint:
   shoulder_lift   →  Lift upper arm UP, then DOWN to limits
   elbow_flex      →  Bend elbow fully UP, then fully DOWN
   wrist_flex      →  Flex wrist FULLY one way, then the other
-  gripper         →  Open the jaws all the way, then close fully
+  *** gripper     →  Open the jaws all the way, then close fully —
+                     pump open/closed twice so both extremes register.
+                     SKIP THIS AND THE GRIPPER WILL REFUSE TO OPEN UNTIL
+                     YOU RE-RUN THIS SCRIPT. (The servo's firmware
+                     enforces the Min/Max range you sweep here.)
   (wrist_roll is skipped — it's a continuous-rotation axis)
 
 Take your time. Move EACH joint visibly to its end-stops.
 Press ENTER only after every joint has been swept through its full range.
 
-Common failure mode: not moving the joints enough (or at all), then
-the wizard crashes with "Some motors have the same min and max values."
+Common failure modes:
+  - Not moving any joints → wizard crashes:
+    "Some motors have the same min and max values."
+  - Moving arm joints but skipping the gripper → wizard succeeds, but
+    gripper open commands silently fail later (servo firmware-rejected).
+    No error in jsr / control_gui logs — just a stuck gripper.
 
 ───────────────────────────────────────────────────────────────────────────
 
