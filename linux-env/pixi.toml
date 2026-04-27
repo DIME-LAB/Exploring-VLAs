@@ -1,0 +1,48 @@
+[workspace]
+authors = ["Aldrin Inbaraj <aaugus11@asu.edu>"]
+channels = ["robostack-jazzy", "conda-forge"]
+name = "linux-env"
+platforms = ["linux-64"]
+version = "0.1.0"
+description = "Linux env for SO-ARM101 × LeRobot: subscribes to Isaac Sim's existing ROS2 topics (system Humble side) via Cyclone DDS and records v3 datasets with lerobot-record. Sim runs under system Humble; only the lerobot recorder lives in this env."
+
+[tasks]
+
+[dependencies]
+# lerobot pyproject hard-pin: requires-python = ">=3.12"
+python = "3.12.*"
+pip = "*"
+
+# --- ROS2 client + RMW (Jazzy) -----------------------------------------
+# We deliberately use Jazzy here (not Humble) because robostack-humble
+# doesn't ship Python 3.12 wheels, and lerobot pyproject pins >=3.12.
+# Wire-level DDS compat between Humble (system, sim publisher side) and
+# Jazzy (this env, lerobot subscriber side) holds for sensor_msgs/Image,
+# sensor_msgs/JointState, and std_msgs across the Humble→Jazzy step
+# (no IDL break for the message types we record).
+ros-jazzy-ros-base = "*"            # rclpy + RMW core (smaller than -desktop)
+ros-jazzy-ros2cli = "*"
+ros-jazzy-ros2topic = "*"
+ros-jazzy-rmw-cyclonedds-cpp = "*"  # matches system RMW_IMPLEMENTATION
+
+# --- Message types lerobot's ROS2Camera + so101_ros2 BYOH consume -------
+ros-jazzy-cv-bridge = "*"           # not strictly used today; keep for safety
+ros-jazzy-sensor-msgs = "*"
+ros-jazzy-sensor-msgs-py = "*"
+ros-jazzy-std-msgs = "*"
+ros-jazzy-geometry-msgs = "*"
+
+# --- Image I/O for lerobot's video encoding pipeline --------------------
+opencv = "*"
+ffmpeg = "*"
+pillow = "*"
+# numpy: unpinned — lerobot upstream requires >=2.0; ROS2Camera decodes
+# sensor_msgs/Image without cv_bridge so numpy 2 is fine.
+
+# After `pixi install`, install lerobot + extras inside the env:
+#   cd ~/Projects/Exploring-VLAs/linux-env
+#   pixi run pip install -e "../lerobot[viz,dataset,feetech]"
+#
+# The Mac env documents this same manual-pip step. We can't put it under
+# [tasks] because relative paths through pixi-run don't survive workspace
+# changes reliably.
