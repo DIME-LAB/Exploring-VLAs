@@ -8,15 +8,27 @@ Source: adapted from RoboSort/JETANK_description/jetank_control_gui.py (3133 lin
         Joint mapping from MuammerBay/SO-ARM_ROS2_URDF and SO-ARM101_MoveIt_IsaacSim.
 """
 
+import glob
 import math
 import os
 import random
+import shutil
 import signal
+import subprocess
 import threading
 import time
 import tkinter as tk
 import weakref
 from tkinter import ttk
+
+
+def _detect_real_arm_connected() -> bool:
+    """Heuristic: True iff a USB-serial port matching the SO-ARM101 board
+    signature exists. The board enumerates as /dev/tty.usbmodem* on macOS
+    and /dev/ttyACM* on Linux. Doesn't probe the bus — purely a port-presence
+    check, fast and safe to call at init.
+    """
+    return bool(glob.glob('/dev/tty.usbmodem*') or glob.glob('/dev/ttyACM*'))
 
 from so_arm101_control.grasp_trace import tracer
 
@@ -498,8 +510,13 @@ class SOArm101ControlGUI(Node):
         # karelics.fi/deadlocks-in-rclpy.
         self._sub_cb_group = ReentrantCallbackGroup()
 
-        # Hardware mode
-        self.use_real_hardware = False
+        # Hardware mode — auto-detect based on USB-serial port presence.
+        # Cascades through GUI construction so /objects_poses_* and bbox
+        # topic subscriptions pick the right source on first build. The
+        # user can always override via the Real/Sim radio in the status
+        # bar; _toggle_hardware handles the switch.
+        self._real_arm_detected_at_init = _detect_real_arm_connected()
+        self.use_real_hardware = self._real_arm_detected_at_init
         self.hw_lock = threading.Lock()
 
         # Current joint positions (radians) — updated from joint_state_broadcaster
@@ -669,6 +686,10 @@ class SOArm101ControlGUI(Node):
         # Parameters for widget registry services (~/get_widget_value, ~/set_widget_value)
         self.declare_parameter('widget_id', '')
         self.declare_parameter('widget_value', '')
+        # Parameter for ~/select_tab service. Set this to one of the tab
+        # names (e.g. 'Quickstart', 'Real Test', 'Settings') then call
+        # ros2 service call /so_arm101_control_gui/select_tab std_srvs/srv/Trigger.
+        self.declare_parameter('tab_name', '')
 
         # TF buffer for TCP pose lookups
         self._tf_buffer = TfBuffer()
@@ -1915,11 +1936,23 @@ class SOArm101ControlGUI(Node):
         tk.Label(status_frame, textvariable=self.status_var, anchor='w',
                  font=('Arial', 10, 'bold')).pack(side=tk.LEFT)
 
-        self.hw_var = tk.StringVar(value='sim')
+        # Default the radio to the auto-detected mode (set in __init__).
+        # If a real arm is plugged in (USB-serial port present), start in
+        # 'real' mode so the GUI subscribes to /objects_poses_real /
+        # /objects_bbox_real out of the gate. User can flip the radio
+        # to override.
+        self.hw_var = tk.StringVar(
+            value='real' if self._real_arm_detected_at_init else 'sim'
+        )
         tk.Radiobutton(status_frame, text='Real Hardware', variable=self.hw_var,
                        value='real', command=self._toggle_hardware).pack(side=tk.RIGHT, padx=2)
         tk.Radiobutton(status_frame, text='Simulation', variable=self.hw_var,
                        value='sim', command=self._toggle_hardware).pack(side=tk.RIGHT, padx=2)
+        # Reflect the detected mode in the status bar at boot.
+        self.status_var.set(
+            'Mode: Real Hardware (auto-detected)'
+            if self._real_arm_detected_at_init else 'Mode: Simulation'
+        )
 
         # Ground plane collision toggle (common to all tabs)
         scene_frame = tk.Frame(self.root)
@@ -1951,6 +1984,7 @@ class SOArm101ControlGUI(Node):
         self._build_quickstart_tab(notebook)
         self._build_real_test_tab(notebook)
         self._build_display_tab(notebook)
+        self._build_settings_tab(notebook)
 
         # Auto-populate IK fields when switching to IK tab
         notebook.bind('<<NotebookTabChanged>>', self._on_tab_changed)
@@ -3056,6 +3090,7 @@ class SOArm101ControlGUI(Node):
                 (self._build_quickstart_tab, 'Quickstart'),
                 (self._build_real_test_tab, 'Real Test'),
                 (self._build_display_tab, 'RViz'),
+                (self._build_settings_tab, 'Settings'),
             ]:
                 try:
                     builder(notebook)
@@ -3616,7 +3651,20 @@ class SOArm101ControlGUI(Node):
         # Initial populate — use refresh_all so legos AND drops get a fresh
         # pass on first tab build. Deferred via root.after so the grasp tab
         # (source of the legacy listbox) is already constructed.
-        self.root.after(800, self._cmd_qs_refresh_all)
+        #
+        # ONLY in sim mode. In real mode, _cmd_grasp_refresh /
+        # _cmd_drop_refresh internally call _sim_ensure_sim_topics which
+        # forces the object/bbox/drop subs back to /*_sim — undoing the
+        # /*_real subs that were initialized at __init__ when the USB arm
+        # was detected. The subsequent auto-connect's mode-flip then
+        # ricochets the subs through another swap to /*_real, doubling
+        # the rclpy executor-race window and reliably crashing
+        # control_gui with SIGBUS (exit code -10) on this system.
+        # In real mode, the Quickstart listbox is populated by the user
+        # explicitly via the Real Test tab's pipeline, not via this auto-
+        # populate.
+        if not getattr(self, 'use_real_hardware', False):
+            self.root.after(800, self._cmd_qs_refresh_all)
 
     # ---- Quickstart helpers ----
 
@@ -5056,7 +5104,7 @@ class SOArm101ControlGUI(Node):
             prev_bbox = self._bbox_topic_var.get().strip()
             self._bbox_topic_var.set(REAL_BBOX)
             if hasattr(self, 'bbox_sub') and self.bbox_sub is not None:
-                self.destroy_subscription(self.bbox_sub)
+                self._safe_orphan_subscription(self.bbox_sub)
             self.bbox_sub = self.create_subscription(
                 String, REAL_BBOX, self._bbox_callback, 1)
             # Clear stale sim bbox; next /objects_bbox_real msg refills it
@@ -5137,7 +5185,7 @@ class SOArm101ControlGUI(Node):
             if hasattr(self, '_bbox_topic_var'):
                 self._bbox_topic_var.set(SIM_BBOX)
             if hasattr(self, 'bbox_sub') and self.bbox_sub is not None:
-                self.destroy_subscription(self.bbox_sub)
+                self._safe_orphan_subscription(self.bbox_sub)
             self.bbox_sub = self.create_subscription(
                 String, SIM_BBOX, self._bbox_callback, 1)
             self.objects_bbox = {}
@@ -5554,6 +5602,692 @@ class SOArm101ControlGUI(Node):
                 self._qs_listbox.selection_set(i)
                 return True
         return False
+
+    # ------------------------------------------------------------------
+    # Tab: Settings — calibration + future per-session toggles
+    # ------------------------------------------------------------------
+    # The first thing this tab does is calibration. Calibration on Feetech
+    # servos is a register write (Homing_Offset at addr 31) plus a JSON
+    # update — lerobot ships an interactive CLI (`lerobot-calibrate`) that
+    # handles the full procedure. Rather than re-implement, we route to
+    # that CLI from a Toplevel wizard that:
+    #   1. Surfaces prerequisite state (lerobot installed? servo offsets
+    #      vs JSON match?)
+    #   2. Provides copy-able shell commands for each step
+    #   3. Offers a one-click "Open in Terminal" to launch Terminal.app
+    #      with the correct command pre-typed
+    #
+    # Why not embed lerobot-calibrate in a Tk widget directly: lerobot
+    # uses readline-style interactive prompts that fight Tk's event loop.
+    # A real Terminal handles them cleanly.
+
+    _DEFAULT_FOLLOWER_PORT = '/dev/tty.usbmodem5A680088871'
+    _LEROBOT_CALIBRATION_PATH = (
+        '~/.cache/huggingface/lerobot/calibration/robots/so_follower/'
+        'my_awesome_follower_arm.json'
+    )
+
+    def _build_settings_tab(self, notebook):
+        frame = ttk.Frame(notebook)
+        notebook.add(frame, text='Settings')
+
+        tk.Label(
+            frame, text='Settings',
+            font=('Helvetica', 14, 'bold')
+        ).pack(anchor=tk.W, padx=10, pady=(10, 0))
+
+        # ---- Real Hardware Calibration ---------------------------------
+        calib = ttk.LabelFrame(
+            frame, text='Real Hardware Calibration', padding=10
+        )
+        calib.pack(fill=tk.X, padx=10, pady=10)
+
+        tk.Label(
+            calib,
+            text=(
+                'Run lerobot-calibrate. Writes Homing_Offset to each '
+                'servo and updates the calibration JSON so /joint_states '
+                'aligns with URDF zero. Re-run if the physical home pose '
+                'drifts from RViz.'
+            ),
+            wraplength=440, justify=tk.LEFT, anchor=tk.W,
+        ).pack(fill=tk.X, anchor=tk.W)
+
+        ttk.Button(
+            calib, text='Calibrate Follower (lerobot-calibrate)…',
+            command=self._open_calibration_window,
+        ).pack(anchor=tk.W, pady=(8, 2))
+
+        ttk.Button(
+            calib, text='Check servo offsets vs JSON',
+            command=self._check_calibration_offsets,
+        ).pack(anchor=tk.W, pady=2)
+
+        self._settings_calib_status = tk.Label(
+            calib, text='', justify=tk.LEFT, anchor=tk.W,
+            font=('Menlo', 10),
+        )
+        self._settings_calib_status.pack(fill=tk.X, anchor=tk.W, pady=(8, 0))
+
+        # ---- Real Hardware Connection ---------------------------------
+        # Two buttons that own the real-mode data layer:
+        #   Connect   → jsr (write mode, accept_command_input=true)
+        #               + trajectory_shim (action servers up).
+        #               MoveIt Plan & Execute physically drives the arm.
+        #   Disconnect → kills shim + switches jsr to observe-only
+        #                (accept_command_input=false). RViz still mirrors
+        #                live joint state, but action goals time out
+        #                because no /arm_controller/follow_joint_trajectory
+        #                server is registered. Same shape as the very
+        #                first read-only test we did before any writes.
+        conn = ttk.LabelFrame(
+            frame, text='Real Hardware Connection', padding=10
+        )
+        conn.pack(fill=tk.X, padx=10, pady=10)
+        tk.Label(
+            conn,
+            text=(
+                'Connect → write mode (jsr + shim). Plan & Execute drives '
+                'the arm.\n'
+                'Disconnect → observe-only. RViz mirrors pose; motion goals '
+                'time out.\n'
+                'Refresh → re-detect USB and reconnect.'
+            ),
+            wraplength=440, justify=tk.LEFT, anchor=tk.W,
+        ).pack(fill=tk.X, anchor=tk.W)
+        btn_row = ttk.Frame(conn)
+        btn_row.pack(fill=tk.X, pady=(8, 0))
+        self._real_connect_btn = ttk.Button(
+            btn_row, text='Connect',
+            command=self._cmd_real_connect,
+        )
+        self._real_connect_btn.pack(side=tk.LEFT, padx=2)
+        self._real_refresh_btn = ttk.Button(
+            btn_row, text='Refresh',
+            command=self._cmd_real_refresh,
+        )
+        self._real_refresh_btn.pack(side=tk.LEFT, padx=2)
+        self._real_disconnect_btn = ttk.Button(
+            btn_row, text='Disconnect',
+            command=self._cmd_real_disconnect,
+        )
+        self._real_disconnect_btn.pack(side=tk.LEFT, padx=2)
+        self._real_conn_status = tk.Label(
+            conn, text='Status: unknown — click a button to set state',
+            justify=tk.LEFT, anchor=tk.W,
+            font=('Menlo', 11),
+        )
+        self._real_conn_status.pack(fill=tk.X, anchor=tk.W, pady=(8, 0))
+
+        # Auto-connect on startup if a real arm USB device was detected at
+        # __init__ time. Fires after a short delay so GUI bootstrap finishes
+        # first and any pre-existing jsr_observe process can be cleanly
+        # replaced by jsr_write + shim. User can flip to Disconnect at any
+        # time, or hit Refresh after a USB unplug/replug.
+        if getattr(self, '_real_arm_detected_at_init', False):
+            self._real_conn_status.config(
+                text=('Status: auto-connecting in 3s '
+                      '(real arm detected at boot)…'),
+                fg='black',
+            )
+            self.root.after(3000, self._cmd_real_connect)
+
+    def _cmd_select_tab(self):
+        """Programmatically switch the active notebook tab.
+
+        Reads the ``tab_name`` ROS parameter and calls
+        ``self._notebook.select(index)``. Tk updates the notebook UI on
+        the main thread; the visible tab flips immediately. Lets a test
+        harness or remote driver verify tabs work without mouse input.
+
+        Sets ``self._cmd_error`` on failure (no tab matches) so the
+        Trigger service returns success=False with a message.
+        """
+        name = self.get_parameter('tab_name').get_parameter_value().string_value.strip()
+        if not name:
+            self._cmd_error = (
+                "no tab_name. Set first: "
+                "ros2 param set /so_arm101_control_gui tab_name 'Quickstart'"
+            )
+            return
+        nb = getattr(self, '_notebook', None)
+        if nb is None:
+            self._cmd_error = 'notebook widget not yet built'
+            return
+        target_idx = -1
+        for i in range(nb.index('end')):
+            if nb.tab(i, 'text') == name:
+                target_idx = i
+                break
+        if target_idx < 0:
+            available = [nb.tab(i, 'text') for i in range(nb.index('end'))]
+            self._cmd_error = (
+                f"no tab named {name!r}. Available: {available}"
+            )
+            return
+
+        def _flip():
+            nb.select(target_idx)
+            current = nb.tab(nb.select(), 'text')
+            self._append_log(
+                f'select_tab: switched to {current!r} (idx={target_idx})')
+        # Tk widget mutation must happen on the main thread.
+        if getattr(self, '_gui_ready', False):
+            self.root.after(0, _flip)
+        else:
+            _flip()
+
+    def _cmd_get_current_tab(self):
+        """Report the current tab via the Trigger response message.
+        Useful for test-harness verification of tab-switch operations.
+        """
+        nb = getattr(self, '_notebook', None)
+        if nb is None:
+            self._cmd_error = 'notebook not built'
+            return
+        try:
+            current = nb.tab(nb.select(), 'text')
+            self._cmd_message = f'current_tab={current!r}'
+        except Exception as e:
+            self._cmd_error = f'tab read failed: {e}'
+
+    # --- Real-mode subprocess management ----------------------------------
+
+    # Embedded wrapper scripts. Written to /tmp on first use so the GUI
+    # works after a reboot (the originals at /tmp/run_jsr_*.sh evaporate
+    # on reboot but the source-of-truth lives here in the package).
+    _JSR_WRITE_WRAPPER = '/tmp/run_jsr_write.sh'
+    _JSR_OBSERVE_WRAPPER = '/tmp/run_jsr_observe.sh'
+    _SHIM_WRAPPER = '/tmp/run_traj_shim.sh'
+
+    _MAC_ENV_LIB = (
+        '/Users/aldrininbaraj/Documents/Projects/untitled folder/'
+        'agents/ros2/repos/Exploring-VLAs/mac-env/scripts/_lib.sh'
+    )
+    _DEFAULT_FOLLOWER_PORT_FOR_CONN = '/dev/tty.usbmodem5A680088871'
+
+    def _ensure_wrappers(self):
+        """Re-create the /tmp wrapper scripts if they don't exist. Idempotent."""
+        port = self._DEFAULT_FOLLOWER_PORT_FOR_CONN
+        common_env = (
+            f'source "{self._MAC_ENV_LIB}"\n'
+            f'exec pixi run --manifest-path "$MAC_ENV_MANIFEST" bash -c \''
+            f'source "$SOARM_WS_SETUP" && '
+            f'export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp && '
+            f'export CYCLONEDDS_URI="file://$MAC_ENV_DIR/cyclonedds.xml" && '
+            f'export KMP_DUPLICATE_LIB_OK=TRUE && '
+        )
+
+        scripts = {
+            self._JSR_WRITE_WRAPPER: (
+                '#!/usr/bin/env bash\n' + common_env +
+                f'exec ros2 run jointstatereader joint_state_reader --ros-args '
+                f'-p follower_port:={port} '
+                f'-p leader_port:=/dev/null-no-leader '
+                f'-p publish_source:=follower '
+                f'-p publish_commands:=false '
+                f'-p accept_command_input:=true '
+                f'-p mirror_to_follower:=false '
+                f"-p publish_rate_hz:=20.0'\n"
+            ),
+            self._JSR_OBSERVE_WRAPPER: (
+                '#!/usr/bin/env bash\n' + common_env +
+                f'exec ros2 run jointstatereader joint_state_reader --ros-args '
+                f'-p follower_port:={port} '
+                f'-p leader_port:=/dev/null-no-leader '
+                f'-p publish_source:=follower '
+                f'-p publish_commands:=false '
+                f'-p accept_command_input:=false '
+                f'-p mirror_to_follower:=false '
+                f"-p publish_rate_hz:=20.0'\n"
+            ),
+            self._SHIM_WRAPPER: (
+                '#!/usr/bin/env bash\n' + common_env +
+                f'exec ros2 run so_arm101_control trajectory_shim --ros-args '
+                f'-p velocity_scale:=0.5 '
+                f'-p rate_hz:=20.0 '
+                f'-p tolerance_rad:=0.0524 '
+                f"-p completion_timeout_s:=2.0'\n"
+            ),
+        }
+        for path, body in scripts.items():
+            if not os.path.exists(path):
+                with open(path, 'w') as f:
+                    f.write(body)
+                os.chmod(path, 0o755)
+
+    def _kill_real_data_processes(self):
+        """Kill any running jsr / shim processes (best-effort, idempotent)."""
+        for pattern in ('joint_state_reader', 'trajectory_shim',
+                        'run_jsr_write', 'run_jsr_observe', 'run_traj_shim'):
+            try:
+                subprocess.run(
+                    ['pkill', '-f', pattern],
+                    capture_output=True, timeout=5,
+                )
+            except Exception:
+                pass
+
+    def _cmd_real_connect(self):
+        """Start jsr (write) + trajectory_shim. Idempotent — kills any
+        running predecessors first."""
+        self._real_conn_status.config(
+            text='Status: connecting…', fg='black')
+        threading.Thread(
+            target=self._real_connect_worker, daemon=True,
+        ).start()
+
+    def _real_connect_worker(self):
+        try:
+            self._ensure_wrappers()
+            self._kill_real_data_processes()
+            time.sleep(1.5)
+            # close_fds + start_new_session lets Python prefer posix_spawn
+            # over fork() on macOS. fork() from a Tk-multithreaded process
+            # triggers SIGBUS (handled by OBJC_DISABLE_INITIALIZE_FORK_SAFETY
+            # in the launch wrapper, but posix_spawn is the right path).
+            jsr = subprocess.Popen(
+                ['/bin/bash', self._JSR_WRITE_WRAPPER],
+                stdout=open('/tmp/jsr_write.log', 'w'),
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                close_fds=True,
+            )
+            time.sleep(3.0)
+            shim = subprocess.Popen(
+                ['/bin/bash', self._SHIM_WRAPPER],
+                stdout=open('/tmp/traj_shim.log', 'w'),
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                close_fds=True,
+            )
+            time.sleep(2.0)
+            text = (
+                f'Status: CONNECTED (write mode)\n'
+                f'  jsr.pid={jsr.pid} (accept_command_input=true)\n'
+                f'  shim.pid={shim.pid} (action servers up)\n'
+                f'MoveIt Plan & Execute will move the real arm.'
+            )
+            self._real_conn_status.after(
+                0, lambda: self._real_conn_status.config(text=text, fg='green'))
+            # Sync the Real/Sim radio + topic subscriptions to real mode.
+            # Tk widget mutation must happen on the main thread.
+            def _sync_mode():
+                if self.hw_var.get() != 'real':
+                    self.hw_var.set('real')
+                    self._toggle_hardware()
+            self.root.after(0, _sync_mode)
+            self._append_log('Real hardware connected (write mode)')
+        except Exception as e:
+            err = f'Status: connect FAILED — {e}'
+            self._real_conn_status.after(
+                0, lambda: self._real_conn_status.config(text=err, fg='red'))
+            self._append_log(f'real connect failed: {e}', 'error')
+
+    def _cmd_real_refresh(self):
+        """Re-check USB device presence and (re)connect if found.
+
+        Use after a physical USB unplug/replug, or any time the connection
+        state looks stale. Idempotent — runs the same kill+restart path
+        as Connect, but first verifies the serial port exists so we get a
+        clear status message instead of silent retry-loops.
+        """
+        if not _detect_real_arm_connected():
+            self._real_conn_status.config(
+                text=('Status: REFRESH — no /dev/tty.usbmodem* found.\n'
+                      'Plug the arm USB in, then click Refresh again.'),
+                fg='red',
+            )
+            # No real arm visible → reflect that in the Sim/Real radio.
+            # Avoids the GUI claiming "Real Hardware" mode while motion
+            # commands silently have nowhere to land.
+            if self.hw_var.get() != 'sim':
+                self.hw_var.set('sim')
+                self._toggle_hardware()
+            self._append_log(
+                'Real refresh: no USB device found', 'warn')
+            return
+        self._real_conn_status.config(
+            text='Status: refreshing — USB detected, reconnecting…',
+            fg='black',
+        )
+        threading.Thread(
+            target=self._real_connect_worker, daemon=True,
+        ).start()
+
+    def _cmd_real_disconnect(self):
+        """Stop shim, restart jsr in observe-only. RViz keeps mirroring."""
+        self._real_conn_status.config(
+            text='Status: disconnecting…', fg='black')
+        threading.Thread(
+            target=self._real_disconnect_worker, daemon=True,
+        ).start()
+
+    def _real_disconnect_worker(self):
+        try:
+            self._ensure_wrappers()
+            self._kill_real_data_processes()
+            time.sleep(1.5)
+            jsr = subprocess.Popen(
+                ['/bin/bash', self._JSR_OBSERVE_WRAPPER],
+                stdout=open('/tmp/jsr_observe.log', 'w'),
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                close_fds=True,
+            )
+            time.sleep(3.0)
+            text = (
+                f'Status: DISCONNECTED (observe-only)\n'
+                f'  jsr.pid={jsr.pid} (accept_command_input=false, no shim)\n'
+                f'RViz mirrors live arm pose; Plan & Execute will time out.'
+            )
+            self._real_conn_status.after(
+                0, lambda: self._real_conn_status.config(text=text, fg='orange'))
+            # Flip back to Simulation mode — write path is gone, so object
+            # detection topics should default back to /objects_poses_sim
+            # (consistent with control_gui's existing radio semantics).
+            def _sync_mode():
+                if self.hw_var.get() != 'sim':
+                    self.hw_var.set('sim')
+                    self._toggle_hardware()
+            self.root.after(0, _sync_mode)
+            self._append_log('Real hardware disconnected (observe-only)')
+        except Exception as e:
+            err = f'Status: disconnect FAILED — {e}'
+            self._real_conn_status.after(
+                0, lambda: self._real_conn_status.config(text=err, fg='red'))
+            self._append_log(f'real disconnect failed: {e}', 'error')
+
+    def _open_calibration_window(self):
+        win = tk.Toplevel(self.root)
+        win.title('Calibrate Follower — lerobot-calibrate')
+        win.geometry('700x620')
+
+        tk.Label(
+            win, text='Follower calibration via lerobot-calibrate',
+            font=('Helvetica', 13, 'bold')
+        ).pack(anchor=tk.W, padx=12, pady=(12, 4))
+
+        # --- Port entry ---
+        port_row = ttk.Frame(win)
+        port_row.pack(fill=tk.X, padx=12, pady=(4, 8))
+        tk.Label(port_row, text='Follower port:').pack(side=tk.LEFT)
+        port_var = tk.StringVar(value=self._DEFAULT_FOLLOWER_PORT)
+        ttk.Entry(port_row, textvariable=port_var, width=44).pack(
+            side=tk.LEFT, padx=(6, 0)
+        )
+
+        intro = tk.Label(
+            win,
+            text=(
+                'Sequence:\n'
+                '  1. Stop jointstatereader and trajectory_shim (they hold '
+                'the serial port).\n'
+                '  2. Run lerobot-calibrate in a Terminal — follow its '
+                'prompts (move arm to home, sweep range of motion).\n'
+                '  3. Restart drivers when done.\n\n'
+                'lerobot writes Homing_Offset to each servo\'s EEPROM and '
+                'updates ~/.cache/huggingface/lerobot/.../my_awesome_follower_arm.json.'
+            ),
+            wraplength=660, justify=tk.LEFT, anchor=tk.W,
+        )
+        intro.pack(fill=tk.X, padx=12)
+
+        # --- Pre-flight check (lerobot installed?) ---
+        preflight_frame = ttk.LabelFrame(win, text='Pre-flight', padding=8)
+        preflight_frame.pack(fill=tk.X, padx=12, pady=(10, 4))
+        preflight_label = tk.Label(
+            preflight_frame, text='Checking…',
+            justify=tk.LEFT, anchor=tk.W, font=('Menlo', 10)
+        )
+        preflight_label.pack(fill=tk.X, anchor=tk.W)
+
+        # --- Commands display (copy-friendly Text widget) ---
+        cmd_frame = ttk.LabelFrame(win, text='Commands', padding=8)
+        cmd_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=4)
+        cmd_text = tk.Text(
+            cmd_frame, height=14, font=('Menlo', 10), wrap=tk.NONE
+        )
+        cmd_text.pack(fill=tk.BOTH, expand=True)
+
+        def _refresh_commands():
+            port = port_var.get().strip() or self._DEFAULT_FOLLOWER_PORT
+            cmds = (
+                "# 1. Stop drivers (port-holders)\n"
+                "pkill -f joint_state_reader\n"
+                "pkill -f trajectory_shim\n"
+                "\n"
+                "# 2. Run lerobot-calibrate (interactive — follow prompts)\n"
+                "pixi run --manifest-path /tmp/mac-env/pixi.toml bash -c '\n"
+                "  source /tmp/soarm-ws/install/setup.bash &&\n"
+                f"  lerobot-calibrate \\\n"
+                f"    --robot.type=so101_follower \\\n"
+                f"    --robot.port={port} \\\n"
+                f"    --robot.id=my_awesome_follower_arm\n"
+                "'\n"
+                "\n"
+                "# 3. Restart drivers (assumes /tmp/run_jsr_write.sh +\n"
+                "#                      /tmp/run_traj_shim.sh exist)\n"
+                "nohup /tmp/run_jsr_write.sh > /tmp/jsr_write.log 2>&1 &\n"
+                "sleep 3\n"
+                "nohup /tmp/run_traj_shim.sh > /tmp/traj_shim.log 2>&1 &\n"
+            )
+            cmd_text.configure(state=tk.NORMAL)
+            cmd_text.delete('1.0', tk.END)
+            cmd_text.insert('1.0', cmds)
+            cmd_text.configure(state=tk.NORMAL)
+
+        port_var.trace_add('write', lambda *_: _refresh_commands())
+        _refresh_commands()
+
+        # --- Action buttons ---
+        btn_row = ttk.Frame(win)
+        btn_row.pack(fill=tk.X, padx=12, pady=(8, 12))
+
+        def _open_terminal_with_cmd(cmd: str):
+            """Open Terminal.app and type (but don't auto-run) the command,
+            so the user can review before executing."""
+            try:
+                # AppleScript: open Terminal, type text, don't press Enter.
+                # `do script` runs immediately; `keystroke` types but lets
+                # the user inspect first. We use `do script ""` to open a
+                # blank window then `tell application "System Events" to
+                # keystroke ...` — but that requires accessibility perms.
+                # Simpler + reliable: write commands to a script file and
+                # open Terminal pointing at it.
+                applescript = f'''
+                    tell application "Terminal"
+                        activate
+                        do script "{self._applescript_escape(cmd)}"
+                    end tell
+                '''
+                subprocess.Popen(['osascript', '-e', applescript])
+            except Exception as e:
+                self._append_log(
+                    f'open-terminal failed: {e}', 'error'
+                )
+
+        ttk.Button(
+            btn_row, text='Open step 1 (stop drivers) in Terminal',
+            command=lambda: _open_terminal_with_cmd(
+                'pkill -f joint_state_reader; pkill -f trajectory_shim; '
+                'echo Drivers stopped.'
+            ),
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        ttk.Button(
+            btn_row, text='Open step 2 (calibrate) in Terminal',
+            command=lambda: _open_terminal_with_cmd(
+                "pixi run --manifest-path /tmp/mac-env/pixi.toml bash -c '"
+                "source /tmp/soarm-ws/install/setup.bash && "
+                f"lerobot-calibrate "
+                f"--robot.type=so101_follower "
+                f"--robot.port={port_var.get().strip() or self._DEFAULT_FOLLOWER_PORT} "
+                f"--robot.id=my_awesome_follower_arm"
+                "'"
+            ),
+        ).pack(side=tk.LEFT, padx=6)
+
+        ttk.Button(
+            btn_row, text='Close',
+            command=win.destroy,
+        ).pack(side=tk.RIGHT)
+
+        # Run pre-flight asynchronously so the dialog opens fast.
+        def _run_preflight():
+            results = self._calibration_preflight()
+            preflight_label.after(0, lambda: preflight_label.configure(
+                text=results
+            ))
+        threading.Thread(target=_run_preflight, daemon=True).start()
+
+    @staticmethod
+    def _applescript_escape(s: str) -> str:
+        return s.replace('\\', '\\\\').replace('"', '\\"')
+
+    def _calibration_preflight(self) -> str:
+        """Check that lerobot is installed and the JSON exists. Pure-string
+        result; runs off the UI thread."""
+        lines = []
+        # lerobot CLI on PATH?
+        which = shutil.which('lerobot-calibrate')
+        if which:
+            lines.append(f'  • lerobot-calibrate: FOUND ({which})')
+        else:
+            # Try via pixi env explicitly.
+            try:
+                r = subprocess.run(
+                    ['pixi', 'run',
+                     '--manifest-path', '/tmp/mac-env/pixi.toml',
+                     'which', 'lerobot-calibrate'],
+                    capture_output=True, text=True, timeout=15,
+                )
+                if r.returncode == 0 and r.stdout.strip():
+                    lines.append(
+                        f'  • lerobot-calibrate (pixi env): FOUND'
+                    )
+                else:
+                    lines.append(
+                        '  • lerobot-calibrate: NOT INSTALLED — run\n'
+                        '    `pixi run --manifest-path /tmp/mac-env/pixi.toml '
+                        'pip install -e <repo>/lerobot` and then\n'
+                        '    `pixi run … pip install --force-reinstall '
+                        "--no-deps 'numpy<2'`"
+                    )
+            except Exception as e:
+                lines.append(f'  • lerobot-calibrate check failed: {e}')
+
+        # Calibration JSON present?
+        path = os.path.expanduser(self._LEROBOT_CALIBRATION_PATH)
+        if os.path.exists(path):
+            lines.append(f'  • calibration JSON: EXISTS ({path})')
+        else:
+            lines.append(
+                f'  • calibration JSON: missing ({path}) — '
+                'lerobot-calibrate will create it'
+            )
+        return '\n'.join(lines)
+
+    def _check_calibration_offsets(self):
+        """Read Homing_Offset (register 31) from each servo and compare
+        to the JSON. Updates the status label inline. Briefly opens the
+        port — only safe to call when jointstatereader is NOT running."""
+        try:
+            import json
+            import struct
+            import serial
+        except Exception as e:
+            self._settings_calib_status.configure(
+                text=f'pyserial not available: {e}', fg='red'
+            )
+            return
+
+        def _decode_signed12(v):
+            return -(v & 0x7FF) if v & 0x800 else v
+
+        def _read_reg(ser, sid, addr, length):
+            payload = [sid, 4, 0x02, addr, length]
+            chk = (~sum(payload)) & 0xFF
+            ser.reset_input_buffer()
+            ser.write(bytes([0xFF, 0xFF] + payload + [chk]))
+            time.sleep(0.002)
+            r = ser.read(6 + length)
+            if (len(r) < 6 + length or r[0] != 0xFF or r[1] != 0xFF
+                    or r[2] != sid or r[4] != 0):
+                return None
+            if length == 2:
+                return struct.unpack('<H', r[5:7])[0]
+            return r[5]
+
+        port = self._DEFAULT_FOLLOWER_PORT
+        json_path = os.path.expanduser(self._LEROBOT_CALIBRATION_PATH)
+
+        def _worker():
+            lines = []
+            try:
+                with open(json_path) as f:
+                    calib = json.load(f)
+            except Exception as e:
+                lines.append(f'JSON read failed: {e}')
+                self._settings_calib_status.after(
+                    0, lambda: self._settings_calib_status.configure(
+                        text='\n'.join(lines), fg='red'))
+                return
+
+            try:
+                ser = serial.Serial(port, 1000000, timeout=0.1)
+                ser.reset_input_buffer()
+                ser.reset_output_buffer()
+                time.sleep(0.05)
+            except Exception as e:
+                lines.append(
+                    f'Could not open {port}: {e}\n'
+                    f'(Stop jointstatereader first — it holds the port.)'
+                )
+                self._settings_calib_status.after(
+                    0, lambda: self._settings_calib_status.configure(
+                        text='\n'.join(lines), fg='red'))
+                return
+
+            joint_order = ['shoulder_pan', 'shoulder_lift', 'elbow_flex',
+                           'wrist_flex', 'wrist_roll', 'gripper']
+            mismatches = 0
+            try:
+                for sid in range(1, 7):
+                    joint = joint_order[sid - 1]
+                    raw = _read_reg(ser, sid, 31, 2)
+                    if raw is None:
+                        lines.append(f'  {sid} {joint:<14} READ FAIL')
+                        mismatches += 1
+                        continue
+                    sv = _decode_signed12(raw)
+                    jv = calib.get(joint, {}).get('homing_offset')
+                    match = sv == jv
+                    if not match:
+                        mismatches += 1
+                    flag = 'OK' if match else 'DIFF'
+                    lines.append(
+                        f'  {sid} {joint:<14} servo={sv:>5}  json={jv:>5}  [{flag}]'
+                    )
+                    time.sleep(0.005)
+            finally:
+                try:
+                    ser.close()
+                except Exception:
+                    pass
+
+            verdict = (
+                'All match — calibration in sync.' if mismatches == 0
+                else f'{mismatches}/6 joints mismatch — re-run lerobot-calibrate.'
+            )
+            color = 'green' if mismatches == 0 else 'orange'
+            text = '\n'.join(lines) + '\n\n' + verdict
+            self._settings_calib_status.after(
+                0, lambda: self._settings_calib_status.configure(
+                    text=text, fg=color))
+
+        threading.Thread(target=_worker, daemon=True).start()
+        self._settings_calib_status.configure(text='Reading servos…', fg='black')
 
     def _build_display_tab(self, notebook):
         frame = ttk.Frame(notebook)
@@ -6430,7 +7164,7 @@ class SOArm101ControlGUI(Node):
     def _update_drop_topic(self, topic='/drop_poses'):
         """Switch drop subscription to topic."""
         if self._drop_sub is not None:
-            self.destroy_subscription(self._drop_sub)
+            self._safe_orphan_subscription(self._drop_sub)
         with self._drop_lock:
             self._drop_data.clear()
         self._remove_cup_collision_objects()
@@ -7558,14 +8292,69 @@ class SOArm101ControlGUI(Node):
             return None
         return name, pose['x'], pose['y'], pose['z']
 
+    def _safe_orphan_subscription(self, sub):
+        """Replacement for ``destroy_subscription`` on topic-swap call sites.
+
+        rclpy's ``destroy_subscription`` races with the MultiThreadedExecutor's
+        spin thread on macOS — if any callback is in flight when destroy is
+        called (even for a different subscription), the C-level state can
+        get inconsistent and crash the process with SIGBUS / ``exit code -10``.
+        Python ``try/except`` cannot catch SIGBUS — it bypasses the
+        interpreter. The pre-existing idempotency guards in
+        ``_real_ensure_real_topics`` / ``_sim_ensure_sim_topics`` reduce
+        the destroy-frequency to "once per topic-switch" (per their
+        docstrings) but a single destroy still has the race window.
+
+        Trade-off taken here: don't actually destroy the subscription —
+        just stop using its handle (the caller has already overwritten the
+        attribute with a new sub). The orphaned sub remains alive in the
+        executor and continues to receive callbacks from its old topic.
+        That's safe because (a) callbacks land in the same shared dict
+        as the new sub's, latest-write-wins, and (b) only one of the
+        sim/real topic pair has a live publisher at any time, so the
+        orphaned sub is effectively quiescent. Memory grows by one stale
+        sub per topic-switch per session — bounded, trivial.
+
+        Used at: ``_cmd_grasp_update_topic`` (objects_sub), ``_update_drop_topic``
+        (_drop_sub), ``_real_ensure_real_topics`` / ``_sim_ensure_sim_topics``
+        (bbox_sub). Temp-sub destroys (``_real_refresh_cups_pose`` etc.) keep
+        using ``destroy_subscription`` directly because those subs are
+        per-button-click and would actually leak across many user actions.
+        """
+        # Intentionally no-op. Sub stays alive in the executor.
+        del sub  # release our local reference; executor still holds it
+
     def _cmd_grasp_update_topic(self):
-        """Switch object subscription to topic from GUI entry and auto-refresh."""
+        """Switch object subscription to topic from GUI entry and auto-refresh.
+
+        Idempotent based on the LIVE subscription's ``topic_name`` (not the
+        StringVar widget). If we're already subscribed to the requested
+        topic, return early — re-creating the subscription races the
+        executor spin thread that may be mid-callback on the old handle,
+        producing ``InvalidHandle: destruction was requested`` /
+        SIGBUS crashes (this is the same race as documented in
+        ``_real_ensure_real_topics`` line 5036). Common trigger:
+        ``_toggle_hardware`` fires when auto-connect flips the Sim/Real
+        radio — without this guard, every connect-cycle bounces the
+        subscription and risks the crash.
+        """
         new_topic = self._grasp_topic_var.get().strip()
         if not new_topic:
             return
+        # Idempotency check: skip destroy/create if sub is already on this topic.
+        existing = getattr(self, 'objects_sub', None)
+        if existing is not None:
+            try:
+                current = existing.topic_name
+                if current.lstrip('/').rstrip('/') == new_topic.lstrip('/').rstrip('/'):
+                    return
+            except Exception:
+                # If topic_name read fails, fall through to recreate (safer
+                # than leaving a dangling sub).
+                pass
         # Destroy old subscription and create new one
         if hasattr(self, 'objects_sub') and self.objects_sub is not None:
-            self.destroy_subscription(self.objects_sub)
+            self._safe_orphan_subscription(self.objects_sub)
         with self.objects_lock:
             self.objects_data.clear()
         self.objects_sub = self.create_subscription(
@@ -9572,7 +10361,28 @@ class SOArm101ControlGUI(Node):
         self.joint_cmd_pub.publish(msg)
 
     def _ext_cmd_callback(self, msg):
-        """Handle external joint commands — update sliders and send to controllers."""
+        """Handle external joint commands — update sliders and send to controllers.
+
+        In **sim mode** /joint_commands is the policy-action stream (a
+        teleop or learned policy publishes it); we forward those as
+        FollowJointTrajectory goals so the sim arm follows them.
+
+        In **real-hardware mode** the trajectory_shim ALSO publishes to
+        /joint_commands at 20 Hz — that topic is the wire jointstatereader
+        consumes to write Goal_Position to the Feetech follower. If we
+        re-dispatched those publishes as FollowJointTrajectory goals, every
+        shim publish would feed back as a 1-waypoint preemption that kills
+        the in-flight multi-waypoint plan before it can play out. The shim
+        is already the action-server-side executor in real mode, so this
+        callback's "drive the robot" responsibility is redundant.
+
+        Solution: in real mode, skip the dispatch and let the shim own the
+        write path. We still avoid touching joint_positions / sliders here
+        because the regular /joint_states callback handles state mirroring
+        already.
+        """
+        if self.use_real_hardware:
+            return
         self._slider_driven = True
         with self.joint_lock:
             for i, name in enumerate(msg.name):

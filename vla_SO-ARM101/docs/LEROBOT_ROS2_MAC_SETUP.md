@@ -361,6 +361,38 @@ Everything from the sim runbook's "0. Prerequisites" still applies. On top:
 - macOS may prompt for **camera permission** the first time — accept it in *System Settings → Privacy & Security → Camera*.
 - macOS may need **terminal USB permissions** for the ACM devices; if `/dev/ttyACM*` doesn't appear, try unplug/replug or a different cable.
 
+### 0.5. First-contact safety check (do this once, the first time you plug an arm in)
+
+Before any node writes to the follower servos, prove the **read path** works end to end. This catches wrong-port / wrong-baud / dead-cable problems while there's still no chance of accidental motion.
+
+**Step a — raw Feetech ping (pre-ROS).** Open the port at 1 Mbps and read present-position from servo IDs 1–6. If 6/6 don't respond, fix the wiring before bringing up ROS:
+
+```bash
+pixi run --manifest-path /tmp/mac-env/pixi.toml python - <<'PY' /dev/tty.usbmodemXXXX
+import sys, struct, time, serial
+port = sys.argv[1]; ser = serial.Serial(port, 1000000, timeout=0.1)
+for sid in range(1, 7):
+    p = [sid, 4, 0x02, 0x38, 0x02]; pkt = bytes([0xFF, 0xFF] + p + [(~sum(p)) & 0xFF])
+    ser.reset_input_buffer(); ser.write(pkt); time.sleep(0.0015)
+    r = ser.read(8)
+    pos = struct.unpack('<H', r[5:7])[0] if len(r) >= 8 and r[2] == sid and r[4] == 0 else None
+    print(f"id={sid} pos={pos}")
+PY
+```
+
+**Step b — `read_only` stack mode.** Bring up `backend_real.launch.py` with `read_only:=true`: jointstatereader runs in observation-only mode (`accept_command_input=false`, `publish_commands=false`), so the `/joint_commands` subscriber is never created — there is no path from a topic to a servo write. Combined with the absent FollowJointTrajectory action server (no `controller_manager` in real-mode), control_gui's execute clicks time out instead of moving anything. Verify in RViz that the model mirrors the physical arm's pose (set Fixed Frame to `base`, add a RobotModel display on `/robot_description`):
+
+```bash
+ros2 launch so_arm101_control backend_real.launch.py \
+  follower_port:=/dev/tty.usbmodemXXXX \
+  read_only:=true \
+  enable_top:=false   # skip cameras for first contact
+```
+
+**Note on calibration**: `jointstatereader` does **not** apply the `homing_offset`/`range_min/max` from `~/.cache/huggingface/lerobot/calibration/...` — it converts raw ticks via `(ticks-2048)/2048·π`. The RViz model will track the arm's *relative motion* faithfully but absolute joint zeros may differ from the URDF zero by a constant per joint. Calibration is consumed by the lerobot `so101_ros2` plugin during `record.sh` (step 3 below), not here.
+
+Once read-only is verified, re-launch without `read_only:=true` to unlock the write path for steps 1-3 below.
+
 ### 1. Start the camera publisher
 
 ```bash

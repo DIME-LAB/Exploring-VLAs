@@ -28,6 +28,7 @@ setup(
     entry_points={
         'console_scripts': [
             'control_gui = so_arm101_control.control_gui:main',
+            'trajectory_shim = so_arm101_control.trajectory_shim:main',
             'servo_driver = so_arm101_control.servo_driver:main',
             'ee_pose_publisher = so_arm101_control.ee_pose_publisher:main',
             'camera_pose_publisher = so_arm101_control.camera_pose_publisher:main',

@@ -243,10 +243,18 @@ class JointStateReader(Node):
         return int(round(2048 + (radians / math.pi) * 2048.0))
 
     # --------------------------------------------------------------- helpers
-    def _read_all(self, ser, error_counter):
+    def _read_all(self, ser, error_counter, last_known):
         """Read all 6 joints from one serial port. Returns list[int] (ticks)
         with the previous value substituted for any joint that failed to read.
-        Returns None if every joint failed (port probably dead)."""
+        Returns None if every joint failed (port probably dead).
+
+        ``last_known`` is the per-arm tick vector from the most recent fully
+        successful cycle (last_leader_ticks or last_follower_ticks). Falling
+        back to it — instead of 2048 (mid-encoder) — keeps /joint_states
+        stable across transient read failures. The previous behavior caused
+        a visible RViz snap-to-zero per joint whenever the serial bus was
+        contended (e.g. during topic-driven goal writes).
+        """
         ticks = []
         ok = 0
         for i in range(len(self.joint_names)):
@@ -254,9 +262,7 @@ class JointStateReader(Node):
             t = self._read_servo_position(ser, servo_id)
             if t is None:
                 error_counter[i] += 1
-                # Use last known value for this arm so the published vector
-                # doesn't suddenly collapse on a single bad read.
-                t = 2048
+                t = last_known[i]
             else:
                 ok += 1
             ticks.append(t)
@@ -301,14 +307,16 @@ class JointStateReader(Node):
         follower_ticks = None
 
         if self.leader_serial is not None:
-            leader_ticks = self._read_all(self.leader_serial, self.read_errors_leader)
+            leader_ticks = self._read_all(
+                self.leader_serial, self.read_errors_leader, self.last_leader_ticks)
             if leader_ticks is None:
                 self._close_serial('leader_serial')
             else:
                 self.last_leader_ticks = leader_ticks
 
         if self.follower_serial is not None:
-            follower_ticks = self._read_all(self.follower_serial, self.read_errors_follower)
+            follower_ticks = self._read_all(
+                self.follower_serial, self.read_errors_follower, self.last_follower_ticks)
             if follower_ticks is None:
                 # Only close follower if we couldn't read at all AND we're not
                 # actively writing to it via mirror/command modes — else wait

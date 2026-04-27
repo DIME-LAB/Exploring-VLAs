@@ -18,6 +18,7 @@ ros-jazzy-ros2cli = "*"
 ros-jazzy-ros2topic = "*"
 ros-jazzy-rmw-cyclonedds-cpp = "*" # macOS-friendly DDS
 colcon-common-extensions = "*"     # colcon build for SO-ARM101 packages
+pyserial = "*"                     # jointstatereader Feetech bus driver
 
 # --- Gazebo Harmonic + ros2_control bridge ------------------------------
 ros-jazzy-ros-gz = "*"

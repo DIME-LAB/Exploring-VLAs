@@ -113,6 +113,8 @@ mac-env/scripts/stack_start.sh
             └── backend_real.launch.py    ← jointstatereader + real_cameras + localize_aruco + localize_yoloe
                                             (motion-execution shim NOT YET IMPLEMENTED — planning works,
                                              execute path needs the trajectory_shim node)
+                                            (pass `read_only:=true` for first-contact bringup —
+                                             jointstatereader observation-only, no follower writes)
 ```
 
 The old monolithic `gazebo.launch.py` is preserved unchanged for
