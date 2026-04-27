@@ -55,7 +55,11 @@ REG_TORQUE_ENABLE = 40
 REG_GOAL_POSITION = 42
 REG_PRESENT_POSITION = 56
 
-DELTA_LIMIT = 50  # tick magnitude per call; refuse larger values.
+DELTA_LIMIT = 2048  # tick magnitude per call. ±50 ticks (~±4.4°) is the
+# typical small-drift correction; ±1024 (~90°) handles big situations
+# like reverting an over-rotated Freedrive Recenter; ±2048 is a hard
+# cap (half the encoder = 180°, larger means re-run lerobot-calibrate
+# instead). Original ±50 was too tight for the recenter-undo case.
 
 
 # --- Feetech bus primitives (mirrors arm_reset.py) ---
