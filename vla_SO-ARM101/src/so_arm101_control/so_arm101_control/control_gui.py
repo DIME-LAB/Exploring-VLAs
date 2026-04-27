@@ -5628,8 +5628,58 @@ class SOArm101ControlGUI(Node):
     )
 
     def _build_settings_tab(self, notebook):
-        frame = ttk.Frame(notebook)
-        notebook.add(frame, text='Settings')
+        # The Settings tab grew past one screen height (Real HW Calibration +
+        # Manual Trim + Gravity Comp + Detector Overlays + Real HW Connection).
+        # Wrap everything in a tk.Canvas + ttk.Scrollbar so the user can scroll
+        # to reach the Connect/Disconnect buttons at the bottom. Standard Tk
+        # scroll pattern: outer frame holds canvas + scrollbar; canvas hosts
+        # an inner frame; all LabelFrames go in the inner frame.
+        outer = ttk.Frame(notebook)
+        notebook.add(outer, text='Settings')
+
+        canvas = tk.Canvas(outer, highlightthickness=0)
+        vsb = ttk.Scrollbar(outer, orient='vertical', command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        frame = ttk.Frame(canvas)
+        _frame_window = canvas.create_window((0, 0), window=frame, anchor='nw')
+
+        def _on_inner_resize(_event):
+            # Update scrollregion as inner content grows / shrinks.
+            canvas.configure(scrollregion=canvas.bbox('all'))
+        frame.bind('<Configure>', _on_inner_resize)
+
+        def _on_canvas_resize(event):
+            # Match inner frame width to canvas width so child widgets
+            # using fill=tk.X span the visible area cleanly.
+            canvas.itemconfigure(_frame_window, width=event.width)
+        canvas.bind('<Configure>', _on_canvas_resize)
+
+        # Mouse-wheel scrolling. macOS native Tk delivers <MouseWheel>
+        # with delta in single units per wheel-click; Windows uses
+        # multiples of 120; Linux uses Button-4/Button-5. Activate
+        # bind_all only while the cursor is over the Settings tab so
+        # wheel events on other tabs don't accidentally scroll this
+        # canvas.
+        def _on_wheel(event):
+            if event.delta:
+                canvas.yview_scroll(int(-event.delta), 'units')
+        def _on_wheel_linux_up(_event):
+            canvas.yview_scroll(-1, 'units')
+        def _on_wheel_linux_down(_event):
+            canvas.yview_scroll(1, 'units')
+        def _activate_wheel(_event):
+            canvas.bind_all('<MouseWheel>', _on_wheel)
+            canvas.bind_all('<Button-4>', _on_wheel_linux_up)
+            canvas.bind_all('<Button-5>', _on_wheel_linux_down)
+        def _deactivate_wheel(_event):
+            canvas.unbind_all('<MouseWheel>')
+            canvas.unbind_all('<Button-4>')
+            canvas.unbind_all('<Button-5>')
+        canvas.bind('<Enter>', _activate_wheel)
+        canvas.bind('<Leave>', _deactivate_wheel)
 
         tk.Label(
             frame, text='Settings',
