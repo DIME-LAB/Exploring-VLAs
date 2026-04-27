@@ -574,9 +574,6 @@ class SOArm101ControlGUI(Node):
         self._cup_collision_names = []
 
         # --- Real-mode pipeline (Real Test tab; scan-then-cache cup poses) ---
-        # +1 = optimal cup-markers-in-FOV pose for _cmd_drop_point; -1 = alternate
-        # when + is occluded. Toggled from Real Test tab, consumed by drop_point IK.
-        self._drop_wrist_roll_sign = 1
         # child_frame_id ('drop_0'/'drop_1'/'drop_2') →
         # {'translation': (x,y,z), 'rotation': (qx,qy,qz,qw)} in frame 'base'.
         # Populated by Refresh Cups Pose (subscribe-once /drop_poses_real with
@@ -3963,8 +3960,6 @@ class SOArm101ControlGUI(Node):
         builder and every _cmd_real_* handler so the running session
         picks up the new vars without a full relaunch.
         """
-        if not hasattr(self, '_drop_wrist_roll_sign'):
-            self._drop_wrist_roll_sign = 1
         if not hasattr(self, '_cached_cup_poses'):
             self._cached_cup_poses = {}
         if not hasattr(self, '_cached_lego_poses'):
@@ -4583,8 +4578,7 @@ class SOArm101ControlGUI(Node):
     def _real_set_wrist_roll(self, target_rad):
         """Move ONLY wrist_roll to target_rad; all other joints stay at
         current /joint_states values. Safe duration based on the wrist_roll
-        delta (other joints have ~0 delta so they don't bound it). Updates
-        `_drop_wrist_roll_sign` for back-compat with code still reading it.
+        delta (other joints have ~0 delta so they don't bound it).
         """
         self._ensure_real_state()
         with self.joint_lock:
@@ -4594,7 +4588,6 @@ class SOArm101ControlGUI(Node):
         delta = abs(target_rad - current['wrist_roll'])
         SAFE_RATE_RAD_PER_S = math.radians(30)
         duration = max(1.5, delta / SAFE_RATE_RAD_PER_S + 0.5)
-        self._drop_wrist_roll_sign = 1 if target_rad >= 0 else -1
         self._append_log(
             f'Real: wrist_roll → {math.degrees(target_rad):+.1f}° '
             f'(Δ={math.degrees(delta):.1f}°, dur={duration:.1f}s)')
@@ -4911,7 +4904,6 @@ class SOArm101ControlGUI(Node):
           - drop_listbox + obj_listbox (re-populated from trimmed data)
           - cup + lego collision objects in MoveIt planning scene
           - cup visual markers in RViz (idempotent DELETE)
-          - _drop_wrist_roll_sign reset to +1 (default)
           - Status labels (Cups + Legos + Run)
 
         Not cleared:
@@ -4967,10 +4959,6 @@ class SOArm101ControlGUI(Node):
         # button press in the Grasp/QS tab would still pull from /*_real
         # because subs are sticky after a Real Test session.
         self._sim_ensure_sim_topics()
-
-        self._drop_wrist_roll_sign = 1
-        # Note: clearing the sign no longer touches a button — Roll +90° /
-        # Roll −90° are explicit-action buttons, not toggle indicators.
 
         if hasattr(self, '_real_cups_status_var'):
             self._real_cups_status_var.set('Cups: (none)')
@@ -8646,20 +8634,19 @@ class SOArm101ControlGUI(Node):
             current = dict(self.joint_positions)
         target = dict(current)
         target['shoulder_pan'] = pan
-        # Drop point's wrist_roll is the SCAN orientation (camera reads
-        # cup ArUco markers), distinct from drop_sweep's release-orientation
-        # which stays at -\u03c0/2. Default +1 -> +\u03c0/2 (cup markers in FOV
-        # for the scan); toggle to -1 -> -\u03c0/2 as the alternate when the
-        # default is occluded. The button label matches the resulting sign:
-        # "Wrist Roll +" really means wrist_roll = +90\u00b0.
-        # getattr fallback: hot-reloaded sessions where __init__ pre-dates
-        # the attr's introduction get +1 without raising.
-        sign = getattr(self, '_drop_wrist_roll_sign', 1)
-        wrist_roll_target = sign * (math.pi / 2)
+        # Drop Point holds wrist_roll at grasp_home's default (-\u03c0/2 + URDF_PITCH).
+        # Previously this read self._drop_wrist_roll_sign and flipped to \u00b1\u03c0/2
+        # for Real Test's ArUco scan orientation, but Drop Scan (Real Test) now
+        # has its own dedicated function (_cmd_real_drop_scan) with a hardcoded
+        # SCAN_WRIST_ROLL_RAD. So Quickstart's Drop Point can stay at the
+        # canonical home wrist_roll \u2014 saves a ~177\u00b0 wrist swing per cycle
+        # that was pure scan-artifact in sim mode.
+        from so_arm101_control.compute_workspace import WRIST_ROLL_URDF_PITCH
+        wrist_roll_target = -math.pi / 2 + WRIST_ROLL_URDF_PITCH
         target['wrist_roll'] = wrist_roll_target
         self._append_log(
             f'Drop Point: pan={math.degrees(pan):.1f}\u00b0 '
-            f'wrist_roll={math.degrees(wrist_roll_target):+.0f}\u00b0 toward {name}')
+            f'wrist_roll={math.degrees(wrist_roll_target):+.1f}\u00b0 toward {name}')
         # tier1 linear-interp + OMPL fallback. Validates every waypoint
         # against cups, world legos, ground, AND the held-lego world copy.
         # duration 3.0 s: matches grasp_home / grasp_move; the prior 1.0 s
