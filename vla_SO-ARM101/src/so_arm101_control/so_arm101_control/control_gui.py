@@ -5663,6 +5663,60 @@ class SOArm101ControlGUI(Node):
             command=self._check_calibration_offsets,
         ).pack(anchor=tk.W, pady=2)
 
+        # ---- Manual Trim (per-tick Homing_Offset adjust) ----
+        # When the audit above shows a small mismatch (1-3 ticks) the
+        # full lerobot-calibrate wizard is overkill — bump
+        # Homing_Offset (Feetech reg 31) by ±N ticks per joint and
+        # persist to the lerobot JSON. 1 tick = 0.088° on the 4096-tick
+        # encoder. Implementation in mac-env/scripts/arm_trim.py:
+        # kill jsr → torque off → mutate reg 31 per joint → anti-jolt
+        # (Goal=Present) → torque on → update lerobot JSON → restart jsr.
+        # Larger drifts (>50 ticks ≈ ±4.4°) deliberately rejected by
+        # the script; re-run lerobot-calibrate instead.
+        ttk.Separator(calib, orient='horizontal').pack(
+            fill=tk.X, pady=(8, 4))
+        tk.Label(
+            calib,
+            text=(
+                'Manual trim: bump per-joint Homing_Offset by ±N ticks '
+                '(1 tick ≈ 0.088°). Use after a small audit MISMATCH; '
+                'persists to EEPROM and lerobot JSON. Causes a ~5 sec '
+                '/joint_states blackout (kill+restart jsr).'
+            ),
+            wraplength=440, justify=tk.LEFT, anchor=tk.W,
+        ).pack(fill=tk.X, anchor=tk.W)
+
+        trim_grid = ttk.Frame(calib)
+        trim_grid.pack(fill=tk.X, anchor=tk.W, pady=(6, 2))
+        self._trim_vars = {}
+        # Joint order matches JOINT_NAMES in arm_trim.py / feetech bus IDs 1-6.
+        trim_joints = ['shoulder_pan', 'shoulder_lift', 'elbow_flex',
+                       'wrist_flex', 'wrist_roll', 'gripper']
+        for col, jname in enumerate(trim_joints):
+            row = col // 3
+            sub = col % 3
+            cell = ttk.Frame(trim_grid)
+            cell.grid(row=row, column=sub, padx=4, pady=2, sticky='w')
+            tk.Label(cell, text=f'{jname}:',
+                     font=('Helvetica', 10)).pack(side=tk.LEFT)
+            v = tk.IntVar(value=0)
+            self._trim_vars[jname] = v
+            tk.Spinbox(
+                cell, from_=-50, to=50, increment=1, width=5,
+                textvariable=v,
+            ).pack(side=tk.LEFT, padx=(4, 0))
+
+        trim_btns = ttk.Frame(calib)
+        trim_btns.pack(fill=tk.X, anchor=tk.W, pady=(4, 2))
+        ttk.Button(
+            trim_btns, text='Apply Trim (and persist)',
+            command=lambda: self._cmd_apply_trim(persist=True),
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            trim_btns, text='Reset spinboxes',
+            command=self._cmd_reset_trim_spinboxes,
+        ).pack(side=tk.LEFT)
+
         # Gravity-comp K_calib lives DOWNSTREAM of lerobot calibration.
         # Two-tier: lerobot fixes joint zeros (Homing_Offset → EEPROM),
         # gravity-comp fits per-joint K coefficients against observed sag
@@ -6094,6 +6148,87 @@ class SOArm101ControlGUI(Node):
             self._real_conn_status.after(
                 0, lambda: self._real_conn_status.config(text=err, fg='red'))
             self._append_log(f'real disconnect failed: {e}', 'error')
+
+    def _cmd_reset_trim_spinboxes(self):
+        """Zero all six trim spinboxes — does NOT touch hardware."""
+        for v in self._trim_vars.values():
+            v.set(0)
+        self._settings_calib_status.config(
+            text='Trim spinboxes reset to 0 (no hardware change).',
+            fg='gray')
+
+    def _cmd_apply_trim(self, persist=True):
+        """Run mac-env/scripts/arm_trim.py with the current spinbox deltas.
+
+        Blocks the Tk main thread for ~5 sec (jsr kill + bus I/O +
+        jsr respawn). Acceptable for a manual Apply action — same
+        UX trade-off as Calibrate Follower, just shorter. The script
+        torque-cycles + does Goal=Present anti-jolt internally so the
+        arm doesn't startle when torque comes back.
+        """
+        import subprocess
+        deltas = {j: int(v.get()) for j, v in self._trim_vars.items()}
+        nonzero = {j: d for j, d in deltas.items() if d != 0}
+        if not nonzero:
+            self._settings_calib_status.config(
+                text='All deltas are 0 — nothing to apply.', fg='gray')
+            return
+
+        repo_root = os.path.expanduser(
+            '~/Documents/Projects/untitled folder/agents/ros2/repos/Exploring-VLAs')
+        script = os.path.join(repo_root, 'mac-env', 'scripts',
+                              'arm_trim.py')
+        if not os.path.exists(script):
+            self._settings_calib_status.config(
+                text=f'arm_trim.py not found at {script}', fg='red')
+            return
+
+        # Use the pixi-aware mac-env wrapper so pyserial resolves.
+        # Mirror the chain in arm_finetune.sh / camera_pipeline_start.sh.
+        cmd = ['pixi', 'run', '--manifest-path',
+               '/tmp/mac-env/pixi.toml',
+               'python3', script,
+               '--restart-jsr']
+        if persist:
+            cmd.append('--persist')
+        for joint, delta in nonzero.items():
+            cmd.append(f'--{joint.replace("_", "-")}')
+            cmd.append(str(delta))
+
+        self._settings_calib_status.config(
+            text=f'Applying trim {nonzero}… (~5 sec blackout)',
+            fg='blue')
+        # Force Tk to repaint before the blocking call.
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
+
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=30.0)
+            tail = (r.stdout + r.stderr).strip().split('\n')[-3:]
+            tail_str = ' | '.join(tail)[:300]
+            if r.returncode == 0:
+                self._settings_calib_status.config(
+                    text=f'Trim applied + persisted. {tail_str}',
+                    fg='green')
+                # Zero the spinboxes — the deltas have been absorbed
+                # into Homing_Offset / lerobot JSON; "0 from now" is
+                # the new baseline.
+                for v in self._trim_vars.values():
+                    v.set(0)
+            else:
+                self._settings_calib_status.config(
+                    text=f'Trim FAILED (rc={r.returncode}): {tail_str}',
+                    fg='red')
+        except subprocess.TimeoutExpired:
+            self._settings_calib_status.config(
+                text='Trim timed out (>30 sec) — check hardware + jsr',
+                fg='red')
+        except Exception as e:
+            self._settings_calib_status.config(
+                text=f'Trim launch failed: {e}', fg='red')
 
     def _cmd_set_overlay(self, service_name, enabled, label):
         """Toggle aruco/yoloe overlay flags on the merged-detection viewer.
