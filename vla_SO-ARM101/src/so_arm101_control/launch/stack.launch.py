@@ -67,6 +67,7 @@ def generate_launch_description():
         launch_arguments={
             'leader_port': LaunchConfiguration('leader_port'),
             'follower_port': LaunchConfiguration('follower_port'),
+            'auto_detect': LaunchConfiguration('auto_detect'),
             'wrist_idx': LaunchConfiguration('wrist_idx'),
             'top_idx': LaunchConfiguration('top_idx'),
             'enable_top': LaunchConfiguration('enable_top'),
@@ -87,11 +88,15 @@ def generate_launch_description():
 
         # Real-mode pass-through args, declared here so users can set them
         # at the dispatcher level. Ignored in gazebo/isaac modes.
+        # Defaults match backend_real.launch.py — auto_detect resolves
+        # wrist_idx via USB signature; enable_top defaults to false
+        # because the documented real-hw rig is single-cam.
         DeclareLaunchArgument('leader_port',   default_value='/dev/ttyACM1'),
         DeclareLaunchArgument('follower_port', default_value='/dev/ttyACM0'),
-        DeclareLaunchArgument('wrist_idx',     default_value='0'),
+        DeclareLaunchArgument('auto_detect',   default_value='true'),
+        DeclareLaunchArgument('wrist_idx',     default_value='-1'),
         DeclareLaunchArgument('top_idx',       default_value='1'),
-        DeclareLaunchArgument('enable_top',    default_value='true'),
+        DeclareLaunchArgument('enable_top',    default_value='false'),
 
         core,
         backend_gazebo,

@@ -5663,6 +5663,57 @@ class SOArm101ControlGUI(Node):
             command=self._check_calibration_offsets,
         ).pack(anchor=tk.W, pady=2)
 
+        # Gravity-comp K_calib lives DOWNSTREAM of lerobot calibration.
+        # Two-tier: lerobot fixes joint zeros (Homing_Offset → EEPROM),
+        # gravity-comp fits per-joint K coefficients against observed sag
+        # vs Pinocchio-predicted gravity torque.
+        ttk.Separator(calib, orient='horizontal').pack(
+            fill=tk.X, pady=(8, 4))
+        tk.Label(
+            calib,
+            text=(
+                'Gravity-comp K_calib: per-joint scaling that maps '
+                'predicted gravity torque (Pinocchio RNEA on URDF) to '
+                'a position offset, so /joint_targets gets pre-biased '
+                'against gravity at the bus boundary. Re-run after '
+                'lerobot-calibrate or when payload changes.'
+            ),
+            wraplength=440, justify=tk.LEFT, anchor=tk.W,
+        ).pack(fill=tk.X, anchor=tk.W)
+
+        ttk.Button(
+            calib, text='Calibrate Gravity Comp (refit K_calib)',
+            command=self._cmd_calibrate_gravity_comp,
+        ).pack(anchor=tk.W, pady=(8, 2))
+
+        ttk.Button(
+            calib, text='Run Full Finetune Workflow…',
+            command=self._open_full_finetune_window,
+        ).pack(anchor=tk.W, pady=2)
+
+        # ---- Playback Speed (trajectory_shim velocity_scale) ----
+        # The shim's velocity_scale is multiplicative with the FK tab's
+        # MoveIt max_velocity_scaling_factor. Effective speed = the
+        # product. Default 1.0 = play MoveIt-planned trajectories at the
+        # speed they were planned for. Raise to overspeed; lower for
+        # first-contact caution.
+        ttk.Separator(calib, orient='horizontal').pack(
+            fill=tk.X, pady=(8, 4))
+        speed_row = ttk.Frame(calib)
+        speed_row.pack(fill=tk.X, anchor=tk.W, pady=(2, 2))
+        tk.Label(
+            speed_row, text='Playback speed (shim velocity_scale):',
+        ).pack(side=tk.LEFT)
+        self._shim_speed_var = tk.DoubleVar(value=1.0)
+        tk.Spinbox(
+            speed_row, from_=0.1, to=2.0, increment=0.1, width=6,
+            textvariable=self._shim_speed_var,
+        ).pack(side=tk.LEFT, padx=(6, 4))
+        ttk.Button(
+            speed_row, text='Apply',
+            command=self._cmd_apply_shim_speed,
+        ).pack(side=tk.LEFT, padx=2)
+
         self._settings_calib_status = tk.Label(
             calib, text='', justify=tk.LEFT, anchor=tk.W,
             font=('Menlo', 10),
@@ -5997,6 +6048,90 @@ class SOArm101ControlGUI(Node):
             self._real_conn_status.after(
                 0, lambda: self._real_conn_status.config(text=err, fg='red'))
             self._append_log(f'real disconnect failed: {e}', 'error')
+
+    def _cmd_apply_shim_speed(self):
+        """Set trajectory_shim's velocity_scale ROS param at runtime.
+        Effective playback speed = MoveIt scaling × this value.
+        """
+        import subprocess
+        try:
+            val = float(self._shim_speed_var.get())
+        except (TypeError, ValueError):
+            self._settings_calib_status.config(
+                text='Invalid playback speed value', fg='red')
+            return
+        # Use ros2 param set --no-daemon to avoid the macOS daemon hang
+        try:
+            r = subprocess.run(
+                ['ros2', 'param', 'set', '--no-daemon',
+                 '/trajectory_shim', 'velocity_scale', str(val)],
+                capture_output=True, text=True, timeout=8.0)
+            if r.returncode == 0:
+                self._settings_calib_status.config(
+                    text=f'Playback speed set to {val:.2f} '
+                         f'(effective = FK_speed × {val:.2f}).',
+                    fg='green')
+            else:
+                self._settings_calib_status.config(
+                    text=f'set failed: {r.stderr.strip()[:200]}', fg='red')
+        except Exception as e:
+            self._settings_calib_status.config(
+                text=f'set failed: {e}', fg='red')
+
+    def _cmd_calibrate_gravity_comp(self):
+        """Refit gravity-comp K_calib by driving the arm through URDF-zero +
+        grasp_home. Runs in a Terminal window because it takes ~1 minute
+        and produces console output the user wants to see."""
+        import subprocess
+        repo_root = os.path.expanduser(
+            '~/Documents/Projects/untitled folder/agents/ros2/repos/Exploring-VLAs')
+        script = os.path.join(repo_root, 'mac-env', 'scripts',
+                              'arm_finetune.sh')
+        if not os.path.exists(script):
+            self._settings_calib_status.config(
+                text=f'arm_finetune.sh not found at {script}', fg='red')
+            return
+        cmd = f'bash {script} --skip-calibrate --skip-pid --skip-verify'
+        applescript = (
+            f'tell application "Terminal" to do script "{cmd}"\n'
+            f'tell application "Terminal" to activate'
+        )
+        try:
+            subprocess.Popen(['osascript', '-e', applescript])
+            self._settings_calib_status.config(
+                text='Gravity-comp calibration launched in a Terminal '
+                     'window. Watch the K table at the end.', fg='green')
+        except Exception as e:
+            self._settings_calib_status.config(
+                text=f'launch failed: {e}', fg='red')
+
+    def _open_full_finetune_window(self):
+        """Run the full lerobot-calibrate → PID defaults → K_calib refit →
+        verify chain in a Terminal. ~3 min total with hands-on calibration
+        positioning."""
+        import subprocess
+        repo_root = os.path.expanduser(
+            '~/Documents/Projects/untitled folder/agents/ros2/repos/Exploring-VLAs')
+        script = os.path.join(repo_root, 'mac-env', 'scripts',
+                              'arm_finetune.sh')
+        if not os.path.exists(script):
+            self._settings_calib_status.config(
+                text=f'arm_finetune.sh not found at {script}', fg='red')
+            return
+        cmd = f'bash {script}'
+        applescript = (
+            f'tell application "Terminal" to do script "{cmd}"\n'
+            f'tell application "Terminal" to activate'
+        )
+        try:
+            subprocess.Popen(['osascript', '-e', applescript])
+            self._settings_calib_status.config(
+                text='Full finetune workflow launched. Follow the prompts '
+                     'in the Terminal window — you will need to physically '
+                     'position the arm at the URDF-zero pose.', fg='green')
+        except Exception as e:
+            self._settings_calib_status.config(
+                text=f'launch failed: {e}', fg='red')
 
     def _open_calibration_window(self):
         win = tk.Toplevel(self.root)
