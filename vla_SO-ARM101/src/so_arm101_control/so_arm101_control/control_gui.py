@@ -5768,6 +5768,50 @@ class SOArm101ControlGUI(Node):
             command=self._cmd_reset_trim_spinboxes,
         ).pack(side=tk.LEFT)
 
+        # ---- Per-joint Freedrive Recenter ----
+        # Pick a joint, freedrive ONLY that joint (others stay torqued
+        # so the arm holds itself), hand-position to the desired zero,
+        # click "Set Zero". The current physical pose becomes the new
+        # /joint_states=0 reference for that joint via Homing_Offset
+        # write + lerobot JSON update. Sibling of the bulk trim above —
+        # use this when you don't know the tick delta but you know
+        # where you want zero to be physically.
+        ttk.Separator(calib, orient='horizontal').pack(
+            fill=tk.X, pady=(8, 4))
+        tk.Label(
+            calib,
+            text=(
+                'Freedrive Recenter: torque-off ONE joint, hand-position, '
+                'click "Set Zero" to make that physical pose the new '
+                'zero-reference (writes Homing_Offset + lerobot JSON). '
+                'Other joints stay torqued — arm holds itself. Useful for '
+                'wrist_roll which has no end-stops.'
+            ),
+            wraplength=440, justify=tk.LEFT, anchor=tk.W,
+        ).pack(fill=tk.X, anchor=tk.W)
+
+        recenter_row = ttk.Frame(calib)
+        recenter_row.pack(fill=tk.X, anchor=tk.W, pady=(6, 2))
+        tk.Label(recenter_row, text='Joint:').pack(side=tk.LEFT)
+        self._recenter_joint_var = tk.StringVar(value='wrist_roll')
+        ttk.OptionMenu(
+            recenter_row, self._recenter_joint_var, 'wrist_roll',
+            'shoulder_pan', 'shoulder_lift', 'elbow_flex',
+            'wrist_flex', 'wrist_roll', 'gripper_joint',
+        ).pack(side=tk.LEFT, padx=(4, 12))
+        # Two-state toggle: "Freedrive joint" → "Set Zero (Apply)".
+        self._recenter_state = 'idle'  # 'idle' | 'freedrive'
+        self._recenter_btn = ttk.Button(
+            recenter_row, text='Freedrive joint',
+            command=self._cmd_recenter_toggle,
+        )
+        self._recenter_btn.pack(side=tk.LEFT, padx=2)
+        self._recenter_cancel_btn = ttk.Button(
+            recenter_row, text='Cancel',
+            command=self._cmd_recenter_cancel,
+        )
+        self._recenter_cancel_btn.pack(side=tk.LEFT, padx=2)
+
         # Gravity-comp K_calib lives DOWNSTREAM of lerobot calibration.
         # Two-tier: lerobot fixes joint zeros (Homing_Offset → EEPROM),
         # gravity-comp fits per-joint K coefficients against observed sag
@@ -6392,6 +6436,121 @@ class SOArm101ControlGUI(Node):
         except Exception as e:
             self._settings_calib_status.config(
                 text=f'Trim launch failed: {e}', fg='red')
+
+    def _cmd_recenter_toggle(self):
+        """Toggle between freedrive_one (enter) and recenter_one (apply).
+
+        Idle state: button reads "Freedrive joint" — clicking calls
+            /joint_state_reader/freedrive_one which torque-offs the
+            selected servo. Other 5 servos stay torqued. Button label
+            flips to "Set Zero ({joint})".
+
+        Freedrive state: button reads "Set Zero ({joint})" — clicking
+            calls /joint_state_reader/recenter_one which snapshots
+            current Present_Position, computes the Homing_Offset delta
+            that makes /joint_states report 0° at this physical pose,
+            writes EEPROM, anti-jolt, torque-on, and updates the lerobot
+            JSON. Button label flips back to "Freedrive joint".
+        """
+        joint = self._recenter_joint_var.get()
+        if self._recenter_state == 'idle':
+            service = '/joint_state_reader/freedrive_one'
+            new_state = 'freedrive'
+            new_label = f'Set Zero ({joint})'
+            status_msg = (
+                f'{joint} freedriven — hand-position to where you want '
+                f'zero, then click "Set Zero ({joint})"')
+            status_fg = 'orange'
+        else:
+            service = '/joint_state_reader/recenter_one'
+            new_state = 'idle'
+            new_label = 'Freedrive joint'
+            status_msg = f'{joint} recentering…'
+            status_fg = 'blue'
+
+        self._settings_calib_status.config(text=status_msg, fg=status_fg)
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
+
+        def _worker():
+            ok = self._set_target_joint_then_call(service, joint)
+            if ok:
+                self.root.after(0, lambda: self._recenter_btn.config(
+                    text=new_label))
+                self._recenter_state = new_state
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _cmd_recenter_cancel(self):
+        """If currently in freedrive state, call cancel_freedrive_one to
+        re-engage torque on the selected joint without modifying its
+        Homing_Offset. No-op if already idle."""
+        if self._recenter_state != 'freedrive':
+            self._settings_calib_status.config(
+                text='Recenter not in freedrive state — nothing to cancel',
+                fg='gray')
+            return
+        joint = self._recenter_joint_var.get()
+        self._settings_calib_status.config(
+            text=f'{joint} cancelling freedrive…', fg='blue')
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
+
+        def _worker():
+            ok = self._set_target_joint_then_call(
+                '/joint_state_reader/cancel_freedrive_one', joint)
+            if ok:
+                self.root.after(0, lambda: self._recenter_btn.config(
+                    text='Freedrive joint'))
+                self._recenter_state = 'idle'
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _set_target_joint_then_call(self, service, joint):
+        """Set jsr's target_joint_name param, then call the named service.
+        Returns True on service success=True. Updates _settings_calib_status
+        with the result. Run from a background thread (subprocess.run
+        blocks ~0.5–1 sec for param + service round-trip)."""
+        import subprocess
+        try:
+            r1 = subprocess.run(
+                ['ros2', 'param', 'set', '--no-daemon',
+                 '/joint_state_reader', 'target_joint_name', joint],
+                capture_output=True, text=True, timeout=8.0)
+            if r1.returncode != 0:
+                err = (r1.stderr or r1.stdout).strip()[:240]
+                self._settings_calib_status.after(
+                    0, lambda: self._settings_calib_status.config(
+                        text=f'param set failed: {err}', fg='red'))
+                return False
+            r2 = subprocess.run(
+                ['ros2', 'service', 'call', service,
+                 'std_srvs/srv/Trigger'],
+                capture_output=True, text=True, timeout=12.0)
+            ok = (r2.returncode == 0 and 'success=True' in r2.stdout)
+            tail = (r2.stdout + r2.stderr).strip().split('\n')[-1][:300]
+            if ok:
+                self._settings_calib_status.after(
+                    0, lambda: self._settings_calib_status.config(
+                        text=f'{service.split("/")[-1]} OK: {tail}',
+                        fg='green'))
+                self._append_log(f'{service} → {tail}')
+                return True
+            self._settings_calib_status.after(
+                0, lambda: self._settings_calib_status.config(
+                    text=f'{service} failed: {tail}', fg='red'))
+            self._append_log(f'{service} failed: {tail}', 'error')
+            return False
+        except Exception as e:
+            self._settings_calib_status.after(
+                0, lambda: self._settings_calib_status.config(
+                    text=f'{service} exception: {e}', fg='red'))
+            self._append_log(f'{service} exception: {e}', 'error')
+            return False
 
     def _cmd_set_overlay(self, service_name, enabled, label):
         """Toggle aruco/yoloe overlay flags on the merged-detection viewer.

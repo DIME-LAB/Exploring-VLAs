@@ -162,9 +162,21 @@ class JointStateReader(Node):
             Trigger, '~/torque_off', self._on_torque_off)
         self._torque_on_service = self.create_service(
             Trigger, '~/torque_on', self._on_torque_on)
+        # Per-joint freedrive + recenter (single-joint zeroing).
+        # Reads ROS param `target_joint_name` (string, in self.joint_names)
+        # so the same Trigger srv type handles any joint.
+        self.declare_parameter('target_joint_name', '')
+        self._freedrive_one_service = self.create_service(
+            Trigger, '~/freedrive_one', self._on_freedrive_one)
+        self._recenter_one_service = self.create_service(
+            Trigger, '~/recenter_one', self._on_recenter_one)
+        self._cancel_freedrive_one_service = self.create_service(
+            Trigger, '~/cancel_freedrive_one',
+            self._on_cancel_freedrive_one)
         self.get_logger().info(
-            f"Hosting services: ~/torque_reset (cycle), ~/torque_off "
-            f"(freedrive), ~/torque_on (anti-jolt re-engage)")
+            f"Hosting services: ~/torque_reset, ~/torque_off, "
+            f"~/torque_on, ~/freedrive_one, ~/recenter_one, "
+            f"~/cancel_freedrive_one")
 
         mode = (
             "usb-mirror-teleop" if self.mirror_to_follower
@@ -490,6 +502,269 @@ class JointStateReader(Node):
             response.message = f"torque_on failed: {exc}"
             self.get_logger().error(response.message)
         return response
+
+    # --------------------------------------------------------------- per-joint freedrive + recenter
+    def _resolve_target_joint(self):
+        """Read target_joint_name param + map to (name, servo_id).
+        Returns (name, sid) on success, (None, error_message) on failure."""
+        name = str(self.get_parameter('target_joint_name').value).strip()
+        if not name:
+            return None, ("target_joint_name param is empty — set first: "
+                          "ros2 param set /joint_state_reader "
+                          "target_joint_name <joint>")
+        if name not in self.joint_names:
+            return None, (f"target_joint_name={name!r} not in "
+                          f"{self.joint_names}")
+        return (name, self.joint_names.index(name) + 1), None
+
+    def _read_servo_word_signed(self, ser, sid, addr):
+        """Read 2-byte signed register (e.g. Homing_Offset reg 31).
+        Convention: top-bit = sign, mirrors arm_reset.py's read_signed_word."""
+        try:
+            payload = [sid, 4, 0x02, addr, 2]
+            packet = bytes([0xFF, 0xFF] + payload + [self._checksum(payload)])
+            ser.reset_input_buffer()
+            ser.write(packet)
+            time.sleep(0.003)
+            r = ser.read(8)
+            if (len(r) < 8 or r[0] != 0xFF or r[1] != 0xFF
+                    or r[2] != sid or r[4] != 0):
+                return None
+            raw = struct.unpack('<H', r[5:7])[0]
+            return raw - 65536 if raw >= 32768 else raw
+        except Exception:
+            return None
+
+    def _write_servo_word(self, ser, sid, addr, value):
+        """Write 2-byte little-endian register. Negative values mask
+        to uint16 so signed Homing_Offset round-trips correctly."""
+        try:
+            v = value & 0xFFFF
+            lo = v & 0xFF
+            hi = (v >> 8) & 0xFF
+            payload = [sid, 5, 0x03, addr, lo, hi]
+            packet = bytes([0xFF, 0xFF] + payload + [self._checksum(payload)])
+            ser.reset_input_buffer()
+            ser.write(packet)
+            time.sleep(0.005)
+            r = ser.read(6)
+            return (len(r) >= 6 and r[0] == 0xFF and r[1] == 0xFF
+                    and r[2] == sid and r[4] == 0)
+        except Exception:
+            return False
+
+    def _on_freedrive_one(self, request, response):
+        """Disengage torque on a single servo (the joint named in
+        target_joint_name param). Other 5 servos stay torqued, holding
+        the rest of the arm rigid while the user hand-positions one
+        joint. Pair with ~/recenter_one (sets new zero) or
+        ~/cancel_freedrive_one (re-engage without changing zero)."""
+        if self.follower_serial is None:
+            response.success = False
+            response.message = "follower_serial not connected"
+            return response
+        resolved, err = self._resolve_target_joint()
+        if resolved is None:
+            response.success = False
+            response.message = err
+            return response
+        joint, sid = resolved
+        try:
+            with self.follower_write_lock:
+                ok = self._write_servo_byte(self.follower_serial, sid, 40, 0)
+            if not ok:
+                response.success = False
+                response.message = (
+                    f"{joint} (servo {sid}) torque-off bus write failed")
+                return response
+            response.success = True
+            response.message = (
+                f"{joint} (servo {sid}) torque OFF — back-drivable. "
+                f"Hand-position then call ~/recenter_one to set new zero, "
+                f"or ~/cancel_freedrive_one to re-engage with no change.")
+            self.get_logger().info(response.message)
+        except Exception as e:
+            response.success = False
+            response.message = f"freedrive_one failed: {e}"
+            self.get_logger().error(response.message)
+        return response
+
+    def _on_recenter_one(self, request, response):
+        """Snapshot the current physical pose as the new zero-reference
+        for the joint named in target_joint_name. Procedure:
+
+          1. read Present_Position (post-Homing_Offset, signed about 2048)
+          2. read current Homing_Offset (reg 31, signed int16)
+          3. delta_ticks = Present_Position - 2048
+             new_Homing_Offset = old_Homing_Offset + delta_ticks
+          4. write new Homing_Offset → firmware reinterprets, next
+             Present_Position read returns ~2048
+          5. anti-jolt: re-read Present, write Goal_Position = Present
+          6. Torque_Enable=1
+          7. update lerobot calibration JSON (homing_offset += delta_ticks)
+             so the change persists across stack restarts
+
+        Result: /joint_states reports ~0° for this joint at the user's
+        current physical position. Other joints unchanged.
+        """
+        if self.follower_serial is None:
+            response.success = False
+            response.message = "follower_serial not connected"
+            return response
+        resolved, err = self._resolve_target_joint()
+        if resolved is None:
+            response.success = False
+            response.message = err
+            return response
+        joint, sid = resolved
+
+        REG_HOMING_OFFSET = 31
+        REG_TORQUE_ENABLE = 40
+
+        try:
+            with self.follower_write_lock:
+                ser = self.follower_serial
+                # 1+2: snapshot present + homing
+                present = self._read_servo_position(ser, sid)
+                old_homing = self._read_servo_word_signed(
+                    ser, sid, REG_HOMING_OFFSET)
+                if present is None or old_homing is None:
+                    response.success = False
+                    response.message = (
+                        f"{joint}: read Present/Homing failed "
+                        f"(present={present}, old_homing={old_homing})")
+                    return response
+
+                # 3: compute delta + new_homing
+                delta_ticks = present - 2048
+                new_homing = old_homing + delta_ticks
+
+                # Sanity: Feetech Homing_Offset signed int16 range
+                # is roughly ±2047 in practical use. Reject big shifts
+                # (likely a misuse or readout glitch).
+                if abs(new_homing) > 2047:
+                    response.success = False
+                    response.message = (
+                        f"{joint}: new_Homing_Offset={new_homing} out of "
+                        f"safe range. delta_ticks={delta_ticks}, "
+                        f"old_homing={old_homing}. Re-run lerobot-calibrate "
+                        f"and recheck.")
+                    return response
+
+                # 4: write new homing offset
+                ok = self._write_servo_word(
+                    ser, sid, REG_HOMING_OFFSET, new_homing)
+                if not ok:
+                    response.success = False
+                    response.message = (
+                        f"{joint}: write Homing_Offset failed")
+                    return response
+                time.sleep(0.05)  # let firmware re-apply
+
+                # 5: anti-jolt
+                new_present = self._read_servo_position(ser, sid)
+                if new_present is not None:
+                    self._write_servo_goal(ser, sid, new_present)
+
+                # 6: torque on
+                self._write_servo_byte(ser, sid, REG_TORQUE_ENABLE, 1)
+
+            # 7: persist to lerobot JSON (after releasing the bus lock —
+            # JSON I/O is filesystem, not bus, so it's fine outside).
+            json_status = "skipped"
+            try:
+                json_status = self._update_lerobot_json_homing(
+                    joint, delta_ticks)
+            except Exception as je:
+                json_status = f"FAILED: {je}"
+                self.get_logger().warn(
+                    f"lerobot JSON update failed for {joint}: {je}")
+
+            delta_deg = delta_ticks * 360.0 / 4096.0
+            response.success = True
+            response.message = (
+                f"{joint} (servo {sid}) recentered: "
+                f"Homing_Offset {old_homing}→{new_homing} "
+                f"(Δ{delta_ticks:+d} ticks ≈ {delta_deg:+.2f}°). "
+                f"Torque on with anti-jolt. JSON: {json_status}")
+            self.get_logger().info(response.message)
+        except Exception as e:
+            response.success = False
+            response.message = f"recenter_one failed: {e}"
+            self.get_logger().error(response.message)
+        return response
+
+    def _on_cancel_freedrive_one(self, request, response):
+        """Re-engage torque on the target joint with anti-jolt, WITHOUT
+        changing Homing_Offset. Use to abort a freedrive_one that the
+        user changed their mind about."""
+        if self.follower_serial is None:
+            response.success = False
+            response.message = "follower_serial not connected"
+            return response
+        resolved, err = self._resolve_target_joint()
+        if resolved is None:
+            response.success = False
+            response.message = err
+            return response
+        joint, sid = resolved
+        REG_TORQUE_ENABLE = 40
+        try:
+            with self.follower_write_lock:
+                ser = self.follower_serial
+                present = self._read_servo_position(ser, sid)
+                if present is not None:
+                    self._write_servo_goal(ser, sid, present)
+                self._write_servo_byte(ser, sid, REG_TORQUE_ENABLE, 1)
+            response.success = True
+            response.message = (
+                f"{joint} (servo {sid}) freedrive cancelled — torque on, "
+                f"Homing_Offset unchanged.")
+            self.get_logger().info(response.message)
+        except Exception as e:
+            response.success = False
+            response.message = f"cancel_freedrive_one failed: {e}"
+            self.get_logger().error(response.message)
+        return response
+
+    def _update_lerobot_json_homing(self, joint_name, delta_ticks):
+        """Add delta_ticks to homing_offset for the named joint in the
+        most-recent lerobot calibration JSON. Returns a short status
+        string for service response messages.
+
+        Mirrors arm_trim.py's update_lerobot_json so EEPROM + JSON
+        stay consistent regardless of which path made the change.
+        """
+        import json
+        import os
+        cal_dir = os.path.expanduser(
+            '~/.cache/huggingface/lerobot/calibration/'
+            'robots/so101_follower/')
+        if not os.path.isdir(cal_dir):
+            return f"calib dir missing: {cal_dir}"
+        json_files = [f for f in os.listdir(cal_dir) if f.endswith('.json')]
+        if not json_files:
+            return f"no .json in {cal_dir}"
+        path = os.path.join(cal_dir, sorted(json_files)[-1])
+        with open(path, 'r') as f:
+            cal = json.load(f)
+        if joint_name not in cal:
+            return f"{joint_name!r} not in JSON keys ({list(cal.keys())})"
+        old = int(cal[joint_name].get('homing_offset', 0))
+        cal[joint_name]['homing_offset'] = old + delta_ticks
+        # Backup BEFORE mutation (preserve old state on disk too).
+        bak = path + '.bak'
+        try:
+            with open(bak, 'w') as f:
+                json.dump({**cal, joint_name: {
+                    **cal[joint_name],
+                    'homing_offset': old,
+                }}, f, indent=2)
+        except Exception:
+            pass  # best-effort backup
+        with open(path, 'w') as f:
+            json.dump(cal, f, indent=2)
+        return f"ok ({joint_name}.homing_offset {old}→{old + delta_ticks})"
 
     # ---------------------------------------------------------------- main loop
     def read_and_publish(self):
