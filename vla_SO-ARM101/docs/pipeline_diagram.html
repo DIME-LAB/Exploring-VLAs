@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SO-ARM101 × LeRobot — Data Collection Pipeline</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #2a2f3a;
+    --text: #e6e8ee;
+    --muted: #8a93a6;
+    --ok: #48c78e;
+    --warn: #ffa94d;
+    --miss: #ff6b6b;
+    --sim: #6ab0ff;
+    --real: #c29cff;
+    --dataset: #ffd66b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); margin-bottom: 24px; }
+
+  .legend {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    padding: 12px 16px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 24px;
+  }
+  .legend-item { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .dot.ok { background: var(--ok); }
+  .dot.warn { background: var(--warn); }
+  .dot.miss { background: var(--miss); }
+
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 24px; }
+  @media (max-width: 980px) { .row { grid-template-columns: 1fr; } }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+  }
+  .panel h2 {
+    font-size: 15px;
+    margin: 0 0 6px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .panel h2 .tag {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 99px;
+    font-weight: 600;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+  }
+  .tag.sim { background: rgba(106, 176, 255, 0.15); color: var(--sim); }
+  .tag.real { background: rgba(194, 156, 255, 0.15); color: var(--real); }
+  .tag.merge { background: rgba(255, 214, 107, 0.15); color: var(--dataset); }
+
+  .panel .desc { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+
+  /* SVG container */
+  .diag { width: 100%; }
+  .diag text { fill: var(--text); font: 12px -apple-system, sans-serif; }
+  .diag .topic { fill: var(--muted); font-family: "SF Mono", Menlo, Monaco, monospace; font-size: 11px; }
+  .diag rect.box { stroke-width: 1.2; fill: #1c2028; }
+  .diag rect.box.ok { stroke: var(--ok); }
+  .diag rect.box.warn { stroke: var(--warn); }
+  .diag rect.box.miss { stroke: var(--miss); stroke-dasharray: 6 4; }
+  .diag rect.box.dataset { stroke: var(--dataset); fill: #2a2518; }
+  .diag line.arrow, .diag path.arrow { stroke: var(--muted); fill: none; stroke-width: 1.2; }
+  .diag line.arrow.miss, .diag path.arrow.miss { stroke: var(--miss); stroke-dasharray: 4 3; }
+  .diag .arrowhead { fill: var(--muted); }
+  .diag .arrowhead.miss { fill: var(--miss); }
+  .diag .caption { fill: var(--muted); font-size: 10px; font-style: italic; }
+
+  .notes { margin-top: 16px; }
+  .notes ul { margin: 6px 0 0; padding-left: 18px; }
+  .notes li { margin-bottom: 4px; color: var(--muted); }
+  .notes code {
+    background: #0a0c11;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 12px;
+    color: #b6d7a8;
+  }
+
+  .full { grid-column: 1 / -1; }
+
+  table.gaps {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 8px;
+    font-size: 13px;
+  }
+  .gaps th, .gaps td {
+    text-align: left;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .gaps th { color: var(--muted); font-weight: 500; text-transform: uppercase; font-size: 11px; letter-spacing: .04em; }
+  .gaps td.status { white-space: nowrap; }
+  .gaps .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 99px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .pill.ok { background: rgba(72, 199, 142, 0.15); color: var(--ok); }
+  .pill.warn { background: rgba(255, 169, 77, 0.15); color: var(--warn); }
+  .pill.miss { background: rgba(255, 107, 107, 0.15); color: var(--miss); }
+</style>
+</head>
+<body>
+
+<h1>SO-ARM101 × LeRobot — Data Collection Pipeline</h1>
+<div class="subtitle">
+  Where the ROS2 image topic enters the dataset, how the real robot flow works today,
+  and what still has to be wired before a co-training-ready dataset is produced.
+</div>
+
+<div class="legend">
+  <div class="legend-item"><span class="dot ok"></span> Working today (verified)</div>
+  <div class="legend-item"><span class="dot warn"></span> Partial / synthetic stand-in</div>
+  <div class="legend-item"><span class="dot miss"></span> Missing — blocks full dataset</div>
+</div>
+
+<div class="row">
+  <!-- SIM pipeline -->
+  <div class="panel">
+    <h2>Current sim pipeline <span class="tag sim">SIM</span></h2>
+    <div class="desc">Where the ROS2 image comes from in Gazebo and how it lands in a LeRobotDataset today.</div>
+
+    <svg class="diag" viewBox="0 0 520 720" preserveAspectRatio="xMidYMid meet">
+      <defs>
+        <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5"
+                markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path class="arrowhead" d="M0,0 L10,5 L0,10 z"/>
+        </marker>
+        <marker id="ah-miss" viewBox="0 0 10 10" refX="8" refY="5"
+                markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path class="arrowhead miss" d="M0,0 L10,5 L0,10 z"/>
+        </marker>
+      </defs>
+
+      <!-- Gazebo block -->
+      <rect class="box ok" x="30" y="20" width="200" height="60" rx="6"/>
+      <text x="130" y="45" text-anchor="middle" font-weight="600">Gazebo Harmonic</text>
+      <text x="130" y="62" text-anchor="middle" class="topic">wrist_camera sensor in
+        so_arm101.gazebo.xacro</text>
+
+      <!-- ros2_control block -->
+      <rect class="box ok" x="290" y="20" width="200" height="60" rx="6"/>
+      <text x="390" y="45" text-anchor="middle" font-weight="600">ros2_control</text>
+      <text x="390" y="62" text-anchor="middle" class="topic">joint_state_broadcaster</text>
+
+      <!-- Bridge block -->
+      <rect class="box ok" x="30" y="120" width="200" height="60" rx="6"/>
+      <text x="130" y="145" text-anchor="middle" font-weight="600">ros_gz_bridge</text>
+      <text x="130" y="162" text-anchor="middle" class="topic">gz.msgs.Image → sensor_msgs/Image</text>
+
+      <!-- Arrow Gz -> bridge -->
+      <line class="arrow" x1="130" y1="80" x2="130" y2="115" marker-end="url(#ah)"/>
+      <text x="140" y="102" class="topic">gz topic</text>
+
+      <!-- Topic label: /wrist_camera -->
+      <rect x="80" y="195" width="180" height="26" rx="4" fill="#0a0c11" stroke="#2a2f3a"/>
+      <text x="170" y="213" text-anchor="middle" class="topic">/wrist_camera
+        (sensor_msgs/Image)</text>
+
+      <!-- ros2_control -> /joint_states -->
+      <rect x="310" y="195" width="170" height="26" rx="4" fill="#0a0c11" stroke="#2a2f3a"/>
+      <text x="395" y="213" text-anchor="middle" class="topic">/joint_states
+        (JointState)</text>
+
+      <line class="arrow" x1="130" y1="180" x2="130" y2="195" marker-end="url(#ah)"/>
+      <line class="arrow" x1="390" y1="80" x2="390" y2="195" marker-end="url(#ah)"/>
+
+      <!-- ROS2Camera -->
+      <rect class="box ok" x="30" y="260" width="200" height="60" rx="6"/>
+      <text x="130" y="285" text-anchor="middle" font-weight="600">ROS2Camera (PR #866)</text>
+      <text x="130" y="302" text-anchor="middle" class="topic">lerobot.…cameras.ros2</text>
+
+      <!-- rclpy js subscriber (still synthetic in our smoke test) -->
+      <rect class="box warn" x="290" y="260" width="200" height="60" rx="6"/>
+      <text x="390" y="285" text-anchor="middle" font-weight="600">rclpy JS subscriber</text>
+      <text x="390" y="302" text-anchor="middle" class="topic">(custom in smoke_l2)</text>
+
+      <line class="arrow" x1="170" y1="221" x2="130" y2="255" marker-end="url(#ah)"/>
+      <line class="arrow" x1="395" y1="221" x2="390" y2="255" marker-end="url(#ah)"/>
+
+      <!-- action (MISSING) -->
+      <rect class="box miss" x="290" y="360" width="200" height="56" rx="6"/>
+      <text x="390" y="383" text-anchor="middle" font-weight="600">action source</text>
+      <text x="390" y="400" text-anchor="middle" class="topic">(synthetic today —
+        needs teleop/ctrl topic)</text>
+
+      <!-- glue script -->
+      <rect class="box ok" x="110" y="460" width="300" height="60" rx="6"/>
+      <text x="260" y="485" text-anchor="middle" font-weight="600">smoke_l2_dataset.py</text>
+      <text x="260" y="502" text-anchor="middle" class="topic">LeRobotDataset.create() →
+        add_frame() → save_episode()</text>
+
+      <line class="arrow" x1="130" y1="320" x2="200" y2="455" marker-end="url(#ah)"/>
+      <text x="130" y="345" class="topic">ndarray (H,W,3) uint8</text>
+
+      <line class="arrow" x1="390" y1="320" x2="320" y2="455" marker-end="url(#ah)"/>
+      <text x="400" y="345" class="topic">float32[6] (obs.state)</text>
+
+      <line class="arrow miss" x1="390" y1="416" x2="320" y2="455" marker-end="url(#ah-miss)"/>
+      <text x="420" y="440" class="caption">placeholder</text>
+
+      <!-- Dataset on disk -->
+      <rect class="box dataset" x="60" y="580" width="400" height="100" rx="8"/>
+      <text x="260" y="610" text-anchor="middle" font-weight="700" fill="#ffd66b">
+        LeRobotDataset v2.1 on disk
+      </text>
+      <text x="260" y="632" text-anchor="middle" class="topic">
+        data/chunk-000/episode_000000.parquet
+      </text>
+      <text x="260" y="650" text-anchor="middle" class="topic">
+        videos/chunk-000/observation.images.top/episode_000000.mp4
+      </text>
+      <text x="260" y="668" text-anchor="middle" class="topic">
+        meta/info.json • meta/episodes.jsonl • meta/tasks.jsonl
+      </text>
+
+      <line class="arrow" x1="260" y1="520" x2="260" y2="575" marker-end="url(#ah)"/>
+    </svg>
+
+    <div class="notes">
+      <strong>What's actually verified (as of 2026-04-22):</strong>
+      <ul>
+        <li>L1 smoke — <code>ROS2Camera</code> subscribes, returns 10 unique <code>(480,640,3)</code> uint8 frames.</li>
+        <li>L2 smoke — full dataset round trip; parquet + AV1 MP4 + metadata match v2.1 schema; reload verified.</li>
+        <li><span style="color:var(--warn)">Both tested against synthetic <code>/smoke/image</code> and <code>/smoke/joint_states</code>.</span> Real <code>/wrist_camera</code> and <code>/joint_states</code> not yet connected on Mac.</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- REAL pipeline -->
+  <div class="panel">
+    <h2>Current real pipeline <span class="tag real">REAL</span></h2>
+    <div class="desc">How the reference flow (LEROBOT_GUIDE.md — Windows/RTX4090) captures data today, without ROS2.</div>
+
+    <svg class="diag" viewBox="0 0 520 720" preserveAspectRatio="xMidYMid meet">
+      <defs>
+        <marker id="ah2" viewBox="0 0 10 10" refX="8" refY="5"
+                markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path class="arrowhead" d="M0,0 L10,5 L0,10 z"/>
+        </marker>
+      </defs>
+
+      <!-- SO-101 Follower -->
+      <rect class="box ok" x="30" y="20" width="200" height="60" rx="6"/>
+      <text x="130" y="45" text-anchor="middle" font-weight="600">SO-101 Follower</text>
+      <text x="130" y="62" text-anchor="middle" class="topic">COM3 (serial USB)</text>
+
+      <!-- SO-101 Leader (teleop) -->
+      <rect class="box ok" x="290" y="20" width="200" height="60" rx="6"/>
+      <text x="390" y="45" text-anchor="middle" font-weight="600">SO-101 Leader</text>
+      <text x="390" y="62" text-anchor="middle" class="topic">COM4 — teleop source</text>
+
+      <!-- cameras -->
+      <rect class="box ok" x="30" y="120" width="200" height="60" rx="6"/>
+      <text x="130" y="145" text-anchor="middle" font-weight="600">OpenCV wrist cam</text>
+      <text x="130" y="162" text-anchor="middle" class="topic">index 0, MJPG</text>
+
+      <rect class="box ok" x="290" y="120" width="200" height="60" rx="6"/>
+      <text x="390" y="145" text-anchor="middle" font-weight="600">Intel RealSense top</text>
+      <text x="390" y="162" text-anchor="middle" class="topic">serial 747612060071</text>
+
+      <!-- lerobot Robot + camera classes -->
+      <rect class="box ok" x="30" y="240" width="460" height="60" rx="6"/>
+      <text x="260" y="265" text-anchor="middle" font-weight="600">
+        lerobot Robot + Camera classes
+      </text>
+      <text x="260" y="282" text-anchor="middle" class="topic">
+        so101_follower • so101_leader • OpenCVCamera • RealSenseCamera
+      </text>
+
+      <line class="arrow" x1="130" y1="80" x2="130" y2="235" marker-end="url(#ah2)"/>
+      <line class="arrow" x1="390" y1="80" x2="390" y2="235" marker-end="url(#ah2)"/>
+      <line class="arrow" x1="130" y1="180" x2="180" y2="235" marker-end="url(#ah2)"/>
+      <line class="arrow" x1="390" y1="180" x2="340" y2="235" marker-end="url(#ah2)"/>
+
+      <!-- lerobot-record -->
+      <rect class="box ok" x="110" y="360" width="300" height="60" rx="6"/>
+      <text x="260" y="385" text-anchor="middle" font-weight="600">lerobot-record CLI</text>
+      <text x="260" y="402" text-anchor="middle" class="topic">teleop-driven episode recording</text>
+
+      <line class="arrow" x1="260" y1="300" x2="260" y2="355" marker-end="url(#ah2)"/>
+
+      <!-- keyboard teleop controls -->
+      <rect class="box ok" x="110" y="460" width="300" height="52" rx="6"/>
+      <text x="260" y="485" text-anchor="middle" font-weight="600">keyboard controls</text>
+      <text x="260" y="502" text-anchor="middle" class="topic">
+        →/←/Esc — end/redo/stop per-episode
+      </text>
+
+      <line class="arrow" x1="260" y1="420" x2="260" y2="455" marker-end="url(#ah2)"/>
+
+      <!-- Dataset on disk -->
+      <rect class="box dataset" x="60" y="580" width="400" height="100" rx="8"/>
+      <text x="260" y="610" text-anchor="middle" font-weight="700" fill="#ffd66b">
+        LeRobotDataset v2.1 on disk
+      </text>
+      <text x="260" y="632" text-anchor="middle" class="topic">
+        observation.images.wrist + observation.images.top
+      </text>
+      <text x="260" y="650" text-anchor="middle" class="topic">
+        observation.state (6-D) + action (6-D teleop)
+      </text>
+      <text x="260" y="668" text-anchor="middle" class="topic">
+        pushed to HF (e.g. arjunsinghyadav2/…)
+      </text>
+
+      <line class="arrow" x1="260" y1="512" x2="260" y2="575" marker-end="url(#ah2)"/>
+    </svg>
+
+    <div class="notes">
+      <strong>Current reality of the real path:</strong>
+      <ul>
+        <li>Runs on Windows + RTX4090 (per <code>LEROBOT_GUIDE.md</code>).</li>
+        <li>USB serial to both arms; cameras enumerated via OpenCV index / RealSense serial.</li>
+        <li><strong>Does not touch ROS2 at all</strong> today. Same dataset format as the sim side — so schemas match for co-training.</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- Unified target -->
+<div class="panel full">
+  <h2>Target: unified sim + real via ROS2 <span class="tag merge">TARGET</span></h2>
+  <div class="desc">
+    One recording stack where sim frames and real frames both enter lerobot through ROS2 topics,
+    producing a single dataset schema that SmolVLA / Pi0.5 can co-train on.
+  </div>
+
+  <svg class="diag" viewBox="0 0 1040 420" preserveAspectRatio="xMidYMid meet">
+    <defs>
+      <marker id="ah3" viewBox="0 0 10 10" refX="8" refY="5"
+              markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path class="arrowhead" d="M0,0 L10,5 L0,10 z"/>
+      </marker>
+      <marker id="ah3-miss" viewBox="0 0 10 10" refX="8" refY="5"
+              markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path class="arrowhead miss" d="M0,0 L10,5 L0,10 z"/>
+      </marker>
+    </defs>
+
+    <!-- Left: sim source -->
+    <rect class="box ok" x="20" y="30" width="200" height="56" rx="6"/>
+    <text x="120" y="53" text-anchor="middle" font-weight="600">Gazebo + ros_gz_bridge</text>
+    <text x="120" y="70" text-anchor="middle" class="topic">/wrist_camera, /joint_states</text>
+
+    <!-- Right: real source through ROS2 -->
+    <rect class="box warn" x="820" y="30" width="200" height="56" rx="6"/>
+    <text x="920" y="53" text-anchor="middle" font-weight="600">usb_cam + realsense2_camera</text>
+    <text x="920" y="70" text-anchor="middle" class="topic">/wrist_camera, /joint_states</text>
+
+    <!-- Converging ROS2 topics -->
+    <rect x="380" y="30" width="280" height="56" rx="6" class="box ok"/>
+    <text x="520" y="53" text-anchor="middle" font-weight="600">ROS2 topics (shared contract)</text>
+    <text x="520" y="70" text-anchor="middle" class="topic">/wrist_camera • /joint_states • /command</text>
+
+    <line class="arrow" x1="220" y1="58" x2="380" y2="58" marker-end="url(#ah3)"/>
+    <line class="arrow" x1="820" y1="58" x2="660" y2="58" marker-end="url(#ah3)"/>
+
+    <!-- ROS2Camera + ROS2 Robot backend -->
+    <rect class="box ok" x="240" y="160" width="260" height="60" rx="6"/>
+    <text x="370" y="185" text-anchor="middle" font-weight="600">ROS2Camera (PR #866)</text>
+    <text x="370" y="202" text-anchor="middle" class="topic">subscribe → ndarray</text>
+
+    <rect class="box miss" x="540" y="160" width="260" height="60" rx="6"/>
+    <text x="670" y="185" text-anchor="middle" font-weight="600">ROS2 Robot backend</text>
+    <text x="670" y="202" text-anchor="middle" class="topic">obs.state + action via topics — NEW</text>
+
+    <line class="arrow" x1="480" y1="86" x2="370" y2="155" marker-end="url(#ah3)"/>
+    <line class="arrow miss" x1="560" y1="86" x2="670" y2="155" marker-end="url(#ah3-miss)"/>
+
+    <!-- lerobot-record -->
+    <rect class="box warn" x="380" y="270" width="280" height="60" rx="6"/>
+    <text x="520" y="295" text-anchor="middle" font-weight="600">lerobot-record CLI</text>
+    <text x="520" y="312" text-anchor="middle" class="topic">one command for sim AND real</text>
+
+    <line class="arrow" x1="370" y1="220" x2="440" y2="265" marker-end="url(#ah3)"/>
+    <line class="arrow miss" x1="670" y1="220" x2="600" y2="265" marker-end="url(#ah3-miss)"/>
+
+    <!-- Dataset -->
+    <rect class="box dataset" x="330" y="360" width="380" height="50" rx="6"/>
+    <text x="520" y="390" text-anchor="middle" font-weight="700" fill="#ffd66b">
+      Unified LeRobotDataset (sim + real, same schema)
+    </text>
+    <line class="arrow" x1="520" y1="330" x2="520" y2="355" marker-end="url(#ah3)"/>
+  </svg>
+</div>
+
+<!-- Gap table -->
+<div class="panel full">
+  <h2>What's missing before "full dataset" is real <span class="tag merge">GAPS</span></h2>
+  <table class="gaps">
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Gap</th>
+        <th>Why it matters</th>
+        <th class="status">Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>1</td>
+        <td>Real Gazebo topics wired into the smoke script</td>
+        <td>Moves us from "synthetic" to "actually sim-recorded" — confirms camera + joint timing align at 30 fps.</td>
+        <td class="status"><span class="pill miss">missing</span></td>
+      </tr>
+      <tr>
+        <td>2</td>
+        <td>ROS2-backed <code>Robot</code> class</td>
+        <td>PR #866 only gives us cameras. Without a Robot class, <code>lerobot-record</code> can't read joint_states or write actions from ROS2 — we'd have to stay on a custom script forever.</td>
+        <td class="status"><span class="pill miss">missing</span></td>
+      </tr>
+      <tr>
+        <td>3</td>
+        <td>Action source (teleop or command topic)</td>
+        <td>Today's L2 uses <em>synthetic</em> actions = noisy state. Real training needs actions that genuinely drove the arm — either leader-arm mirroring (real) or MoveIt/controller goals (sim).</td>
+        <td class="status"><span class="pill warn">stub</span></td>
+      </tr>
+      <tr>
+        <td>4</td>
+        <td>Episode orchestration (start/end/redo)</td>
+        <td>Real flow has keyboard controls built into <code>lerobot-record</code>. Our custom script runs once then exits — no multi-episode loop, no discard.</td>
+        <td class="status"><span class="pill miss">missing</span></td>
+      </tr>
+      <tr>
+        <td>5</td>
+        <td>Task strings per episode</td>
+        <td>SmolVLA / Pi0.5 condition on the task string. Fixed "smoke test" placeholder in L2 — real runs need meaningful task strings per episode.</td>
+        <td class="status"><span class="pill warn">placeholder</span></td>
+      </tr>
+      <tr>
+        <td>6</td>
+        <td>Second camera (top view)</td>
+        <td>Colleague's real flow records <code>wrist</code> + <code>top</code>. Our sim only has the wrist-mounted camera. Either add a top-view SDF camera or agree on single-camera co-training.</td>
+        <td class="status"><span class="pill warn">single-cam</span></td>
+      </tr>
+      <tr>
+        <td>7</td>
+        <td>Real side on ROS2</td>
+        <td>Real SO-101 currently uses USB/COM ports, not ROS2 topics. For the unified target, need <code>usb_cam</code> + <code>realsense2_camera</code> nodes (or keep the USB path and accept two code paths).</td>
+        <td class="status"><span class="pill warn">optional</span></td>
+      </tr>
+      <tr>
+        <td>8</td>
+        <td><code>compute_stats</code> pass + HF-hub push</td>
+        <td>Dataset stats are required for training normalization. Push needed for co-training with colleague's real dataset.</td>
+        <td class="status"><span class="pill miss">missing</span></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="panel full">
+  <h2>Key topic contract (what sim and real must agree on)</h2>
+  <table class="gaps">
+    <thead>
+      <tr>
+        <th>ROS2 topic</th>
+        <th>Type</th>
+        <th>Resolution / shape</th>
+        <th>Rate</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>/wrist_camera</code></td>
+        <td><code>sensor_msgs/Image</code></td>
+        <td>1280×720×3 BGR (sim) → pick one shared resolution for co-training</td>
+        <td>30 Hz</td>
+      </tr>
+      <tr>
+        <td><code>/camera_info</code></td>
+        <td><code>sensor_msgs/CameraInfo</code></td>
+        <td>—</td>
+        <td>30 Hz</td>
+      </tr>
+      <tr>
+        <td><code>/joint_states</code></td>
+        <td><code>sensor_msgs/JointState</code></td>
+        <td>6 joints: <code>Rotation, Pitch, Elbow, Wrist_Pitch, Wrist_Roll, Jaw</code></td>
+        <td>≥ 30 Hz</td>
+      </tr>
+      <tr>
+        <td><code>/command</code> <em>(TBD)</em></td>
+        <td>(TBD — trajectory goals or joint setpoints)</td>
+        <td>6-D action vector</td>
+        <td>match observation rate</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+</body>
+</html>

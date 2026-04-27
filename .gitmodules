@@ -1,0 +1,4 @@
+[submodule "lerobot"]
+	path = lerobot
+	url = git@github.com:inbarajaldrin/lerobot.git
+	branch = ros2_camera

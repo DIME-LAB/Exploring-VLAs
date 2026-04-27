@@ -1898,8 +1898,9 @@ class SOArm101ControlGUI(Node):
     # ------------------------------------------------------------------
 
     def _setup_gui_thread(self):
-        self.gui_thread = threading.Thread(target=self._run_gui, daemon=True)
-        self.gui_thread.start()
+        # macOS requires tkinter on the main thread (Cocoa constraint).
+        # Defer _run_gui to be called from main() instead of a daemon thread.
+        pass
 
     def _run_gui(self):
         self.root = tk.Tk()
@@ -9656,19 +9657,18 @@ def main(args=None):
     signal.signal(signal.SIGINT, _shutdown_handler)
     signal.signal(signal.SIGTERM, _shutdown_handler)
 
+    # Spin ROS2 executor in background thread
+    spin_thread = threading.Thread(target=executor.spin, daemon=True)
+    spin_thread.start()
+
+    # Run tkinter on main thread (required by macOS Cocoa, safe on Linux)
     try:
-        # Use spin_once loop instead of spin() so we can check running flag
-        while node.running and rclpy.ok():
-            executor.spin_once(timeout_sec=0.5)
+        node._run_gui()
     except KeyboardInterrupt:
         pass
     finally:
         node.running = False
-        if hasattr(node, 'root'):
-            try:
-                node.root.quit()
-            except Exception:
-                pass
+        executor.shutdown()
         node.destroy_node()
         rclpy.try_shutdown()
 
