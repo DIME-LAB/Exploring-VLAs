@@ -37,6 +37,7 @@ import time
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
+from std_srvs.srv import Trigger
 import serial
 
 
@@ -142,6 +143,21 @@ class JointStateReader(Node):
         timer_period = 1.0 / max(self.publish_rate_hz, 1.0)
         self.timer = self.create_timer(timer_period, self.read_and_publish)
 
+        # ---- Service: ~/torque_reset (std_srvs/Trigger) ----
+        # Public name resolves to /<node_name>/torque_reset, e.g.
+        # /joint_state_reader/torque_reset. Replaces the
+        # kill+respawn-jsr dance previously needed by mac-env scripts
+        # (arm_reset.py / arm_trim.py) just to access the half-duplex
+        # Feetech bus. The handler runs inside the rclpy
+        # SingleThreadedExecutor, so it naturally blocks the read
+        # timer + the /joint_commands subscriber while it executes.
+        # /joint_states pauses for ~1 sec, then resumes seamlessly.
+        self._torque_reset_service = self.create_service(
+            Trigger, '~/torque_reset', self._on_torque_reset)
+        self.get_logger().info(
+            f"Hosting service: ~/torque_reset (cycles follower torque, "
+            f"~1 s /joint_states blackout, no bus release)")
+
         mode = (
             "usb-mirror-teleop" if self.mirror_to_follower
             else "topic-driven" if self.accept_command_input
@@ -224,6 +240,27 @@ class JointStateReader(Node):
         except Exception:
             return False
 
+    def _write_servo_byte(self, ser, servo_id: int, addr: int, value: int):
+        """Write a single-byte EEPROM/RAM register to a Feetech servo.
+
+        Used by ~/torque_reset for register 40 (Torque_Enable). Returns
+        True on a complete status-packet ack from the servo. Mirrors the
+        `write_byte` helper in mac-env/scripts/arm_reset.py so the
+        in-process and out-of-process paths agree on protocol framing.
+        """
+        try:
+            payload = [servo_id, 4, 0x03, addr, value & 0xFF]
+            packet = bytes([0xFF, 0xFF] + payload + [self._checksum(payload)])
+            ser.reset_input_buffer()
+            ser.write(packet)
+            time.sleep(0.005)
+            response = ser.read(6)
+            return (len(response) >= 6
+                    and response[0] == 0xFF and response[1] == 0xFF
+                    and response[2] == servo_id and response[4] == 0)
+        except Exception:
+            return False
+
     def _close_serial(self, attr_name: str):
         ser = getattr(self, attr_name)
         if ser is None:
@@ -297,6 +334,71 @@ class JointStateReader(Node):
                     self.write_errors[i] += 1
                 time.sleep(self.inter_servo_delay_s)
         self.command_msgs_received += 1
+
+    # --------------------------------------------------------------- torque_reset
+    def _on_torque_reset(self, request, response):
+        """Cycle the follower's torque without releasing the bus.
+
+        Procedure (matches mac-env/scripts/arm_reset.py's bus protocol):
+          1. anti-jolt — Goal_Position ← Present_Position per servo so
+             torque-on produces zero PID error → no startup motion
+          2. Torque_Enable=0 per servo → vibration stops, gravity parks
+          3. sleep 700 ms → let inertia decay
+          4. Torque_Enable=1 per servo → re-engage holding settled pose
+
+        The SingleThreadedExecutor serializes callbacks, so this body
+        naturally blocks the read timer + /joint_commands subscriber
+        for its duration (~1 s). No explicit pause flag needed; rclpy
+        drops missed timer ticks rather than queueing them.
+
+        The follower_write_lock is taken to be defensive against any
+        future MultiThreadedExecutor migration — under the default
+        single-threaded executor the lock is never contended.
+
+        Replaces the kill+respawn-jsr dance previously needed by
+        mac-env/scripts/arm_reset.py (which had to release the
+        half-duplex bus before any external bus access).
+        """
+        if self.follower_serial is None:
+            response.success = False
+            response.message = (
+                f"follower_serial not connected (port="
+                f"{self.follower_port_name}); nothing to torque-cycle")
+            self.get_logger().warn(response.message)
+            return response
+
+        REG_TORQUE_ENABLE = 40
+        try:
+            with self.follower_write_lock:
+                # Step 1: anti-jolt
+                for i in range(len(self.joint_names)):
+                    sid = i + 1
+                    present = self._read_servo_position(self.follower_serial, sid)
+                    if present is not None:
+                        self._write_servo_goal(self.follower_serial, sid, present)
+                    time.sleep(self.inter_servo_delay_s)
+                # Step 2: torque off (per-servo)
+                for i in range(len(self.joint_names)):
+                    self._write_servo_byte(
+                        self.follower_serial, i + 1, REG_TORQUE_ENABLE, 0)
+                    time.sleep(self.inter_servo_delay_s)
+                # Step 3: settle under gravity
+                time.sleep(0.7)
+                # Step 4: torque on (zero PID error → no jolt)
+                for i in range(len(self.joint_names)):
+                    self._write_servo_byte(
+                        self.follower_serial, i + 1, REG_TORQUE_ENABLE, 1)
+                    time.sleep(self.inter_servo_delay_s)
+            response.success = True
+            response.message = (
+                f"torque cycled on {self.follower_port_name} "
+                f"(6 servos, anti-jolt applied)")
+            self.get_logger().info(response.message)
+        except Exception as exc:
+            response.success = False
+            response.message = f"torque_reset failed: {exc}"
+            self.get_logger().error(response.message)
+        return response
 
     # ---------------------------------------------------------------- main loop
     def read_and_publish(self):
