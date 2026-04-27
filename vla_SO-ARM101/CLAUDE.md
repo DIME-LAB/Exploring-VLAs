@@ -54,19 +54,70 @@ This stack mirrors the **`inbarajaldrin/isaac-sim-mcp@so-arm101` phase 01** topi
 
 ## Build & launch
 
+The canonical launchers live in `mac-env/scripts/` and wrap pixi + ROS2 +
+the right env. **Use them instead of calling `ros2 launch` directly** —
+they handle CycloneDDS config, `KMP_DUPLICATE_LIB_OK`, the workspace
+sourcing, and Terminal.app handoff for cv2 viewers.
+
 ```bash
-# Build only this stack (symlink-install picks up Python edits without rebuild)
-colcon build --packages-select so_arm101_control --symlink-install
+# === Sim stack (Gazebo / Isaac / mock) — single mode-aware launcher ===
+# stack.launch.py: core (RSP + move_group + control_gui + RViz) + ONE backend.
+bash mac-env/scripts/stack_start.sh --mode gazebo --gazebo-gui --rviz   # full sim
+bash mac-env/scripts/stack_start.sh --mode gazebo                       # headless server only
+bash mac-env/scripts/stack_start.sh --mode isaac --rviz                 # core+RViz, Isaac runs externally
+bash mac-env/scripts/stack_start.sh --mode real --rviz \                # real arm + cameras + aruco/yoloe
+    follower_port:=/dev/tty.usbmodem<NNN>
+bash mac-env/scripts/stack_stop.sh                                      # SIGINT + per-binary cleanup
 
-# Launch full stack (mock hardware + RViz + MoveIt + control GUI + MTC)
-ros2 launch so_arm101_control control.launch.py rviz:=true mtc:=true
+# Legacy positional args still work (back-compat with scripts/test_*.sh,
+# isaac-sim-mcp's restart-control-stack.sh, etc.):
+bash mac-env/scripts/stack_start.sh headless    # = --mode gazebo
+bash mac-env/scripts/stack_start.sh all         # = --mode gazebo --gazebo-gui --rviz
 
-# Restart only this stack (leaves Isaac Sim alone — graceful pkill -SIGINT inside)
+# Attach RViz to a running headless stack (uses moveit_rviz.launch.py
+# so SRDF actually loads — direct rviz2 invocation skips the SRDF param)
+bash mac-env/scripts/rviz_attach.sh
+bash mac-env/scripts/rviz_stop.sh
+
+# === Real-side perception (camera_publisher + ArUco + YOLOE) ===
+# Auto-detects wrist USB cam by signature in robot_config.yaml.
+bash mac-env/scripts/camera_pipeline_start.sh                       # auto-detect
+bash mac-env/scripts/camera_pipeline_start.sh --camera-id 0         # explicit
+bash mac-env/scripts/camera_pipeline_stop.sh
+bash mac-env/scripts/fix_camera_permissions.sh                      # if Terminal can't open the cam
+
+# === Builds ===
+# Single package, fast iteration:
+cd /tmp/soarm-ws && pixi run --manifest-path /tmp/mac-env/pixi.toml \
+    colcon build --packages-select so_arm101_control
+# (so_arm101_control is python — needs full rebuild after source edits because
+# colcon's --symlink-install no longer works with setuptools 80+, see Conventions)
+
+# === Trigger commands once a stack is up ===
+ros2 service call /so_arm101_control_gui/grasp_home std_srvs/srv/Trigger
+# Other ~/_cmd_* services auto-register from control_gui — see AGENT_DEBUG_GUIDE.md
+
+# === Cross-repo restart (legacy, pre-dates stack_start.sh) ===
 ~/Documents/isaac-sim-mcp/scripts/restart-control-stack.sh
 ```
 
-The restart script lives in the OTHER repo because it predates this
-one. It's been the canonical restart path for both repos' work.
+Launch graph (after the 2026-04-27 refactor):
+
+```
+mac-env/scripts/stack_start.sh
+  └── ros2 launch so_arm101_control stack.launch.py mode:=…
+        ├── core.launch.py            ← always: RSP + move_group + control_gui + ee/camera_pose_publisher + RViz
+        └── ONE of:
+            ├── backend_gazebo.launch.py  ← gz sim + parameter_bridge + controllers + sim_ground_truth
+            ├── backend_isaac.launch.py   ← empty placeholder (Isaac publishes externally)
+            └── backend_real.launch.py    ← jointstatereader + real_cameras + localize_aruco + localize_yoloe
+                                            (motion-execution shim NOT YET IMPLEMENTED — planning works,
+                                             execute path needs the trajectory_shim node)
+```
+
+The old monolithic `gazebo.launch.py` is preserved unchanged for
+back-compat — anything still calling it directly works. New code
+should use `stack.launch.py` via `stack_start.sh`.
 
 ## Conventions
 
