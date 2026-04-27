@@ -1,158 +1,184 @@
-# Gazebo Backend on Linux — Known Limitation
+# Gazebo Backend on Linux — Per-Backend Controller Config Split
 
-> **Status (2026-04-27)**: Gazebo simulation cannot drive arm motion on the local
-> Linux setup. Gripper works, world loads, control GUI starts. Documented for
-> future revisit; not blocking the Isaac Sim sim path.
+> **Status (2026-04-27): RESOLVED.** Gazebo simulation runs end-to-end on
+> Linux via a per-backend `ros2_controllers_*.yaml` split. `arm_controller`
+> activates, `grasp_home` executes (verified: 51-waypoint tier-1 trajectory
+> completed against `gz_ros2_control` → Gazebo physics). Verified pipeline:
+> Gazebo cameras (`/wrist_camera` + `/top_camera`, ~7 Hz on Linux Fortress)
+> → `ros_gz_bridge` → `aruco_camera_localizer` + YOLOE → `/aruco_poses_real`
+> + `/objects_poses_real` + `/yoloe_annotated`. Same `gazebo.launch.py`
+> entry point; the user just needs to set `GZ_SIM_SYSTEM_PLUGIN_PATH` to the
+> locally-built `gz_ros2_control` lib (Mac via pixi handles this through
+> `CONDA_PREFIX` automatically).
 
-## TL;DR
+## TL;DR — what changed
 
-Running `ros2 launch so_arm101_control gazebo.launch.py` on Linux brings
-up Gazebo Ignition, the world, the `gz_ros2_control` plugin, MoveIt, and
-the control GUI cleanly — but `arm_controller` fails to activate.
-`grasp_home` (and any other arm motion service) fails with
-`arm action server rejected the goal`.
+Gazebo and Isaac Sim now use separate ros2_control YAMLs:
 
-Root cause: a mismatch between local commit `eb13c10` (Phase 9 PD
-feed-forward — adds `velocity` command interface to `arm_controller`'s
-yaml) and the version of `gz_ros2_control/GazeboSimSystem` currently
-built on Linux (`~/ros2_ws/install/gz_ros2_control/`), which appears
-not to support multi-command-interface joints in the URDF.
-
-This is NOT a regression introduced by the upstream-merge commit
-`a01e646` — `eb13c10` predates the merge and the Gazebo path was simply
-never re-tested after Phase 9.
-
-## Symptoms
-
-```
-[controller_manager]: Could not switch controllers since prepare command
-  mode switch was rejected.
-[spawner_arm_controller]: Failed to activate controller : arm_controller
-  [exit code 1]
-```
-
-Controller state after launch:
-
-```
-ros2 control list_controllers:
-  joint_state_broadcaster   active
-  arm_controller             inactive    ← cannot move arm
-  gripper_controller         active      (yaml is position-only — matches xacro)
-```
-
-Functional probe:
-
-```
-ros2 service call /so_arm101_control_gui/grasp_home std_srvs/srv/Trigger
-  → success=False, message='_cmd_grasp_home: arm action server rejected the goal'
-```
-
-## Root cause
-
-`src/so_arm101_moveit_config/config/ros2_controllers.yaml`:
-
-```yaml
-arm_controller:
-  command_interfaces:
-    - position
-    - velocity   # ← added by commit eb13c10 for Isaac Sim PD feed-forward
-  state_interfaces:
-    - position
-    - velocity
-```
-
-`src/so_arm101_description/urdf/so_arm101.gazebo.xacro`:
-
-```xml
-<joint name="shoulder_pan">
-  <command_interface name="position"/>   <!-- only position -->
-  <state_interface name="position"/>
-  <state_interface name="velocity"/>
-</joint>
-```
-
-The yaml asks for both `position` and `velocity` command interfaces, but
-the URDF declares only `position`, so
-`controller_manager.prepareCommandModeSwitch()` rejects activation. With
-five arm joints in this state, `arm_controller` never goes active.
-
-## What was tried (and why it failed)
-
-Adding `<command_interface name="velocity"/>` to all five arm joints in
-`so_arm101.gazebo.xacro` did NOT fix it on Linux. The result:
-
-- `ros2 control list_hardware_interfaces` returned **empty** lists for
-  both command and state interfaces.
-- All three controllers (joint_state_broadcaster, arm_controller,
-  gripper_controller) failed to activate — including gripper, which
-  worked before the change.
-
-Interpretation: the Linux-side `gz_ros2_control/GazeboSimSystem` (built
-from `~/ros2_ws/install/gz_ros2_control/`, ROS2 Humble / Ignition
-Fortress era) does not support multi-command-interface joints. When it
-encounters a joint with more than one `<command_interface>`, it appears
-to silently fail URDF parsing and expose zero interfaces for that joint
-(and possibly bail out for the rest of the system).
-
-The xacro change has been reverted; current state matches the merge
-commit `a01e646`.
-
-## Why the Mac path probably works (untested)
-
-`mac-env/pixi.toml` pulls a substantially newer stack via RoboStack:
-
-| Component | Linux (apt + locally built) | Mac (pixi/RoboStack jazzy) |
+| YAML | Used by | `arm_controller.command_interfaces` |
 |---|---|---|
-| ROS2 distro | Humble | **Jazzy** |
-| Gazebo | Ignition Fortress | **Harmonic** |
-| `gz_ros2_control` | locally-built older | **v1.2.17** from `robostack-jazzy/osx-arm64` |
+| `config/ros2_controllers.yaml` | Isaac Sim path (`control.launch.py` + `ros2_control_node`) | `[position, velocity]` — Phase 9 PD feed-forward intact |
+| `config/ros2_controllers_gazebo.yaml` | Gazebo path (`gazebo.launch.py` → URDF `<plugin>` `<parameters>` tag) | `[position]` — Linux gz_ros2_control compatible |
 
-Multi-command-interface support was actively improved in the Jazzy-era
-1.2.x range of `gz_ros2_control`. The Mac path most likely handles
-`position + velocity` claims correctly — but this is **not verified**.
-To confirm on Mac: run `gazebo.launch.py`, then
-`ros2 control list_controllers` and check whether `arm_controller` is
-`active`.
+The Gazebo URDF (`so_arm101.gazebo.xacro`) explicitly references the
+gazebo-specific YAML in its `<gazebo>` plugin block. Isaac Sim's path is
+untouched.
 
-## Workaround paths (not implemented)
+## Why a split, not a single yaml
 
-| Approach | Pros | Cons |
-|---|---|---|
-| **A**. Drop `velocity` from `arm_controller` yaml | One-line fix, makes Linux Gazebo work | Breaks Phase 9 PD feed-forward on Isaac Sim → tracking lag returns (~10° at peak velocity) → cup padding (5%) likely insufficient → drop_sweep collisions return |
-| **B**. Platform-conditional yaml (Gazebo variant: position-only; Isaac variant: position+velocity) | Both backends work | Two yamls to maintain; launch wiring needs to select the right one based on backend |
-| **C**. Upgrade Linux's `gz_ros2_control` to a Jazzy-era version | Same single yaml works everywhere | Painful — would need to either build Jazzy on Humble (ABI mismatch) or upgrade the whole ROS2 distro |
-| **D**. Accept Linux Gazebo as broken; use Isaac Sim only on Linux | Zero work; today's actual practice | Lose the option of Gazebo on Linux; can't onboard a contributor without an Isaac Sim license unless they're on Mac |
+The Phase 9 commit `eb13c10` added `velocity` to `arm_controller`'s
+command interfaces because Isaac Sim's action graph reads
+`velocityCommand` off `/joint_states` and writes it to
+`UsdPhysics.DriveAPI.targetVelocity`, giving the PhysX PD drive its
+feed-forward term. That eliminates `B*v/K` steady-state ramp lag (~0.9°
+wrist_flex lag measured pre-fix → ~2.5 mm TCP error during drop_sweep).
 
-The user's current preference is **D** — Isaac Sim is the primary working
-backend on Linux. Revisit when one of the trigger conditions below applies.
+Gazebo's `gz_ros2_control/GazeboSimSystem` has **no analogous PD-feedforward
+feedback loop**. The `velocity` command interface would be silently
+ignored by the plugin even on a multi-mode-capable version, providing zero
+benefit to Gazebo. So semantically, Gazebo *should* use position-only.
 
-## When to revisit
+The local Linux build of `gz_ros2_control` (from `~/ros2_ws/install/`,
+Humble + Ignition Fortress era) goes one step further: it doesn't tolerate
+multi-command-interface joints at all. When the URDF declares more than
+one `<command_interface>` per joint, the plugin silently fails URDF
+parsing and exposes ZERO interfaces — breaking `joint_state_broadcaster`,
+`arm_controller`, and `gripper_controller` simultaneously. So a single
+shared YAML with `[position, velocity]` doesn't work on Linux.
 
-Most likely triggers:
+The fix is therefore **both architecturally appropriate** (per-backend
+config matches the underlying conceptual model — Gazebo and Isaac Sim
+aren't the same hardware) **and toolchain-pragmatic** (sidesteps the
+gz_ros2_control parse limitation without regressing Phase 9's Isaac Sim
+optimization).
 
-1. Collecting lerobot training datasets on Linux and wanting Gazebo
-   (different rendering, different physics) instead of Isaac Sim.
-2. Onboarding a Linux contributor who can't get an Isaac Sim license.
-3. Verifying the Mac path actually works, then wanting feature parity on
-   Linux.
-4. The `eb13c10` velocity command-interface optimization stops being
-   load-bearing on Isaac Sim — at that point, dropping it from the yaml
-   (workaround **A**) becomes free.
+## Files involved
+
+| File | Role |
+|---|---|
+| `src/so_arm101_moveit_config/config/ros2_controllers.yaml` | Default — Isaac Sim path, position+velocity |
+| `src/so_arm101_moveit_config/config/ros2_controllers_gazebo.yaml` | NEW — Gazebo path, position-only |
+| `src/so_arm101_description/urdf/so_arm101.gazebo.xacro` | UPDATED — `<gazebo><plugin><parameters>` now points at the gazebo-specific yaml |
+
+CMakeLists already installs the entire `config/` directory, so both
+YAMLs are picked up by `colcon build` without explicit per-file install
+rules.
+
+## Linux launch invocation
+
+```bash
+cd ~/Projects/Exploring-VLAs/vla_SO-ARM101
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash       # for the locally-built gz_ros2_control
+source install/setup.bash                  # for so_arm101_*
+
+# point Gazebo at the locally-built gz_ros2_control plugin lib
+export GZ_SIM_SYSTEM_PLUGIN_PATH="$HOME/ros2_ws/install/gz_ros2_control/lib:${GZ_SIM_SYSTEM_PLUGIN_PATH:-}"
+
+ros2 launch so_arm101_control gazebo.launch.py headless:=true rviz:=false
+```
+
+(Mac via `mac-env/scripts/bootstrap.sh` + pixi handles the plugin path
+automatically through `CONDA_PREFIX`. The xacro reads `CONDA_PREFIX`
+when set and falls back to the existing `GZ_SIM_SYSTEM_PLUGIN_PATH`
+otherwise — so this Linux invocation is the manual equivalent.)
+
+## Operating notes (gotchas)
+
+### 1. Orphan `robot_state_publisher` from a prior Isaac Sim launch
+
+If you've been running the Isaac Sim control stack
+(`ros2 launch so_arm101_control control.launch.py`) before switching to
+Gazebo, the launch's `robot_state_publisher` child can survive the
+parent dying and become reparented to PID 1. It keeps publishing the
+**moveit URDF** (with `mock_components/GenericSystem` plugin) on
+`/robot_description`. When `gz_ros2_control` connects to
+"the" robot_state_publisher and asks for `robot_description`, it can
+hit the orphan and try to load `mock_components/GenericSystem` as a
+GazeboSimSystem — which fails with:
+
+```
+[gz_ros2_control]: The plugin failed to load for some reason.
+  Error: According to the loaded plugin descriptions the class
+  mock_components/GenericSystem with base class type
+  gz_ros2_control::GazeboSimSystemInterface does not exist.
+```
+
+**Detection**: `ps -ef | grep robot_state_publisher` after stopping the
+Isaac Sim launch — if there are entries with elapsed time > a few minutes
+that have no parent (PPID = 1), kill them.
+
+**Cleanup**: `kill -SIGTERM <pid>` (graceful), then SIGKILL only if it
+survives. robot_state_publisher is headless, no X11 cleanup concerns.
+
+### 2. Linux Fortress camera frame rate
+
+The wrist + top cameras are declared at 30 Hz in the SDF but actually
+publish at ~7 Hz on Linux/Fortress. This is the Ogre2 renderer's cap on
+this hardware with two cameras sharing the render context. Mac via
+Harmonic + Vulkan typically hits closer to 25-30 Hz. Detection latency
+will feel different between the platforms — that's the renderer, not the
+detection code.
+
+### 3. SDF camera_info topic naming asymmetry
+
+The wrist camera SDF declares
+`<camera_info_topic>wrist_camera/camera_info</camera_info_topic>` but
+older Fortress versions flatten relative paths in this declaration, so
+the actual GZ topic ends up at `/camera_info` (root level). The
+`ros_gz_bridge` config in `gazebo.launch.py` was written to match this
+flattening (`/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo`).
+If `aruco_camera_localizer` auto-discovers `<camera_topic>/camera_info`
+it'll look for `/wrist_camera/camera_info` and miss; the localizer falls
+back to its own `robot_config.yaml` intrinsics (which we already use, so
+this is harmless in current config). If pose accuracy ever looks off,
+the workaround is `--ros-args -r /wrist_camera/camera_info:=/camera_info`
+on the localizer launch.
+
+## When the split could be collapsed back to one yaml
+
+The split exists primarily to sidestep the locally-built gz_ros2_control
+limitation. If/when one of these happens, the gazebo-specific yaml can
+be deleted and the gazebo xacro can point at the default:
+
+1. **Linux upgrades to a Jazzy-era `gz_ros2_control`** (≥ ~1.2.x) that
+   tolerates multi-command-interface joints — same single YAML works
+   for both backends because newer gz_ros2_control just ignores the
+   unused `velocity` declaration. Likely path: upgrade entire ROS2
+   distro to Jazzy, or build Jazzy version from source on Humble (ABI
+   risk).
+2. **Phase 9's `eb13c10` velocity command interface stops being
+   load-bearing on Isaac Sim** (e.g., a different tracking-lag fix
+   replaces PD feed-forward) — at that point dropping `velocity` from
+   the default YAML restores backend symmetry without regression.
+
+Until then, the split stays.
 
 ## Verification status (2026-04-27)
 
-- Isaac Sim path: ✅ end-to-end PASS via
-  `scripts/test_qs_cycle.sh red_2x3` against the merged code (full
-  pick-and-drop cycle, tier-1 + tier-2 deterministic planner, pan-lock,
-  `_attached_lego_tcp_offset` capture).
-- Gazebo on Linux: ❌ broken (this document).
-- Gazebo on Mac: untested.
-- Real hardware: untested (separate scope).
+- **Isaac Sim path**: `scripts/test_qs_cycle.sh red_2x3` — full
+  pick-and-drop cycle PASSED on the merged code (tier-1 4×, tier-2 2×,
+  pan-lock, `_attached_lego_tcp_offset` capture).
+- **Gazebo Linux path**: `gazebo.launch.py headless:=true` →
+  `ros2 service call /so_arm101_control_gui/grasp_home` →
+  `success=True, message='_cmd_grasp_home: trajectory complete (51 wps)'`.
+  Camera bridge alive (`/wrist_camera`, `/top_camera` both publishing
+  rgb8 640×480 at ~7 Hz). Detection pipeline verified end-to-end:
+  YOLOE → `/objects_poses_real` (1.4 Hz),
+  ArUco → `/aruco_poses_real` (~93 Hz with Kalman extrapolation),
+  drop poses → `/drop_poses_real`.
+- **Gazebo Mac path**: still untested. Mac uses RoboStack jazzy's
+  `gz_ros2_control` 1.2.17 which likely tolerates multi-command-mode,
+  but the per-backend yaml split works on it too — the position-only
+  yaml is correct for Gazebo on either platform regardless of plugin
+  version.
+- **Real hardware**: untested (separate scope).
 
-## Rollback anchors (in case future investigation needs to revert)
+## Pre-merge rollback anchors (in case of need)
 
-- Pre-merge git tag in `Exploring-VLAs/`: `pre-merge-snapshot` (points to
-  `f131e48`).
+- Pre-merge git tag in `Exploring-VLAs/`: `pre-merge-snapshot` (points
+  to `f131e48`) — the state before the upstream merge but also before
+  this Gazebo fix.
 - Quarantined merge originals (base / local / upstream / merged-with-markers
   for every conflicted file plus the auto-merged `control.launch.py`):
   `~/Documents/merge-quarantine/vla-SO-ARM101-2026-04-27/`.

@@ -1,0 +1,61 @@
+# Gazebo-specific ros2_control config (sibling of ros2_controllers.yaml).
+#
+# Differs from the default ONLY in that arm_controller's command_interfaces
+# is `position`-only (no `velocity`). Reason: the locally-built Linux
+# `gz_ros2_control/GazeboSimSystem` (Humble + Ignition Fortress era) does
+# not support multi-command-interface joints — encountering more than one
+# `<command_interface>` per joint in the URDF causes the plugin to fail
+# URDF parsing silently and expose ZERO interfaces, breaking ALL
+# controllers. Dropping `velocity` from the YAML side instead of adding
+# it to the URDF side keeps Gazebo's controller-claim path satisfied.
+#
+# Velocity command interface is needed only on Isaac Sim, where the
+# action graph reads /joint_states velocityCommand and feeds it to
+# UsdPhysics.DriveAPI.targetVelocity (Phase 9 PD feed-forward, see
+# ros2_controllers.yaml comment). Gazebo's gz_ros2_control plugin
+# does not have an analogous feedback loop, so position-only is
+# sufficient and correct for Gazebo on both Linux and Mac.
+#
+# This split should be revisited if Linux upgrades to a Jazzy-era
+# `gz_ros2_control` (≥ ~1.2.x) that supports multi-command-mode joints.
+# At that point both yaml files could be unified.
+#
+# See docs/GAZEBO_LINUX_LIMITATION.md for full root-cause analysis.
+
+controller_manager:
+  ros__parameters:
+    update_rate: 50  # Hz (matching ros2_so_arm100 reference)
+
+    arm_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    gripper_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+arm_controller:
+  ros__parameters:
+    joints:
+      - shoulder_pan
+      - shoulder_lift
+      - elbow_flex
+      - wrist_flex
+      - wrist_roll
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+    open_loop_control: false
+
+gripper_controller:
+  ros__parameters:
+    joints:
+      - gripper_joint
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity

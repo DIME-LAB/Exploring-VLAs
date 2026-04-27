@@ -52,10 +52,15 @@
     </joint>
   </ros2_control>
 
-  <!-- Gazebo ros2_control plugin — loads controller_manager with our controller config -->
+  <!-- Gazebo ros2_control plugin — loads controller_manager with our controller config.
+       NOTE: uses ros2_controllers_gazebo.yaml (position-only command interface for
+       arm_controller), NOT the default ros2_controllers.yaml. The default's
+       position+velocity dual-mode is for Isaac Sim's PD feed-forward; Linux's
+       gz_ros2_control can't handle multi-command-mode joints. See
+       docs/GAZEBO_LINUX_LIMITATION.md for the full story. -->
   <gazebo>
     <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
-      <parameters>$(find so_arm101_moveit_config)/config/ros2_controllers.yaml</parameters>
+      <parameters>$(find so_arm101_moveit_config)/config/ros2_controllers_gazebo.yaml</parameters>
     </plugin>
   </gazebo>
 
