@@ -10515,7 +10515,10 @@ class SOArm101ControlGUI(Node):
         so the next arm command renders correctly in RViz."""
         obj_name = self._get_selected_object_name()
         bbox = self._lookup_bbox(obj_name) if obj_name else None
-        if not bbox:
+        # Sim mode requires bbox (dynamic angle calc); real mode uses
+        # hardcoded spinbox values from _gripper_angle_for_object's
+        # short-circuit, so neither obj_name nor bbox is needed.
+        if not bbox and not self.use_real_hardware:
             self._append_log('Grasp Open: no object selected or no bbox data')
             return
         open_angle, _ = self._gripper_angle_for_object(obj_name)
@@ -10539,7 +10542,12 @@ class SOArm101ControlGUI(Node):
         """
         obj_name = self._get_selected_object_name()
         bbox = self._lookup_bbox(obj_name) if obj_name else None
-        if not bbox:
+        # Sim mode requires bbox (dynamic angle calc + attached-collision
+        # sizing); real mode uses hardcoded spinbox values, so neither
+        # obj_name nor bbox is needed for the close motion itself. The
+        # _attach_lego_to_gripper call below is wrapped in try/except
+        # and will gracefully skip when bbox is missing.
+        if not bbox and not self.use_real_hardware:
             self._append_log('Grasp Close: no object selected or no bbox data')
             return
         _, close_angle = self._gripper_angle_for_object(obj_name)
