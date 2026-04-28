@@ -40,8 +40,9 @@ constexpr char kObjectsTopic[] = "/objects_poses_sim";
 constexpr char kDropsTopic[] = "/drop_poses";
 
 // Hardcoded targets for spike. Second iteration adds selection via action goal.
+// Cup IDs follow soarm101-dt CUP_ARUCO_CONFIG: blue=1, green=2, red=3.
 constexpr char kTargetLegoId[] = "green_2x3";
-constexpr char kTargetCupId[] = "drop_0";
+constexpr char kTargetCupId[] = "drop_3";  // red cup (was drop_0 under old convention)
 
 // Planning frame + robot frames (from so_arm101.srdf / kinematics.yaml)
 constexpr char kPlanningFrame[] = "base";

@@ -455,18 +455,20 @@ def find_reachable_grasp_yaw(poses, requested_yaw, debug=False):
     return None, {}, debug_lines
 
 
-# ArUco marker ID -> human-readable color label for drop targets
+# ArUco marker ID -> human-readable color label for drop targets.
+# New convention (mirrors soarm101-dt CUP_ARUCO_CONFIG and
+# aruco_camera_localizer aruco_config.json): blue=1, green=2, red=3.
 DROP_ID_LABELS = {
-    "drop_0": "red",
-    "drop_1": "green",
-    "drop_2": "blue",
+    "drop_1": "blue",
+    "drop_2": "green",
+    "drop_3": "red",
 }
 
 # Visual marker colors for cups in RViz (RGBA, alpha<1.0 avoids ros2/rviz#875)
 _CUP_VISUAL_COLORS = {
-    "drop_0": (0.9, 0.15, 0.1, 0.99),   # red
-    "drop_1": (0.1, 0.75, 0.2, 0.99),   # green
-    "drop_2": (0.15, 0.3, 0.9, 0.99),   # blue
+    "drop_1": (0.15, 0.3, 0.9, 0.99),   # blue
+    "drop_2": (0.1, 0.75, 0.2, 0.99),   # green
+    "drop_3": (0.9, 0.15, 0.1, 0.99),   # red
 }
 def _get_cup_stl_uri():
     """Resolve cup STL file URI for RViz MESH_RESOURCE markers."""
@@ -480,7 +482,7 @@ def _get_cup_stl_uri():
 # Phase 11-01: real-mode color → cup mapping. Inverse of _qs_auto_drop_for_lego.
 # Module-level so hot-reload picks up changes (class-level constants are NOT
 # copied by _patch_methods — only methods are; see comment at L89-90).
-REAL_COLOR_TO_CUP = {'red': 'drop_0', 'green': 'drop_1', 'blue': 'drop_2'}
+REAL_COLOR_TO_CUP = {'red': 'drop_3', 'green': 'drop_2', 'blue': 'drop_1'}
 
 # Phase 11-01 followup: Drop Scan workflow tunables. Module-level for the
 # same hot-reload reason. Times in seconds, angles in radians, variance in m².
@@ -604,7 +606,7 @@ class SOArm101ControlGUI(Node):
         self._cup_collision_names = []
 
         # --- Real-mode pipeline (Real Test tab; scan-then-cache cup poses) ---
-        # child_frame_id ('drop_0'/'drop_1'/'drop_2') →
+        # child_frame_id ('drop_1'/'drop_2'/'drop_3') →
         # {'translation': (x,y,z), 'rotation': (qx,qy,qz,qw)} in frame 'base'.
         # Populated by Refresh Cups Pose (subscribe-once /drop_poses_real with
         # partial-cache merge: missing markers keep their previous value).
@@ -3547,14 +3549,14 @@ class SOArm101ControlGUI(Node):
         """Return the /drop_poses child_frame_id of the cup matching this
         lego's color, or None if it can't be inferred.
 
-        Per CLAUDE.md § Robot Facts the ArUco marker ID mapping is
-        red → 0, green → 1, blue → 2.
+        Per soarm101-dt CUP_ARUCO_CONFIG the ArUco marker ID mapping is
+        blue → 1, green → 2, red → 3.
         """
         if not lego_name:
             return None
         color = lego_name.split('_', 1)[0].lower()
-        return {'red': 'drop_0', 'green': 'drop_1',
-                'blue': 'drop_2'}.get(color)
+        return {'red': 'drop_3', 'green': 'drop_2',
+                'blue': 'drop_1'}.get(color)
 
     def _build_quickstart_tab(self, notebook):
         frame = ttk.Frame(notebook)
@@ -4530,7 +4532,7 @@ class SOArm101ControlGUI(Node):
             # Status label per cup
             def _update_label():
                 marks = []
-                for n in ('drop_0', 'drop_1', 'drop_2'):
+                for n in ('drop_1', 'drop_2', 'drop_3'):
                     glyph = '✓' if n in self._cached_cup_poses else '✗'
                     marks.append(f'{n}:{glyph}')
                 if hasattr(self, '_real_cups_status_var'):
@@ -4810,7 +4812,7 @@ class SOArm101ControlGUI(Node):
             # Status label: ✓ for cached, ✗ for missing.
             def _update_label():
                 marks = []
-                for n in ('drop_0', 'drop_1', 'drop_2'):
+                for n in ('drop_1', 'drop_2', 'drop_3'):
                     glyph = '✓' if n in self._cached_cup_poses else '✗'
                     marks.append(f'{n}:{glyph}')
                 self._real_cups_status_var.set(
@@ -8217,9 +8219,9 @@ class SOArm101ControlGUI(Node):
             self._append_log('No drop target selected', 'warn')
             return None
         text = self._drop_listbox.get(sel[0])
-        # Strip label annotation: "drop_0 [red]  (...)" → "drop_0"
-        raw = text.split('  ')[0]  # "drop_0 [red]" or "drop_0"
-        name = raw.split(' [')[0]  # "drop_0"
+        # Strip label annotation: "drop_3 [red]  (...)" → "drop_3"
+        raw = text.split('  ')[0]  # "drop_3 [red]" or "drop_3"
+        name = raw.split(' [')[0]  # "drop_3"
         with self._drop_lock:
             pose = self._drop_data.get(name)
         if pose is None:
