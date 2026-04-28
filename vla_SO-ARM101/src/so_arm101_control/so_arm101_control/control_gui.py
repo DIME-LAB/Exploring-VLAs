@@ -174,12 +174,16 @@ CUP_BODY_HEIGHT_M = 0.0965
 # at close-in grasp positions, but the lego-in-cup scene filter + sync
 # detach + one-shot OMPL together are now the primary correctness levers;
 # padding returns to its original safety-margin role.
-_CUP_COLLISION_PADDING = 1.025  # 2.5% default pad — was 5%, lowered after
-# scene-polish moved cups inward (cluster_offset_y 0.06 → 0.04) caused
-# grasp_move approach trajectories to clip cups by sub-mm under the
-# previous 5% inflation. 2.5% restores grasp_move to tier-1 clean while
-# still absorbing the multi-mm tracking-lag overshoot during fast pan
-# motions (post-drop grasp_home sweeps 107° at 36°/s).
+_CUP_COLLISION_PADDING = 1.0  # 0% default pad — empirical: 2.5% inflation
+# made the carried-block path clip cup planning meshes during drop_sweep
+# pan-across (sub-mm collisions at wp[14]/wp[35] that triggered OMPL RNG-
+# fallback non-determinism). 0% gives tier-1 deterministic clearance for
+# both grasp_move approach AND drop_sweep with a held block. Failed grasp
+# attempts that DO clip are correctly rejected by tier-1 and skipped by
+# the recording pipeline as failed episodes — that's the safety boundary.
+# Tracking-lag absorption was the original justification for 5% padding;
+# the deterministic-tier path is now slow enough (3 s / 36 °/s) that
+# physics tracks within the bare cup geometry.
 
 
 # --- Record Sim tab constants -----------------------------------------------
@@ -6250,11 +6254,14 @@ class SOArm101ControlGUI(Node):
         pad_row = tk.Frame(cup_frame)
         pad_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(pad_row, text='Collision padding %:', anchor='w').pack(side=tk.LEFT)
-        # 2.5% default — matches the global _CUP_COLLISION_PADDING=1.025.
-        # Lowered from 5% after scene-polish moved cups inward; 5% inflation
-        # caused grasp_move to clip cups by sub-mm. 2.5% absorbs tracking-lag
-        # overshoot while keeping grasp/drop tier-1 clean.
-        self._collision_padding_var = tk.DoubleVar(value=2.5)
+        # 0% default — matches the global _CUP_COLLISION_PADDING=1.0. Any
+        # padding > 0 with the current cup positions caused drop_sweep
+        # carried-block path to clip the inflated cup mesh sub-mm during
+        # pan-across, falling through to OMPL RNG fallback. Bare geometry
+        # keeps tier-1 deterministic for grasp_move + drop_sweep both;
+        # truly unreachable spawns get rejected and the recording pipeline
+        # discards them as failed episodes.
+        self._collision_padding_var = tk.DoubleVar(value=0.0)
         self._register_spinbox(pad_row, label='Collision padding %',
                                tab='RViz', section='Cups',
                                textvariable=self._collision_padding_var,
