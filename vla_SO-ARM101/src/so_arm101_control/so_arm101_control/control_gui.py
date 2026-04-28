@@ -174,9 +174,12 @@ CUP_BODY_HEIGHT_M = 0.0965
 # at close-in grasp positions, but the lego-in-cup scene filter + sync
 # detach + one-shot OMPL together are now the primary correctness levers;
 # padding returns to its original safety-margin role.
-_CUP_COLLISION_PADDING = 1.05  # 5% default pad — absorbs the multi-mm
-# tracking-lag-induced overshoot during fast pan motions (e.g. post-drop
-# grasp_home sweeps 107° at 36°/s, which exceeded the 1% margin in testing).
+_CUP_COLLISION_PADDING = 1.025  # 2.5% default pad — was 5%, lowered after
+# scene-polish moved cups inward (cluster_offset_y 0.06 → 0.04) caused
+# grasp_move approach trajectories to clip cups by sub-mm under the
+# previous 5% inflation. 2.5% restores grasp_move to tier-1 clean while
+# still absorbing the multi-mm tracking-lag overshoot during fast pan
+# motions (post-drop grasp_home sweeps 107° at 36°/s).
 
 
 # --- Record Sim tab constants -----------------------------------------------
@@ -3533,13 +3536,17 @@ class SOArm101ControlGUI(Node):
     # The callable is bound on the class, so we reference it by name and
     # resolve with getattr(self, name) in the runner — keeps this table
     # readable and independent of method order.
+    # Phase 10.2: 'point to drop cup' (_cmd_drop_point) removed — drop_sweep
+    # is now self-contained and does its own face-cup pan internally before
+    # the IK-planned tilt. The Drop Point button in the GUI still works for
+    # manual use; the auto-sequence just doesn't dispatch it as a separate
+    # step anymore.
     _QS_SEQUENCE = [
         ('move to home',        '_cmd_grasp_home',            {'skip_if_home': True}),
         ('grasp open',          '_cmd_gripper_open_for_object', {}),
         ('grasp move',          '_cmd_grasp_move',            {}),
         ('grasp close',         '_cmd_gripper_close_for_object', {}),
         ('return home (carry)', '_cmd_grasp_home',            {}),
-        ('point to drop cup',   '_cmd_drop_point',            {}),
         ('drop sweep',          '_cmd_drop_sweep',            {}),
         ('release',             '_cmd_drop_release',          {}),
         ('return home',         '_cmd_grasp_home',            {}),
@@ -6243,15 +6250,15 @@ class SOArm101ControlGUI(Node):
         pad_row = tk.Frame(cup_frame)
         pad_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(pad_row, text='Collision padding %:', anchor='w').pack(side=tk.LEFT)
-        # 5% default — matches the global _CUP_COLLISION_PADDING=1.05.
-        # Absorbs the multi-mm tracking-lag overshoot during fast pan
-        # motions (post-drop grasp_home, etc). 1% wasn't enough; 5%
-        # confirmed clean by user in repeated cycles.
-        self._collision_padding_var = tk.IntVar(value=5)
+        # 2.5% default — matches the global _CUP_COLLISION_PADDING=1.025.
+        # Lowered from 5% after scene-polish moved cups inward; 5% inflation
+        # caused grasp_move to clip cups by sub-mm. 2.5% absorbs tracking-lag
+        # overshoot while keeping grasp/drop tier-1 clean.
+        self._collision_padding_var = tk.DoubleVar(value=2.5)
         self._register_spinbox(pad_row, label='Collision padding %',
                                tab='RViz', section='Cups',
                                textvariable=self._collision_padding_var,
-                               from_=0, to=50, increment=5, width=5).pack(side=tk.LEFT, padx=(5, 0))
+                               from_=0, to=50, increment=0.5, width=5).pack(side=tk.LEFT, padx=(5, 0))
         self._register_button(pad_row, text='Apply', tab='RViz', section='Cups',
                               command=self._cmd_apply_collision_padding).pack(side=tk.LEFT, padx=(5, 0))
 
@@ -9350,19 +9357,29 @@ class SOArm101ControlGUI(Node):
             target, on_complete_event=evt, duration_s=3.0)
 
     def _cmd_drop_sweep(self):
-        """IK-planned drop sweep: geometric IK → collision check → MoveIt path.
+        """IK-planned drop sweep: combined pan + wrist tilt to deliver
+        the held block over the selected cup.
 
-        Phase 9: the IK target represents the **jaw-gap center** (where the
-        held block actually sits), not tcp_link. Previously we passed the
-        cup's (x, y, z+127mm) directly as tcp_link target, which placed the
-        fixed jaw tip above the cup — but the block was offset by ~half the
-        jaw gap from tcp. The dropped block missed the cup center.
+        Self-contained as of Phase 10.2 — no longer requires
+        _cmd_drop_point to have run first. Geometric IK solves for all
+        five arm joints (pan, lift, elbow, wrist_flex, wrist_roll) at
+        the over-cup target, and _joint_space_collision_free_execute
+        interpolates the full joint vector in one trajectory. Net
+        effect: the wrist lifts the block as it tilts forward, while
+        the base pans across — block clears the cup rims during the
+        sweep (vs. a pan-only-then-tilt sequence that flatlined the
+        block at carry height during the cross).
 
-        Now: we derive the current jaw gap from gripper_joint (the same
-        linear model _gripper_angle_for_object uses), compute the offset
-        from gap-center to tcp (fixed-jaw direction, same convention as
-        _compute_jaw_offset), and shift the IK target accordingly. Net
-        effect: the gap center (block center) ends up at the cup target.
+        The _QS_SEQUENCE no longer dispatches a separate "point to drop
+        cup" step; drop_sweep owns the full motion. The Drop Point
+        button still exists for manual use.
+
+        Phase 9 invariant preserved (block-center target, not tcp_link):
+        derives the current jaw gap from gripper_joint, computes the
+        offset from gap-center to tcp along the fixed-jaw direction, and
+        shifts the IK target accordingly. The MEASURED |ax| from the
+        physical attach is preferred over the theoretical half_gap so
+        off-center grasps land cleanly.
         """
         result = self._get_selected_drop_pose()
         if result is None:
@@ -9371,7 +9388,7 @@ class SOArm101ControlGUI(Node):
 
         evt = threading.Event()
         self._motion_event = evt
-
+        self._last_motion_status = None
 
         # Drop target for the BLOCK CENTER at (cup_rim_height + hover).
         # /drop_poses publishes cup BODY-CENTER (z = cup_base + half_height),
@@ -9441,13 +9458,15 @@ class SOArm101ControlGUI(Node):
 
         grip_deg = getattr(self, '_drop_grip_angle_var', None)
         grip_angle = math.radians(grip_deg.get() if grip_deg else 45)
-        # Lock shoulder_pan to the post-drop_point physical pan so the
-        # sweep is a pure wrist-tilt, not "tilt + 1° base yaw drift".
-        # See _plan_collision_free_execute(lock_pan=...) docstring.
-        with self.joint_lock:
-            locked_pan = self._actual_positions.get(
-                'shoulder_pan',
-                self.joint_positions.get('shoulder_pan', 0.0))
+        # Lock shoulder_pan to the cup-derived pan (atan2(-y, x-X_PAN)).
+        # Phase 10.2: was previously read from the live measured pan, which
+        # required _cmd_drop_point to have run first. Cup-derived pan makes
+        # drop_sweep self-sufficient — the IK-planned trajectory drives
+        # pan from current → cup_pan as part of the combined motion (the
+        # wrist tilts up at the same time, lifting the held block over
+        # the cup rims during the cross). See _plan_collision_free_execute
+        # (lock_pan=...) docstring for the post-IK overwrite semantics.
+        locked_pan = pan
         # Sweep duration from the GUI spinbox (Grasp tab → Drop section).
         # 3.0 s default matches drop_point / grasp_home / grasp_move so
         # the whole pick-drop cycle has consistent joint velocities. User
