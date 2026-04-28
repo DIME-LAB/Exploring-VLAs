@@ -2,6 +2,18 @@
 
 ## Dataset viewer setup (rerun + lerobot-dataset-viz, 2026-04-28)
 
+**Use the wrapper for normal launches:**
+```bash
+bash mac-env/scripts/dataset_viz.sh                 # episode 0 of default ref dataset
+bash mac-env/scripts/dataset_viz.sh 5               # episode 5 of default ref dataset
+bash mac-env/scripts/dataset_viz.sh 5 user/dataset  # any repo
+bash mac-env/scripts/dataset_viz.sh --restore       # only run env restore
+bash mac-env/scripts/dataset_viz.sh --check         # only verify imports
+```
+
+The wrapper auto-detects a broken env on launch and runs the recovery sequence
+below. Manual recovery (only if you can't use the wrapper):
+
 The `lerobot-dataset-viz` toolchain is fragile on macOS pixi. After it breaks
 (symptoms: `datasets`, `av`, `rerun-sdk`, or `pyarrow` ImportError; `_iconv`
 symbol-not-found from pyarrow), restore with this exact sequence:
