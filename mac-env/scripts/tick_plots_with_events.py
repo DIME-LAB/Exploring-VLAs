@@ -93,8 +93,8 @@ def find_first_big_motion(cmd_by_joint, threshold_deg=2.0):
 
 
 def main():
-    rec_path = '/tmp/user_drive_v3.jsonl'
-    log_path = '/tmp/traj_shim.log'
+    rec_path = sys.argv[1] if len(sys.argv) > 1 else '/tmp/user_drive_v3.jsonl'
+    log_path = sys.argv[2] if len(sys.argv) > 2 else '/tmp/traj_shim.log'
 
     cmds, states = load_recorder(rec_path)
     if not cmds:
