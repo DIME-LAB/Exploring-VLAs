@@ -3267,7 +3267,7 @@ class SOArm101ControlGUI(Node):
         self.obj_listbox = self._register_listbox(
             obj_frame, label='Detected Objects', tab='Grasp',
             section='Detected Objects',
-            height=2, font=('Consolas', 9),
+            height=6, font=('Consolas', 9),
             selectbackground='#d0d0d0', selectforeground='#1a1a1a')
         self.obj_listbox.pack(fill=tk.X, padx=5, pady=2)
 
@@ -3451,7 +3451,7 @@ class SOArm101ControlGUI(Node):
         self._drop_listbox = self._register_listbox(
             drop_list_frame, label='Drop Targets',
             tab='Grasp', section='Drop Targets',
-            height=2, font=('Consolas', 9),
+            height=3, font=('Consolas', 9),
             selectbackground='#d0d0d0', selectforeground='#1a1a1a')
         self._drop_listbox.pack(fill=tk.X, padx=5, pady=2)
 
@@ -9244,13 +9244,19 @@ class SOArm101ControlGUI(Node):
 
     def _cmd_drop_refresh(self):
         """Resync cup state from /drop_poses. Mirrors _cmd_grasp_refresh:
-        remove current collision objects, schedule repopulate + re-add +
-        marker republish at fixed delays. Never clears _drop_data — the
-        /drop_poses subscription refills it at ~12 Hz so ≥6 messages have
-        arrived by the 500 ms scheduled read.
+        clear _drop_data, remove current collision objects, schedule
+        repopulate + re-add + marker republish at fixed delays. The
+        /drop_poses subscription refills _drop_data at ~12 Hz so ≥6
+        messages arrive within the 500 ms scheduled read window — safe
+        to clear without leaving the listbox blank for long.
 
-        Forces sub topics back to sim before pulling so a prior Real Test
-        session can't leak /drop_poses_real data into the sim cup
+        Clearing matters because /drop_poses child_frame_ids changed
+        (drop_0/1/2 → drop_1/2/3 after the cup-ArUco-ID remap); without
+        a clear, the stale drop_0 entry from a previous run lingers in
+        _drop_data forever and shows up in every listbox refresh.
+
+        Forces sub topics back to sim before pulling so a prior Real
+        Test session can't leak /drop_poses_real data into the sim cup
         collision scene.
         """
         if not hasattr(self, '_drop_listbox'):
@@ -9259,6 +9265,9 @@ class SOArm101ControlGUI(Node):
             tracer.close_cycle('user_canceled',
                                note='drop_refresh while cycle open')
         self._sim_ensure_sim_topics()
+        with self._drop_lock:
+            self._drop_data.clear()
+        self._drop_listbox.delete(0, tk.END)
         self._remove_cup_collision_objects()
         if getattr(self, '_gui_ready', False):
             self.root.after(500, self._populate_drop_list)
