@@ -139,6 +139,28 @@ JOINT_LIMITS = {
     'gripper_joint':   (-0.174533, 1.74533),
 }
 
+# Calibrated home pose for sim-side data collection (Quickstart cycle +
+# Record Sim tab). Derived from real-world dataset blue_sort_v1 ep7
+# frame 277 shoulders+gripper convention, sim's wrist convention, and
+# elbow_flex = -shoulder_lift (parallelogram cancellation for a compact
+# ready pose). _cmd_grasp_home (manual button, IK tab, Real Test tab,
+# etc.) keeps using the original all-zeros + sim wrist target — only
+# the data-collection path retargets to this calibrated home so the
+# recorded sim trajectories share a starting pose with real-world data.
+def _grasp_home_data_target():
+    """Joint-angle dict (radians) for the data-collection home pose.
+    Lazy import of WRIST_ROLL_URDF_PITCH avoids a circular import at
+    module load."""
+    from so_arm101_control.compute_workspace import WRIST_ROLL_URDF_PITCH
+    return {
+        'shoulder_pan':  math.radians(0.874),
+        'shoulder_lift': math.radians(-14.829),
+        'elbow_flex':    math.radians(14.829),
+        'wrist_flex':    math.pi / 2,
+        'wrist_roll':    -math.pi / 2 + WRIST_ROLL_URDF_PITCH,
+    }
+
+
 # Jaw geometry for single-moving-jaw gripper offset compensation.
 # Derived from STL mesh analysis of moving_jaw_so101_v1.stl + FK chain.
 # Linear fit: jaw_gap(m) = BASELINE_JAW_GAP + JAW_GAP_RATE * gripper_joint_angle(rad)
@@ -3546,14 +3568,14 @@ class SOArm101ControlGUI(Node):
     # manual use; the auto-sequence just doesn't dispatch it as a separate
     # step anymore.
     _QS_SEQUENCE = [
-        ('move to home',        '_cmd_grasp_home',            {'skip_if_home': True}),
+        ('move to home',        '_cmd_grasp_home_data',       {'skip_if_home': True}),
         ('grasp open',          '_cmd_gripper_open_for_object', {}),
         ('grasp move',          '_cmd_grasp_move',            {}),
         ('grasp close',         '_cmd_gripper_close_for_object', {}),
-        ('return home (carry)', '_cmd_grasp_home',            {}),
+        ('return home (carry)', '_cmd_grasp_home_data',       {}),
         ('drop sweep',          '_cmd_drop_sweep',            {}),
         ('release',             '_cmd_drop_release',          {}),
-        ('return home',         '_cmd_grasp_home',            {}),
+        ('return home',         '_cmd_grasp_home_data',       {}),
     ]
 
     def _qs_auto_drop_for_lego(self, lego_name):
@@ -3746,11 +3768,12 @@ class SOArm101ControlGUI(Node):
         self.root.after(0, _update)
 
     def _qs_is_at_home(self, tol_deg=2.0):
-        """Check whether the arm joints are already at the grasp-home pose."""
-        from so_arm101_control.compute_workspace import WRIST_ROLL_URDF_PITCH
-        target = {n: 0.0 for n in ARM_JOINT_NAMES}
-        target['wrist_flex'] = math.pi / 2
-        target['wrist_roll'] = -math.pi / 2 + WRIST_ROLL_URDF_PITCH
+        """Check whether the arm joints are already at the QS data-collection
+        home pose. Compares against _grasp_home_data_target() since
+        _QS_SEQUENCE's 'move to home' step routes through
+        _cmd_grasp_home_data. Manual _cmd_grasp_home callers don't use
+        this skip-if-home check."""
+        target = _grasp_home_data_target()
         tol = math.radians(tol_deg)
         with self.joint_lock:
             for n in ARM_JOINT_NAMES:
@@ -6147,9 +6170,11 @@ class SOArm101ControlGUI(Node):
                     f'Ep {episode_idx + 1}/{n_target}, scene {st["scene"]}, '
                     f'lego {lego} (try {attempt + 1})'))
 
-            # Optional reset to grasp_home before each episode.
+            # Optional reset to data-collection home before each episode.
+            # Uses grasp_home_data (calibrated to real-world ep7 frame 277)
+            # so sim recordings start from the same pose as real captures.
             if self._rec_reset_arm_var.get():
-                self._rec_call_trigger('grasp_home', timeout=20)
+                self._rec_call_trigger('grasp_home_data', timeout=20)
 
             verdict = self._rec_run_one_qs_cycle(lego)
             if verdict == 'PASS':
@@ -8355,6 +8380,50 @@ class SOArm101ControlGUI(Node):
             target, on_complete_event=evt, duration_s=3.0,
             allow_ompl_fallback=False)
 
+        if saved_vs is not None:
+            self.velocity_scale_var.set(saved_vs)
+
+    def _cmd_grasp_home_data(self):
+        """Move arm to the calibrated data-collection home pose.
+
+        Used by _QS_SEQUENCE (Quickstart tab cycle) and the Record Sim
+        tab's per-episode arm reset. Differs from _cmd_grasp_home in
+        the target dict only — same deterministic-tier execution and
+        same trace events (so existing telemetry / verify pipelines
+        keep working).
+
+        Target sourced from _grasp_home_data_target() so any future
+        recalibration touches a single helper. Manual home button,
+        Real Test tab, and IK tab keep using _cmd_grasp_home with the
+        original all-zeros target.
+        """
+        target = _grasp_home_data_target()
+        self._append_log(
+            f'Grasp Home (data): pan={math.degrees(target["shoulder_pan"]):+.2f}° '
+            f'lift={math.degrees(target["shoulder_lift"]):+.2f}° '
+            f'elbow={math.degrees(target["elbow_flex"]):+.2f}° '
+            f'wrist_flex={math.degrees(target["wrist_flex"]):.1f}° '
+            f'wrist_roll={math.degrees(target["wrist_roll"]):.1f}°')
+        tracer.event('grasp_home_start', target=dict(target),
+                     calibration='data')
+        evt = threading.Event()
+        self._motion_event = evt
+        def _emit_home_done():
+            evt.wait(timeout=30.0)
+            tracer.event('grasp_home_done')
+            if getattr(self, '_cycle_detach_seen', False) and tracer.is_active():
+                tracer.close_cycle('completed')
+                self._cycle_detach_seen = False
+        threading.Thread(target=_emit_home_done, daemon=True).start()
+        hvs = float(self.get_parameter('home_velocity_scale').value)
+        saved_vs = None
+        if hvs > 0.0 and hasattr(self, 'velocity_scale_var'):
+            saved_vs = self.velocity_scale_var.get()
+            self.velocity_scale_var.set(hvs)
+            self._append_log(f'  velocity_scale override: {hvs:.2f} (was {saved_vs:.2f})')
+        self._joint_space_collision_free_execute(
+            target, on_complete_event=evt, duration_s=3.0,
+            allow_ompl_fallback=False)
         if saved_vs is not None:
             self.velocity_scale_var.set(saved_vs)
 
