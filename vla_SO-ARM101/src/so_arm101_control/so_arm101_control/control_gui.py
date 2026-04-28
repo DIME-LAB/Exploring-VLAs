@@ -2965,6 +2965,9 @@ class SOArm101ControlGUI(Node):
         state['grasp_grip_duration'] = self._grasp_grip_duration_var.get()
         state['jaw_open_clearance'] = self._jaw_open_clearance_var.get()
         state['jaw_close_clearance'] = self._jaw_close_clearance_var.get()
+        if hasattr(self, '_real_grip_open_rad_var'):
+            state['real_grip_open_rad'] = self._real_grip_open_rad_var.get()
+            state['real_grip_close_rad'] = self._real_grip_close_rad_var.get()
         state['tcp_clearance'] = self._tcp_clearance_var.get()
         state['drop_hover_above_rim'] = self._drop_hover_above_rim_var.get()
 
@@ -3025,6 +3028,11 @@ class SOArm101ControlGUI(Node):
         self._grasp_grip_duration_var.set(state.get('grasp_grip_duration', 3.0))
         self._jaw_open_clearance_var.set(state.get('jaw_open_clearance', 5.0))
         self._jaw_close_clearance_var.set(state.get('jaw_close_clearance', 0.0))
+        if hasattr(self, '_real_grip_open_rad_var'):
+            self._real_grip_open_rad_var.set(
+                state.get('real_grip_open_rad', 0.375))
+            self._real_grip_close_rad_var.set(
+                state.get('real_grip_close_rad', 0.18))
         self._tcp_clearance_var.set(state.get('tcp_clearance', 1.0))
         self._drop_hover_above_rim_var.set(state.get('drop_hover_above_rim', 0.050))
 
@@ -3409,6 +3417,40 @@ class SOArm101ControlGUI(Node):
                                textvariable=self._jaw_close_clearance_var,
                                from_=-10.0, to=10.0, increment=0.5,
                                width=5, format='%.1f').pack(side=tk.LEFT, padx=(5, 0))
+
+        # ---- Real-mode gripper defaults (hardcoded angles for a lego) ----
+        # Sim mode uses dynamic bbox-driven angle calculation
+        # (BASELINE_JAW_GAP + JAW_GAP_RATE × angle, see
+        # _gripper_angle_for_object). In real mode, /objects_bbox_real
+        # is available but real-world bbox accuracy is noisier than
+        # sim ground truth, so we override with a single tuned pair
+        # for a standard lego block. Adjust via these spinboxes if
+        # the gripper doesn't grip / overshoots — typical range is
+        # ~0.15-0.20 rad close, ~0.35-0.40 rad open for a lego.
+        real_grip_row = tk.Frame(grip_col)
+        real_grip_row.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(real_grip_row, text='Real (rad):',
+                 anchor='w').pack(side=tk.LEFT)
+        tk.Label(real_grip_row, text='close',
+                 anchor='w').pack(side=tk.LEFT, padx=(6, 1))
+        self._real_grip_close_rad_var = tk.DoubleVar(value=0.18)
+        self._register_spinbox(
+            real_grip_row, label='Real Grip Close (rad)',
+            tab='Grasp', section='Gripper',
+            textvariable=self._real_grip_close_rad_var,
+            from_=0.0, to=1.745, increment=0.01,
+            width=6, format='%.3f',
+        ).pack(side=tk.LEFT)
+        tk.Label(real_grip_row, text='open',
+                 anchor='w').pack(side=tk.LEFT, padx=(8, 1))
+        self._real_grip_open_rad_var = tk.DoubleVar(value=0.375)
+        self._register_spinbox(
+            real_grip_row, label='Real Grip Open (rad)',
+            tab='Grasp', section='Gripper',
+            textvariable=self._real_grip_open_rad_var,
+            from_=0.0, to=1.745, increment=0.01,
+            width=6, format='%.3f',
+        ).pack(side=tk.LEFT)
 
         tcp_clear_row = tk.Frame(grip_col)
         tcp_clear_row.pack(fill=tk.X, padx=5, pady=2)
@@ -10420,9 +10462,30 @@ class SOArm101ControlGUI(Node):
     def _gripper_angle_for_object(self, obj_name):
         """Return (open_angle, close_angle) in radians for the selected object.
 
-        Uses jaw_gap = BASELINE_JAW_GAP + JAW_GAP_RATE * angle model derived
-        from STL mesh analysis. Falls back to full range if no bbox data.
+        Sim mode: dynamic — uses jaw_gap = BASELINE_JAW_GAP + JAW_GAP_RATE
+        × angle model derived from STL mesh analysis, with bbox from
+        /objects_bbox_sim.
+
+        Real mode: hardcoded — uses the Grasp tab "Real (rad)" spinboxes
+        (default open=0.375, close=0.18 — tuned for a standard lego
+        block). Bypasses the bbox-driven calculation because real-world
+        bbox accuracy from yoloe is noisier than sim ground truth, and
+        a single tuned pair is more reliable for repeated grasps.
         """
+        # Real mode: short-circuit to the spinbox-configured defaults.
+        if self.use_real_hardware and hasattr(
+                self, '_real_grip_open_rad_var'):
+            try:
+                open_angle = float(self._real_grip_open_rad_var.get())
+                close_angle = float(self._real_grip_close_rad_var.get())
+                # Clamp to URDF limits defensively.
+                lo, hi = JOINT_LIMITS['gripper_joint']
+                open_angle = max(lo, min(open_angle, hi))
+                close_angle = max(lo, min(close_angle, hi))
+                return open_angle, close_angle
+            except (TypeError, ValueError):
+                pass  # fall through to dynamic path on bad input
+
         grip_width = self._get_grip_width(obj_name) if obj_name else None
         if grip_width is None:
             return JOINT_LIMITS['gripper_joint'][1], JOINT_LIMITS['gripper_joint'][0]
