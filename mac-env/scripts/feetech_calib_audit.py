@@ -53,17 +53,31 @@ def read_word(ser, sid, addr):
 
 
 def read_signed_word(ser, sid, addr):
-    """Some Feetech registers are signed 16-bit. Homing_Offset register 31
-    is documented as int16 in some refs and uint16 with a sign bit in
-    others. Treat top bit as sign for now."""
+    """Read a signed Feetech register and decode using the 12-bit sign-
+    magnitude convention used by STS3215 firmware for Homing_Offset
+    (register 31). lerobot's motors_bus.py applies the same decode
+    internally before storing in the calibration JSON, so EEPROM as
+    decoded here matches JSON homing_offset 1-to-1.
+
+    Encoding: bits 0-10 = magnitude (0-2047), bit 11 = sign (1=negative).
+    Bits 12-15 are reserved/unused on STS3215 STORED values.
+
+    Prior version of this function read raw uint16 and only flipped the
+    16-bit two's-complement boundary (>=32768 → negative). That gave
+    false MISMATCH alarms for any negative homing — the firmware never
+    sets bits 12-15 so values like JSON=-137 came back as raw=2185
+    (which the old decoder reported as +2185 instead of -137).
+    """
     raw = read_word(ser, sid, addr)
     if raw is None:
         return None
-    # Convention: if top bit set (>=32768), negative
+    # Two's-complement int16 fallback (covers other registers that may
+    # use the standard convention, e.g. Goal_Velocity).
     if raw >= 32768:
         return raw - 65536
-    # OR Feetech's "sign bit" convention: bit 11 (>=2048 means negative)
-    # We'll show both interpretations
+    # 12-bit sign-magnitude (Feetech STS Homing_Offset convention).
+    if raw & 0x800:  # bit 11 set → negative
+        return -(raw & 0x7FF)
     return raw
 
 

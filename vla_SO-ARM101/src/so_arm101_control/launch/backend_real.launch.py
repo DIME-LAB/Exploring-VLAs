@@ -285,13 +285,13 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'velocity_scale': velocity_scale_real,
-            'rate_hz': 20.0,
+            # 50 Hz matches the shim's wrapper-spawned instance (control_gui's
+            # auto-Connect path) so behavior is identical pre/post-handoff.
+            # Cubic-Hermite interp + INLINE gravity FF + integrator (see
+            # trajectory_shim.py) — no separate gravity_comp_node needed.
+            'rate_hz': 50.0,
             'use_sim_time': False,
-            # Route through gravity_comp: shim writes /joint_targets, then
-            # gravity_comp_node applies K_calib feed-forward and republishes
-            # to /joint_commands. Without this, K_calib calibration is a
-            # no-op and the arm sags by the full uncompensated amount.
-            'joint_commands_topic': '/joint_targets',
+            'joint_commands_topic': '/joint_commands',
         }],
         condition=UnlessCondition(read_only),
     )
@@ -373,5 +373,8 @@ def generate_launch_description():
         jointstatereader_observe,
         cameras_and_perception,
         trajectory_shim,
-        gravity_comp_node,
+        # gravity_comp_node REMOVED: gravity FF + integrator now run inline
+        # in trajectory_shim's _publish path. The standalone executable
+        # (`ros2 run so_arm101_control gravity_comp_node --calibrate`) still
+        # ships for re-fitting K_calib offline; only the daemon mode is gone.
     ])

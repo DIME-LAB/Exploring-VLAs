@@ -413,7 +413,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--urdf', default=None,
                     help='URDF path. Default: so_arm101_description package share.')
-    ap.add_argument('--rate-hz', type=float, default=20.0)
+    # 50 Hz: matches trajectory_shim's publish rate. At 20 Hz, gravity_comp
+    # was the bottleneck — shim's smooth 50 Hz setpoint stream got resampled
+    # down to 20 Hz steps with up to 50 ms of phase jitter relative to shim
+    # ticks, which the servo PD treated as a square wave on top of the
+    # trajectory. Matching rates eliminates the resampling step.
+    ap.add_argument('--rate-hz', type=float, default=50.0)
     ap.add_argument('--integrator-rate-hz', type=float, default=2.0)
     ap.add_argument('--alpha-int', type=float, default=0.3)
     ap.add_argument('--i-max-deg', type=float, default=5.0)

@@ -211,6 +211,37 @@ exit, so downstream consumers see only this-cycle counts.
 
 ## Gotchas
 
+- **Feetech `Homing_Offset` (reg 31) is 12-bit sign-magnitude in EEPROM,
+  NOT int16.** Bit 11 = sign, bits 0-10 = magnitude. lerobot's
+  `motors_bus.py` decodes this internally before storing in JSON.
+  Raw byte readers must apply the same decode or you'll see false
+  "EEPROM ≠ JSON" mismatches on every joint with negative homing
+  (most of them after a real calibration). Reference implementation:
+  `mac-env/scripts/feetech_calib_audit.py:read_signed_word`.
+- **Calibration MUST run with the stack stopped.** Even though
+  `calibrate_arm.sh` `pkill`'s jsr first, control_gui's auto-Connect
+  respawns its own jsr ~3s after `stack_start`. If lerobot-calibrate
+  is still running then, jsr's 50 Hz reads of register 56 collide
+  with lerobot's writes to register 31 → corrupted EEPROM. Workflow:
+  `stack_stop → calibrate_arm.sh → feetech_calib_audit.py → stack_start`.
+  Never run calibration with the stack up.
+- **Calibration step 1's pose IS the new /joint_states zero**, regardless
+  of the wizard's "middle of its range of motion" wording. The wizard
+  records WHATEVER pose you press ENTER at as the homing reference.
+  Press ENTER at URDF zero (straight horizontal) for /joint_states to
+  match RViz at URDF zero. wrist_roll has no end-stop so it's the
+  joint most likely to be off-zero by 90°+ if you don't visually align
+  the gripper parallel to the arm before pressing ENTER.
+- **`recenter_one` requires prior freedrive (torque off).** Direct call
+  with torque ON makes the servo PD drive to a wrong position because
+  Goal_Position is interpreted in post-Homing coords; changing Homing
+  while torque is on means the same Goal value points to a new physical
+  position. **For bulk EEPROM drift, use `lerobot-calibrate` (via
+  `calibrate_arm.sh`)**, not recenter. An in-place "recenter to a
+  non-zero target" operation without hand-positioning is architecturally
+  impossible on Feetech servos for cable-loaded joints — Feetech doesn't
+  expose a "rebase Goal with Homing" command, and torque-off cycles
+  trade PD-driven motion for cable/gravity sag.
 - **Tier-1 spline-divergence trap**: an earlier tier-1 implementation
   validated N waypoints but dispatched only `(start, end, duration)`
   — controller's spline took different paths. Current tier-1

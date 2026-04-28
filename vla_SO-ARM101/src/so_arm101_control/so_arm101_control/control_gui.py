@@ -1871,8 +1871,41 @@ class SOArm101ControlGUI(Node):
             if goal_handle.accepted:
                 with self._gripper_goal_lock:
                     self._gripper_goal_handle = goal_handle
+                # Hook result completion so we can re-sync sliders/goal-state
+                # to the actual physical gripper position. Without this, when
+                # the gripper blocks on an object before reaching the
+                # commanded jaw_target, the slider + RViz orange-ghost stay
+                # at the unreached target while /joint_states reports the
+                # actual stopped position — visible mismatch.
+                rf = goal_handle.get_result_async()
+                rf.add_done_callback(self._gripper_result_done)
         except Exception:
             pass
+
+    def _gripper_result_done(self, future):
+        """Re-sync gripper slider + goal_state to actual /joint_states once
+        the gripper trajectory completes (success, abort, or blocked-on-
+        object). _gripper_command set _slider_driven=True to push the
+        commanded jaw_target into the GUI immediately; clearing it here
+        lets the next _joint_states_callback overwrite with actual. Also
+        does an immediate sync so the user sees the corrected value
+        without waiting for the next /joint_states tick."""
+        self._slider_driven = False
+        with self.joint_lock:
+            actual = self._actual_positions.get('gripper_joint')
+        if actual is None:
+            return
+        # Immediate force-sync (avoid waiting 20-50 ms for the next js msg).
+        with self.joint_lock:
+            self.joint_positions['gripper_joint'] = actual
+        if getattr(self, '_gui_ready', False):
+            def _apply():
+                if 'gripper_joint' in self.sliders:
+                    self.sliders['gripper_joint'].set(actual)
+                    self.slider_labels['gripper_joint'].config(
+                        text=f'{actual:.3f}')
+                self._publish_goal_state()
+            self.root.after(0, _apply)
 
     # ------------------------------------------------------------------
     # Joint state feedback
@@ -1892,8 +1925,28 @@ class SOArm101ControlGUI(Node):
                 for i, name in enumerate(msg.name):
                     if i < len(msg.velocity):
                         self._actual_velocities[name] = msg.velocity[i]
-        # On first message, seed joint_positions from actual robot state
+        # On first message, seed joint_positions from actual robot state.
+        # IMPORTANT: only mark sync "done" once we've received a message
+        # containing ALL 6 expected joints. Earlier versions accepted the
+        # first message even if it was partial — e.g., the launch's
+        # observe-mode jsr's first publish sometimes omits gripper_joint
+        # while the bus warms up. That left the gripper slider stuck at
+        # the DoubleVar default 0.0 until the next /joint_states tick
+        # fired AFTER _slider_driven cleared, which the user perceived
+        # as "arm syncs on start, gripper doesn't." Waiting for all 6
+        # joints means we only init-sync once we have a complete picture.
         if not self._initial_sync_done:
+            msg_names = set(msg.name)
+            if not set(ALL_JOINT_NAMES).issubset(msg_names):
+                # Partial message — accumulate the joints we DO have into
+                # _actual_positions/joint_positions for tracking, but
+                # don't push to sliders yet (would show stale 0s for
+                # missing joints). Wait for a full message.
+                with self.joint_lock:
+                    for i, name in enumerate(msg.name):
+                        if name in self.joint_positions and i < len(msg.position):
+                            self.joint_positions[name] = msg.position[i]
+                return
             self._initial_sync_done = True
             with self.joint_lock:
                 for i, name in enumerate(msg.name):
@@ -6189,18 +6242,21 @@ class SOArm101ControlGUI(Node):
             self._SHIM_WRAPPER: (
                 '#!/usr/bin/env bash\n' + common_env +
                 f'exec ros2 run so_arm101_control trajectory_shim --ros-args '
-                # Publish setpoints to /joint_targets (NOT /joint_commands)
-                # so gravity_comp_node intercepts, applies K_calib feed-
-                # forward (Δθ_ff = K · τ_g), and republishes the corrected
-                # setpoint to /joint_commands. Without this rerouting,
-                # the shim writes /joint_commands directly and bypasses
-                # gravity_comp entirely — K_calib calibration becomes a
-                # no-op and the arm sags by the full uncompensated amount
-                # at every pose, which is why grasp_home / Set-to-Zero
-                # show visible droop vs the RViz model.
-                f'-p joint_commands_topic:=/joint_targets '
+                # Direct publish to /joint_commands. Gravity FF + Layer-3
+                # integrator are now INSIDE the shim (see _publish /
+                # _integrator_tick in trajectory_shim.py), so no separate
+                # gravity_comp_node is needed in the production motion
+                # path. gravity_comp_node still ships as a standalone tool
+                # for `--calibrate` (re-fitting K_calib).
+                f'-p joint_commands_topic:=/joint_commands '
                 f'-p velocity_scale:=0.5 '
-                f'-p rate_hz:=20.0 '
+                # 50 Hz: 4× finer setpoint resolution than the prior 20 Hz
+                # eliminates the per-tick "step" the Feetech PD treated as
+                # an impulse. Combined with the shim's cubic-Hermite interp
+                # + zero-velocity endpoints (see _interpolate /
+                # _compute_hermite_tangents), the commanded stream is C1-
+                # continuous from rest to rest.
+                f'-p rate_hz:=50.0 '
                 f'-p tolerance_rad:=0.0524 '
                 f"-p completion_timeout_s:=2.0'\n"
             ),
@@ -6611,6 +6667,7 @@ class SOArm101ControlGUI(Node):
                 self._recenter_state = 'idle'
 
         threading.Thread(target=_worker, daemon=True).start()
+
 
     def _set_target_joint_then_call(self, service, joint):
         """Set jsr's target_joint_name param, then call the named service.
