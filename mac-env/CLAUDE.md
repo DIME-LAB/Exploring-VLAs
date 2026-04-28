@@ -3,6 +3,8 @@
 This dir is the **macOS / pixi build environment** + **session-management scripts** for the SO-ARM101 stack.
 
 > **Inherits**: see `../CLAUDE.md` for repo topology, build paths, macOS gotchas.
+>
+> **Linux counterpart**: `../linux-env/CLAUDE.md` — Isaac-Sim-backed recording stack (no Gazebo). Uses pixi-Jazzy for the lerobot consumer + a system-Humble mirror node, paired with the Isaac Sim digital twin at `~/Documents/isaac-sim-mcp/`.
 
 ## Why `mac-env/` exists
 

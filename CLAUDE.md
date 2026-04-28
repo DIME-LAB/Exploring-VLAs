@@ -46,7 +46,8 @@ Read in this order on first contact:
 Per-area conventions also live in nested CLAUDE.md files:
 
 - `vla_SO-ARM101/CLAUDE.md` — package inventory + sim-world conventions
-- `mac-env/CLAUDE.md` — script lifecycle (stack_start, record, drive)
+- `mac-env/CLAUDE.md` — Mac script lifecycle (stack_start, record, drive)
+- `linux-env/CLAUDE.md` — **Linux** record stack (mirror, lerobot-record wrapper, Record Sim tab integration). Recording on Linux pairs with Isaac Sim digital twin at `~/Documents/isaac-sim-mcp/` instead of Gazebo.
 - `lerobot/CLAUDE.md` (= `AGENTS.md` symlinked) — fork plugin rules, rclpy singleton, numpy pin
 
 ## macOS gotchas (top 5)
@@ -78,6 +79,20 @@ bash mac-env/scripts/stack_stop.sh               # tear down (SIGINT propagates)
 ```
 
 For real-hardware data collection see the runbook (#2 above).
+
+### Bringing it up (Linux + Isaac Sim — sim recording)
+
+```bash
+# 1. Isaac Sim + control stack: see ~/Documents/isaac-sim-mcp/CLAUDE.md
+#    (the canonical bring-up doc — covers preflight, MCP socket on 8767,
+#    quick_start, control.launch.py)
+
+# 2. Recording layer: see linux-env/CLAUDE.md
+#    (mirror, lerobot-record wrapper, or the Record Sim tab in control_gui)
+```
+
+The Linux path uses Isaac Sim as the physics backend (Gazebo on Mac) and
+the `linux-env/` pixi-Jazzy env for the lerobot consumer side.
 
 ## Conventions for agents working here
 

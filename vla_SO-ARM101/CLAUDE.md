@@ -156,6 +156,22 @@ exit, so downstream consumers see only this-cycle counts.
 | `_QS_SEQUENCE` | `control_gui.py:3424` | The 9-step pick-and-drop player flow |
 | `_CUP_COLLISION_PADDING` | `control_gui.py:172` | Module-level cup pad multiplier |
 
+## Record Sim tab (Linux dataset recording)
+
+A 7th tab in `control_gui` orchestrates the full lerobot-record session:
+spawns mirror + lerobot-record subprocesses, runs N pick-place episodes
+through the QS sequence, retries on QS halt (5 max per lego), finalizes
+dataset on Stop. Auto-registered services usable from CLI:
+`/so_arm101_control_gui/{rec_start, rec_pause, rec_stop, rec_reset_scene,
+rec_open_dataset}`. Settings (Episodes, Block color, action checkboxes)
+are widget-registry entries — drive via `set_widget_value` (`widget_id` +
+`widget_value` params, then call the trigger). See
+`~/Projects/Exploring-VLAs/linux-env/CLAUDE.md` for end-to-end CLI flow.
+
+`REC_LEGOS_BY_COLOR` (module-level constant near top of `control_gui.py`)
+defines which legos cycle per color — currently `[<color>_2x2,
+<color>_2x3]` per scene.
+
 ## Gotchas
 
 - **Tier-1 spline-divergence trap**: an earlier tier-1 implementation
@@ -188,6 +204,41 @@ exit, so downstream consumers see only this-cycle counts.
   clear `_motion_event` / `_last_motion_status` / `_cmd_error`
   before dispatch. So the script harness and GUI buttons produce
   identical behavior.
+- **Action interface, not topic interface, actuates joints**: under
+  `mock_components/GenericSystem` (Linux config), publishing to
+  `/arm_controller/joint_trajectory` is silently ignored —
+  JointTrajectoryController only honors FollowJointTrajectory **action
+  goals** to `/arm_controller/follow_joint_trajectory`. Mac's
+  `gz_ros2_control` honors the topic interface; Linux's mock_components
+  doesn't. control_gui already uses action clients; new code should too.
+- **`_drop_wrist_roll_sign` is dead state** (cleaned Apr 27, 2026).
+  `_cmd_drop_point` previously read it and flipped wrist_roll to ±π/2
+  for ArUco scan orientation — now hardcoded to grasp_home's wrist_roll
+  (`-π/2 + URDF_PITCH ≈ -87.2°`). Real Test's Drop Scan path uses its
+  own dedicated `SCAN_WRIST_ROLL_RAD = π/2` constant and does not
+  share with Drop Point. Don't reintroduce a flag that gates QS-side
+  behavior on Real-Test-side state.
+- **`_hot_reload_gui` has its own hardcoded tab list** at
+  `control_gui.py:3055`. Adding a new tab requires editing TWO places:
+  (1) the notebook builder around line 1948, and (2) the rebuild loop
+  inside `_hot_reload_gui`. Without (2) the tab won't appear after
+  Ctrl+Shift+R until a full process restart. The error-safe wrapper
+  also adds a `<name> (ERROR)` tab if the builder raises, but that
+  `(ERROR)` tab persists across reloads in Tk geometry until process
+  restart.
+- **Class-level constants don't survive `_hot_reload_logic`**.
+  `class Foo: X = ...` only attaches X to the new class object created
+  on re-import; the running instance's `__class__` ref still points
+  to the old class. Either put constants at MODULE level (preferred —
+  see `REC_LEGOS_BY_COLOR`, `REC_LEROBOT_SCRIPT` etc near the top of
+  `control_gui.py`) or access via `getattr(self, 'X', default)` if
+  they must live on the class.
+- **`/joint_commands` triggers `_ext_cmd_callback`** which sends action
+  goals on every received message. Don't mirror `/joint_states →
+  /joint_commands` — it creates a 30 Hz feedback loop that saturates
+  the executor and starves all `qs_*` services. Use
+  `/joint_commands_lerobot` (or another distinct topic) for recorder
+  action sources. See `linux-env/CLAUDE.md`.
 
 ## Tracking-lag context
 
