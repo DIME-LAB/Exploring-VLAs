@@ -191,14 +191,15 @@ REC_SIM_RESET_SCRIPT = os.path.expanduser(
     "~/Projects/Exploring-VLAs/vla_SO-ARM101/scripts/sim_reset.sh")
 REC_MCP_HOST = "localhost"
 REC_MCP_PORT = 8767
-# Hardcoded scene contract — matches extension.py LEGO_USDS.
-# 2 sizes per color picked → 2 episodes per scene. Skipping 2x4 (largest)
-# because its grasp footprint is closer to the workspace edge and tends to
-# need yaw-fallback retries.
+# Hardcoded scene contract — MUST stay in sync with extension.py
+# LEGO_USDS block_names. 1 episode = 1 lego pick-place. Lego rotates
+# through this list per episode for uniform dataset coverage.
+# Current scene contract: 2 of each color × 2x3 (suffixed _a / _b),
+# spawned via Cloner(replicate_physics=True).
 REC_LEGOS_BY_COLOR = {
-    "red":   ["red_2x2", "red_2x3"],
-    "green": ["green_2x2", "green_2x3"],
-    "blue":  ["blue_2x2", "blue_2x3"],
+    "red":   ["red_2x3_0", "red_2x3_1"],
+    "green": ["green_2x3_0", "green_2x3_1"],
+    "blue":  ["blue_2x3_0", "blue_2x3_1"],
 }
 REC_MAX_RETRIES_PER_LEGO = 5
 
@@ -5687,9 +5688,9 @@ class SOArm101ControlGUI(Node):
         actions = ttk.LabelFrame(frame, text='Per-episode actions')
         actions.pack(fill=tk.X, padx=10, pady=4)
         for label, var in [
-            ('Randomize legos (per scene = every K episodes)',
+            ('Randomize legos (every episode)',
              self._rec_randomize_legos_var),
-            ('Randomize cups (per scene)',
+            ('Randomize cups (every episode)',
              self._rec_randomize_cups_var),
             ('Reset arm to grasp_home (per episode)',
              self._rec_reset_arm_var),
@@ -6046,10 +6047,14 @@ class SOArm101ControlGUI(Node):
     # -- Main loop --------------------------------------------------------
 
     def _rec_loop_thread(self):
-        """Orchestration loop. Runs on a daemon background thread."""
+        """Orchestration loop. Runs on a daemon background thread.
+
+        Episode contract: 1 episode = 1 lego pick-place. The scene is
+        re-randomized before every episode (not every K), and the lego
+        size rotates through `legos` for uniform coverage.
+        """
         st = self._rec_state
         legos = list(REC_LEGOS_BY_COLOR[self._rec_color_var.get()])
-        legos_per_scene = len(legos)
         n_target = st['n_episodes']
 
         # Warm-up wait — give lerobot ~10s to subscribe + emit first frame.
@@ -6079,22 +6084,23 @@ class SOArm101ControlGUI(Node):
         while episode_idx < n_target and not st['stop_evt'].is_set():
             st['pause_evt'].wait()  # block while paused
 
-            # Start of scene?
-            if episode_idx % legos_per_scene == 0:
-                scene_idx += 1
-                st['scene'] = scene_idx
-                self._rec_set_status(
-                    status_text='RANDOMIZING',
-                    progress_text=(
-                        f'Episode {episode_idx + 1}/{n_target}, '
-                        f'scene {scene_idx}'))
-                if self._rec_randomize_legos_var.get():
-                    self._rec_mcp_call('randomize_object_poses', {})
-                if self._rec_randomize_cups_var.get():
-                    self._rec_mcp_call('randomize_cups', {})
-                time.sleep(1.0)  # let physics settle
+            # Re-randomize before every episode. scene_idx ≡ episode_idx
+            # under the new contract; kept distinct for status display
+            # parity with prior versions.
+            scene_idx += 1
+            st['scene'] = scene_idx
+            self._rec_set_status(
+                status_text='RANDOMIZING',
+                progress_text=(
+                    f'Episode {episode_idx + 1}/{n_target}, '
+                    f'scene {scene_idx}'))
+            if self._rec_randomize_legos_var.get():
+                self._rec_mcp_call('randomize_object_poses', {})
+            if self._rec_randomize_cups_var.get():
+                self._rec_mcp_call('randomize_cups', {})
+            time.sleep(1.0)  # let physics settle
 
-            lego = legos[episode_idx % legos_per_scene]
+            lego = legos[episode_idx % len(legos)]
             st['last_lego'] = lego
 
             verdict = self._rec_run_episode_with_retry(lego, episode_idx, n_target)
