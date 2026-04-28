@@ -65,6 +65,18 @@ class JointStateReader(Node):
         self.declare_parameter('mirror_to_follower', True)         # legacy USB teleop
         self.declare_parameter('accept_command_input', False)      # topic-driven teleop
 
+        # --- SyncWritePosEx tuning (used in topic-driven mode) ---
+        # Acceleration register is 1 byte (0..254); 254 = fastest ramp.
+        # Speed register is 2 bytes (0..3400 steps/s ≈ 0..166°/s);
+        # higher = firmware-internal profile completes each per-tick move
+        # in less time, leaving the Hermite stream from trajectory_shim as
+        # the dominant rate-shaping authority. Values of 0 are interpreted
+        # by Feetech firmware as "use default" — pass nonzero numbers to
+        # force the profile params we want.
+        self.declare_parameter('sync_write_acc', 254)
+        self.declare_parameter('sync_write_speed', 3400)
+        self.declare_parameter('use_sync_write', True)
+
         # --- Resolve ---
         self.leader_port_name = str(self.get_parameter('leader_port').value)
         self.follower_port_name = str(self.get_parameter('follower_port').value)
@@ -84,6 +96,10 @@ class JointStateReader(Node):
 
         self.mirror_to_follower = bool(self.get_parameter('mirror_to_follower').value)
         self.accept_command_input = bool(self.get_parameter('accept_command_input').value)
+
+        self.sync_write_acc = int(self.get_parameter('sync_write_acc').value)
+        self.sync_write_speed = int(self.get_parameter('sync_write_speed').value)
+        self.use_sync_write = bool(self.get_parameter('use_sync_write').value)
 
         if self.mirror_to_follower and self.accept_command_input:
             self.get_logger().warn(
@@ -260,6 +276,56 @@ class JointStateReader(Node):
         except Exception:
             return False
 
+    def _sync_write_pos_ex(self, ser, servo_ticks, acc=254, time_v=0,
+                           speed=3400):
+        """Synchronized Goal_Acc + Goal_Pos + Goal_Time + Goal_Speed write
+        for all servos in ONE half-duplex bus transaction (instruction 0x83).
+
+        Replaces the per-servo sequential `_write_servo_goal` loop
+        (`+ inter_servo_delay_s` between each) with a single broadcast
+        packet — eliminating the ~12 ms cumulative bus skew across 6
+        joints, which is exactly the window where gravity coupling shows
+        up at trajectory start. Also gives the firmware explicit
+        Goal_Acceleration + Goal_Speed every tick, so the Feetech internal
+        position-profile state is refreshed continuously instead of
+        relying on whatever defaults the EEPROM holds.
+
+        Setting accel=254 (max ramp) and speed=3400 (~166°/s, near the
+        STS3215 maximum) makes each per-tick move as close to a "go to
+        position now" passthrough as the firmware allows; downstream
+        rate-shaping comes from the trajectory_shim's Hermite stream, not
+        from firmware-internal smoothing.
+
+        servo_ticks is list[(id, ticks)]; pass only the joints actually
+        present in the inbound message so partial-target updates don't
+        wipe joints absent from the stream.
+        """
+        if not servo_ticks:
+            return False
+        start_addr = 0x29  # Goal_Acc; consecutive registers 0x29..0x2F
+        per_data_len = 7   # acc(1) + pos(2) + time(2) + speed(2)
+        n = len(servo_ticks)
+        # length field = bytes after length (instr + addr + perlen +
+        # N*(id+data) + checksum) = 4 + n*(1+per_data_len)
+        length = 4 + n * (1 + per_data_len)
+        payload = [0xFE, length, 0x83, start_addr, per_data_len]
+        for servo_id, ticks in servo_ticks:
+            ticks = max(0, min(4095, int(ticks)))
+            payload.extend([
+                int(servo_id),
+                acc & 0xFF,
+                ticks & 0xFF, (ticks >> 8) & 0xFF,
+                time_v & 0xFF, (time_v >> 8) & 0xFF,
+                speed & 0xFF, (speed >> 8) & 0xFF,
+            ])
+        try:
+            packet = bytes([0xFF, 0xFF] + payload +
+                           [self._checksum(payload)])
+            ser.write(packet)
+            return True
+        except Exception:
+            return False
+
     def _write_servo_byte(self, ser, servo_id: int, addr: int, value: int):
         """Write a single-byte EEPROM/RAM register to a Feetech servo.
 
@@ -337,22 +403,55 @@ class JointStateReader(Node):
 
     # --------------------------------------------------------------- command sub
     def _on_command_msg(self, msg: JointState):
-        """Topic-driven follower write. Only active when accept_command_input=True."""
+        """Topic-driven follower write. Only active when accept_command_input=True.
+
+        Sync-write path (default): all joints in ONE Feetech bus packet via
+        instruction 0x83 (SYNC_WRITE), pushing Goal_Acc + Goal_Pos +
+        Goal_Time + Goal_Speed. Eliminates per-joint bus skew and gives
+        firmware fresh profile params each tick — addresses the
+        hold→motion stiffness drop that produces the "release" jerk users
+        see at trajectory start (see trajectory_shim.py docstring + GPT
+        diagnosis comment in MEMORY.md).
+
+        Legacy path (use_sync_write=false): per-joint sequential
+        WRITE_DATA writes with inter_servo_delay_s between, preserved for
+        bring-up debugging.
+        """
         if not self.accept_command_input or self.follower_serial is None:
             return
         # Match incoming positions to our joint ordering by name.
         pos_by_name = dict(zip(msg.name, msg.position, strict=False))
-        with self.follower_write_lock:
+        if self.use_sync_write:
+            servo_ticks = []
             for i, name in enumerate(self.joint_names):
                 rad = pos_by_name.get(name)
                 if rad is None:
                     continue
-                servo_id = i + 1
-                if not self._write_servo_goal(
-                    self.follower_serial, servo_id, self._radians_to_ticks(rad)
-                ):
+                servo_ticks.append((i + 1, self._radians_to_ticks(rad)))
+            with self.follower_write_lock:
+                ok = self._sync_write_pos_ex(
+                    self.follower_serial, servo_ticks,
+                    acc=self.sync_write_acc,
+                    speed=self.sync_write_speed,
+                )
+            if not ok:
+                # Don't pinpoint per-joint blame in sync mode; bump the
+                # whole vector so write-error rate still flags bus issues.
+                for i in range(len(self.joint_names)):
                     self.write_errors[i] += 1
-                time.sleep(self.inter_servo_delay_s)
+        else:
+            with self.follower_write_lock:
+                for i, name in enumerate(self.joint_names):
+                    rad = pos_by_name.get(name)
+                    if rad is None:
+                        continue
+                    servo_id = i + 1
+                    if not self._write_servo_goal(
+                        self.follower_serial, servo_id,
+                        self._radians_to_ticks(rad)
+                    ):
+                        self.write_errors[i] += 1
+                    time.sleep(self.inter_servo_delay_s)
         self.command_msgs_received += 1
 
     # --------------------------------------------------------------- torque_reset

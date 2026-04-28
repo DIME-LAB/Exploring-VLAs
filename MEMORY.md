@@ -1,5 +1,59 @@
 # Project Memory — Exploring-VLAs
 
+## Motion-quality stack (2026-04-28) — what's where & why
+
+Empirical-debug session that landed `trajectory_shim` + `jointstatereader` in a stable motion-quality regime. The journey is documented here because every change is non-obvious and tied to a specific observation about the **STS3215 firmware behavior** that you will rediscover otherwise.
+
+### Hardware truths to know first
+
+- **Feetech STS3215 firmware deadband**: ~0.88° (10 encoder counts at 0.088°/LSB). Goal_Position writes within this band of the previously-honored Goal are silently ignored. Source: Robo9 measurement (https://robonine.com/testing-of-feetech-sts3215-servomotor-backlash-repeatability-and-torque/).
+- **Mechanical backlash**: ~0.87° (vendor spec said 0.5°; actual is 75% worse). Adds to the deadband to give a ~1° unrecoverable noise floor on static positioning.
+- **Encoder LSB**: 0.088°. Visible "ticks" the user sees are servo motion at this resolution.
+- **No upstream gravity-comp** in HuggingFace LeRobot for SO-ARM. Our trajectory_shim's stack is more sophisticated than anything documented upstream — we are in original-research territory.
+
+### What's shipped in trajectory_shim.py
+
+1. **Cubic Hermite interp + zero-velocity endpoints** (line ~88): smooths motion within a trajectory's waypoints; pinning first/last tangents to 0 eliminates the velocity-step jerk at trajectory boundaries.
+2. **Soft-start prefix** (line ~497): if `/joint_states − traj.points[0]` exceeds threshold (default 0.5°), prepend a synthetic waypoint at current state and shift original waypoints by `soft_start_s` (0.2s default). Hermite then eases physical-actual → planner-seed-pose. **DEAD CODE** when MoveIt seeds from current state (gap=0), which is the normal case. Kept as defensive scaffolding.
+3. **Continuous publishing during hold** (line ~402, `_idle_tick`): the shim publishes the last setpoint at 50 Hz forever between goals. Reason: when the bus goes silent, the STS3215 firmware enters its quiescent static-hold profile; the next goal accept causes a hold→motion firmware transition that briefly drops effective support torque → arm "releases" with gravity for a fraction of a second before catching. Continuous publish keeps the firmware out of that quiescent state.
+4. **Wire freeze on `_play()` exit** (line ~752): after success or tolerance-violated abort, `_wire_frozen=True` so `_idle_tick` calls `_publish_frozen()` (republishes literal saved cmd values, bypassing FF/i_term re-evaluation). Reason: without this, the integrator continues drifting cmd post-trajectory at ~0.5°/sec; cumulative shift crosses the firmware deadband ~1 sec later, and the servo lurches in 1° LSB-snap "ticks" the user can see. Freeze stops the drift before it accumulates past the deadband.
+5. **50 Hz integrator with proportionally-scaled alpha** (line ~241): integrator runs at the publish rate so the bus sees small per-tick increments rather than 2 Hz step changes. `alpha=0.008` and `motion_leak=0.0114` preserve the same cumulative learning rate as the original 2 Hz × 0.2 / 25% setup.
+6. **Rate-limited i_term contribution** (line ~688): per-tick wire-cmd shift due to i_term capped at `max_i_change_per_tick_deg=0.04°` (½ LSB) so individual integrator updates can't cross encoder resolution and stair-step the servo.
+7. **Predictive r_hat(q) model** (line ~218 onward): per-joint `K_res` learned online from converged hold integrator values, used as `cmd = q − ff + r_hat(q)` for trajectory-aware gravity correction. **DISABLED BY DEFAULT** (`r_hat_enabled=False`) after a GPT review identified critical signal-path bugs (i_term decoupled from plant → invalid label, learner runs twice per goal-accept, missing NLMS regularization, time-misaligned samples). Code retained as scaffolding for the offline-calibration follow-up. **Don't enable without redesigning the signal path.**
+
+### What's shipped in jointstatereader.py
+
+- **SyncWritePosEx (instruction 0x83)** (line ~263, `_sync_write_pos_ex`): writes Goal_Acc + Goal_Pos + Goal_Time + Goal_Speed for all 6 servos in ONE half-duplex bus packet. Replaces per-joint sequential WRITE_DATA writes (which had ~12 ms cumulative skew across 6 joints — exactly the window where gravity coupling shows up at trajectory start). Speed/Accel set to firmware max (3400/254) so each tick is "go now" rather than firmware-profiled.
+- **Param defaults** (`use_sync_write=True`, `sync_write_acc=254`, `sync_write_speed=3400`).
+
+### What was tried and didn't work
+
+- **Freeze i_term during motion** (instead of motion-leak toward 0): made the perceived release WORSE because preserving the prior-pose integrator value into the new pose caused larger wire shifts at goal-accept.
+- **Tighten tolerance to 1°**: many trajectories aborted with `tolerance_violated` because the integrator can't drive sub-deadband residuals (1° tolerance < 1° hardware floor). Combined with continuing post-abort drift, made the "ticks" worse and added GUI errors.
+- **Online r_hat learning** (per-pose K_res LMS update from converged i_term): K_res oscillated wildly between samples because i_term was no longer in the wire (decoupled from plant), so the learner's "label" was an open-loop accumulator drift rather than a plant-coupled converged value. Trajectory itself became shaky as noisy K_res got injected per tick.
+
+### Stable steady state (2026-04-28 evening)
+
+| Setting | Value | Why |
+|---|---|---|
+| `tolerance_rad` | 3° | Below this, aborts proliferate (hardware can't deliver) |
+| `completion_timeout_s` | 2 s | Original; longer doesn't help |
+| `freeze_wire_at_t_end` | true | Stops post-trajectory drift from crossing deadband |
+| `r_hat_enabled` | **false** | Online learner has critical signal-path bugs |
+| `continuous_hold` | true | Eliminates trajectory-start "release" jerk |
+| `use_sync_write` (jsr) | true | Eliminates per-joint bus skew |
+| `_i_deadband` | 1° | Match firmware deadband floor |
+| `max_i_change_per_tick_deg` | 0.04° | Sub-LSB per-tick wire shifts |
+
+**Static accuracy:** ~3° at hold (per `tolerance_rad`). Acceptable for current experiments but limiting for grasping. Future work: offline calibration (move arm to N diverse poses, hold each ~10 s, measure settled residual command, fit `K_res` per joint via ridge regression on `τ_g` features, ship as static `K_res`). Then re-enable `r_hat_enabled=true` with the static `K_res`.
+
+### Diagnostic tools that exist for next time
+
+- `/tmp/start_jerk_recorder_v2.py` — stream-to-disk recorder for `/joint_commands` + `/joint_states`. SIGINT-safe. Use this for any future motion-quality investigation.
+- `/tmp/tick_inspector.py` / `/tmp/tick_classifier.py` — find LSB-events in state stream and classify as during-motion vs idle-drift.
+- `/tmp/tick_plots_v2.py` / `/tmp/tick_plots_v3.py` — generate annotated PNGs (events overlaid, shim trajectory boundaries marked).
+- The empirical loop: record → inspect → propose → measure-diff. **Don't theory-fix without baseline measurement** — half this session's iterations chased the wrong root cause because we trusted intuition over data.
+
 ## Workflow preferences
 
 - **Always restart the stack when a procedure requires it.** Don't ask "want me to restart?" — just run `bash mac-env/scripts/stack_stop.sh && bash mac-env/scripts/stack_start.sh --mode <mode> --rviz follower_port:=...` and wait for `/tmp/soarm_stack.log` to show ready signals. Reason: user runs `--dangerously-skip-permissions` and wants next-step actions taken without confirmation.

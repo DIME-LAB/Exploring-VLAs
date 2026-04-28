@@ -6325,6 +6325,16 @@ class SOArm101ControlGUI(Node):
                 # _compute_hermite_tangents), the commanded stream is C1-
                 # continuous from rest to rest.
                 f'-p rate_hz:=50.0 '
+                # Tolerance back to 3°. Combined with
+                # `freeze_wire_at_t_end=true` (default in the source),
+                # _play() exits once the arm is within 3° AND the wire
+                # then freezes — so the integrator can't drift cmd past
+                # the firmware deadband post-trajectory and produce LSB
+                # snap-back ticks. This is the empirically-validated
+                # combination: tighter tolerance → tolerance-violated
+                # aborts; no freeze → idle-drift ticks. Both together
+                # gives smooth motion + no post-motion ticks at the cost
+                # of a small static residual at hold.
                 f'-p tolerance_rad:=0.0524 '
                 f"-p completion_timeout_s:=2.0'\n"
             ),
