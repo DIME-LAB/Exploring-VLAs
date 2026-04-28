@@ -62,3 +62,17 @@ NB: an in-place "recenter to a non-zero target" operation (rewrite EEPROM Homing
 
 - JSON saves to `~/.cache/huggingface/lerobot/calibration/robots/so_follower/` (NOT `so101_follower/`) regardless of `--robot.type=so101_follower`. The CLI flag configures the runtime CLASS; the JSON dir uses the BASE class name. (HANDOFF A.10 documented + reverted a path-drift assumption that broke this.)
 - URDF/jsr/control_gui call the gripper joint `gripper_joint`; lerobot calibration JSON calls it `gripper`. Translation happens at the wrapper boundary.
+
+## Gripper frame rename (2026-04-28)
+
+The end-effector now has three distinct TF frames. Knowing which to use prevents calibration off-by-half-gap bugs:
+
+- `gripper_tip` — static URDF link (was `tcp_link` pre-rename). **The IK chain tip** (SRDF `<chain tip_link>` points here). Use whenever you need the fixed-jaw tip pose; never refer to it as "TCP" in messages to agents.
+- `jaw_tip` — static URDF link, child of `jaw`. Origin `(-0.010058, -0.081201, 0.018900)` derived from `moving_jaw_so101_v1.stl` via `calibrate_jaw.py`.
+- `tcp_link` — **dynamic, broadcast at runtime by `grasp_center_publisher`** (NOT in URDF). Midpoint of `gripper_tip` + `jaw_tip` at the live `gripper_joint` angle. This is the "true TCP" / grasp center. `/ee_pose` reports this frame; vision `calibration_offset` should target this.
+
+For "what-if" FK queries (e.g. collision-checking a planned grasp), request both `gripper_tip` and `jaw_tip` from MoveIt FK and average — same answer the live broadcaster would give. See `_compute_fk_to_spinboxes` in `control_gui.py`.
+
+### TODO: Isaac Sim USD parity
+
+Isaac Sim digital twin (`~/Documents/isaac-sim-mcp/`, branch `so-arm101`) still references `tcp_link` in the so-arm101-dt extension's USD. When we revisit Isaac work, port the same three-frame layout: rename existing `tcp_link` Xform → `gripper_tip`, add `jaw_tip` Xform under the moving-jaw prim, broadcast a dynamic `tcp_link` Xform via the action graph or a Python prim. Until then, real-world is correct, sim is on the old single-frame model — DO NOT trust Isaac-side `tcp_link` poses for grasp-center math.

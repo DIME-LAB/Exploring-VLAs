@@ -287,12 +287,18 @@
     </collision>
   </link>
 
-  
-  <link name="tcp_link" />
-  <joint name="tcp_joint" type="fixed">
+
+  <!-- gripper_tip: fixed-jaw tip. Static frame, child of gripper.
+       This is the IK chain tip (MoveIt solves to here).
+       Was named "tcp_link" before 2026-04-28 — renamed for semantic clarity:
+       "tcp_link" now means the dynamic grasp center (midpoint of gripper_tip
+       and jaw_tip), broadcast at runtime by grasp_center_publisher and NOT
+       declared in URDF. -->
+  <link name="gripper_tip" />
+  <joint name="gripper_tip_joint" type="fixed">
     <origin xyz="-0.0079 -0.000218121 -0.0981274" rpy="0 3.14159 0" />
     <parent link="gripper" />
-    <child link="tcp_link" />
+    <child link="gripper_tip" />
   </joint>
 
   
@@ -402,6 +408,21 @@
       <mechanicalReduction>1</mechanicalReduction>
     </actuator>
   </transmission>
+
+  <!-- jaw_tip: moving-jaw tip in jaw link frame.
+       Origin derived from STL mesh analysis of moving_jaw_so101_v1.stl
+       (centroid of 1651 vertices within 2 mm of -Y extreme; R²=0.997 on
+       linear gap fit). Re-derive with:
+         python3 src/so_arm101_control/so_arm101_control/calibrate_jaw.py
+       The midpoint of (gripper_tip, jaw_tip) at the live gripper_joint
+       angle is the dynamic "tcp_link" frame, broadcast by
+       grasp_center_publisher.py at 50 Hz. -->
+  <link name="jaw_tip" />
+  <joint name="jaw_tip_joint" type="fixed">
+    <origin xyz="-0.010058 -0.081201 0.018900" rpy="0 0 0" />
+    <parent link="jaw" />
+    <child link="jaw_tip" />
+  </joint>
 
   
   <joint name="wrist_roll" type="revolute">

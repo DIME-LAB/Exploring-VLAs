@@ -7,8 +7,11 @@ Derives the linear model:
     jaw_gap(m) = BASELINE_JAW_GAP + JAW_GAP_RATE * gripper_joint_angle(rad)
 
 The moving jaw tip is found from the STL mesh (extreme -Y point in jaw link
-frame = finger tip). The fixed jaw tip is the TCP. The gap is the lateral
-distance between them in the gripper frame at each joint angle.
+frame = finger tip). It's the source for the URDF `jaw_tip` link origin.
+The fixed-jaw tip is `gripper_tip` (URDF static link). The gap is the
+lateral distance between gripper_tip and jaw_tip in the gripper frame at
+each joint angle. Their midpoint is the dynamic `tcp_link` frame
+(broadcast at runtime by grasp_center_publisher).
 
 Re-run this script whenever the jaw STL or gripper URDF changes.
 
@@ -39,8 +42,9 @@ GRIPPER_JOINT_RPY = (1.5708, 0.0, 0.0)  # rpy=(π/2, 0, 0)
 JAW_VISUAL_XYZ = np.array([0.0, 0.0, 0.0189])
 JAW_VISUAL_RPY = (0.0, 0.0, 0.0)
 
-# tcp_joint: fixed, parent=gripper, child=tcp_link
-TCP_IN_GRIPPER = np.array([-0.0079, -0.000218121, -0.0981274])
+# gripper_tip_joint: fixed, parent=gripper, child=gripper_tip (the fixed-jaw tip).
+# Was named tcp_joint / tcp_link before 2026-04-28 — see urdf comment block.
+GRIPPER_TIP_IN_GRIPPER = np.array([-0.0079, -0.000218121, -0.0981274])
 
 # gripper_joint limits
 GRIPPER_LOWER = -0.174533  # rad (-10°)
@@ -143,9 +147,9 @@ def compute_gap_table(tip_in_link, n_points=50):
 
     for i, angle in enumerate(angles):
         tip_g = jaw_tip_in_gripper(tip_in_link, angle)
-        dx = tip_g[0] - TCP_IN_GRIPPER[0]
-        dy = tip_g[1] - TCP_IN_GRIPPER[1]
-        dz = tip_g[2] - TCP_IN_GRIPPER[2]
+        dx = tip_g[0] - GRIPPER_TIP_IN_GRIPPER[0]
+        dy = tip_g[1] - GRIPPER_TIP_IN_GRIPPER[1]
+        dz = tip_g[2] - GRIPPER_TIP_IN_GRIPPER[2]
         gaps_lat[i] = math.sqrt(dx**2 + dy**2)
         gaps_tot[i] = math.sqrt(dx**2 + dy**2 + dz**2)
 
@@ -325,8 +329,8 @@ def main(args=None):
 
     # --- TCP position info ---
     print(f'\n=== Reference Points (gripper frame) ===')
-    print(f'  TCP (fixed jaw):  ({TCP_IN_GRIPPER[0]:.6f}, '
-          f'{TCP_IN_GRIPPER[1]:.6f}, {TCP_IN_GRIPPER[2]:.6f})')
+    print(f'  gripper_tip:      ({GRIPPER_TIP_IN_GRIPPER[0]:.6f}, '
+          f'{GRIPPER_TIP_IN_GRIPPER[1]:.6f}, {GRIPPER_TIP_IN_GRIPPER[2]:.6f})')
     tip_g0 = jaw_tip_in_gripper(tip, 0.0)
     print(f'  Jaw tip (θ=0°):   ({tip_g0[0]:.6f}, {tip_g0[1]:.6f}, {tip_g0[2]:.6f})')
     tip_g90 = jaw_tip_in_gripper(tip, math.radians(90))

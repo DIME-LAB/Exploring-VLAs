@@ -45,7 +45,12 @@ constexpr char kTargetCupId[] = "drop_0";
 
 // Planning frame + robot frames (from so_arm101.srdf / kinematics.yaml)
 constexpr char kPlanningFrame[] = "base";
-constexpr char kTcpFrame[] = "tcp_link";
+// gripper_tip is the static URDF link MoveIt IK + attach use. The runtime
+// TF frame "tcp_link" (broadcast by grasp_center_publisher as midpoint of
+// gripper_tip + jaw_tip) is NOT a RobotModel link — MTC stages here would
+// silently misbehave if pointed at it. See vla_SO-ARM101/CLAUDE.md
+// "Gripper frame layout" section. Renamed from kGripperTipFrame on 2026-04-28.
+constexpr char kGripperTipFrame[] = "gripper_tip";
 constexpr char kArmGroup[] = "arm";
 constexpr char kGripperGroup[] = "gripper";
 // End-effector NAME from SRDF (<end_effector name="endeffector" ...>).
@@ -188,7 +193,7 @@ private:
 
     task.setProperty("group", kArmGroup);
     task.setProperty("eef", kEefName);
-    task.setProperty("ik_frame", kTcpFrame);
+    task.setProperty("ik_frame", kGripperTipFrame);
 
     auto sampling = std::make_shared<mtc::solvers::PipelinePlanner>(node_);
     sampling->setPlannerId("RRTConnectkConfigDefault");
@@ -247,7 +252,7 @@ private:
       {
         auto stage = std::make_unique<mtc::stages::MoveRelative>("approach", cart);
         stage->properties().set("marker_ns", "approach");
-        stage->properties().set("link", kTcpFrame);
+        stage->properties().set("link", kGripperTipFrame);
         stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
         stage->setMinMaxDistance(0.02, 0.08);
         geometry_msgs::msg::Vector3Stamped vec;
@@ -280,7 +285,7 @@ private:
         auto ik = std::make_unique<mtc::stages::ComputeIK>("grasp IK", std::move(gen));
         ik->setMaxIKSolutions(4);
         ik->setMinSolutionDistance(0.1);
-        ik->setIKFrame(kTcpFrame);
+        ik->setIKFrame(kGripperTipFrame);
         ik->properties().configureInitFrom(mtc::Stage::PARENT, {"eef", "group"});
         ik->properties().configureInitFrom(mtc::Stage::INTERFACE, {"target_pose"});
         pick->insert(std::move(ik));
@@ -306,7 +311,7 @@ private:
 
       {
         auto stage = std::make_unique<mtc::stages::ModifyPlanningScene>("attach lego");
-        stage->attachObject(kTargetLegoId, kTcpFrame);
+        stage->attachObject(kTargetLegoId, kGripperTipFrame);
         attach_object_stage = stage.get();
         pick->insert(std::move(stage));
       }
@@ -315,7 +320,7 @@ private:
         auto stage = std::make_unique<mtc::stages::MoveRelative>("lift", cart);
         stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
         stage->setMinMaxDistance(0.03, 0.10);
-        stage->setIKFrame(kTcpFrame);
+        stage->setIKFrame(kGripperTipFrame);
         stage->properties().set("marker_ns", "lift");
         geometry_msgs::msg::Vector3Stamped vec;
         vec.header.frame_id = kPlanningFrame;
@@ -384,7 +389,7 @@ private:
 
       {
         auto stage = std::make_unique<mtc::stages::ModifyPlanningScene>("detach lego");
-        stage->detachObject(kTargetLegoId, kTcpFrame);
+        stage->detachObject(kTargetLegoId, kGripperTipFrame);
         place->insert(std::move(stage));
       }
 
@@ -392,7 +397,7 @@ private:
         auto stage = std::make_unique<mtc::stages::MoveRelative>("retreat", cart);
         stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
         stage->setMinMaxDistance(0.03, 0.10);
-        stage->setIKFrame(kTcpFrame);
+        stage->setIKFrame(kGripperTipFrame);
         stage->properties().set("marker_ns", "retreat");
         geometry_msgs::msg::Vector3Stamped vec;
         vec.header.frame_id = kPlanningFrame;

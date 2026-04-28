@@ -304,20 +304,36 @@ def _lego_size_from_name(name):
 
 
 def _normalize_grasp_yaw(yaw, pan):
-    """Pick yaw or yaw±π that keeps wrist_roll within joint limits.
+    """Canonicalize the grasp yaw deterministically.
 
     Gripper jaws are symmetric about the grip axis, so yaw and yaw+π
-    produce equivalent grasps. We pick whichever keeps wrist_roll
-    closest to the center of its range.
+    produce equivalent grasps. yoloe's PCA-based 2D orientation can
+    report EITHER symmetric value non-deterministically (depends on
+    lighting, camera angle, segmentation noise). Without canonical
+    folding, this caused identical physical lego poses to produce
+    180°-different wrist_roll targets across invocations — manifesting
+    as a "weird wrist flip reset" mid-trajectory.
+
+    Strategy: fold input yaw to canonical [-π/2, π/2). Both symmetric
+    values (yaw and yaw+π) collapse to the same canonical, producing
+    a deterministic wrist_roll target. If that canonical choice would
+    drive wrist_roll outside its joint limits for this pan, fall back
+    to the only escape (canonical + π).
+
+    Pre-2026-04-28 version chose between {yaw, yaw+π, yaw-π} by
+    minimizing |target_wr - wr_center|. That picked the "absolute
+    closest to center" branch but ignored where wrist_roll started
+    from, so a small yoloe yaw flip flipped the wrist by 180° too.
     """
+    # Fold to canonical [-π/2, π/2)
+    canonical = ((yaw + math.pi / 2) % math.pi) - math.pi / 2
+    target_wr = pan + canonical - _CHAIN_BASE_ROTATION
     wr_lo, wr_hi = JOINT_LIMITS['wrist_roll']
-    wr_center = (wr_lo + wr_hi) / 2
-    best, best_dist = yaw, abs(pan + yaw - _CHAIN_BASE_ROTATION - wr_center)
-    for candidate in (yaw + math.pi, yaw - math.pi):
-        dist = abs(pan + candidate - _CHAIN_BASE_ROTATION - wr_center)
-        if dist < best_dist:
-            best, best_dist = candidate, dist
-    return best
+    if wr_lo <= target_wr <= wr_hi:
+        return canonical
+    # Canonical unreachable; the only symmetric escape is +π (or -π,
+    # which produces the same physical orientation).
+    return canonical + math.pi
 
 # ---------------------------------------------------------------------------
 # Workspace bounds — loaded from compute_workspace.py output
@@ -2139,7 +2155,7 @@ class SOArm101ControlGUI(Node):
             command=self._cmd_plan_execute)
         self.execute_btn.pack(side=tk.LEFT, padx=5)
         tk.Label(action_frame, text='Speed:', font=('Arial', 9)).pack(side=tk.LEFT, padx=(10, 2))
-        self.velocity_scale_var = tk.DoubleVar(value=0.5)
+        self.velocity_scale_var = tk.DoubleVar(value=1.0)
         self._last_speed_val = 0.5
         vcmd = (self.root.register(self._validate_speed), '%P')
         self.velocity_scale_spin = self._register_spinbox(
@@ -3354,7 +3370,16 @@ class SOArm101ControlGUI(Node):
         arm_dur_row = tk.Frame(arm_col)
         arm_dur_row.pack(fill=tk.X, padx=5, pady=2)
         tk.Label(arm_dur_row, text='Duration (s):', anchor='w').pack(side=tk.LEFT)
-        self._grasp_arm_duration_var = tk.DoubleVar(value=2.5)
+        # Duration of each tier1 linear stage (approach OR descent).
+        # trajectory_shim uses cubic Hermite at 50 Hz with zero-velocity
+        # endpoints, so each stage accelerates from 0 → cruise → decelerates
+        # to 0. Default raised from 2.5 s → 4.0 s on 2026-04-28 because the
+        # 2.5 s motion produced a peak shoulder_lift speed of 8 °/s that
+        # the Feetech servos tracked with visible wobble. 4.0 s lowers
+        # the peak speed to ~5 °/s for the same trajectory and gives the
+        # PD gains more time to converge between setpoints. Tune higher
+        # for even smoother / lower for snappier.
+        self._grasp_arm_duration_var = tk.DoubleVar(value=1.0)
         self._register_spinbox(arm_dur_row, label='Arm Duration (s)',
                                tab='Grasp', section='Arm',
                                textvariable=self._grasp_arm_duration_var,
@@ -3437,6 +3462,29 @@ class SOArm101ControlGUI(Node):
             textvariable=self._real_grasp_z_floor_var,
             from_=0.000, to=0.050, increment=0.001,
             width=7, format='%.3f',
+        ).pack(side=tk.LEFT, padx=(5, 0))
+
+        # Real-mode lego height (mm). Used to compute a deterministic
+        # target Z for the grasp instead of trusting yoloe's Z (which
+        # depends on the cuboid-fit's known_height assumption + camera
+        # geometry). Since the table is at ground_plane_z=0 and the lego
+        # height is a fixed physical constant, target_z for tcp_link
+        # (grasp center) = lego_height_mm / 2 (mm → m). gripper_tip ends
+        # at the same Z because jaw_dir is horizontal at top-down grasp.
+        # Default 11.4 mm = standard 1-brick + stud (real lego); user
+        # can tune if their pieces are taller (1-brick + plate ≈ 12.8mm)
+        # or shorter (just brick body ≈ 9.6mm).
+        lego_h_row = tk.Frame(arm_col)
+        lego_h_row.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(lego_h_row, text='Real lego height (mm):',
+                 anchor='w').pack(side=tk.LEFT)
+        self._real_lego_height_mm_var = tk.DoubleVar(value=11.4)
+        self._register_spinbox(
+            lego_h_row, label='Real lego height (mm)',
+            tab='Grasp', section='Arm',
+            textvariable=self._real_lego_height_mm_var,
+            from_=3.0, to=30.0, increment=0.2,
+            width=7, format='%.1f',
         ).pack(side=tk.LEFT, padx=(5, 0))
 
         self._grasp_move_btn = self._register_button(
@@ -3531,6 +3579,26 @@ class SOArm101ControlGUI(Node):
             from_=0.0, to=1.745, increment=0.01,
             width=6, format='%.3f',
         ).pack(side=tk.LEFT)
+
+        # Toggle: when checked, real-mode grasp open/close angles use the
+        # spinbox values above (the legacy hand-tuned defaults from before
+        # bbox + JAW_GAP_RATE calibration). When unchecked, the dynamic
+        # bbox-driven calculation runs (same path sim mode uses): angle =
+        # (lego_grip_width + 2*tcp_clear + open_clearance - BASELINE) / RATE.
+        # See _gripper_angle_for_object. Pre-2026-04-28 the spinboxes
+        # always overrode the dynamic path in real mode (yoloe bbox was
+        # too noisy then). Post-calibration we have accurate bbox + grip
+        # geometry, so the dynamic path is preferred — but this toggle
+        # keeps the override available if a piece behaves oddly.
+        real_dyn_row = tk.Frame(grip_col)
+        real_dyn_row.pack(fill=tk.X, padx=5, pady=2)
+        self._real_grip_use_fixed_var = tk.BooleanVar(value=False)
+        self._register_check(
+            real_dyn_row,
+            label='Use fixed Real grasp angles (else dynamic from bbox)',
+            tab='Grasp', section='Gripper',
+            variable=self._real_grip_use_fixed_var,
+        ).pack(anchor='w')
 
         tcp_clear_row = tk.Frame(grip_col)
         tcp_clear_row.pack(fill=tk.X, padx=5, pady=2)
@@ -7173,6 +7241,22 @@ class SOArm101ControlGUI(Node):
         self._register_button(pad_row, text='Apply', tab='RViz', section='Cups',
                               command=self._cmd_apply_collision_padding).pack(side=tk.LEFT, padx=(5, 0))
 
+        # --- Debug ---
+        # tcp_link is the dynamic grasp center (midpoint of gripper_tip
+        # and jaw_tip, broadcast by grasp_center_publisher). When this
+        # checkbox is on, control_gui publishes a small yellow sphere
+        # marker on /visualization_marker, frame-locked to tcp_link, so
+        # RViz renders it tracking the live grasp center as the gripper
+        # opens / closes. Useful for visually verifying the IK target
+        # really matches the grasp center, especially during calibration.
+        debug_frame = ttk.LabelFrame(frame, text='Debug')
+        debug_frame.pack(fill=tk.X, padx=10, pady=5)
+        self._show_tcp_marker_var = tk.BooleanVar(value=False)
+        self._register_check(debug_frame, label='Show tcp_link marker (magenta sphere)',
+                             tab='RViz', section='Debug',
+                             variable=self._show_tcp_marker_var,
+                             command=self._toggle_tcp_marker).pack(anchor='w', padx=5, pady=2)
+
         # --- Planning ---
         plan_frame = ttk.LabelFrame(frame, text='Planning')
         plan_frame.pack(fill=tk.X, padx=10, pady=5)
@@ -7270,7 +7354,12 @@ class SOArm101ControlGUI(Node):
                 request = GetPositionFK.Request()
                 request.header.frame_id = 'base'
                 request.header.stamp = self.get_clock().now().to_msg()
-                request.fk_link_names = ['tcp_link']
+                # tcp_link isn't in the URDF — it's a runtime midpoint of
+                # gripper_tip and jaw_tip (broadcast by grasp_center_publisher).
+                # MoveIt FK can only resolve URDF links, so request both static
+                # jaw tips and average them inline. Returns the same grasp
+                # center pose `tcp_link` would carry at this joint state.
+                request.fk_link_names = ['gripper_tip', 'jaw_tip']
                 request.robot_state.joint_state.name = list(ARM_JOINT_NAMES)
                 request.robot_state.joint_state.position = list(positions)
 
@@ -7280,11 +7369,21 @@ class SOArm101ControlGUI(Node):
             if future.result() is None:
                 return
             resp = future.result()
-            if resp.error_code.val != 1 or not resp.pose_stamped:
+            if resp.error_code.val != 1 or len(resp.pose_stamped) < 2:
                 return
 
-            p = resp.pose_stamped[0].pose.position
+            # Midpoint of gripper_tip and jaw_tip = dynamic tcp_link.
+            # Orientation copied from gripper_tip (matches what
+            # grasp_center_publisher broadcasts on /tf).
+            p_grip = resp.pose_stamped[0].pose.position
+            p_jaw = resp.pose_stamped[1].pose.position
             o = resp.pose_stamped[0].pose.orientation
+            from types import SimpleNamespace
+            p = SimpleNamespace(
+                x=0.5 * (p_grip.x + p_jaw.x),
+                y=0.5 * (p_grip.y + p_jaw.y),
+                z=0.5 * (p_grip.z + p_jaw.z),
+            )
             if getattr(self, '_gui_ready', False):
                 self.root.after(0, self._populate_ik_spinboxes,
                                p.x, p.y, p.z, o.x, o.y, o.z, o.w)
@@ -7836,8 +7935,15 @@ class SOArm101ControlGUI(Node):
                 duration = getattr(self, '_grasp_arm_duration', 2.0)
                 evt = getattr(self, '_grasp_motion_event', None) \
                     or threading.Event()
+                # Pass the validated approach joints as the descent seed.
+                # _actual_positions lags between approach and descent
+                # (joint-state callback latency on real HW), so without
+                # this the descent trajectory was wp[0]=pre-approach,
+                # producing a visible "retreat" before the descent.
+                start_seed = getattr(self, '_grasp_approach_joints', None)
                 self._joint_space_collision_free_execute(
-                    target, on_complete_event=evt, duration_s=duration)
+                    target, on_complete_event=evt, duration_s=duration,
+                    start_joints=start_seed)
 
         if getattr(self, '_gui_ready', False):
             self.root.after(0, _apply)
@@ -8634,24 +8740,40 @@ class SOArm101ControlGUI(Node):
             self._append_log(f'Attach skipped: no pose for {obj_name}', 'warn')
             return False
 
-        # Model: tcp_link is the fixed-jaw tip. After grasp_move + gripper_close,
-        # the block is pinched between the two jaws with:
+        # Model (post-2026-04-28 rename): tcp_link is the dynamic grasp center
+        # (midpoint of gripper_tip and jaw_tip, broadcast by grasp_center_publisher).
+        # After grasp_move + gripper_close, the block is pinched between the two
+        # jaws with:
         #   - Block side-center (vertical mid-height) at tcp.Z (no vertical offset)
-        #   - Block center XY offset from tcp by the jaw half-width (set by
-        #     _compute_jaw_offset during grasp_move)
-        # We compute the actual block-in-tcp transform via TF — this gives the
-        # correct XY offset AND the block's orientation relative to tcp (which
-        # determines how the BOX collision volume is oriented in tcp's frame).
+        #   - Block center XY ≈ tcp_link XY for a centered grasp (the IK-target
+        #     half-gap shift in _compute_jaw_offset puts the grasp center on the
+        #     object center). Off-center grasps land 1–2 mm shifted from tcp_link,
+        #     which is exactly what we want to MEASURE here rather than assume.
+        # We compute the actual block-in-tcp_link transform via TF — captures
+        # both the residual XY offset AND the block's orientation in tcp_link's
+        # frame (which determines how the BOX collision volume is oriented).
         import numpy as np
         try:
             t = self._tf_buffer.lookup_transform('base', 'tcp_link', rclpy.time.Time())
+            # gripper_tip is the URDF link MoveIt understands for the
+            # AttachedCollisionObject; tcp_link is the runtime midpoint
+            # broadcast by grasp_center_publisher (NOT a robot model link),
+            # so MoveIt would silently drop an attach to it. We need both:
+            # tcp_link-frame block offset stays in self._attached_lego_tcp_offset
+            # for drop_sweep semantics (block-at-grasp-center ≈ 0); the
+            # gripper_tip-frame offset is what AttachedCollisionObject uses.
+            t_gt = self._tf_buffer.lookup_transform('base', 'gripper_tip', rclpy.time.Time())
         except Exception as e:
-            self._append_log(f'Attach failed: TF lookup tcp_link: {e}', 'warn')
+            self._append_log(f'Attach failed: TF lookup tcp_link/gripper_tip: {e}', 'warn')
             return False
         tr = t.transform
         tcp_mat = self._pose7_to_mat(
             tr.translation.x, tr.translation.y, tr.translation.z,
             tr.rotation.x, tr.rotation.y, tr.rotation.z, tr.rotation.w)
+        gtr = t_gt.transform
+        gripper_tip_mat = self._pose7_to_mat(
+            gtr.translation.x, gtr.translation.y, gtr.translation.z,
+            gtr.rotation.x, gtr.rotation.y, gtr.rotation.z, gtr.rotation.w)
         bx = float(block['x']); by = float(block['y'])
         # Isaac Sim reports the block origin at its CENTER, not its bottom —
         # verified empirically: all three brick sizes (2x2/2x3/2x4) report
@@ -8667,6 +8789,9 @@ class SOArm101ControlGUI(Node):
             float(block.get('qz', 0.0)), float(block.get('qw', 1.0)))
         block_in_tcp = np.linalg.inv(tcp_mat) @ block_mat
         ax, ay, az, aqx, aqy, aqz, aqw = self._mat_to_pose7(block_in_tcp)
+        # block-in-gripper_tip — used for AttachedCollisionObject below.
+        block_in_gripper_tip = np.linalg.inv(gripper_tip_mat) @ block_mat
+        gx, gy, gz, gqx, gqy, gqz, gqw = self._mat_to_pose7(block_in_gripper_tip)
         # Sanity: block should be within one grip-width of tcp. Reject if grasp
         # clearly failed (e.g., FC-1 rejected grasp_move but close fired anyway).
         dist_mm = float((ax*ax + ay*ay + az*az) ** 0.5) * 1000.0
@@ -8736,25 +8861,32 @@ class SOArm101ControlGUI(Node):
             add_scene.is_diff = True
             add_scene.robot_state.is_diff = True
             aco = AttachedCollisionObject()
-            aco.link_name = 'tcp_link'
+            # gripper_tip is the URDF link — MoveIt requires a real
+            # RobotModel link for AttachedCollisionObject. tcp_link is
+            # runtime-only TF and would be silently rejected.
+            aco.link_name = 'gripper_tip'
             aco.object.id = name_id
-            aco.object.header.frame_id = 'tcp_link'
+            aco.object.header.frame_id = 'gripper_tip'
             aco.object.operation = CollisionObject.ADD
             block_pose = Pose()
-            block_pose.position.x = float(ax)
-            block_pose.position.y = float(ay)
-            block_pose.position.z = float(az)
-            block_pose.orientation.x = float(aqx)
-            block_pose.orientation.y = float(aqy)
-            block_pose.orientation.z = float(aqz)
-            block_pose.orientation.w = float(aqw)
+            block_pose.position.x = float(gx)
+            block_pose.position.y = float(gy)
+            block_pose.position.z = float(gz)
+            block_pose.orientation.x = float(gqx)
+            block_pose.orientation.y = float(gqy)
+            block_pose.orientation.z = float(gqz)
+            block_pose.orientation.w = float(gqw)
             if kind == 'mesh':
                 aco.object.meshes.append(geom)
                 aco.object.mesh_poses.append(block_pose)
             else:  # 'box'
                 aco.object.primitives.append(geom)
                 aco.object.primitive_poses.append(block_pose)
-            aco.touch_links = ['tcp_link', 'gripper', 'jaw']
+            # All adjacent gripper links — block geometry intersects them
+            # by design when held. jaw_tip and gripper_tip are massless
+            # frames but still need entries so their mesh-checks ignore
+            # the held block.
+            aco.touch_links = ['gripper_tip', 'gripper', 'jaw', 'jaw_tip']
             add_scene.robot_state.attached_collision_objects.append(aco)
 
             # Claim attached-state BEFORE the apply so a racing
@@ -8763,10 +8895,13 @@ class SOArm101ControlGUI(Node):
             prev_attached = self._attached_lego_name
             prev_offset = self._attached_lego_tcp_offset
             self._attached_lego_name = obj_name
-            # Snapshot physical grasp offset in tcp_link frame. drop_sweep
-            # reads this to place the block center at the cup target, not
-            # tcp_link — the 1-2 mm delta between measured |ax| and the
-            # theoretical half_gap is exactly what OMPL used to flail on.
+            # Snapshot physical grasp offset in tcp_link (grasp-center) frame.
+            # drop_sweep reads this to place the block center at the cup target.
+            # Post-rename: tcp_link IS the grasp center, so |ax| ≈ 0 for a
+            # centered grasp (off-center grasps still produce 1–2 mm of
+            # measurable offset, which is what we want). The MoveIt attach
+            # above used the gripper_tip-frame variant (gx, gy, gz) since
+            # tcp_link isn't a robot link.
             self._attached_lego_tcp_offset = (float(ax), float(ay), float(az))
             if not _apply_scene(add_scene, 'attach_lego'):
                 self._attached_lego_name = prev_attached
@@ -8858,18 +8993,30 @@ class SOArm101ControlGUI(Node):
         try:
             t = self._tf_buffer.lookup_transform(
                 'base', 'tcp_link', rclpy.time.Time())
+            # Also look up gripper_tip — that's the URDF link MoveIt
+            # AttachedCollisionObject must reference. tcp_link (runtime
+            # midpoint) is kept for the dist sanity check + tracer event
+            # so log fields stay comparable to pre-rename traces.
+            t_gt = self._tf_buffer.lookup_transform(
+                'base', 'gripper_tip', rclpy.time.Time())
         except Exception:
             return False
         tr = t.transform
         tcp_mat = self._pose7_to_mat(
             tr.translation.x, tr.translation.y, tr.translation.z,
             tr.rotation.x, tr.rotation.y, tr.rotation.z, tr.rotation.w)
+        gtr = t_gt.transform
+        gripper_tip_mat = self._pose7_to_mat(
+            gtr.translation.x, gtr.translation.y, gtr.translation.z,
+            gtr.rotation.x, gtr.rotation.y, gtr.rotation.z, gtr.rotation.w)
         block_mat = self._pose7_to_mat(
             float(block['x']), float(block['y']), float(block['z']),
             float(block.get('qx', 0.0)), float(block.get('qy', 0.0)),
             float(block.get('qz', 0.0)), float(block.get('qw', 1.0)))
         block_in_tcp = np.linalg.inv(tcp_mat) @ block_mat
         ax, ay, az, aqx, aqy, aqz, aqw = self._mat_to_pose7(block_in_tcp)
+        block_in_gripper_tip = np.linalg.inv(gripper_tip_mat) @ block_mat
+        gx, gy, gz, gqx, gqy, gqz, gqw = self._mat_to_pose7(block_in_gripper_tip)
         dist_mm = float((ax*ax + ay*ay + az*az) ** 0.5) * 1000.0
         if dist_mm > 80.0:
             self._append_log(
@@ -8885,7 +9032,7 @@ class SOArm101ControlGUI(Node):
         rm_scene.is_diff = True
         rm_scene.robot_state.is_diff = True
         aco_rm = AttachedCollisionObject()
-        aco_rm.link_name = 'tcp_link'
+        aco_rm.link_name = 'gripper_tip'
         aco_rm.object.id = name_id
         aco_rm.object.operation = CollisionObject.REMOVE
         rm_scene.robot_state.attached_collision_objects.append(aco_rm)
@@ -8897,22 +9044,22 @@ class SOArm101ControlGUI(Node):
         if kind is None:
             return False
         aco = AttachedCollisionObject()
-        aco.link_name = 'tcp_link'
+        aco.link_name = 'gripper_tip'
         aco.object.id = name_id
-        aco.object.header.frame_id = 'tcp_link'
+        aco.object.header.frame_id = 'gripper_tip'
         aco.object.operation = CollisionObject.ADD
         pose = Pose()
-        pose.position.x = float(ax); pose.position.y = float(ay)
-        pose.position.z = float(az)
-        pose.orientation.x = float(aqx); pose.orientation.y = float(aqy)
-        pose.orientation.z = float(aqz); pose.orientation.w = float(aqw)
+        pose.position.x = float(gx); pose.position.y = float(gy)
+        pose.position.z = float(gz)
+        pose.orientation.x = float(gqx); pose.orientation.y = float(gqy)
+        pose.orientation.z = float(gqz); pose.orientation.w = float(gqw)
         if kind == 'mesh':
             aco.object.meshes.append(geom)
             aco.object.mesh_poses.append(pose)
         else:  # 'box'
             aco.object.primitives.append(geom)
             aco.object.primitive_poses.append(pose)
-        aco.touch_links = ['tcp_link', 'gripper', 'jaw']
+        aco.touch_links = ['gripper_tip', 'gripper', 'jaw', 'jaw_tip']
         add_scene.robot_state.attached_collision_objects.append(aco)
 
         try:
@@ -8929,6 +9076,12 @@ class SOArm101ControlGUI(Node):
                 return False
         except Exception:
             return False
+        # Refresh the cached tcp-frame offset too. drop_sweep reads this
+        # to compute the jaw-shift for cup-target placement; if the block
+        # settled in the jaws between attach and refresh (gravity slip,
+        # closing-pinch micro-motion), the planning scene would have the
+        # new pose but drop_sweep would compute against the stale one.
+        self._attached_lego_tcp_offset = (float(ax), float(ay), float(az))
         tracer.event('attached_pose_refreshed',
                      obj_name=obj_name,
                      block_in_tcp=(ax, ay, az),
@@ -8958,7 +9111,7 @@ class SOArm101ControlGUI(Node):
             for c in colors:
                 for s in sizes:
                     aco = AttachedCollisionObject()
-                    aco.link_name = 'tcp_link'
+                    aco.link_name = 'gripper_tip'
                     aco.object.id = f'lego_{c}_{s}'
                     aco.object.operation = CollisionObject.REMOVE
                     scene.robot_state.attached_collision_objects.append(aco)
@@ -9008,7 +9161,7 @@ class SOArm101ControlGUI(Node):
         scene.robot_state.is_diff = True
         # Detach from gripper
         aco = AttachedCollisionObject()
-        aco.link_name = 'tcp_link'
+        aco.link_name = 'gripper_tip'
         aco.object.id = obj_id
         aco.object.operation = CollisionObject.REMOVE
         scene.robot_state.attached_collision_objects.append(aco)
@@ -9137,6 +9290,61 @@ class SOArm101ControlGUI(Node):
             m.action = VisMarker.DELETE
             ma.markers.append(m)
         self._cup_visual_pub.publish(ma)
+
+    # tcp_link debug marker — toggled from RViz tab → Debug section.
+    # Single-shot publish with frame_locked=True is sufficient: RViz
+    # re-resolves base→tcp_link on every render, so the marker tracks
+    # the live grasp center without us needing a periodic timer.
+    _TCP_MARKER_TOPIC = '/visualization_marker'
+    _TCP_MARKER_NS = 'tcp_link_debug'
+    _TCP_MARKER_SCALE_M = 0.008  # 8 mm sphere
+    _TCP_MARKER_RGBA = (1.0, 0.2, 1.0, 0.95)  # magenta
+
+    def _toggle_tcp_marker(self):
+        """RViz tab → Debug → 'Show tcp_link marker' checkbox callback."""
+        if self._show_tcp_marker_var.get():
+            self._publish_tcp_marker()
+        else:
+            self._delete_tcp_marker()
+
+    def _ensure_tcp_marker_pub(self):
+        if not hasattr(self, '_tcp_marker_pub'):
+            self._tcp_marker_pub = self.create_publisher(
+                VisMarker, self._TCP_MARKER_TOPIC, 10)
+
+    def _publish_tcp_marker(self):
+        """ADD a magenta sphere at tcp_link, frame_locked so RViz tracks
+        the dynamic grasp center on every render."""
+        self._ensure_tcp_marker_pub()
+        from std_msgs.msg import ColorRGBA
+        m = VisMarker()
+        m.header.frame_id = 'tcp_link'
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.ns = self._TCP_MARKER_NS
+        m.id = 0
+        m.type = VisMarker.SPHERE
+        m.action = VisMarker.ADD
+        m.pose.orientation.w = 1.0
+        s = self._TCP_MARKER_SCALE_M
+        m.scale = Vector3(x=s, y=s, z=s)
+        r, g, b, a = self._TCP_MARKER_RGBA
+        m.color = ColorRGBA(r=r, g=g, b=b, a=a)
+        m.lifetime = Duration(sec=0)
+        m.frame_locked = True
+        self._tcp_marker_pub.publish(m)
+
+    def _delete_tcp_marker(self):
+        """DELETE the tcp_link debug marker. No-op if publisher never
+        materialized (toggle was never turned on)."""
+        if not hasattr(self, '_tcp_marker_pub'):
+            return
+        m = VisMarker()
+        m.header.frame_id = 'tcp_link'
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.ns = self._TCP_MARKER_NS
+        m.id = 0
+        m.action = VisMarker.DELETE
+        self._tcp_marker_pub.publish(m)
 
 
     def _get_selected_drop_pose(self):
@@ -9345,8 +9553,21 @@ class SOArm101ControlGUI(Node):
 
     def _joint_space_collision_free_execute(self, target, on_complete_event,
                                              duration_s=3.0, waypoints=50,
-                                             allow_ompl_fallback=True):
+                                             allow_ompl_fallback=True,
+                                             start_joints=None):
         """Tiered deterministic planner with opt-in OMPL fallback.
+
+        ``start_joints`` (post-2026-04-28): if provided, use this as the
+        trajectory's seed instead of ``self._actual_positions``. Needed for
+        the grasp-descent stage where ``_actual_positions`` lags the live
+        arm state (the joint-state callback hasn't yet caught up to the
+        approach end pose by the time descent is planned, so the planner
+        was seeding from the pre-approach pose, producing a trajectory whose
+        wp[0] = pre-approach state. The controller then "retreats" through
+        wp[0] before the descent waypoints — visible as a wrist/elbow
+        pull-back between approach and descent stages). Pass the validated
+        approach joints as ``start_joints`` to anchor descent at the right
+        pose.
 
         Tier 1: linear joint-space interp, per-waypoint validity check.
             Dispatches the SAME (waypoints+1)-point trajectory it validated
@@ -9374,10 +9595,18 @@ class SOArm101ControlGUI(Node):
         # Snapshot current (physics) positions before advancing
         # self.joint_positions to the target — tier1/tier2 interpolate from
         # the physical start, not from the freshly-overwritten slider target.
+        # If start_joints was passed (descent path), use it as the seed
+        # instead of _actual_positions (which lags between approach and
+        # descent — see docstring above).
         with self.joint_lock:
-            current = {n: self._actual_positions.get(
-                n, self.joint_positions.get(n, 0.0))
-                       for n in ARM_JOINT_NAMES}
+            if start_joints is not None:
+                current = {n: float(start_joints.get(
+                    n, self._actual_positions.get(n, 0.0)))
+                           for n in ARM_JOINT_NAMES}
+            else:
+                current = {n: self._actual_positions.get(
+                    n, self.joint_positions.get(n, 0.0))
+                           for n in ARM_JOINT_NAMES}
             for n in ARM_JOINT_NAMES:
                 if n in target:
                     self.joint_positions[n] = target[n]
@@ -9485,6 +9714,48 @@ class SOArm101ControlGUI(Node):
             pt.time_from_start.nanosec = int((t - int(t)) * 1e9)
             jt.points.append(pt)
         return jt
+
+    def _plan_two_stage_concat(self, current, mid, final, duration_each,
+                                  n_samples=50):
+        """Plan a single concatenated trajectory: current → mid → final.
+
+        Both segments are linear-joint-interp + per-waypoint collision
+        check (same as ``_plan_linear_joint_path``). They are stitched
+        together with the second segment's first waypoint dropped (it
+        equals the first segment's last) and all stage-2 ``time_from_start``
+        offset by ``duration_each``.
+
+        The result is ONE trajectory: the controller cruises through the
+        intermediate ``mid`` waypoint without decelerating to zero at it
+        (which is what trajectory_shim would otherwise do at every
+        single-stage trajectory's endpoints — produces the visible
+        "stop-and-go" jerk between approach and descent).
+
+        Returns a JointTrajectory or None on collision.
+        """
+        seg1 = self._plan_linear_joint_path(
+            current, mid, duration_each, n_samples=n_samples)
+        if seg1 is None:
+            return None
+        seg2 = self._plan_linear_joint_path(
+            mid, final, duration_each, n_samples=n_samples)
+        if seg2 is None:
+            return None
+        combined = JointTrajectory()
+        combined.joint_names = list(ARM_JOINT_NAMES)
+        combined.points = list(seg1.points)
+        for i, p in enumerate(seg2.points):
+            if i == 0:
+                continue  # duplicate of seg1.points[-1]
+            new_pt = JointTrajectoryPoint()
+            new_pt.positions = list(p.positions)
+            t = (p.time_from_start.sec
+                 + p.time_from_start.nanosec * 1e-9
+                 + duration_each)
+            new_pt.time_from_start.sec = int(t)
+            new_pt.time_from_start.nanosec = int((t - int(t)) * 1e9)
+            combined.points.append(new_pt)
+        return combined
 
     def _plan_retract_pan_settle(self, current, target_full, duration_s,
                                    n_samples=50):
@@ -10579,22 +10850,47 @@ class SOArm101ControlGUI(Node):
         return max(bbox['sx'], bbox['sy']) if cross else min(bbox['sx'], bbox['sy'])
 
     def _compute_jaw_offset(self, obj_name, obj_yaw):
-        """Compute (dx, dy) to shift TCP so the object center sits between jaws.
+        """Compute (dx, dy) to shift the IK target so the object center
+        sits at the grasp center (tcp_link = midpoint of jaws) at the
+        CURRENT (live) gripper-open angle.
 
-        TCP is at the fixed jaw tip. The moving jaw opens along the object's
-        local +Y axis: (-sin(obj_yaw), cos(obj_yaw)) in world frame.
-        (wrist_roll compensates for pan, so only obj_yaw matters.)
-        We shift TCP from object center toward the fixed jaw by grip_width/2.
-        Returns (0, 0) when TCP offset is disabled via the checkbox.
+        The IK chain tip is gripper_tip (fixed-jaw tip — see SRDF). The
+        moving jaw opens along the object's local +Y axis:
+        (-sin(obj_yaw), cos(obj_yaw)) in world frame. (wrist_roll
+        compensates for pan, so only obj_yaw matters.) We shift the IK
+        target from object center toward the fixed jaw by half the LIVE
+        jaw_gap, so the midpoint of (gripper_tip, jaw_tip) — the dynamic
+        tcp_link — lands exactly on the object center at the moment the
+        approach completes.
+
+        Pre-2026-04-28 this used grip_width/2 + tcp_clear (the closed-on-
+        lego half-width), which centered tcp_link on the lego only AFTER
+        the gripper closed onto the lego — during the open-jaw approach
+        tcp_link sat ~14 mm offset. User caught this empirically: the
+        magenta sphere (tcp_link) was visibly offset from the lego at
+        approach end. Switched to live jaw_gap so tcp_link lands on lego
+        at any open angle.
+
+        Trade-off: with the live-gap shift, gripper_tip ends 23 mm offset
+        from the lego at +21° open. The subsequent gripper-close motion
+        will scoop / push the lego toward the fixed jaw rather than pinch
+        it in place — block ends up displaced by (half_open_gap - half_grip_width).
+        Acceptable for visually-correct approach; if pinch-in-place is
+        ever needed back, restore the grip_width/2 form.
+
+        Returns (0, 0) when the offset is disabled via the checkbox.
         """
         if hasattr(self, '_bbox_enabled_var') and not self._bbox_enabled_var.get():
             return 0.0, 0.0
-        grip_width = self._get_grip_width(obj_name)
-        if grip_width is None:
-            return 0.0, 0.0
-        tcp_clear = (self._tcp_clearance_var.get() / 1000
-                     if hasattr(self, '_tcp_clearance_var') else TCP_CLEARANCE_M)
-        half_offset = grip_width / 2 + tcp_clear
+        # Live jaw gap from the current gripper_joint angle. Falls back to
+        # BASELINE_JAW_GAP if joint state unavailable.
+        gj = float(self._actual_positions.get(
+            'gripper_joint', self.joint_positions.get('gripper_joint', 0.0)))
+        current_jaw_gap = BASELINE_JAW_GAP + JAW_GAP_RATE * gj
+        # Clamp to non-negative (defensive — gj at lower limit -10° gives
+        # ~6 mm gap, still positive, but a bad joint read could underflow).
+        current_jaw_gap = max(current_jaw_gap, 0.0)
+        half_offset = current_jaw_gap / 2.0
         # fixed_jaw_dir = (-sin(obj_yaw), +cos(obj_yaw))
         dx = -half_offset * math.sin(obj_yaw)
         dy = half_offset * math.cos(obj_yaw)
@@ -10613,9 +10909,16 @@ class SOArm101ControlGUI(Node):
         bbox accuracy from yoloe is noisier than sim ground truth, and
         a single tuned pair is more reliable for repeated grasps.
         """
-        # Real mode: short-circuit to the spinbox-configured defaults.
-        if self.use_real_hardware and hasattr(
-                self, '_real_grip_open_rad_var'):
+        # Real mode: short-circuit to the spinbox-configured defaults
+        # ONLY if the "Use fixed Real grasp angles" toggle is ON.
+        # Pre-2026-04-28 this was unconditional in real mode; now the
+        # default is the dynamic bbox-driven path (yoloe bbox is reliable
+        # post-calibration), with the fixed-angle override gated behind
+        # the checkbox in the Gripper section.
+        if (self.use_real_hardware
+                and hasattr(self, '_real_grip_open_rad_var')
+                and getattr(self, '_real_grip_use_fixed_var', None) is not None
+                and self._real_grip_use_fixed_var.get()):
             try:
                 open_angle = float(self._real_grip_open_rad_var.get())
                 close_angle = float(self._real_grip_close_rad_var.get())
@@ -10678,7 +10981,7 @@ class SOArm101ControlGUI(Node):
 
     def _cmd_gripper_close_for_object(self):
         """Close gripper to the object's width minus threshold.
-        On success, attach the object to tcp_link as an AttachedCollisionObject
+        On success, attach the object to gripper_tip as an AttachedCollisionObject
         so MoveIt plans subsequent motions aware of the carried-block envelope.
         """
         obj_name = self._get_selected_object_name()
@@ -10760,6 +11063,31 @@ class SOArm101ControlGUI(Node):
         obj_z_override = self._grasp_obj_z_var.get()
         if abs(obj_z_override) > 1e-4:
             base_z = obj_z_override
+        elif (getattr(self, 'use_real_hardware', False)
+              and hasattr(self, '_real_lego_height_mm_var')
+              and topic != '/drop_poses'):
+            # Real mode: deterministic Z from known geometry.
+            #
+            # Table is at ground_plane_z=0, lego height is a fixed physical
+            # constant. We DON'T trust yoloe's Z (cuboid-fit known_height
+            # bias). For a top-down grasp, the gripper's IK chain tip
+            # (gripper_tip) must sit ABOVE the lego top so the gripper
+            # body's collision mesh doesn't penetrate the ground plane —
+            # tested IK lower bound is ~14 mm gripper_tip Z. Targeting
+            # tcp_link at lego CENTER (h/2 ≈ 6 mm) puts gripper_tip
+            # geometrically below this floor and IK rejects with all
+            # solutions colliding.
+            #
+            # Correct formula: target_z = lego_height + clearance_above_top,
+            # putting gripper_tip ~ at lego top + clearance. tcp_link
+            # (midpoint, ~horizontal jaw_dir) is then at the same Z,
+            # i.e., at lego top — which is where the jaws need to be
+            # positioned to surround the lego sides as they close.
+            try:
+                lego_h_m = float(self._real_lego_height_mm_var.get()) / 1000.0
+            except (TypeError, ValueError):
+                lego_h_m = 0.0114  # 11.4 mm fallback
+            base_z = lego_h_m + _GRIPPER_TCP_CLEARANCE_ABOVE_BLOCK_M
         else:
             bbox_sz = (self._lookup_bbox(obj_name) or {}).get('sz', 0.0)
             base_z = (pos['z']
@@ -10926,13 +11254,64 @@ class SOArm101ControlGUI(Node):
             # All stages validated — execute
             duration = self._grasp_arm_duration
             if approach_h > 0 and 'approach' in validated and 'final' in validated:
-                self._append_log(f'  Both stages validated, executing approach')
-                self._grasp_final_joints = validated['final']
-                self._grasp_motion_event = evt
-                def _apply_approach():
-                    self._ik_apply_and_act(validated['approach'], 'grasp_approach')
-                if getattr(self, '_gui_ready', False):
-                    self.root.after(0, _apply_approach)
+                self._append_log(
+                    f'  Both stages validated, executing concat traj')
+                # Two-stage CONCAT dispatch (post-2026-04-28). Previously
+                # this dispatched approach as one trajectory then, on
+                # approach_done, dispatched descent as a second trajectory.
+                # That produced two visible jerks: (1) zero-velocity
+                # endpoint at approach end + zero-velocity start of descent
+                # makes the arm decel-stop-accel mid-grasp, (2) the
+                # follow_joint_trajectory goal cancel/accept handshake adds
+                # a ~50-100 ms motion gap. Concatenating both segments into
+                # ONE trajectory eliminates both — controller cruises
+                # through the intermediate (approach end) waypoint
+                # without decel, single goal handshake.
+                with self.joint_lock:
+                    cur = {n: self._actual_positions.get(
+                        n, self.joint_positions.get(n, 0.0))
+                           for n in ARM_JOINT_NAMES}
+                concat_traj = self._plan_two_stage_concat(
+                    cur,
+                    {n: validated['approach'].get(n, cur[n])
+                     for n in ARM_JOINT_NAMES},
+                    {n: validated['final'].get(n, cur[n])
+                     for n in ARM_JOINT_NAMES},
+                    duration_each=duration, n_samples=50)
+                if concat_traj is None:
+                    self._append_log(
+                        '  concat plan failed (segment collided) — '
+                        'falling back to two-stage dispatch', 'warn')
+                    self._grasp_final_joints = validated['final']
+                    self._grasp_approach_joints = validated['approach']
+                    self._grasp_motion_event = evt
+                    def _apply_approach():
+                        self._ik_apply_and_act(
+                            validated['approach'], 'grasp_approach')
+                    if getattr(self, '_gui_ready', False):
+                        self.root.after(0, _apply_approach)
+                else:
+                    self._append_log(
+                        f'  concat tier1: {len(concat_traj.points)} wps '
+                        f'over {2*duration:.1f}s, executing')
+                    # Update sliders + planning_state to FINAL goal so RViz
+                    # ghost reflects end target (matches old grasp_execute
+                    # behavior at this point in the flow).
+                    self._select_planning_group('arm')
+                    with self.joint_lock:
+                        for n in ARM_JOINT_NAMES:
+                            if n in validated['final']:
+                                self.joint_positions[n] = validated['final'][n]
+                    for n in ARM_JOINT_NAMES:
+                        if (n in validated['final']
+                                and n in self.sliders):
+                            self.sliders[n].set(validated['final'][n])
+                            if n in self.slider_labels:
+                                self.slider_labels[n].config(
+                                    text=f"{validated['final'][n]:.3f}")
+                    self._publish_goal_state()
+                    self._grasp_motion_event = evt
+                    self._execute_full_trajectory(concat_traj, evt)
             elif 'final' in validated:
                 self._grasp_motion_event = evt
                 def _apply_final():

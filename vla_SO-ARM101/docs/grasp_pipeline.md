@@ -11,8 +11,11 @@ Technical reference for the top-down grasp pipeline used by the SO-ARM101 contro
 ## Overview
 
 The grasp pipeline moves the arm to pick up a detected object using a two-stage
-IK approach (approach then descend), with a single-moving-jaw gripper whose TCP
-sits at the fixed jaw tip.
+IK approach (approach then descend) with a single-moving-jaw gripper. The IK
+chain solves to `gripper_tip` (the fixed-jaw tip); the **grasp center** is the
+dynamic `tcp_link` frame — midpoint of `gripper_tip` and `jaw_tip`, broadcast
+at runtime by `grasp_center_publisher` (see `vla_SO-ARM101/CLAUDE.md` →
+"Gripper frame layout").
 
 **Both stages are pre-validated before the arm moves.** If either the approach
 or final pose fails geometric IK or collision checking, the entire grasp is
@@ -21,12 +24,16 @@ rejected and the arm stays in place.
 ### Kinematic Chain
 
 ```
-... -> wrist_roll -> gripper (body) -> tcp_link   (FIXED joint)
-                                    -> jaw         (REVOLUTE - gripper_joint)
+... -> wrist_roll -> gripper (body) -> gripper_tip  (FIXED joint, IK chain tip)
+                                    -> jaw          (REVOLUTE - gripper_joint)
+                                       -> jaw_tip   (FIXED, mesh-derived)
+
+         tcp_link  (dynamic, runtime TF) = midpoint(gripper_tip, jaw_tip)
 ```
 
-TCP is at the fixed jaw tip. The moving jaw swings open/closed via
-`gripper_joint`. Opening the jaw does **not** move the TCP.
+`gripper_tip` is at the fixed-jaw tip. The moving jaw swings open/closed via
+`gripper_joint`. Opening the jaw does **not** move `gripper_tip`, but it DOES
+move `jaw_tip` and therefore the dynamic `tcp_link` (grasp center).
 
 ## Geometric IK
 

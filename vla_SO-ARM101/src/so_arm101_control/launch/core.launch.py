@@ -73,15 +73,40 @@ def generate_launch_description():
         parameters=[{'use_sim_time': use_sim_time}],
     )
 
+    # /ee_pose now reports the dynamic grasp center (tcp_link), broadcast by
+    # grasp_center_publisher below — semantically correct as the "where my
+    # tool is" topic. Aruco's robot_config.yaml subscribes to /ee_pose for
+    # the same reason; it gets the new midpoint frame for free.
     ee_pose_publisher = Node(
         package='so_arm101_control',
         executable='ee_pose_publisher',
         name='ee_pose_publisher',
         parameters=[{
             'base_frame': 'base',
-            'ee_frame': 'gripper',
+            'ee_frame': 'tcp_link',
             'publish_rate': 10.0,
-            'startup_delay': 5.0,
+            'startup_delay': 6.0,
+            'use_sim_time': use_sim_time,
+        }],
+        output='screen',
+    )
+
+    # Broadcasts dynamic tcp_link as the midpoint of gripper_tip and jaw_tip.
+    # tcp_link is NOT in the URDF — it lives only in the live TF tree, so
+    # MoveIt's IK chain ends at the static gripper_tip. Startup delay must
+    # be < ee_pose_publisher's so /tf has the new frame before /ee_pose
+    # tries to read it.
+    grasp_center_publisher = Node(
+        package='so_arm101_control',
+        executable='grasp_center_publisher',
+        name='grasp_center_publisher',
+        parameters=[{
+            'base_frame': 'base',
+            'gripper_tip_frame': 'gripper_tip',
+            'jaw_tip_frame': 'jaw_tip',
+            'output_frame': 'tcp_link',
+            'publish_rate': 50.0,
+            'startup_delay': 4.0,
             'use_sim_time': use_sim_time,
         }],
         output='screen',
@@ -135,6 +160,7 @@ def generate_launch_description():
         robot_state_publisher,
         move_group,
         control_gui,
+        grasp_center_publisher,
         ee_pose_publisher,
         camera_pose_publisher,
         rviz,

@@ -160,16 +160,37 @@ def generate_launch_description():
         parameters=[{'use_sim_time': True}],
     )
 
+    # --- Grasp center publisher — dynamic tcp_link as midpoint(gripper_tip,
+    # jaw_tip), post-2026-04-28 frame rename. Must start before
+    # ee_pose_publisher so /ee_pose's TF lookup hits the new frame.
+    grasp_center_publisher = Node(
+        package='so_arm101_control',
+        executable='grasp_center_publisher',
+        name='grasp_center_publisher',
+        parameters=[{
+            'base_frame': 'base',
+            'gripper_tip_frame': 'gripper_tip',
+            'jaw_tip_frame': 'jaw_tip',
+            'output_frame': 'tcp_link',
+            'publish_rate': 50.0,
+            'startup_delay': 4.0,
+            'use_sim_time': True,
+        }],
+        output='screen',
+    )
+
     # --- EE Pose Publisher ---
+    # Publishes /ee_pose from the dynamic tcp_link (grasp center).
+    # ee_frame was 'gripper' before the rename.
     ee_pose_publisher = Node(
         package='so_arm101_control',
         executable='ee_pose_publisher',
         name='ee_pose_publisher',
         parameters=[{
             'base_frame': 'base',
-            'ee_frame': 'gripper',
+            'ee_frame': 'tcp_link',
             'publish_rate': 10.0,
-            'startup_delay': 5.0,
+            'startup_delay': 6.0,
             'use_sim_time': True,
         }],
         output='screen',
@@ -255,7 +276,7 @@ def generate_launch_description():
         RegisterEventHandler(
             event_handler=OnProcessExit(
                 target_action=load_gripper_controller,
-                on_exit=[move_group, control_gui, ee_pose_publisher, camera_pose_publisher, rviz],
+                on_exit=[move_group, control_gui, grasp_center_publisher, ee_pose_publisher, camera_pose_publisher, rviz],
             )
         ),
     ])

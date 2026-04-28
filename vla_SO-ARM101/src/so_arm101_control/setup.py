@@ -32,6 +32,7 @@ setup(
             'gravity_comp_node = so_arm101_control.gravity_comp_node:main',
             'servo_driver = so_arm101_control.servo_driver:main',
             'ee_pose_publisher = so_arm101_control.ee_pose_publisher:main',
+            'grasp_center_publisher = so_arm101_control.grasp_center_publisher:main',
             'camera_pose_publisher = so_arm101_control.camera_pose_publisher:main',
             'test_ik_solvers = so_arm101_control.test_ik_solvers:main',
             'test_planning = so_arm101_control.test_planning:main',

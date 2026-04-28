@@ -144,6 +144,26 @@ def generate_launch_description():
             output='screen',
         ),
 
+        # Grasp center publisher — broadcasts dynamic tcp_link as midpoint
+        # of gripper_tip and jaw_tip (post-2026-04-28 frame rename).
+        # MUST start before ee_pose_publisher: ee_pose_publisher subscribes
+        # to base->tcp_link via TF; if tcp_link doesn't exist, /ee_pose
+        # spins on lookup failures forever.
+        Node(
+            package='so_arm101_control',
+            executable='grasp_center_publisher',
+            name='grasp_center_publisher',
+            parameters=[{
+                'base_frame': 'base',
+                'gripper_tip_frame': 'gripper_tip',
+                'jaw_tip_frame': 'jaw_tip',
+                'output_frame': 'tcp_link',
+                'publish_rate': 50.0,
+                'startup_delay': 2.0,
+            }],
+            output='screen',
+        ),
+
         # EE Pose Publisher
         Node(
             package='so_arm101_control',
@@ -153,7 +173,7 @@ def generate_launch_description():
                 'base_frame': 'base',
                 'ee_frame': 'tcp_link',
                 'publish_rate': 10.0,
-                'startup_delay': 3.0,
+                'startup_delay': 4.0,
             }],
             output='screen',
         ),

@@ -22,10 +22,29 @@ MCP tool inventory live in `~/Documents/isaac-sim-mcp/CLAUDE.md`.
 | --- | --- | --- |
 | `so_arm101_description` | URDF + SDF (Gazebo `lego_world.sdf`), meshes, robot_state_publisher launch | Yes |
 | `so_arm101_moveit_config` | MoveIt config (SRDF, kinematics, OMPL/Pilz), `move_group.launch.py`, `demo.launch.py` | Yes |
-| `so_arm101_control` | `control_gui` (tk-based), `gazebo.launch.py` (the master sim launcher), ros2_control config, ee_pose_publisher, camera_pose_publisher | Yes |
+| `so_arm101_control` | `control_gui` (tk-based), `gazebo.launch.py` (the master sim launcher), ros2_control config, ee_pose_publisher, camera_pose_publisher, **grasp_center_publisher** (broadcasts dynamic `tcp_link` TF — see Gripper frame layout below) | Yes |
 | `jointstatereader` | Real-hardware Feetech serial bridge — reads leader/follower servos, publishes `/joint_states` + `/joint_commands`, optional mirror or topic-driven follower write | Yes |
 | `so_arm101_bringup` | **Real-camera bringup** — `camera_publisher` (cv2.VideoCapture → ROS2 Image), `real_cameras.launch.py` (wrist + optional top). Self-contained — no aruco_camera_localizer dependency | Yes (Phase 6-02) |
 | `sim_ground_truth` | **Sim ground-truth** — gz.transport13 → `/objects_poses_sim`, `/objects_bbox_sim`, `/drop_poses` mirroring aruco real-side contract. Catalog at `config/lego_world_objects.yaml`. | Yes (Phase 6-04) |
+
+## Gripper frame layout (renamed 2026-04-28)
+
+The end-effector has **three** TF frames after the rename. Knowing which is which matters whenever you target IK or read a "TCP" pose:
+
+| Frame | Static or dynamic? | URDF? | What it is | Use for |
+| --- | --- | --- | --- | --- |
+| `gripper_tip` | static (child of `gripper`) | yes | Fixed-jaw tip. Was called `tcp_link` before the rename. | **IK chain tip** — MoveIt/trac_ik solve to here. SRDF `<chain tip_link>` points here. |
+| `jaw_tip` | static (child of `jaw`) | yes | Moving-jaw tip. Origin derived from `moving_jaw_so101_v1.stl` via `calibrate_jaw.py`. | Half of the midpoint computation; collision-disable entries in SRDF. |
+| `tcp_link` | **dynamic** (depends on live `gripper_joint`) | **no** — broadcast at runtime by `grasp_center_publisher` | Midpoint of `gripper_tip` and `jaw_tip` = the true grasp center. | Every "where is my tool?" query — TF lookups, `/ee_pose`, the calibration_offset target for vision (yoloe/aruco). |
+
+Why `tcp_link` lives only in the TF tree: a midpoint of two siblings can't be expressed in URDF (it'd require dynamic origin). MoveIt's IK chain therefore ends at the static `gripper_tip`. For "what-if" FK queries (e.g., collision-checking a planned grasp pose), `_compute_fk_to_spinboxes` requests both `gripper_tip` + `jaw_tip` from MoveIt FK and averages them — same answer the live broadcaster would give for that joint state.
+
+**Migration consequences (still valid 2026-04-28+):**
+- `_compute_jaw_offset` (control_gui.py:10581) still shifts the IK target by `grip_width/2` along the fixed-jaw direction. Same math as before; the *naming* changed (it now shifts "object-center target" → "`gripper_tip` target"; previously called the same destination `tcp_link target`).
+- `_attached_lego_tcp_offset` is captured in the *new* `tcp_link` frame (= grasp center). For a centered grasp it's now ≈ 0 in the jaw-open direction (was ≈ +half_gap before). Drop motions using this MEASURED offset stay correct without code changes.
+- `/ee_pose` now reports the dynamic `tcp_link` (grasp center). `aruco_camera_localizer/config/robot_config.yaml.so_arm101.topics.tcp_pose: '/ee_pose'` automatically gets the correct frame.
+
+**TODO**: Isaac Sim USD references `tcp_link` in the so-arm101-dt extension. Update the USD when we revisit Isaac digital-twin work — log lives in `MEMORY.md`. Sim (Gazebo) URDF is the same file as real, no separate change needed.
 
 ## Sim-world layout (`so_arm101_description/worlds/lego_world.sdf`)
 
@@ -155,10 +174,13 @@ records which planner ran. Read in /tmp/arm_traj/*.json or via
 
 - **Attach offset captured at grasp time**: `_attach_lego_to_gripper`
   (line 5168) computes block-in-tcp_link pose and stores it on
-  `self._attached_lego_tcp_offset`. `_cmd_drop_sweep` (line 6793)
-  uses MEASURED `|ax|` for the gap→tcp shift, NOT theoretical
-  `half_gap`. Off-center grasps shift the block 1-2 mm vs theoretical
-  jaw center; planner compensates.
+  `self._attached_lego_tcp_offset`. After the 2026-04-28 frame rename,
+  `tcp_link` is the dynamic grasp center (midpoint of jaws), so this
+  offset is now ≈0 in the jaw-open direction for a centered grasp
+  (was ≈+half_gap before). `_cmd_drop_sweep` (line 6793) uses MEASURED
+  `|ax|` for the gap→tcp shift, NOT theoretical `half_gap`. Off-center
+  grasps shift the block 1-2 mm vs theoretical jaw center; planner
+  compensates regardless of which frame convention is in use.
 - **Pan lock on drop_sweep**: `_plan_collision_free_execute`
   (line 2176) accepts `lock_pan=<rad>` kwarg. drop_sweep passes
   current shoulder_pan so geometric IK on the shifted tcp_target
