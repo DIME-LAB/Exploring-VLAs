@@ -345,13 +345,31 @@ class GravityCompNode(Node):
     def _cycle(self):
         if not self.target:
             return
-        # Build full q at target
-        q_target = map_user_pose_to_q(self.target, self.joint_idx_in_q, self.model)
+        # Build full q at target. We need the FULL q for Pinocchio's RNEA
+        # (gravity torque on, say, shoulder_lift depends on elbow_flex
+        # too), so missing joints fall back to the last actual reading
+        # rather than 0. Falling back to 0 was the pre-fix bug: arm-only
+        # targets pinned gripper to mid-range, gripper-only targets
+        # slammed the arm to all-zero ("robot falls down" symptom).
+        target_full = dict(self.target)
+        for j in JOINT_NAMES_URDF:
+            if j not in target_full:
+                # Prefer last actual reading; fall back to 0 only if we've
+                # never seen state for this joint.
+                target_full[j] = self.actual.get(j, 0.0)
+        q_target = map_user_pose_to_q(target_full, self.joint_idx_in_q, self.model)
         tau_g = gravity_torque(self.model, self.data, q_target)
 
+        # Publish ONLY the joints actually present in the incoming target.
+        # jsr's _on_command_msg uses dict(zip(msg.name, msg.position)).get()
+        # so absent joints are left alone — the per-controller separation
+        # in trajectory_shim (arm action server vs gripper action server)
+        # publishes partial JointStates, and we must preserve that
+        # partition through gravity_comp instead of broadcasting a full
+        # 6-joint command on every tick.
         cmd = {}
-        for j in JOINT_NAMES_URDF:
-            base = self.target.get(j, 0.0)
+        for j in self.target.keys():
+            base = self.target[j]
             ff = 0.0
             idx = self.joint_idx_in_q.get(j)
             if idx is not None and self.k_calib.get(j, 0.0) != 0:
@@ -360,7 +378,10 @@ class GravityCompNode(Node):
                 # To CANCEL that error we command target - (predicted error),
                 # i.e. SUBTRACT the FF offset from target.
                 ff = self.k_calib[j] * float(tau_g[idx])
-            cmd[j] = base - ff + self.i_term[j]
+            cmd[j] = base - ff + self.i_term.get(j, 0.0)
+
+        if not cmd:
+            return
 
         # Publish
         msg = JointState()

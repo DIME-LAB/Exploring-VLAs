@@ -26,7 +26,7 @@ Usage (typically you launch stack.launch.py instead):
 import os
 import xacro
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -101,10 +101,27 @@ def generate_launch_description():
         output='screen',
     )
 
-    rviz = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(moveit_pkg, 'launch', 'moveit_rviz.launch.py')),
-        condition=IfCondition(use_rviz),
+    # RViz is started AFTER everything else via TimerAction.
+    # Why: launching rviz2 in parallel with move_group + robot_state_publisher
+    # races on the planning-scene + /tf time-source initialization. In real
+    # mode (no /clock) we've seen rviz2 abort with
+    #   `std::runtime_error: can't compare times with different time sources`
+    # when it subscribes to /tf or /planning_scene mid-init while another
+    # publisher is still reconfiguring its clock. Delaying rviz to ~12s
+    # mirrors what mac-env/scripts/rviz_attach.sh does (start rviz only
+    # after the rest of the stack is fully up) — that path never crashes.
+    # If you ever need to attach RViz to a no-rviz launch, the script is
+    # the right tool; this delay just makes the in-stack rviz behave the
+    # same way without a second invocation.
+    rviz = TimerAction(
+        period=12.0,
+        actions=[
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    os.path.join(moveit_pkg, 'launch', 'moveit_rviz.launch.py')),
+                condition=IfCondition(use_rviz),
+            ),
+        ],
     )
 
     return LaunchDescription([

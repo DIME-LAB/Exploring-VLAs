@@ -287,6 +287,11 @@ def generate_launch_description():
             'velocity_scale': velocity_scale_real,
             'rate_hz': 20.0,
             'use_sim_time': False,
+            # Route through gravity_comp: shim writes /joint_targets, then
+            # gravity_comp_node applies K_calib feed-forward and republishes
+            # to /joint_commands. Without this, K_calib calibration is a
+            # no-op and the arm sags by the full uncompensated amount.
+            'joint_commands_topic': '/joint_targets',
         }],
         condition=UnlessCondition(read_only),
     )

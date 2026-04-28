@@ -364,12 +364,16 @@ GRASP_WORKSPACE_BOUNDS = {
 }
 
 
-def check_grasp_reachable(x, y, z, ground_z=None):
+def check_grasp_reachable(x, y, z, ground_z=None, z_min_override=None):
     """Check if (x, y, z) is within the top-down grasp workspace.
 
     Bounds are computed by sweeping geometric_ik() over a (r, z, yaw) grid,
     so they represent the true IK-solvable region, not just FK-reachable.
     ground_z: if provided, reject targets at or below the ground plane.
+    z_min_override: if provided, replaces the default Z_MIN floor (used in
+        real mode where yoloe-derived Z has small systematic bias vs sim
+        ground truth — see grasp_workspace_bounds_raw.z_min for the true
+        IK-reachable lower bound).
     Returns (ok, reason_string). ok=True means reachable.
     """
     if ground_z is not None and z <= ground_z:
@@ -381,7 +385,7 @@ def check_grasp_reachable(x, y, z, ground_z=None):
         return False, f'too close: r={r:.3f}m < {r_min:.3f}m'
     if r > r_max:
         return False, f'too far: r={r:.3f}m > {r_max:.3f}m'
-    z_min = GRASP_WORKSPACE_BOUNDS['Z_MIN']
+    z_min = z_min_override if z_min_override is not None else GRASP_WORKSPACE_BOUNDS['Z_MIN']
     z_max = GRASP_WORKSPACE_BOUNDS['Z_MAX']
     if z < z_min:
         return False, f'too low: z={z:.3f}m < {z_min:.3f}m'
@@ -2967,6 +2971,8 @@ class SOArm101ControlGUI(Node):
         if hasattr(self, '_real_grip_open_rad_var'):
             state['real_grip_open_rad'] = self._real_grip_open_rad_var.get()
             state['real_grip_close_rad'] = self._real_grip_close_rad_var.get()
+        if hasattr(self, '_real_grasp_z_floor_var'):
+            state['real_grasp_z_floor'] = self._real_grasp_z_floor_var.get()
         state['tcp_clearance'] = self._tcp_clearance_var.get()
         state['drop_hover_above_rim'] = self._drop_hover_above_rim_var.get()
 
@@ -3032,6 +3038,9 @@ class SOArm101ControlGUI(Node):
                 state.get('real_grip_open_rad', 0.375))
             self._real_grip_close_rad_var.set(
                 state.get('real_grip_close_rad', 0.18))
+        if hasattr(self, '_real_grasp_z_floor_var'):
+            self._real_grasp_z_floor_var.set(
+                state.get('real_grasp_z_floor', 0.010))
         self._tcp_clearance_var.set(state.get('tcp_clearance', 1.0))
         self._drop_hover_above_rim_var.set(state.get('drop_hover_above_rim', 0.050))
 
@@ -3355,6 +3364,27 @@ class SOArm101ControlGUI(Node):
                               section='Arm',
                               command=self._cmd_apply_home_speed).pack(
                               side=tk.LEFT, padx=(5, 0))
+
+        # Real-mode grasp Z-floor override (mirrors A.12 gripper-defaults
+        # pattern). The default Gate A floor is the smoothed
+        # grasp_workspace_bounds.z_min (0.014m, 5% safety margin on the IK
+        # sweep). yoloe-reported lego top-Z runs ~1-2mm below that floor in
+        # real mode due to depth-fallback bias. The raw IK-reachable bound
+        # is grasp_workspace_bounds_raw.z_min = 0.010m, so 0.010 is a safe
+        # default. Spinbox is real-mode only; sim mode uses the smoothed
+        # default (no override) since sim ground-truth Z is exact.
+        z_floor_row = tk.Frame(arm_col)
+        z_floor_row.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(z_floor_row, text='Real Z-floor (m):',
+                 anchor='w').pack(side=tk.LEFT)
+        self._real_grasp_z_floor_var = tk.DoubleVar(value=0.010)
+        self._register_spinbox(
+            z_floor_row, label='Real Grasp Z-floor (m)',
+            tab='Grasp', section='Arm',
+            textvariable=self._real_grasp_z_floor_var,
+            from_=0.000, to=0.050, increment=0.001,
+            width=7, format='%.3f',
+        ).pack(side=tk.LEFT, padx=(5, 0))
 
         self._grasp_move_btn = self._register_button(
             arm_col, text='Move to Grab', tab='Grasp', section='Arm',
@@ -6159,17 +6189,33 @@ class SOArm101ControlGUI(Node):
             self._SHIM_WRAPPER: (
                 '#!/usr/bin/env bash\n' + common_env +
                 f'exec ros2 run so_arm101_control trajectory_shim --ros-args '
+                # Publish setpoints to /joint_targets (NOT /joint_commands)
+                # so gravity_comp_node intercepts, applies K_calib feed-
+                # forward (Δθ_ff = K · τ_g), and republishes the corrected
+                # setpoint to /joint_commands. Without this rerouting,
+                # the shim writes /joint_commands directly and bypasses
+                # gravity_comp entirely — K_calib calibration becomes a
+                # no-op and the arm sags by the full uncompensated amount
+                # at every pose, which is why grasp_home / Set-to-Zero
+                # show visible droop vs the RViz model.
+                f'-p joint_commands_topic:=/joint_targets '
                 f'-p velocity_scale:=0.5 '
                 f'-p rate_hz:=20.0 '
                 f'-p tolerance_rad:=0.0524 '
                 f"-p completion_timeout_s:=2.0'\n"
             ),
         }
+        # Always overwrite. Earlier we only wrote on missing-file (assumption
+        # was wrappers are content-stable per machine). Reality: source
+        # constants like trajectory_shim's velocity_scale do change between
+        # commits, but the on-disk wrapper persists across reboots/sessions
+        # and silently keeps using the old value (e.g., 0.25 from a previous
+        # commit even after source moved to 0.5). Regenerating every Connect
+        # makes the wrapper a function of current source, not session history.
         for path, body in scripts.items():
-            if not os.path.exists(path):
-                with open(path, 'w') as f:
-                    f.write(body)
-                os.chmod(path, 0o755)
+            with open(path, 'w') as f:
+                f.write(body)
+            os.chmod(path, 0o755)
 
     def _kill_real_data_processes(self):
         """Kill any running jsr / shim processes (best-effort, idempotent)."""
@@ -6217,10 +6263,25 @@ class SOArm101ControlGUI(Node):
                 close_fds=True,
             )
             time.sleep(2.0)
+            # Auto-apply Playback speed spinbox so the running shim's
+            # velocity_scale matches what the GUI shows. Without this the
+            # wrapper's hardcoded default (e.g., 0.5) silently overrides
+            # the spinbox until the user clicks Settings → Apply.
+            shim_speed_line = ''
+            try:
+                shim_val = float(self._shim_speed_var.get())
+                ok, msg = self._set_shim_velocity_scale(shim_val)
+                shim_speed_line = (
+                    f'  shim velocity_scale={shim_val:.2f} '
+                    f'({"applied" if ok else "FAILED: " + msg})\n'
+                )
+            except Exception as e:
+                shim_speed_line = f'  shim velocity_scale apply skipped ({e})\n'
             text = (
                 f'Status: CONNECTED (write mode)\n'
                 f'  jsr.pid={jsr.pid} (accept_command_input=true)\n'
                 f'  shim.pid={shim.pid} (action servers up)\n'
+                f'{shim_speed_line}'
                 f'MoveIt Plan & Execute will move the real arm.'
             )
             self._real_conn_status.after(
@@ -6624,34 +6685,39 @@ class SOArm101ControlGUI(Node):
             self._overlay_status.config(
                 text=f'{label} toggle failed: {e}', fg='red')
 
+    def _set_shim_velocity_scale(self, val):
+        """Push velocity_scale to the running trajectory_shim. Thread-safe
+        (no Tk mutation). Returns (ok, message) so callers can render their
+        own status. Used by both the Settings-tab Apply button and the
+        post-Connect auto-apply path so the spinbox value is the
+        single source of truth, not the wrapper-script default.
+        """
+        import subprocess
+        try:
+            r = subprocess.run(
+                ['ros2', 'param', 'set', '--no-daemon',
+                 '/trajectory_shim', 'velocity_scale', str(float(val))],
+                capture_output=True, text=True, timeout=8.0)
+            if r.returncode == 0:
+                return True, (f'Playback speed set to {float(val):.2f} '
+                              f'(effective = FK_speed × {float(val):.2f}).')
+            return False, f'set failed: {r.stderr.strip()[:200]}'
+        except Exception as e:
+            return False, f'set failed: {e}'
+
     def _cmd_apply_shim_speed(self):
         """Set trajectory_shim's velocity_scale ROS param at runtime.
         Effective playback speed = MoveIt scaling × this value.
         """
-        import subprocess
         try:
             val = float(self._shim_speed_var.get())
         except (TypeError, ValueError):
             self._settings_calib_status.config(
                 text='Invalid playback speed value', fg='red')
             return
-        # Use ros2 param set --no-daemon to avoid the macOS daemon hang
-        try:
-            r = subprocess.run(
-                ['ros2', 'param', 'set', '--no-daemon',
-                 '/trajectory_shim', 'velocity_scale', str(val)],
-                capture_output=True, text=True, timeout=8.0)
-            if r.returncode == 0:
-                self._settings_calib_status.config(
-                    text=f'Playback speed set to {val:.2f} '
-                         f'(effective = FK_speed × {val:.2f}).',
-                    fg='green')
-            else:
-                self._settings_calib_status.config(
-                    text=f'set failed: {r.stderr.strip()[:200]}', fg='red')
-        except Exception as e:
-            self._settings_calib_status.config(
-                text=f'set failed: {e}', fg='red')
+        ok, msg = self._set_shim_velocity_scale(val)
+        self._settings_calib_status.config(
+            text=msg, fg='green' if ok else 'red')
 
     def _cmd_calibrate_gravity_comp(self):
         """Refit gravity-comp K_calib by driving the arm through URDF-zero +
@@ -7471,7 +7537,10 @@ class SOArm101ControlGUI(Node):
             with self._ik_solve_lock:
                 ground_z = (self._ground_z_var.get()
                             if hasattr(self, '_ground_z_var') else None)
-                ok, reason = check_grasp_reachable(x, y, z, ground_z=ground_z)
+                z_min_override = self._real_grasp_z_floor_override()
+                ok, reason = check_grasp_reachable(
+                    x, y, z, ground_z=ground_z,
+                    z_min_override=z_min_override)
                 if not ok:
                     self._append_log(
                         f'Grasp rejected: {reason} '
@@ -7772,7 +7841,15 @@ class SOArm101ControlGUI(Node):
         # angular-dependent during a pan sweep) re-add the legos at drifting
         # base-frame coordinates makes the collision meshes appear to move
         # with shoulder_pan even though they're physically stationary.
-        if new_any_big_move:
+        # Phase 6-07 followup: in real mode, never auto-add. yoloe-derived
+        # poses jitter (~5-15 mm even on a static lego — wrist-cam angle
+        # changes the projected centroid), so a >3mm threshold fires on
+        # almost every callback and the planning scene flickers. Real mode
+        # uses Refresh-only semantics: the user clicks "Refresh Objects"
+        # (or Quickstart Refresh All) when they want a planning-scene
+        # update. The cache (objects_data) still updates above so the
+        # listbox stays live with current detections.
+        if new_any_big_move and not getattr(self, 'use_real_hardware', False):
             self._ensure_lego_state()
             if self._attached_lego_name:
                 return
@@ -9187,8 +9264,13 @@ class SOArm101ControlGUI(Node):
         # OMPL fallback disabled — RRTConnect's RNG variance has produced cup-
         # clipping trajectories from far-pan start poses. If both tiers fail,
         # surface loudly rather than roll the dice.
+        # Duration: read the Grasp tab "Arm Duration (s)" spinbox. Sim mode
+        # tolerates aggressive durations; in real mode keep it ≥ 3.0 s to stay
+        # inside the PD drive's tracking envelope (see _cmd_drop_point comment).
+        dur_var = getattr(self, '_grasp_arm_duration_var', None)
+        duration_s = float(dur_var.get()) if dur_var is not None else 3.0
         self._joint_space_collision_free_execute(
-            target, on_complete_event=evt, duration_s=3.0,
+            target, on_complete_event=evt, duration_s=duration_s,
             allow_ompl_fallback=False)
 
         if saved_vs is not None:
@@ -10183,13 +10265,17 @@ class SOArm101ControlGUI(Node):
             f'wrist_roll={math.degrees(wrist_roll_target):+.0f}\u00b0 toward {name}')
         # tier1 linear-interp + OMPL fallback. Validates every waypoint
         # against cups, world legos, ground, AND the held-lego world copy.
-        # duration 3.0 s: matches grasp_home / grasp_move; the prior 1.0 s
-        # default put pan rotation at ~107°/s (1.87 rad/s) — beyond the PD
-        # drive's tracking envelope per the forum-findings note, and a key
-        # cause of lego-vs-cup contact during the pan-to-cup sweep with a
-        # carried block.
+        # Duration: Grasp tab "Arm Duration (s)" spinbox. The prior 1.0 s
+        # hardcode put pan rotation at ~107°/s (1.87 rad/s) — beyond the
+        # real-hardware PD drive's tracking envelope per the forum-findings
+        # note, and a key cause of lego-vs-cup contact during the pan-to-cup
+        # sweep with a carried block. In sim the controller tracks fast
+        # motions cleanly; user is in control of the trade-off via the
+        # spinbox.
+        dur_var = getattr(self, '_grasp_arm_duration_var', None)
+        duration_s = float(dur_var.get()) if dur_var is not None else 3.0
         self._joint_space_collision_free_execute(
-            target, on_complete_event=evt, duration_s=3.0)
+            target, on_complete_event=evt, duration_s=duration_s)
 
     def _cmd_drop_sweep(self):
         """IK-planned drop sweep: geometric IK → collision check → MoveIt path.
@@ -10678,9 +10764,12 @@ class SOArm101ControlGUI(Node):
                 poses_to_check.append(('final', tx, ty, target_z))
 
             # Workspace bbox check first — fast reject for clearly-out-of-reach.
+            z_min_override = self._real_grasp_z_floor_override()
             gate_a_results = []
             for stage, px, py, pz in poses_to_check:
-                ok, reason = check_grasp_reachable(px, py, pz, ground_z=ground_z)
+                ok, reason = check_grasp_reachable(
+                    px, py, pz, ground_z=ground_z,
+                    z_min_override=z_min_override)
                 gate_a_results.append({
                     'stage': stage, 'x': px, 'y': py, 'z': pz,
                     'ok': ok, 'reason': reason,
@@ -10864,6 +10953,22 @@ class SOArm101ControlGUI(Node):
             self._tcp_clearance_var.set(val)
         self._append_log(f'TCP clearance set to {val:.1f}mm')
 
+    def _real_grasp_z_floor_override(self):
+        """Return the user-set Z-floor override for real-mode Gate A, else None.
+
+        Real mode uses yoloe-derived object Z which has small systematic bias
+        vs sim ground truth (~1-2mm low). Default smoothed Gate A floor
+        (grasp_workspace_bounds.z_min = 0.014m) was tuned for sim Z accuracy
+        and over-rejects real targets. Spinbox default is 0.010m, matching
+        grasp_workspace_bounds_raw.z_min — the true IK-reachable lower bound.
+        Sim mode returns None so it keeps the conservative smoothed default.
+        """
+        if not getattr(self, 'use_real_hardware', False):
+            return None
+        if not hasattr(self, '_real_grasp_z_floor_var'):
+            return None
+        return self._real_grasp_z_floor_var.get()
+
     def _cmd_check_grasp_reachable(self):
         """Check if the selected object is within the top-down grasp workspace."""
         obj_name = self._get_selected_object_name()
@@ -10878,7 +10983,10 @@ class SOArm101ControlGUI(Node):
         obj_z_override = self._grasp_obj_z_var.get()
         z = obj_z_override if abs(obj_z_override) > 1e-4 else pos['z']
         ground_z = self._ground_z_var.get() if hasattr(self, '_ground_z_var') else None
-        ok, reason = check_grasp_reachable(pos['x'], pos['y'], z, ground_z=ground_z)
+        z_min_override = self._real_grasp_z_floor_override()
+        ok, reason = check_grasp_reachable(
+            pos['x'], pos['y'], z, ground_z=ground_z,
+            z_min_override=z_min_override)
         r = math.sqrt(pos['x']**2 + pos['y']**2)
         if ok:
             self._append_log(
