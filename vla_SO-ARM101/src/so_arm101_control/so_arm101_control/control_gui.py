@@ -8,14 +8,19 @@ Source: adapted from RoboSort/JETANK_description/jetank_control_gui.py (3133 lin
         Joint mapping from MuammerBay/SO-ARM_ROS2_URDF and SO-ARM101_MoveIt_IsaacSim.
 """
 
+import datetime
+import json
 import math
 import os
 import random
 import signal
+import socket
+import subprocess
 import threading
 import time
 import tkinter as tk
 import weakref
+from pathlib import Path
 from tkinter import ttk
 
 from so_arm101_control.grasp_trace import tracer
@@ -172,6 +177,27 @@ CUP_BODY_HEIGHT_M = 0.0965
 _CUP_COLLISION_PADDING = 1.05  # 5% default pad — absorbs the multi-mm
 # tracking-lag-induced overshoot during fast pan motions (e.g. post-drop
 # grasp_home sweeps 107° at 36°/s, which exceeded the 1% margin in testing).
+
+
+# --- Record Sim tab constants -----------------------------------------------
+# Module-level (not class-level) so hot_reload picks them up on the running
+# instance — class attributes only attach to a fresh class object on import.
+REC_LEROBOT_SCRIPT = os.path.expanduser(
+    "~/Projects/Exploring-VLAs/linux-env/scripts/record_sim_isaac.sh")
+REC_MIRROR_SCRIPT = os.path.expanduser(
+    "~/Projects/Exploring-VLAs/linux-env/scripts/joint_states_to_commands.py")
+REC_DATASET_ROOT = os.path.expanduser("~/.cache/huggingface/lerobot/local")
+REC_SIM_RESET_SCRIPT = os.path.expanduser(
+    "~/Projects/Exploring-VLAs/vla_SO-ARM101/scripts/sim_reset.sh")
+REC_MCP_HOST = "localhost"
+REC_MCP_PORT = 8767
+# Hardcoded scene contract — matches extension.py LEGO_USDS.
+REC_LEGOS_BY_COLOR = {
+    "red":   ["red_2x3_a", "red_2x3_b"],
+    "green": ["green_2x3_a", "green_2x3_b"],
+    "blue":  ["blue_2x3_a", "blue_2x3_b"],
+}
+REC_MAX_RETRIES_PER_LEGO = 5
 
 
 def _load_cup_mesh():
@@ -1947,6 +1973,7 @@ class SOArm101ControlGUI(Node):
         self._build_grasp_tab(notebook)
         self._build_quickstart_tab(notebook)
         self._build_real_test_tab(notebook)
+        self._build_record_sim_tab(notebook)
         self._build_display_tab(notebook)
 
         # Auto-populate IK fields when switching to IK tab
@@ -3052,6 +3079,7 @@ class SOArm101ControlGUI(Node):
                 (self._build_grasp_tab, 'Grasp'),
                 (self._build_quickstart_tab, 'Quickstart'),
                 (self._build_real_test_tab, 'Real Test'),
+                (self._build_record_sim_tab, 'Record Sim'),
                 (self._build_display_tab, 'RViz'),
             ]:
                 try:
@@ -5542,6 +5570,621 @@ class SOArm101ControlGUI(Node):
                 self._qs_listbox.selection_set(i)
                 return True
         return False
+
+    # ==================================================================
+    # Record Sim — closed-loop dataset recording in Isaac Sim
+    # ==================================================================
+    #
+    # Orchestrates the full recording session:
+    # 1) spawn lerobot-record subprocess + /joint_commands_lerobot mirror
+    # 2) loop scenes (per scene = randomize → run K episodes, one per
+    #    pickable lego of the chosen color)
+    # 3) per episode: optional reset-to-grasp_home → drive QS pick-place →
+    #    wait for "pick-and-drop cycle complete" sentinel
+    # 4) on QS halt → re-randomize same scene, retry same lego (up to
+    #    REC_MAX_RETRIES_PER_LEGO before skipping)
+    # 5) on Stop or session done → SIGINT subprocesses, finalize dataset
+    #
+    # All blocking work runs on a daemon thread; UI updates marshaled via
+    # root.after(0, ...). State stored in self._rec_state dict guarded by
+    # self._rec_lock.
+    #
+    # Constants live at MODULE level (defined just above this class) so
+    # hot_reload picks up changes without a full restart — class-level
+    # attributes only attach to a fresh class object created on import,
+    # not to the running instance's existing __class__.
+
+    def _build_record_sim_tab(self, notebook):
+        """Tab: closed-loop sim recording. Spawns lerobot-record + mirror,
+        runs a configurable number of pick-and-drop episodes against the
+        chosen color, re-randomizing the scene every K episodes."""
+        frame = ttk.Frame(notebook)
+        notebook.add(frame, text='Record Sim')
+
+        # --- State (lazy init — survives hot-reload) ---
+        if not hasattr(self, '_rec_lock'):
+            self._rec_lock = threading.Lock()
+        if not hasattr(self, '_rec_state'):
+            self._rec_state = {
+                'phase': 'idle',          # idle|starting|running|paused|stopping
+                'episode': 0,             # 1-indexed during run, 0 idle
+                'n_episodes': 0,
+                'scene': 0,
+                'last_lego': '',
+                'last_verdict': '',
+                'dataset_dir': '',
+                'lerobot_proc': None,
+                'mirror_proc': None,
+                'thread': None,
+                'stop_evt': threading.Event(),
+                'pause_evt': threading.Event(),  # set = run, clear = pause
+                'total_retries': 0,
+            }
+            self._rec_state['pause_evt'].set()  # not paused on init
+
+        # --- Tk vars (bound to widgets, persisted via widget registry) ---
+        if not hasattr(self, '_rec_episodes_var'):
+            self._rec_episodes_var = tk.IntVar(value=16)
+        if not hasattr(self, '_rec_color_var'):
+            self._rec_color_var = tk.StringVar(value='blue')
+        if not hasattr(self, '_rec_dataset_var'):
+            self._rec_dataset_var = tk.StringVar(value='')
+        if not hasattr(self, '_rec_randomize_legos_var'):
+            self._rec_randomize_legos_var = tk.BooleanVar(value=True)
+        if not hasattr(self, '_rec_randomize_cups_var'):
+            self._rec_randomize_cups_var = tk.BooleanVar(value=False)
+        if not hasattr(self, '_rec_reset_arm_var'):
+            self._rec_reset_arm_var = tk.BooleanVar(value=True)
+        if not hasattr(self, '_rec_pause_between_var'):
+            self._rec_pause_between_var = tk.BooleanVar(value=False)
+        if not hasattr(self, '_rec_status_var'):
+            self._rec_status_var = tk.StringVar(value='IDLE')
+        if not hasattr(self, '_rec_progress_var'):
+            self._rec_progress_var = tk.StringVar(value='—')
+        if not hasattr(self, '_rec_dataset_path_var'):
+            self._rec_dataset_path_var = tk.StringVar(value='—')
+
+        # ===== Section: Settings =====
+        settings = ttk.LabelFrame(frame, text='Settings')
+        settings.pack(fill=tk.X, padx=10, pady=(8, 4))
+
+        row1 = ttk.Frame(settings); row1.pack(fill=tk.X, padx=5, pady=4)
+        tk.Label(row1, text='Episodes:').pack(side=tk.LEFT, padx=(0, 4))
+        self._register_spinbox(
+            row1, label='Episodes', tab='Record Sim', section='Settings',
+            textvariable=self._rec_episodes_var,
+            from_=1, to=10000, increment=1, width=6,
+        ).pack(side=tk.LEFT, padx=(0, 12))
+
+        tk.Label(row1, text='Block color:').pack(side=tk.LEFT, padx=(0, 4))
+        color_cb = ttk.Combobox(
+            row1, textvariable=self._rec_color_var,
+            values=list(REC_LEGOS_BY_COLOR.keys()),
+            state='readonly', width=8,
+        )
+        color_cb.pack(side=tk.LEFT, padx=(0, 12))
+        # Register so widget services can read/set it.
+        self._widget_registry_add(
+            'Block color', 'Combobox', color_cb,
+            self._rec_color_var, tab='Record Sim', section='Settings',
+            writable=True)
+
+        row2 = ttk.Frame(settings); row2.pack(fill=tk.X, padx=5, pady=4)
+        tk.Label(row2, text='Dataset name:').pack(side=tk.LEFT, padx=(0, 4))
+        ds_entry = ttk.Entry(row2, textvariable=self._rec_dataset_var, width=40)
+        ds_entry.pack(side=tk.LEFT, padx=(0, 4))
+        self._widget_registry_add(
+            'Dataset name', 'Entry', ds_entry,
+            self._rec_dataset_var, tab='Record Sim', section='Settings',
+            writable=True)
+        tk.Label(row2, text='(blank → auto rec_<HHMMSS>)',
+                 fg='#888').pack(side=tk.LEFT)
+
+        # Per-episode actions
+        actions = ttk.LabelFrame(frame, text='Per-episode actions')
+        actions.pack(fill=tk.X, padx=10, pady=4)
+        for label, var in [
+            ('Randomize legos (per scene = every K episodes)',
+             self._rec_randomize_legos_var),
+            ('Randomize cups (per scene)',
+             self._rec_randomize_cups_var),
+            ('Reset arm to grasp_home (per episode)',
+             self._rec_reset_arm_var),
+            ('Pause briefly between episodes (~2.5s)',
+             self._rec_pause_between_var),
+        ]:
+            self._register_check(
+                actions, label=label, tab='Record Sim', section='Actions',
+                variable=var,
+            ).pack(anchor=tk.W, padx=8, pady=1)
+
+        # ===== Section: Control =====
+        control = ttk.LabelFrame(frame, text='Control')
+        control.pack(fill=tk.X, padx=10, pady=4)
+        ctrl_row = ttk.Frame(control); ctrl_row.pack(fill=tk.X, padx=5, pady=6)
+        self._rec_btn_start = self._register_button(
+            ctrl_row, text='▶ Start', tab='Record Sim', section='Control',
+            command=self._cmd_rec_start,
+        )
+        self._rec_btn_start.pack(side=tk.LEFT, fill=tk.X, expand=True,
+                                 padx=2, ipady=4)
+        self._rec_btn_pause = self._register_button(
+            ctrl_row, text='⏸ Pause', tab='Record Sim', section='Control',
+            command=self._cmd_rec_pause,
+        )
+        self._rec_btn_pause.pack(side=tk.LEFT, fill=tk.X, expand=True,
+                                 padx=2, ipady=4)
+        self._rec_btn_stop = self._register_button(
+            ctrl_row, text='⏹ Stop', tab='Record Sim', section='Control',
+            command=self._cmd_rec_stop,
+        )
+        self._rec_btn_stop.pack(side=tk.LEFT, fill=tk.X, expand=True,
+                                padx=2, ipady=4)
+        self._register_button(
+            ctrl_row, text='↻ Reset Scene', tab='Record Sim', section='Control',
+            command=self._cmd_rec_reset_scene,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2, ipady=4)
+        self._register_button(
+            ctrl_row, text='📁 Open Dataset', tab='Record Sim',
+            section='Control', command=self._cmd_rec_open_dataset,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2, ipady=4)
+
+        # ===== Section: Status =====
+        status = ttk.LabelFrame(frame, text='Status')
+        status.pack(fill=tk.X, padx=10, pady=4)
+        st_row1 = ttk.Frame(status); st_row1.pack(fill=tk.X, padx=8, pady=2)
+        tk.Label(st_row1, text='State:', width=10, anchor=tk.W).pack(side=tk.LEFT)
+        tk.Label(st_row1, textvariable=self._rec_status_var,
+                 font=('TkDefaultFont', 10, 'bold')).pack(side=tk.LEFT)
+
+        st_row2 = ttk.Frame(status); st_row2.pack(fill=tk.X, padx=8, pady=2)
+        tk.Label(st_row2, text='Progress:', width=10, anchor=tk.W).pack(
+            side=tk.LEFT)
+        tk.Label(st_row2, textvariable=self._rec_progress_var).pack(
+            side=tk.LEFT)
+
+        st_row3 = ttk.Frame(status); st_row3.pack(fill=tk.X, padx=8, pady=2)
+        tk.Label(st_row3, text='Dataset:', width=10, anchor=tk.W).pack(
+            side=tk.LEFT)
+        tk.Label(st_row3, textvariable=self._rec_dataset_path_var,
+                 fg='#0066cc').pack(side=tk.LEFT)
+
+        # Initial button-enabled-ness
+        self._rec_update_button_state()
+
+    # -- Helpers -----------------------------------------------------------
+
+    def _rec_set_status(self, status_text=None, progress_text=None,
+                        dataset_text=None):
+        """Marshal a status update onto the Tk thread."""
+        def _apply():
+            if status_text is not None:
+                self._rec_status_var.set(status_text)
+            if progress_text is not None:
+                self._rec_progress_var.set(progress_text)
+            if dataset_text is not None:
+                self._rec_dataset_path_var.set(dataset_text)
+            self._rec_update_button_state()
+        try:
+            self.root.after(0, _apply)
+        except Exception:
+            pass
+
+    def _rec_update_button_state(self):
+        """Enable/disable Start/Pause/Stop based on phase."""
+        phase = self._rec_state['phase']
+        is_idle = phase == 'idle'
+        is_running = phase in ('running',)
+        is_paused = phase == 'paused'
+        try:
+            self._rec_btn_start.configure(
+                state=(tk.NORMAL if is_idle else tk.DISABLED))
+            self._rec_btn_pause.configure(
+                state=(tk.NORMAL if (is_running or is_paused) else tk.DISABLED),
+                text=('▶ Resume' if is_paused else '⏸ Pause'))
+            self._rec_btn_stop.configure(
+                state=(tk.NORMAL if not is_idle else tk.DISABLED))
+        except Exception:
+            pass
+
+    def _rec_mcp_call(self, cmd_type, params=None, timeout=120):
+        """Call an Isaac Sim MCP tool via socket 8767. Returns response dict
+        or None on failure. Used for randomize_object_poses, randomize_cups."""
+        msg = json.dumps({"type": cmd_type, "params": params or {}})
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            sock.connect((REC_MCP_HOST, REC_MCP_PORT))
+            sock.sendall(msg.encode("utf-8"))
+            data = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+                try:
+                    return json.loads(data.decode("utf-8"))
+                except json.JSONDecodeError:
+                    continue
+            sock.close()
+        except Exception as exc:
+            self._append_log(f'Record: MCP {cmd_type} failed: {exc}', 'warn')
+        return None
+
+    def _rec_call_trigger(self, srv_name, timeout=20):
+        """Call a /so_arm101_control_gui/<srv_name> Trigger service from this
+        node's executor. Returns the Trigger response or None."""
+        cli = self.create_client(Trigger, f'~/{srv_name}')
+        if not cli.wait_for_service(timeout_sec=5):
+            return None
+        fut = cli.call_async(Trigger.Request())
+        # Spin until done — we're on a background thread, the executor runs
+        # in main, so use spin_until_future_complete with the current
+        # node + a timeout.
+        t0 = time.time()
+        while not fut.done() and (time.time() - t0) < timeout:
+            time.sleep(0.05)
+        if fut.done():
+            return fut.result()
+        return None
+
+    def _rec_dataset_repo_id(self):
+        """Resolve dataset repo_id from the entry; auto-name if blank."""
+        name = (self._rec_dataset_var.get() or '').strip()
+        if not name:
+            name = f"rec_{datetime.datetime.now():%H%M%S}"
+        if '/' not in name:
+            name = f"local/{name}"
+        return name
+
+    # -- Commands ----------------------------------------------------------
+
+    def _cmd_rec_start(self):
+        """Spawn lerobot-record + mirror, then start the orchestration thread."""
+        with self._rec_lock:
+            if self._rec_state['phase'] != 'idle':
+                self._append_log('Record: already running', 'warn')
+                return
+            self._rec_state['phase'] = 'starting'
+            self._rec_state['stop_evt'].clear()
+            self._rec_state['pause_evt'].set()
+            self._rec_state['episode'] = 0
+            self._rec_state['scene'] = 0
+            self._rec_state['total_retries'] = 0
+            self._rec_state['last_verdict'] = ''
+            self._rec_state['last_lego'] = ''
+            self._rec_state['n_episodes'] = int(self._rec_episodes_var.get())
+
+        repo_id = self._rec_dataset_repo_id()
+        ds_path = os.path.join(REC_DATASET_ROOT, repo_id.split('/', 1)[-1])
+        if os.path.exists(ds_path):
+            self._append_log(
+                f'Record: dataset {ds_path} already exists; pick a new name',
+                'err')
+            with self._rec_lock:
+                self._rec_state['phase'] = 'idle'
+            self._rec_set_status(status_text='IDLE')
+            return
+
+        self._rec_state['dataset_dir'] = ds_path
+        self._rec_set_status(
+            status_text='STARTING (spawning subprocesses)',
+            progress_text=f'0/{self._rec_state["n_episodes"]}',
+            dataset_text=ds_path)
+        self._append_log(f'Record: starting → {repo_id}')
+
+        # Spawn mirror (system Humble Python).
+        try:
+            mp = subprocess.Popen(
+                ['python3', '-u', REC_MIRROR_SCRIPT],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True)
+            self._rec_state['mirror_proc'] = mp
+        except Exception as exc:
+            self._append_log(f'Record: mirror spawn failed: {exc}', 'err')
+            self._rec_finalize(error=True)
+            return
+
+        # Spawn lerobot-record (pixi-Jazzy via bash wrapper).
+        cmd = [
+            'bash', REC_LEROBOT_SCRIPT,
+            f'--dataset.repo_id={repo_id}',
+            f'--dataset.num_episodes={self._rec_state["n_episodes"]}',
+            '--dataset.episode_time_s=120',
+            '--dataset.reset_time_s=2',
+            '--dataset.single_task=sort blue blocks',
+            '--dataset.push_to_hub=false',
+            '--display_data=false',
+        ]
+        try:
+            log_path = f"/tmp/rec_{datetime.datetime.now():%H%M%S}.log"
+            log_fd = open(log_path, 'w')
+            lp = subprocess.Popen(
+                cmd, stdout=log_fd, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True)
+            self._rec_state['lerobot_proc'] = lp
+            self._rec_state['lerobot_log'] = log_path
+        except Exception as exc:
+            self._append_log(f'Record: lerobot spawn failed: {exc}', 'err')
+            self._rec_finalize(error=True)
+            return
+
+        # Start orchestration thread.
+        t = threading.Thread(target=self._rec_loop_thread, daemon=True)
+        self._rec_state['thread'] = t
+        t.start()
+
+    def _cmd_rec_pause(self):
+        """Toggle pause/resume the orchestration loop. lerobot keeps running."""
+        with self._rec_lock:
+            phase = self._rec_state['phase']
+            if phase == 'running':
+                self._rec_state['phase'] = 'paused'
+                self._rec_state['pause_evt'].clear()
+                self._append_log('Record: paused (lerobot still recording)')
+                self._rec_set_status(status_text='PAUSED')
+            elif phase == 'paused':
+                self._rec_state['phase'] = 'running'
+                self._rec_state['pause_evt'].set()
+                self._append_log('Record: resumed')
+                self._rec_set_status(status_text='RUNNING')
+
+    def _cmd_rec_stop(self):
+        """Signal the loop to stop, then SIGINT subprocesses."""
+        with self._rec_lock:
+            if self._rec_state['phase'] == 'idle':
+                return
+            self._rec_state['phase'] = 'stopping'
+            self._rec_state['stop_evt'].set()
+            self._rec_state['pause_evt'].set()  # release pause if blocked
+        self._rec_set_status(status_text='STOPPING')
+        self._append_log('Record: stopping (waiting for clean tear-down…)')
+        # Run the rest on a thread so we don't block tk.
+        threading.Thread(target=self._rec_finalize_thread, daemon=True).start()
+
+    def _cmd_rec_reset_scene(self):
+        """Trigger sim_reset.sh in a subprocess. Idempotent — safe any time."""
+        self._append_log('Record: sim_reset')
+        try:
+            subprocess.Popen(
+                ['bash', REC_SIM_RESET_SCRIPT],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL, start_new_session=True)
+        except Exception as exc:
+            self._append_log(f'Record: reset failed: {exc}', 'err')
+
+    def _cmd_rec_open_dataset(self):
+        """xdg-open the most recent dataset folder (or the configured one)."""
+        target = self._rec_state.get('dataset_dir') or REC_DATASET_ROOT
+        if not os.path.exists(target):
+            self._append_log(f'Record: no dataset at {target}', 'warn')
+            return
+        try:
+            subprocess.Popen(['xdg-open', target],
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        except Exception as exc:
+            self._append_log(f'Record: open failed: {exc}', 'err')
+
+    # -- Subprocess teardown ----------------------------------------------
+
+    def _rec_finalize_thread(self):
+        """Background: SIGINT subprocesses, wait for clean exit, then idle."""
+        for key in ('lerobot_proc', 'mirror_proc'):
+            proc = self._rec_state.get(key)
+            if proc and proc.poll() is None:
+                try:
+                    # SIGINT propagates through start_new_session
+                    os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+                except Exception:
+                    try:
+                        proc.send_signal(signal.SIGTERM)
+                    except Exception:
+                        pass
+        # Wait up to ~10s for clean exit, then escalate.
+        deadline = time.time() + 10.0
+        for key in ('lerobot_proc', 'mirror_proc'):
+            proc = self._rec_state.get(key)
+            if not proc:
+                continue
+            while proc.poll() is None and time.time() < deadline:
+                time.sleep(0.2)
+            if proc.poll() is None:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except Exception:
+                    pass
+        self._rec_finalize(error=False)
+
+    def _rec_finalize(self, error=False):
+        """Reset state to idle. Safe to call from any thread."""
+        with self._rec_lock:
+            self._rec_state['phase'] = 'idle'
+            self._rec_state['lerobot_proc'] = None
+            self._rec_state['mirror_proc'] = None
+            self._rec_state['stop_evt'].clear()
+            self._rec_state['pause_evt'].set()
+        msg = 'IDLE (error)' if error else 'IDLE'
+        self._rec_set_status(status_text=msg)
+        self._append_log(f'Record: finalized ({msg})')
+
+    # -- Main loop --------------------------------------------------------
+
+    def _rec_loop_thread(self):
+        """Orchestration loop. Runs on a daemon background thread."""
+        st = self._rec_state
+        legos = list(REC_LEGOS_BY_COLOR[self._rec_color_var.get()])
+        legos_per_scene = len(legos)
+        n_target = st['n_episodes']
+
+        # Warm-up wait — give lerobot ~10s to subscribe + emit first frame.
+        for _ in range(50):
+            if st['stop_evt'].is_set():
+                return
+            if st.get('lerobot_proc') and st['lerobot_proc'].poll() is None:
+                # Probe its log for "Recording episode" sentinel
+                log_path = st.get('lerobot_log', '')
+                if log_path and os.path.exists(log_path):
+                    try:
+                        with open(log_path) as f:
+                            if 'Recording episode 0' in f.read():
+                                break
+                    except Exception:
+                        pass
+            time.sleep(0.2)
+
+        with self._rec_lock:
+            if st['phase'] != 'starting':
+                return
+            st['phase'] = 'running'
+        self._rec_set_status(status_text='RUNNING')
+
+        episode_idx = 0  # 0-indexed
+        scene_idx = 0
+        while episode_idx < n_target and not st['stop_evt'].is_set():
+            st['pause_evt'].wait()  # block while paused
+
+            # Start of scene?
+            if episode_idx % legos_per_scene == 0:
+                scene_idx += 1
+                st['scene'] = scene_idx
+                self._rec_set_status(
+                    status_text='RANDOMIZING',
+                    progress_text=(
+                        f'Episode {episode_idx + 1}/{n_target}, '
+                        f'scene {scene_idx}'))
+                if self._rec_randomize_legos_var.get():
+                    self._rec_mcp_call('randomize_object_poses', {})
+                if self._rec_randomize_cups_var.get():
+                    self._rec_mcp_call('randomize_cups', {})
+                time.sleep(1.0)  # let physics settle
+
+            lego = legos[episode_idx % legos_per_scene]
+            st['last_lego'] = lego
+
+            verdict = self._rec_run_episode_with_retry(lego, episode_idx, n_target)
+
+            if verdict == 'ABORT':
+                break
+            st['last_verdict'] = verdict
+            episode_idx += 1
+            st['episode'] = episode_idx
+
+            if self._rec_pause_between_var.get():
+                time.sleep(2.5)
+
+        # Clean exit: signal stop, finalize.
+        if not st['stop_evt'].is_set():
+            self._append_log(f'Record: completed {episode_idx} episodes')
+            self._cmd_rec_stop()
+
+    def _rec_run_episode_with_retry(self, lego, episode_idx, n_target):
+        """Run one episode for `lego`, re-randomizing on QS halt up to
+        REC_MAX_RETRIES_PER_LEGO times. Returns 'PASS' / 'SKIP' / 'ABORT'."""
+        st = self._rec_state
+        for attempt in range(REC_MAX_RETRIES_PER_LEGO):
+            if st['stop_evt'].is_set():
+                return 'ABORT'
+            st['pause_evt'].wait()
+
+            self._rec_set_status(
+                status_text='RUNNING',
+                progress_text=(
+                    f'Ep {episode_idx + 1}/{n_target}, scene {st["scene"]}, '
+                    f'lego {lego} (try {attempt + 1})'))
+
+            # Optional reset to grasp_home before each episode.
+            if self._rec_reset_arm_var.get():
+                self._rec_call_trigger('grasp_home', timeout=20)
+
+            verdict = self._rec_run_one_qs_cycle(lego)
+            if verdict == 'PASS':
+                return 'PASS'
+            if verdict == 'ABORT':
+                return 'ABORT'
+            # FAIL: re-randomize and retry
+            st['total_retries'] += 1
+            self._append_log(
+                f'Record: episode {episode_idx + 1} failed on {lego} '
+                f'(attempt {attempt + 1}); re-randomizing')
+            self._rec_mcp_call('randomize_object_poses', {})
+            time.sleep(1.0)
+
+        # Exhausted retries — log and skip.
+        self._append_log(
+            f'Record: lego {lego} unreachable after '
+            f'{REC_MAX_RETRIES_PER_LEGO} retries; advancing', 'warn')
+        return 'SKIP'
+
+    def _rec_run_one_qs_cycle(self, lego, timeout_s=90):
+        """Drive one QuickStart pick-and-drop cycle for the named lego.
+        Returns 'PASS' / 'FAIL' / 'ABORT'.
+
+        Per Q1 (Always PASS — never verify), success is the
+        'pick-and-drop cycle complete' sentinel in get_log. No pose check.
+        """
+        from rcl_interfaces.srv import SetParameters
+        from rcl_interfaces.msg import Parameter, ParameterValue, ParameterType
+        st = self._rec_state
+
+        # 1) Set ik_target.
+        params_cli = self.create_client(
+            SetParameters, '~/set_parameters')
+        params_cli.wait_for_service(timeout_sec=5)
+        p = Parameter(name='ik_target',
+                      value=ParameterValue(
+                          type=ParameterType.PARAMETER_STRING,
+                          string_value=lego))
+        fut = params_cli.call_async(SetParameters.Request(parameters=[p]))
+        t0 = time.time()
+        while not fut.done() and time.time() - t0 < 10:
+            time.sleep(0.05)
+
+        # 2) qs_refresh_all → sleep → qs_select → sleep
+        if st['stop_evt'].is_set():
+            return 'ABORT'
+        self._rec_call_trigger('qs_refresh_all', timeout=15)
+        time.sleep(2.5)
+        if st['stop_evt'].is_set():
+            return 'ABORT'
+        self._rec_call_trigger('qs_select', timeout=15)
+        time.sleep(0.5)
+
+        # 3) Snapshot pre-cycle log line count.
+        log_resp = self._rec_call_trigger('get_log', timeout=10)
+        if log_resp is None:
+            return 'FAIL'
+        pre_lines = len(log_resp.message.split('\\n'))
+
+        # 4) qs_play.
+        if st['stop_evt'].is_set():
+            return 'ABORT'
+        self._rec_call_trigger('qs_play', timeout=15)
+
+        # 5) Poll get_log for terminal sentinel.
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            if st['stop_evt'].is_set():
+                return 'ABORT'
+            st['pause_evt'].wait()
+            time.sleep(2.0)
+            log_resp = self._rec_call_trigger('get_log', timeout=10)
+            if log_resp is None:
+                continue
+            new = '\\n'.join(log_resp.message.split('\\n')[pre_lines:])
+            if 'pick-and-drop cycle complete' in new:
+                return 'PASS'
+            if ('Quickstart halted' in new or
+                    'Quickstart aborted' in new):
+                return 'FAIL'
+        return 'FAIL'
+
+    # ==================================================================
+    # End Record Sim
+    # ==================================================================
 
     def _build_display_tab(self, notebook):
         frame = ttk.Frame(notebook)
