@@ -148,10 +148,11 @@ echo "  Control GUI (tkinter) appears in all modes after init."
 
 if [ "$MODE" = "real" ]; then
   echo ""
-  echo "  NOTE: real mode runs perception + state ingest only. Motion"
-  echo "        execution from control_gui to the real arm requires the"
-  echo "        trajectory_shim node, not yet implemented. Plans will succeed,"
-  echo "        execute action calls will time out."
+  echo "  Real mode: perception + state ingest + motion execution via"
+  echo "  trajectory_shim (50 Hz, time-interpolates FollowJointTrajectory"
+  echo "  goals to /joint_commands). control_gui auto-Connect spawns the"
+  echo "  live jsr+shim ~3s after launch — backend_real's own jsr+shim die"
+  echo "  with exit 1 (cosmetic; expected; see vla_SO-ARM101/CLAUDE.md)."
 fi
 if [ "$MODE" = "isaac" ]; then
   echo ""

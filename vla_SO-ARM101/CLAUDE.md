@@ -99,11 +99,28 @@ bash mac-env/scripts/rviz_attach.sh
 bash mac-env/scripts/rviz_stop.sh
 
 # === Real-side perception (camera_publisher + ArUco + YOLOE) ===
-# Auto-detects wrist USB cam by signature in robot_config.yaml.
-bash mac-env/scripts/camera_pipeline_start.sh                       # auto-detect
-bash mac-env/scripts/camera_pipeline_start.sh --camera-id 0         # explicit
+# Auto-detects wrist USB cam by USB vid/pid signature in robot_config.yaml.
+#
+# Always launch via camera_pipeline_start.sh — NOT directly via `ros2 launch
+# aruco_camera_localizer camera_pipeline.launch.py` and NOT via the camera
+# nodes that backend_real.launch.py tries to start. The wrapper hands off
+# through Terminal.app so cv2 gets the Cocoa session + Camera TCC grants
+# that direct/non-interactive launches don't reliably inherit. We've
+# observed the same cv2.VideoCapture(0) call return zero frames from a
+# plain shell context but stream cleanly via the wrapper — Terminal.app
+# handoff is the load-bearing piece, not a convenience.
+#
+# Verify cv2 idx → device mapping any time auto-detect feels off:
+#   pixi run --manifest-path /tmp/mac-env/pixi.toml \
+#     python -m aruco_camera_localizer.find_camera
+# On Sequoia + current OpenCV the printed list matches cv2's VideoCapture
+# index. OpenCV upstream issues #26371/#26305 report cases where iPhone
+# Continuity Camera disrupts the mapping on other versions — if the
+# printed mapping disagrees with reality, pass --camera-id explicitly.
+bash mac-env/scripts/camera_pipeline_start.sh                       # auto-detect (default)
+bash mac-env/scripts/camera_pipeline_start.sh --camera-id 0         # explicit override
 bash mac-env/scripts/camera_pipeline_stop.sh
-bash mac-env/scripts/fix_camera_permissions.sh                      # if Terminal can't open the cam
+bash mac-env/scripts/fix_camera_permissions.sh                      # if `OpenCV: not authorized` appears
 
 # === Builds ===
 # Single package, fast iteration:
@@ -139,6 +156,23 @@ mac-env/scripts/stack_start.sh
 The old monolithic `gazebo.launch.py` is preserved unchanged for
 back-compat — anything still calling it directly works. New code
 should use `stack.launch.py` via `stack_start.sh`.
+
+> **Real-mode launch race (cosmetic but noisy in logs):**
+> `backend_real.launch.py` spawns its own `joint_state_reader` +
+> `trajectory_shim`, but ~3 s later `control_gui`'s auto-Connect spawns
+> its **own** jsr+shim children that take the Feetech serial port. The
+> launch's instances die with `[ERROR] process has died [pid ..., exit
+> code 1]` in `/tmp/soarm_stack.log`. **This is expected** — the live
+> jsr+shim are children of `control_gui` (PID 25632 in last session),
+> not of `ros2 launch`. Verify with
+> `pgrep -lf "joint_state_reader\|trajectory_shim"` — the running ones
+> have `--params-file` from control_gui's auto-Connect, not from
+> launch_params_*. `stack_status.sh` only shows launch-children so it
+> reports 6 procs even when the system has 8.
+
+> **TODO (code drift):** `mac-env/scripts/stack_start.sh`'s real-mode
+> banner still says `trajectory_shim ... not yet implemented` —
+> shipped in `b1c9a3f`, banner is stale.
 
 ## Conventions
 

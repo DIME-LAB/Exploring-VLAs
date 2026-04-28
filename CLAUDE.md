@@ -51,15 +51,17 @@ Per-area conventions also live in nested CLAUDE.md files:
 
 **Cross-session memory** lives in `MEMORY.md` at this root (auto-loaded by Claude Code agents on every session). Captures workflow preferences, calibration recovery procedures, Feetech register encoding, and other learnings that aren't derivable from the code. Append (don't overwrite) when a session uncovers a non-obvious procedure or anti-pattern.
 
-## macOS gotchas (top 5)
+## macOS gotchas (top 7)
 
 | Gotcha | Workaround |
 | --- | --- |
-| `ros2 daemon` hangs | Always pass `--no-daemon` |
+| `ros2 daemon` hangs (and `--no-daemon` is **not universal**) | Pass `--no-daemon` on `ros2 topic list` / `node list` / `pkg list` / `service list`. **`ros2 topic hz` and `ros2 topic echo` reject the flag** (`unrecognized argument`). For those, run `ros2 daemon stop` first, or wrap with `gtimeout` (install via `brew install coreutils` — macOS BSD has no `timeout`). |
 | `pip install -e lerobot` bumps `numpy>=2` → controller spawners die on Accelerate ILP64 | After any pip-touch-numpy: `pixi run --manifest-path /tmp/mac-env/pixi.toml pip install --force-reinstall --no-deps 'numpy<2'` |
-| FastDDS silently fails between Python processes | CycloneDDS — exports `CYCLONEDDS_URI=file:///tmp/mac-env/cyclonedds.xml`, `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp` |
+| FastDDS silently fails between Python processes | CycloneDDS — exports `CYCLONEDDS_URI=file:///tmp/mac-env/cyclonedds.xml`, `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`. **A fresh shell does NOT inherit these** — set them explicitly when running `ros2` ad-hoc, or you'll be on FastDDS and see zero topics. |
 | OpenMP duplicate runtime (`OMP: Error #15`) | `KMP_DUPLICATE_LIB_OK=TRUE` |
 | Spaces in repo path break colcon C++ builds | Build at `/tmp/soarm-ws/` (the bootstrap symlinks source from here) |
+| `camera_publisher` logs `Camera N opened successfully` followed by repeating `Failed to capture frame` | **First reach: `bash mac-env/scripts/camera_pipeline_start.sh`** — it spawns the pipeline through Terminal.app, which gives cv2 the Cocoa session + TCC grants that direct CLI/launch invocations don't always inherit. Empirically clears most "opens-but-no-frames" symptoms even when `cv2.VideoCapture(idx)` from a plain shell fails. If `OpenCV: not authorized` appears: `bash mac-env/scripts/fix_camera_permissions.sh`. If the pipeline launcher still can't read frames, then suspect hardware (cable seating, lens cap, USB hub power, port). |
+| cv2 picking the wrong camera (e.g. FaceTime HD instead of wrist USB) | Verify the cv2 idx → device mapping with `pixi run --manifest-path /tmp/mac-env/pixi.toml python -m aruco_camera_localizer.find_camera`. On macOS Sequoia + current OpenCV the AVFoundation `uniqueID`-sort order matches cv2's `VideoCapture` index, so the printed list IS the cv2 mapping. **However:** OpenCV upstream issues [#26371](https://github.com/opencv/opencv/issues/26371), [#26305](https://github.com/opencv/opencv/issues/26305) report cases where iPhone Continuity Camera shifts indices on different OpenCV versions — if the printed mapping disagrees with what the live `camera_publisher` actually opens, pass `--camera-id <n>` explicitly to `camera_pipeline_start.sh` to override. |
 
 ## Bringing it up
 
