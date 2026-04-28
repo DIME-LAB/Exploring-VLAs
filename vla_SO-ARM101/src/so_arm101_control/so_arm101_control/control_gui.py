@@ -192,10 +192,13 @@ REC_SIM_RESET_SCRIPT = os.path.expanduser(
 REC_MCP_HOST = "localhost"
 REC_MCP_PORT = 8767
 # Hardcoded scene contract — matches extension.py LEGO_USDS.
+# 2 sizes per color picked → 2 episodes per scene. Skipping 2x4 (largest)
+# because its grasp footprint is closer to the workspace edge and tends to
+# need yaw-fallback retries.
 REC_LEGOS_BY_COLOR = {
-    "red":   ["red_2x3_a", "red_2x3_b"],
-    "green": ["green_2x3_a", "green_2x3_b"],
-    "blue":  ["blue_2x3_a", "blue_2x3_b"],
+    "red":   ["red_2x2", "red_2x3"],
+    "green": ["green_2x2", "green_2x3"],
+    "blue":  ["blue_2x2", "blue_2x3"],
 }
 REC_MAX_RETRIES_PER_LEGO = 5
 
@@ -5828,6 +5831,15 @@ class SOArm101ControlGUI(Node):
             return fut.result()
         return None
 
+    def _rec_topic_has_publisher(self, topic_name):
+        """Return True if any node currently publishes `topic_name`.
+        Uses the running node's discovery — no daemon dependency."""
+        try:
+            infos = self.get_publishers_info_by_topic(topic_name)
+            return len(infos) > 0
+        except Exception:
+            return False
+
     def _rec_dataset_repo_id(self):
         """Resolve dataset repo_id from the entry; auto-name if blank."""
         name = (self._rec_dataset_var.get() or '').strip()
@@ -5873,19 +5885,31 @@ class SOArm101ControlGUI(Node):
             dataset_text=ds_path)
         self._append_log(f'Record: starting → {repo_id}')
 
-        # Spawn mirror (system Humble Python).
-        try:
-            mp = subprocess.Popen(
-                ['python3', '-u', REC_MIRROR_SCRIPT],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-                start_new_session=True)
-            self._rec_state['mirror_proc'] = mp
-        except Exception as exc:
-            self._append_log(f'Record: mirror spawn failed: {exc}', 'err')
-            self._rec_finalize(error=True)
-            return
+        # Mirror dedup: if /joint_commands_lerobot already has a publisher
+        # (mirror left over from a prior session or started manually),
+        # reuse it instead of spawning a duplicate. We check the topic
+        # publisher count rather than process names because the topic is
+        # the actual contract the recorder needs.
+        existing_mirror = self._rec_topic_has_publisher(
+            '/joint_commands_lerobot')
+        if existing_mirror:
+            self._append_log(
+                'Record: reusing existing /joint_commands_lerobot publisher')
+            self._rec_state['mirror_proc'] = None
+        else:
+            try:
+                mp = subprocess.Popen(
+                    ['python3', '-u', REC_MIRROR_SCRIPT],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True)
+                self._rec_state['mirror_proc'] = mp
+            except Exception as exc:
+                self._append_log(
+                    f'Record: mirror spawn failed: {exc}', 'err')
+                self._rec_finalize(error=True)
+                return
 
         # Spawn lerobot-record (pixi-Jazzy via bash wrapper).
         cmd = [
@@ -6002,14 +6026,22 @@ class SOArm101ControlGUI(Node):
     def _rec_finalize(self, error=False):
         """Reset state to idle. Safe to call from any thread."""
         with self._rec_lock:
+            ep_done = self._rec_state['episode']
+            ep_target = self._rec_state['n_episodes']
             self._rec_state['phase'] = 'idle'
             self._rec_state['lerobot_proc'] = None
             self._rec_state['mirror_proc'] = None
             self._rec_state['stop_evt'].clear()
             self._rec_state['pause_evt'].set()
         msg = 'IDLE (error)' if error else 'IDLE'
-        self._rec_set_status(status_text=msg)
-        self._append_log(f'Record: finalized ({msg})')
+        # Final summary stays in the progress label so the user can see
+        # how many episodes landed before they stopped / it completed.
+        if ep_target > 0:
+            summary = f'last run: {ep_done}/{ep_target} episodes'
+        else:
+            summary = '—'
+        self._rec_set_status(status_text=msg, progress_text=summary)
+        self._append_log(f'Record: finalized ({msg}, {summary})')
 
     # -- Main loop --------------------------------------------------------
 
