@@ -2007,8 +2007,7 @@ class SOArm101ControlGUI(Node):
     # ------------------------------------------------------------------
 
     def _build_individual_tab(self, notebook):
-        frame = ttk.Frame(notebook)
-        notebook.add(frame, text='FK')
+        frame = self._make_scrollable_tab(notebook, 'FK')
 
         self.sliders = {}
         self.slider_labels = {}
@@ -3133,8 +3132,7 @@ class SOArm101ControlGUI(Node):
     # ------------------------------------------------------------------
 
     def _build_arm_control_tab(self, notebook):
-        frame = ttk.Frame(notebook)
-        notebook.add(frame, text='IK')
+        frame = self._make_scrollable_tab(notebook, 'IK')
         self._ik_tab_frame = frame
 
         # --- Arm (XYZ + RPY) side by side ---
@@ -3241,8 +3239,7 @@ class SOArm101ControlGUI(Node):
             self.ee_labels[key] = tk.StringVar(value='---')
 
     def _build_grasp_tab(self, notebook):
-        frame = ttk.Frame(notebook)
-        notebook.add(frame, text='Grasp')
+        frame = self._make_scrollable_tab(notebook, 'Grasp')
 
         # --- Object Source ---
         topic_frame = ttk.LabelFrame(frame, text='Object Source')
@@ -3606,8 +3603,7 @@ class SOArm101ControlGUI(Node):
                 'blue': 'drop_2'}.get(color)
 
     def _build_quickstart_tab(self, notebook):
-        frame = ttk.Frame(notebook)
-        notebook.add(frame, text='Quickstart')
+        frame = self._make_scrollable_tab(notebook, 'Quickstart')
 
         # Player state (thread/events).
         self._qs_state = 'idle'             # 'idle' | 'running' | 'paused'
@@ -4083,8 +4079,7 @@ class SOArm101ControlGUI(Node):
 
     def _build_real_test_tab(self, notebook):
         self._ensure_real_state()
-        frame = ttk.Frame(notebook)
-        notebook.add(frame, text='Real Test')
+        frame = self._make_scrollable_tab(notebook, 'Real Test')
 
         # ===== Section: Setup =====
         # Three primitive motions used to position the arm before scanning,
@@ -5670,15 +5665,19 @@ class SOArm101ControlGUI(Node):
         'my_awesome_follower_arm.json'
     )
 
-    def _build_settings_tab(self, notebook):
-        # The Settings tab grew past one screen height (Real HW Calibration +
-        # Manual Trim + Gravity Comp + Detector Overlays + Real HW Connection).
-        # Wrap everything in a tk.Canvas + ttk.Scrollbar so the user can scroll
-        # to reach the Connect/Disconnect buttons at the bottom. Standard Tk
-        # scroll pattern: outer frame holds canvas + scrollbar; canvas hosts
-        # an inner frame; all LabelFrames go in the inner frame.
+    def _make_scrollable_tab(self, notebook, tab_title):
+        """Wrap a notebook tab in a tk.Canvas + ttk.Scrollbar so its
+        content can scroll vertically when it overflows the window.
+        Returns the inner ttk.Frame that callers should use as the
+        parent for their widgets. Standard Tk scroll pattern:
+          - outer frame holds canvas + scrollbar
+          - canvas hosts an inner frame via create_window
+          - <Configure> bindings keep scrollregion + width in sync
+          - mouse-wheel events activate on <Enter>, deactivate on
+            <Leave> so other tabs' wheel events don't scroll us
+        """
         outer = ttk.Frame(notebook)
-        notebook.add(outer, text='Settings')
+        notebook.add(outer, text=tab_title)
 
         canvas = tk.Canvas(outer, highlightthickness=0)
         vsb = ttk.Scrollbar(outer, orient='vertical', command=canvas.yview)
@@ -5687,25 +5686,17 @@ class SOArm101ControlGUI(Node):
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         frame = ttk.Frame(canvas)
-        _frame_window = canvas.create_window((0, 0), window=frame, anchor='nw')
+        frame_window = canvas.create_window(
+            (0, 0), window=frame, anchor='nw')
 
         def _on_inner_resize(_event):
-            # Update scrollregion as inner content grows / shrinks.
             canvas.configure(scrollregion=canvas.bbox('all'))
         frame.bind('<Configure>', _on_inner_resize)
 
         def _on_canvas_resize(event):
-            # Match inner frame width to canvas width so child widgets
-            # using fill=tk.X span the visible area cleanly.
-            canvas.itemconfigure(_frame_window, width=event.width)
+            canvas.itemconfigure(frame_window, width=event.width)
         canvas.bind('<Configure>', _on_canvas_resize)
 
-        # Mouse-wheel scrolling. macOS native Tk delivers <MouseWheel>
-        # with delta in single units per wheel-click; Windows uses
-        # multiples of 120; Linux uses Button-4/Button-5. Activate
-        # bind_all only while the cursor is over the Settings tab so
-        # wheel events on other tabs don't accidentally scroll this
-        # canvas.
         def _on_wheel(event):
             if event.delta:
                 canvas.yview_scroll(int(-event.delta), 'units')
@@ -5723,6 +5714,14 @@ class SOArm101ControlGUI(Node):
             canvas.unbind_all('<Button-5>')
         canvas.bind('<Enter>', _activate_wheel)
         canvas.bind('<Leave>', _deactivate_wheel)
+
+        return frame
+
+    def _build_settings_tab(self, notebook):
+        # All tabs route through _make_scrollable_tab so vertical
+        # overflow is browsable instead of being clipped at the
+        # window edge.
+        frame = self._make_scrollable_tab(notebook, 'Settings')
 
         tk.Label(
             frame, text='Settings',
@@ -7024,8 +7023,7 @@ class SOArm101ControlGUI(Node):
         self._settings_calib_status.configure(text='Reading servos…', fg='black')
 
     def _build_display_tab(self, notebook):
-        frame = ttk.Frame(notebook)
-        notebook.add(frame, text='RViz')
+        frame = self._make_scrollable_tab(notebook, 'RViz')
 
         # --- Cups ---
         cup_frame = ttk.LabelFrame(frame, text='Cups')
