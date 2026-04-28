@@ -1,5 +1,59 @@
 # Project Memory — Exploring-VLAs
 
+## Dataset viewer setup (rerun + lerobot-dataset-viz, 2026-04-28)
+
+The `lerobot-dataset-viz` toolchain is fragile on macOS pixi. After it breaks
+(symptoms: `datasets`, `av`, `rerun-sdk`, or `pyarrow` ImportError; `_iconv`
+symbol-not-found from pyarrow), restore with this exact sequence:
+
+```bash
+# 1. pyarrow MUST come from conda (pip wheel hits libiconv linkage bug);
+#    `pixi add` is the canonical way, but if a pip transitive pulled in a
+#    different version, force-reinstall a known-good one with --no-deps:
+pixi run --manifest-path /tmp/mac-env/pixi.toml pip install --force-reinstall \
+    --no-deps "pyarrow==23.0.0"
+
+# 2. `datasets` MUST be >=4.0 (older versions lack ParquetConfig.filters
+#    which lerobot's load_nested_dataset uses):
+pixi run --manifest-path /tmp/mac-env/pixi.toml pip install --force-reinstall \
+    --no-deps "datasets==4.0.*"
+
+# 3. PyAV for video decoding:
+pixi run --manifest-path /tmp/mac-env/pixi.toml pip install av
+
+# 4. rerun-sdk for the viewer (will pull pyarrow as a transitive — uninstall
+#    that one immediately and restore the conda one):
+pixi run --manifest-path /tmp/mac-env/pixi.toml pip install rerun-sdk
+pixi run --manifest-path /tmp/mac-env/pixi.toml pip uninstall -y pyarrow
+pixi run --manifest-path /tmp/mac-env/pixi.toml pip install --force-reinstall \
+    --no-deps "pyarrow==23.0.0"
+
+# 5. Restore numpy<2 (any pip install that doesn't use --no-deps bumps it):
+pixi run --manifest-path /tmp/mac-env/pixi.toml pip install --force-reinstall \
+    --no-deps "numpy<2"
+
+# 6. Verify all imports clean:
+pixi run --manifest-path /tmp/mac-env/pixi.toml python3 -c \
+    "import pyarrow, datasets, rerun, av, lerobot; \
+     print('ok:', pyarrow.__version__, datasets.__version__, rerun.__version__)"
+
+# 7. Launch viewer:
+cd /tmp/soarm-ws && pixi run --manifest-path /tmp/mac-env/pixi.toml bash -c '
+  source install/setup.bash
+  export KMP_DUPLICATE_LIB_OK=TRUE
+  lerobot-dataset-viz \
+    --repo-id <repo_id> \
+    --episode-index 0 \
+    --mode local
+'
+```
+
+**Reference dataset (colleague's real SO-101 pick-and-place):**
+`arjunsinghyadav2/blue_sort_black_bg_colored_cups_v1_440ep` — 440 episodes,
+162221 frames, 30 fps, dataset format v3. Schema metadata snapshot lives at
+`lerobot/.planning/real_dataset_probe/{info.json,features.json,samples.json,
+PARITY_CONTRACT.md}`.
+
 ## Motion-quality stack (2026-04-28) — what's where & why
 
 Empirical-debug session that landed `trajectory_shim` + `jointstatereader` in a stable motion-quality regime. The journey is documented here because every change is non-obvious and tied to a specific observation about the **STS3215 firmware behavior** that you will rediscover otherwise.
