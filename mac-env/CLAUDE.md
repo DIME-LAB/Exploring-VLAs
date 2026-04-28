@@ -27,7 +27,14 @@ The shell scripts split cleanly into **producers** (start/stop the sim or real p
 | `verify_parity.py` | Compare a recorded dataset's schema against a target HF dataset; exit 0 on match | Foreground |
 | `verify_sim_topics.sh` | Print `ros2 topic list/hz` for the topics a record run cares about | Foreground |
 | `smoke_publisher.py`, `smoke_l1_camera.py`, `smoke_l2_dataset.py` | Phase 1/2 plumbing smoke tests | Foreground |
-| `_lib.sh` | Sourced by stack_*.sh — exports the canonical paths (`MAC_ENV_DIR=/tmp/mac-env`, `SOARM_WS=/tmp/soarm-ws`) and runtime env (`RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`, `KMP_DUPLICATE_LIB_OK=TRUE`) | Library |
+| `record_motion_topics.py` | Records `/joint_targets`, `/joint_commands`, `/joint_states` to JSONL with monotonic timestamps. Pairs with `analyze_motion.py`. Use to empirically debug motion smoothness / lag / oscillation. Stack must already be up; you drive the motion during the window. | Foreground |
+| `analyze_motion.py` | Per-joint motion-quality reporter from a `record_motion_topics.py` JSONL: peak/RMS error, settling time, oscillation FFT (3-25 Hz). Used to validate the cubic-Hermite + 50 Hz + integrator-tuning fixes (shoulder_lift hold 2.62° → 0.04°). | Foreground |
+| `probe_joint_states.py` | 4-second `/joint_states` snapshot in degrees, first/middle/last samples per joint. Sanity check after stack restart, calibration, or to watch settle behavior post-motion. | Foreground |
+| `feetech_calib_audit.py` | Read-only audit: compares each servo's EEPROM `Homing_Offset` (reg 31) against lerobot's saved JSON. Decoded as Feetech's 12-bit sign-magnitude (bit 11 = sign) — matches lerobot's internal decoder, so EEPROM == JSON is the real signal. **Stack MUST be stopped** (calibration needs exclusive bus access). | Foreground |
+| `arm_trim.py` | Per-joint EEPROM `Homing_Offset` ±delta tick adjustments (kills jsr → opens bus → mutates → optional JSON sync → optional jsr restart). Recommended range ±50 ticks (~±4.4°). Larger means re-run lerobot-calibrate. | Foreground |
+| `arm_finetune.sh` | 4-stage workflow: lerobot-calibrate → PID defaults → K_calib refit → visual verification. Use after changing physical hardware or accumulated calibration drift. | Foreground |
+| `calibrate_arm.sh` | lerobot-calibrate wrapper. Kills jsr first (bus exclusivity). After it exits: run `feetech_calib_audit.py` to verify EEPROM ↔ JSON, then restart stack. | Foreground |
+| `_lib.sh` | Sourced by stack_*.sh — exports the canonical paths (`MAC_ENV_DIR=/tmp/mac-env`, `SOARM_WS=/tmp/soarm-ws`) and runtime env (`RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`, `KMP_DUPLICATE_LIB_OK=TRUE`). Also defines `stack_running_count` regex used by stack_start.sh's preflight — narrow it (don't use loose patterns like `smoke_p`) to avoid matching unrelated sibling-session processes. | Library |
 
 ## Two record paths (pick one)
 

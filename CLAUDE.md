@@ -45,9 +45,11 @@ Read in this order on first contact:
 
 Per-area conventions also live in nested CLAUDE.md files:
 
-- `vla_SO-ARM101/CLAUDE.md` — package inventory + sim-world conventions
-- `mac-env/CLAUDE.md` — script lifecycle (stack_start, record, drive)
+- `vla_SO-ARM101/CLAUDE.md` — package inventory + sim-world conventions + Feetech encoding gotchas + calibration workflow
+- `mac-env/CLAUDE.md` — script lifecycle (stack_start, record, drive, motion diagnostics, calibration audit)
 - `lerobot/CLAUDE.md` (= `AGENTS.md` symlinked) — fork plugin rules, rclpy singleton, numpy pin
+
+**Cross-session memory** lives in `MEMORY.md` at this root (auto-loaded by Claude Code agents on every session). Captures workflow preferences, calibration recovery procedures, Feetech register encoding, and other learnings that aren't derivable from the code. Append (don't overwrite) when a session uncovers a non-obvious procedure or anti-pattern.
 
 ## macOS gotchas (top 5)
 
