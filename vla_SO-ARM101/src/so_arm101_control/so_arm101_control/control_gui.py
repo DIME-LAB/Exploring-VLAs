@@ -3784,27 +3784,73 @@ class SOArm101ControlGUI(Node):
         picked = self._qs_listbox.get(target_idx).split('  ')[0]
         self._append_log(f'Quickstart selected: {picked}')
 
+    def _lego_is_in_cup(self, pose):
+        """True iff a lego's pose puts it inside any cup's footprint.
+
+        Reuses the same XY+Z test as the MoveIt collision-scene path
+        (where in-cup legos are skipped to avoid phantom collisions —
+        see `_inside_any_cup` in the collision-diff method). A block
+        that's been dropped into a cup is "consumed" and shouldn't be
+        offered as a Quickstart pick target — top-down geometric IK
+        often can't reach the cup rim anyway (cups are placed within
+        the drop-IK envelope, not the grasp-IK envelope).
+        """
+        if pose is None:
+            return False
+        with self._drop_lock:
+            cups = dict(self._drop_data) if self._drop_data else {}
+        if not cups:
+            return False
+        cup_r = 0.039  # cup opening radius (matches CUP_R in collision-diff)
+        lx = float(pose.get('x', 0.0))
+        ly = float(pose.get('y', 0.0))
+        lz = float(pose.get('z', 0.0))
+        for cpos in cups.values():
+            cx = float(cpos['x'])
+            cy = float(cpos['y'])
+            cz = float(cpos['z'])
+            cup_base_z = cz - CUP_BODY_HEIGHT_M / 2.0
+            if (lx - cx) ** 2 + (ly - cy) ** 2 <= (cup_r + 0.005) ** 2:
+                if lz >= cup_base_z - 0.005:
+                    return True
+        return False
+
     def _qs_refresh_objects(self):
         """Populate the Quickstart listbox from the shared objects_data dict
-        (same source as the Grasp tab's listbox). Preserves selection if the
-        previously-selected entry still exists.
+        (same source as the Grasp tab's listbox). Filters out legos that
+        have already been placed in a cup — they're no longer pick
+        candidates, and trying to grasp them fails the workspace check
+        (cups sit at the edge of the drop-IK envelope, often beyond the
+        grasp-IK r_max). Preserves selection if the previously-selected
+        entry still exists and is still graspable.
         """
         prev = None
         if self._qs_listbox.curselection():
             prev = self._qs_listbox.get(self._qs_listbox.curselection()[0]).split('  ')[0]
         self._qs_listbox.delete(0, tk.END)
         with self.objects_lock:
-            names = sorted(self.objects_data.keys())
+            objects_snapshot = dict(self.objects_data)
+        names = sorted(objects_snapshot.keys())
+        skipped_in_cup = []
         restore_idx = None
-        for i, n in enumerate(names):
-            pose = self.objects_data.get(n, {})
+        listbox_idx = 0
+        for n in names:
+            pose = objects_snapshot.get(n, {})
+            if self._lego_is_in_cup(pose):
+                skipped_in_cup.append(n)
+                continue
             x, y, z = pose.get('x', 0), pose.get('y', 0), pose.get('z', 0)
             self._qs_listbox.insert(
                 tk.END, f'{n:<18s}  x={x:+.3f} y={y:+.3f} z={z:+.3f}')
             if n == prev:
-                restore_idx = i
+                restore_idx = listbox_idx
+            listbox_idx += 1
         if restore_idx is not None:
             self._qs_listbox.selection_set(restore_idx)
+        if skipped_in_cup:
+            self._append_log(
+                f'Quickstart: skipped {len(skipped_in_cup)} in-cup lego(s): '
+                f'{skipped_in_cup}')
 
     def _qs_get_selected_object(self):
         sel = self._qs_listbox.curselection()
