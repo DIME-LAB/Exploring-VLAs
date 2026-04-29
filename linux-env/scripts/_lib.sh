@@ -1,49 +1,93 @@
-# _lib.sh — shared constants for stack_* scripts.
+# _lib.sh — shared paths + env for the Linux stack.
 #
-# RoboStack conda packages have shebangs and shell scripts that break when the
-# env lives at a path with spaces. Since our repo lives under `.../untitled
-# folder/...` we can't host the pixi env in-tree. The env lives at /tmp/mac-env
-# (installed once via bootstrap.sh), and the colcon workspace at /tmp/soarm-ws.
+# Sourced by stack_*.sh, bootstrap.sh, and any other linux-env script that needs
+# canonical paths. Mirrors mac-env/scripts/_lib.sh but for the Isaac-Sim-backed
+# Linux topology (system Humble producer side + pixi-Jazzy lerobot consumer).
 #
-# Scripts source this file to keep paths consistent.
+# Resolves REPO_ROOT from this file's location, so colleagues cloning to
+# arbitrary paths get correct values without editing anything.
 
-# Source of truth for the Mac pixi environment (spaceless clone of mac-env/).
-export MAC_ENV_DIR=/tmp/mac-env
-export MAC_ENV_MANIFEST="$MAC_ENV_DIR/pixi.toml"
-export MAC_ENV_PYTHON="$MAC_ENV_DIR/.pixi/envs/default/bin/python"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export LINUX_ENV_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+export REPO_ROOT="$(cd "$LINUX_ENV_DIR/.." && pwd)"
 
-# Colcon workspace where SO-ARM101 packages are built.
-export SOARM_WS=/tmp/soarm-ws
+# Repo subtrees (some are submodules — bootstrap.sh inits them)
+export VLA_PKG="$REPO_ROOT/vla_SO-ARM101"
+export ISAAC_MCP="$REPO_ROOT/isaac-sim-mcp"
+export LEROBOT_DIR="$REPO_ROOT/lerobot"
+
+# System ROS2 (producer side: Isaac Sim, control_gui, MoveIt, mirror node)
+export ROS2_DISTRO="${ROS2_DISTRO:-humble}"
+export ROS2_SETUP="${ROS2_SETUP:-/opt/ros/$ROS2_DISTRO/setup.bash}"
+
+# Colcon workspace lives in-tree on Linux (no spaceless-/tmp/ workaround needed —
+# Linux paths are spaceless by convention, and in-tree keeps build artefacts
+# tied to the source for symlink-install to resolve correctly).
+export SOARM_WS="$VLA_PKG"
 export SOARM_WS_SETUP="$SOARM_WS/install/setup.bash"
 
-# Runtime env for anything that touches ROS 2 on macOS.
+# Pixi env for the lerobot consumer side (Python 3.12 + RoboStack-Jazzy + lerobot deps).
+# linux-env/pixi.toml is materialized in-tree under linux-env/.pixi/.
+export PIXI_MANIFEST="$LINUX_ENV_DIR/pixi.toml"
+
+# Cross-Python DDS discovery (multicast on lo — system default disables this,
+# which prevents Jazzy consumers from seeing Humble producers across process trees).
+# Force-set CYCLONEDDS_URI: any pre-existing value in the user's shell pointing
+# at a different cyclonedds.xml will partition the discovery graph and make
+# stack_status.sh report "node missing" even when nodes are healthy.
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-export CYCLONEDDS_URI="file://$MAC_ENV_DIR/cyclonedds.xml"
-export KMP_DUPLICATE_LIB_OK=TRUE
-export AMENT_PYTHON_EXECUTABLE="$MAC_ENV_PYTHON"
+export CYCLONEDDS_URI="file://$LINUX_ENV_DIR/cyclonedds.xml"
 
-# Pidfile + log for the running stack (for start/stop coordination).
-export STACK_PIDFILE=/tmp/soarm_stack.pid
-export STACK_LOG=/tmp/soarm_stack.log
+# Isaac Sim / MCP
+export ISAAC_LAUNCHER="$LINUX_ENV_DIR/scripts/isaac/isaacsim_launch.sh"
+export MCP_HOST="${MCP_HOST:-localhost}"
+export MCP_PORT="${MCP_PORT:-8767}"
+export ISAAC_EXT_ID="${ISAAC_EXT_ID:-soarm101-dt}"
 
-# Preflight: ensure /tmp/mac-env and /tmp/soarm-ws exist.
+# Logs (single dir, prefixed names — easy to clean up with one rm)
+export LOG_DIR="${LOG_DIR:-/tmp}"
+export STACK_PIDFILE="${STACK_PIDFILE:-$LOG_DIR/soarm_linux_stack.pid}"
+
+# ---------------------------------------------------------------------------
+# Helpers used by stack_*.sh
+# ---------------------------------------------------------------------------
+
+# Verify the prerequisites a colleague needs before stack_start can succeed.
+# Prints helpful errors pointing at bootstrap.sh when something is missing.
 stack_preflight() {
-  if [ ! -f "$MAC_ENV_MANIFEST" ]; then
-    echo "ERROR: $MAC_ENV_MANIFEST missing. Run bootstrap.sh once:" >&2
-    echo "       bash mac-env/scripts/bootstrap.sh" >&2
-    return 1
-  fi
-  if [ ! -f "$SOARM_WS_SETUP" ]; then
-    echo "ERROR: $SOARM_WS_SETUP missing. Run bootstrap.sh once:" >&2
-    echo "       bash mac-env/scripts/bootstrap.sh" >&2
-    return 1
-  fi
-  return 0
+    local missing=0
+    if [ ! -f "$ROS2_SETUP" ]; then
+        echo "ERROR: ROS2 setup not found at $ROS2_SETUP" >&2
+        echo "       Install ros-$ROS2_DISTRO-desktop or set ROS2_SETUP env var." >&2
+        missing=1
+    fi
+    if [ ! -d "$ISAAC_MCP/exts" ]; then
+        echo "ERROR: isaac-sim-mcp submodule not initialized at $ISAAC_MCP" >&2
+        echo "       Run from $REPO_ROOT: git submodule update --init --recursive" >&2
+        missing=1
+    fi
+    if [ ! -f "$SOARM_WS_SETUP" ]; then
+        echo "ERROR: ROS2 control workspace not built at $SOARM_WS_SETUP" >&2
+        echo "       Run: bash $LINUX_ENV_DIR/scripts/bootstrap.sh" >&2
+        missing=1
+    fi
+    if [ ! -x "$ISAAC_LAUNCHER" ]; then
+        echo "ERROR: isaacsim_launch.sh not executable at $ISAAC_LAUNCHER" >&2
+        echo "       chmod +x $ISAAC_LAUNCHER" >&2
+        missing=1
+    fi
+    return $missing
 }
 
-# Count running SO-ARM101 / Gazebo / smoke-test processes.
+# Source ROS2 + the colcon workspace into the current shell.
+stack_source_ros() {
+    # shellcheck disable=SC1090
+    source "$ROS2_SETUP"
+    # shellcheck disable=SC1090
+    [ -f "$SOARM_WS_SETUP" ] && source "$SOARM_WS_SETUP"
+}
+
+# Count linux-stack processes (useful for stack_status / stop verification).
 stack_running_count() {
-  ps aux | \
-    grep -iE "ros2 launch|gz sim|parameter_bridge|move_group|robot_state_publisher|control_gui|rviz2|smoke_l|smoke_p" | \
-    grep -v grep | wc -l | tr -d ' '
+    pgrep -f "ros2.*launch.*control.launch|move_group|control_gui|rviz2|isaacsim|joint_states_to_commands|robot_state_publisher" 2>/dev/null | wc -l | tr -d ' '
 }

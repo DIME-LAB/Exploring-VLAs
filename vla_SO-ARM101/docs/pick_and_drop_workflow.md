@@ -461,18 +461,21 @@ ros2 service call $S/drop_select $T
 ros2 service call $S/check_grasp_reachable $T
 ```
 
-## Required Skill
+## Lifecycle scripts
 
-Load the Isaac Sim extension skill at session start for lifecycle scripts:
-```
-/isaac-sim-extension-dev
-```
+The Isaac Sim launcher is vendored in-repo at
+`../../linux-env/scripts/isaac/isaacsim_launch.sh` (originally from the
+maintainer's `~/.claude/skills/isaac-sim-extension-dev/` skill — the in-repo
+copy is what colleagues clone). Subcommands:
 
-Lifecycle scripts:
 ```bash
-bash ~/.claude/skills/isaac-sim-extension-dev/scripts/isaacsim_launch.sh {launch|close|kill|restart|status|wait} [ext-id]
-bash ~/.claude/skills/isaac-sim-extension-dev/scripts/pick_and_place.sh <pick_object> <drop_target>
+bash ../../linux-env/scripts/isaac/isaacsim_launch.sh \
+  {launch|close|kill|restart|status|wait} [ext-id]
 ```
+
+For full pick-and-place orchestration (rather than just launching Isaac Sim),
+use the control_gui's Quickstart tab `qs_*` services or the Record Sim tab —
+see `../../linux-env/CLAUDE.md`.
 
 ## Connection Recovery
 
@@ -482,12 +485,12 @@ The MCP socket can die during `delete_cups`/`add_cups` (Blender baking blocks th
 
 **Diagnosis:**
 ```bash
-bash ~/.claude/skills/isaac-sim-extension-dev/scripts/isaacsim_launch.sh status
+bash ../../linux-env/scripts/isaac/isaacsim_launch.sh status
 ```
 
 **Recovery:**
 1. If process alive but socket dead: open new stage in Isaac Sim GUI (Ctrl+N) to trigger extension re-init, then run `quick_start`
-2. If process dead: relaunch with `bash ~/.claude/skills/isaac-sim-extension-dev/scripts/isaacsim_launch.sh launch soarm101-dt`, wait for socket, then `quick_start`
+2. If process dead: relaunch with `bash ../../linux-env/scripts/isaac/isaacsim_launch.sh launch soarm101-dt`, wait for socket, then `quick_start`
 
 **Prevention:**
 - Never `touch extension.py` while making socket calls

@@ -1,20 +1,23 @@
 # vla_SO-ARM101 — SO-ARM101 ROS2 Control Stack
 
-ROS2 Humble packages for the SO-ARM101 5-DOF arm: MoveIt2 motion
-planning, tkinter control GUI, geometric IK, drop motion pipeline.
+ROS2 packages for the SO-ARM101 5-DOF arm: MoveIt2 motion planning, tkinter
+control GUI, geometric IK, drop motion pipeline. Same code on Linux (Humble)
+and Mac (RoboStack-Jazzy via pixi).
 
-> **Inherits**: see `../CLAUDE.md` for repo topology, build paths, macOS gotchas.
+> **Inherits**: see [`../CLAUDE.md`](../CLAUDE.md) for repo topology, build paths, and per-platform
+> bring-up. First-time install: [`docs/ROS2_LINUX_SETUP.md`](docs/ROS2_LINUX_SETUP.md) (Linux) or
+> [`docs/ROS2_MAC_SETUP.md`](docs/ROS2_MAC_SETUP.md) (Mac).
 
-> **README.md is stale.** It still references ROS2 Humble + Ubuntu 22.04 and only 3 packages — that predates Phase 6. Don't trust it for current build instructions; use `docs/ROS2_MAC_SETUP.md` and `docs/LEROBOT_ROS2_MAC_SETUP.md` instead. Cleaning up README.md is a separate ticket.
+> **README.md is stale.** It predates Phase 6 (still references only 3 packages). Don't trust it for current build instructions; use the docs above. Cleaning up README.md is on the cleanup tally.
 
 ## Cross-repo
 
-Isaac Sim digital twin lives at `~/Documents/isaac-sim-mcp/` (branch
-`so-arm101`). MCP socket on `localhost:8767`. The pick-and-drop
-pipeline spans both repos — this one plans + executes motion;
-isaac-sim-mcp provides physics, the cup/lego scene, and the
-`/drop_poses` + `/objects_poses_sim` topics. Bring-up sequence and
-MCP tool inventory live in `~/Documents/isaac-sim-mcp/CLAUDE.md`.
+Isaac Sim digital twin lives at [`../isaac-sim-mcp/`](../isaac-sim-mcp/) (a submodule of this
+repo, branch `so-arm101`). MCP socket on `localhost:8767`. The pick-and-drop
+pipeline spans both — this package plans + executes motion; isaac-sim-mcp
+provides physics, the cup/lego scene, and the `/drop_poses` +
+`/objects_poses_sim` topics. Bring-up sequence and MCP tool inventory live in
+[`../isaac-sim-mcp/CLAUDE.md`](../isaac-sim-mcp/CLAUDE.md).
 
 ## Six packages, one role each
 
@@ -54,25 +57,41 @@ This stack mirrors the **`inbarajaldrin/isaac-sim-mcp@so-arm101` phase 01** topi
 
 ## Build & launch
 
+**Linux** (system Humble, in-tree workspace):
+
 ```bash
-# Build only this stack (symlink-install picks up Python edits without rebuild)
+source /opt/ros/humble/setup.bash
+cd vla_SO-ARM101
 colcon build --packages-select so_arm101_control --symlink-install
-
-# Launch full stack (mock hardware + RViz + MoveIt + control GUI + MTC)
-ros2 launch so_arm101_control control.launch.py rviz:=true mtc:=true
-
-# Restart only this stack (leaves Isaac Sim alone — graceful pkill -SIGINT inside)
-~/Documents/isaac-sim-mcp/scripts/restart-control-stack.sh
+source install/setup.bash
+ros2 launch so_arm101_control control.launch.py rviz:=true        # via stack_start.sh in normal use
 ```
 
-The restart script lives in the OTHER repo because it predates this
-one. It's been the canonical restart path for both repos' work.
+**Mac** (pixi env, /tmp workspace):
+
+```bash
+pixi run --manifest-path /tmp/mac-env/pixi.toml \
+  colcon build --packages-select so_arm101_control --symlink-install
+# launch via mac-env/scripts/stack_start.sh
+ros2 launch so_arm101_control control.launch.py rviz:=true mtc:=true
+```
+
+**Restart only the control stack** (leaves Isaac Sim alone, Linux only):
+
+```bash
+../isaac-sim-mcp/scripts/restart-control-stack.sh
+```
+
+The restart script lives in the isaac-sim-mcp submodule for historical
+reasons — it predates this CLAUDE.md and is the canonical restart path for
+both repos' work.
 
 ## Conventions
 
 - **Joint names (canonical, used across so101_ros2 plugin + jointstatereader):** `shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper_joint`. URDF/Gazebo also publishes `gripper_joint`; the `lerobot/so101_ros2` plugin's `joint_name_map` remaps to upstream's `gripper` for HF-dataset parity.
-- **Use `pixi run --manifest-path /tmp/mac-env/pixi.toml ...`** to invoke `ros2`, `colcon`, `python` — never the system binaries. `mac-env/scripts/*.sh` already wrap this. (Mac/pixi path; Linux uses sourced ROS2 humble normally.)
-- **Edit packages here, build at `/tmp/soarm-ws/`** — bootstrap symlinks source. After editing C++ or `setup.py`, `colcon build --packages-select <pkg>` from `/tmp/soarm-ws`. After editing pure-Python in an installed package, the install is *not* a symlink-install (setuptools 80+ removed `develop --editable`), so a rebuild is needed.
+- **Linux** — source `/opt/ros/humble/setup.bash` + `vla_SO-ARM101/install/setup.bash` directly. No pixi wrapping; system Python 3.10 is the producer side. (The pixi-Jazzy env in `linux-env/` is for the lerobot consumer side, not this stack.)
+- **Mac** — wrap every invocation in `pixi run --manifest-path /tmp/mac-env/pixi.toml ...` (never system binaries). `mac-env/scripts/*.sh` already do this.
+- **Edit here, build in workspace** — Linux builds in-tree at `vla_SO-ARM101/install/`; Mac builds at `/tmp/soarm-ws/` (the bootstrap symlinks source). After editing C++ or `setup.py`, `colcon build --packages-select <pkg>`. After editing pure-Python in an installed package, the install is *not* a symlink-install (setuptools 80+ removed `develop --editable`), so a rebuild is still needed.
 
 ## Tiered deterministic motion planner
 
@@ -253,9 +272,11 @@ near another cup" scenario.
 
 ## Related docs
 
-- `docs/ROS2_MAC_SETUP.md` — bootstrap (project-agnostic)
-- `docs/LEROBOT_ROS2_MAC_SETUP.md` — record runbook (sim + real)
-- `docs/grasp_pipeline.md` — control_gui → MoveIt grasp flow
-- `docs/AGENT_DEBUG_GUIDE.md` — debugging the sim stack
-- `docs/GAZEBO_LINUX_LIMITATION.md` — Gazebo on Linux is broken by Phase 9's PD feed-forward yaml; revisit when needed
-- `../lerobot/ROS2_PLUGINS.md` — porting the `so101_ros2` plugin to a new arm
+- [`docs/ROS2_LINUX_SETUP.md`](docs/ROS2_LINUX_SETUP.md) — Linux bootstrap (Humble + pixi + Isaac Sim + colcon)
+- [`docs/ROS2_MAC_SETUP.md`](docs/ROS2_MAC_SETUP.md) — Mac bootstrap (pixi + RoboStack)
+- [`docs/LEROBOT_ROS2_MAC_SETUP.md`](docs/LEROBOT_ROS2_MAC_SETUP.md) — Mac record runbook (sim + real)
+- [`docs/grasp_pipeline.md`](docs/grasp_pipeline.md) — control_gui → MoveIt grasp flow
+- [`docs/AGENT_DEBUG_GUIDE.md`](docs/AGENT_DEBUG_GUIDE.md) — debugging the sim stack
+- [`docs/GAZEBO_LINUX_LIMITATION.md`](docs/GAZEBO_LINUX_LIMITATION.md) — Gazebo on Linux is broken by Phase 9's PD feed-forward yaml; revisit when needed
+- [`../lerobot/ROS2_PLUGINS.md`](../lerobot/ROS2_PLUGINS.md) — porting the `so101_ros2` plugin to a new arm
+- [`../linux-env/CLAUDE.md`](../linux-env/CLAUDE.md) — Linux record stack + scripts inventory

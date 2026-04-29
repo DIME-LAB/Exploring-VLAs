@@ -2,10 +2,34 @@
 
 Linux-side counterpart to `mac-env/`. Provides the **pixi-Jazzy environment**
 that runs `lerobot-record` against Isaac Sim's existing `_sim`-suffixed topics,
-plus the Linux-side mirror + drive scripts.
+plus the Linux-side mirror + drive scripts and the bring-up automation
+(`bootstrap.sh`, `stack_start.sh`, `stack_stop.sh`, `stack_status.sh`).
 
-> **Inherits**: see `../CLAUDE.md` for repo topology and shared conventions,
-> and `../vla_SO-ARM101/CLAUDE.md` for the control stack the recorder rides on.
+> **Inherits**: see [`../CLAUDE.md`](../CLAUDE.md) for repo topology, doc map, and
+> Linux gotchas; [`../vla_SO-ARM101/CLAUDE.md`](../vla_SO-ARM101/CLAUDE.md) for the control stack
+> the recorder rides on; [`../vla_SO-ARM101/docs/ROS2_LINUX_SETUP.md`](../vla_SO-ARM101/docs/ROS2_LINUX_SETUP.md)
+> for first-time install (Humble + pixi + Isaac Sim + colcon).
+
+## First-time setup
+
+```bash
+cd /your/path/to/Exploring-VLAs
+git submodule update --init --recursive
+bash linux-env/scripts/bootstrap.sh
+```
+
+`bootstrap.sh` preflights, inits submodules, installs the pixi env, and runs
+colcon. Idempotent — safe to re-run.
+
+## Each session
+
+```bash
+bash linux-env/scripts/stack_start.sh        # Isaac Sim + RViz + tkinter GUI
+bash linux-env/scripts/stack_start.sh no-rviz   # without RViz (lighter)
+bash linux-env/scripts/stack_status.sh       # all layers' health
+# … record / drive …
+bash linux-env/scripts/stack_stop.sh         # graceful tear-down
+```
 
 ## Why linux-env exists
 
@@ -22,15 +46,21 @@ multicast-on-`lo` config (system default disables multicast).
 
 ## Files
 
-| Script | Role | Runs in |
+| File | Role | Runs in |
 |---|---|---|
 | `pixi.toml` / `pixi.lock` | ros-jazzy-ros-base + lerobot deps | (env definition) |
-| `cyclonedds.xml` | Multicast-on-lo for cross-boundary discovery | (DDS config) |
+| `cyclonedds.xml` | Multicast-on-lo for cross-Python DDS discovery (Humble producer ↔ Jazzy consumer) | (DDS config) |
+| `scripts/_lib.sh` | Shared paths + env: `REPO_ROOT`, `ROS2_SETUP`, `SOARM_WS`, `PIXI_MANIFEST`, `ISAAC_LAUNCHER`, `MCP_PORT`, helpers (`stack_preflight`, `stack_source_ros`, `stack_running_count`) | (lib) |
+| `scripts/bootstrap.sh` | One-shot setup: preflight → submodules → pixi install → colcon build | foreground |
+| `scripts/stack_start.sh [no-rviz]` | Bring up Isaac Sim + quick_start scene + ROS2 control stack. Idempotent | foreground |
+| `scripts/stack_stop.sh` | Graceful SIGINT-first tear-down. Doesn't `kill -9` anything that owns an X11 window | foreground |
+| `scripts/stack_status.sh` | Health across Isaac Sim socket, ROS nodes, sim topics, /clock | foreground |
+| `scripts/isaac/isaacsim_launch.sh` | Vendored from the maintainer's `~/.claude/skills/isaac-sim-extension-dev/`. Subcommands: `launch / close / kill / restart / status / wait`. Env overrides: `ISAACSIM_BIN`, `EXT_FOLDER`, `ISAACSIM_LOG`. Default extension: `soarm101-dt` (port 8767) | foreground |
+| `scripts/_param_set_string.sh <name> <value> [node]` | Set a string-typed ROS2 param without int-coercion. Workaround for `ros2 param set ... '4'` parsing as integer 4 (breaks STRING-typed params like `widget_value`) | foreground |
 | `scripts/record_sim_isaac.sh` | lerobot-record wrapper. Subscribes to `/wrist_camera_rgb_sim` + `/workspace_camera_sim` @ 640×480, action topic `/joint_commands_lerobot` | pixi-Jazzy (via bash wrapper) |
-| `scripts/joint_states_to_commands.py` | Publishes controller-reference (commanded) positions → `/joint_commands_lerobot` at 30 Hz so lerobot's `action` column genuinely leads `observation.state` (not action == state). Filename is historical; *reads* `/{arm,gripper}_controller/controller_state.reference.positions`, not `/joint_states`. See gotcha below. | system Humble Python 3.10 |
-| `scripts/drive_pick_place.py` | Mac-style direct-publish driver via FollowJointTrajectory action client (alternative to control_gui's `qs_*` services for smoke tests) | system Humble |
-| `scripts/drive_pick_place_loop.sh` | Thin wrapper around drive_pick_place.py; sources ROS2 then exec's the python | system Humble |
-| `scripts/_lib.sh` | Shared paths/env (currently mac-style stub; Linux scripts source ROS2 directly) | (lib) |
+| `scripts/joint_states_to_commands.py` | Publishes controller-reference (commanded) positions → `/joint_commands_lerobot` at 30 Hz so lerobot's `action` column genuinely leads `observation.state`. Filename is historical; reads `/{arm,gripper}_controller/controller_state.reference.positions`, not `/joint_states` | system Humble Python 3.10 |
+| `scripts/drive_pick_place.py` | Direct-publish driver via FollowJointTrajectory action client (alternative to control_gui's `qs_*` services for smoke tests) | system Humble |
+| `scripts/drive_pick_place_loop.sh` | Thin wrapper around drive_pick_place.py; sources ROS2 then execs | system Humble |
 | `scripts/drive_base_yaw_sweep.py` | Symlink to `../mac-env/scripts/drive_base_yaw_sweep.py` (synthetic motion smoke) | system Humble |
 
 ## CRITICAL: don't publish to `/joint_commands` from the mirror
@@ -88,9 +118,10 @@ dataset on stop.
 
 ```bash
 # Drive entirely from CLI, no GUI focus needed:
-# 1. set Episodes (defaults 16)
-ros2 param set /so_arm101_control_gui widget_id Episodes
-ros2 param set /so_arm101_control_gui widget_value '4'
+# 1. set Episodes (defaults 16). NOTE: ros2 param CLI int-coerces numeric strings,
+#    so we use the rclpy helper to force STRING typing on widget_value.
+bash linux-env/scripts/_param_set_string.sh widget_id Episodes
+bash linux-env/scripts/_param_set_string.sh widget_value 4
 ros2 service call /so_arm101_control_gui/set_widget_value std_srvs/srv/Trigger
 # 2. start (auto-named dataset rec_<HHMMSS>)
 ros2 service call /so_arm101_control_gui/rec_start std_srvs/srv/Trigger
@@ -101,9 +132,11 @@ ros2 service call /so_arm101_control_gui/rec_stop std_srvs/srv/Trigger
 ```
 
 The Record Sim tab uses `REC_LEGOS_BY_COLOR` (module-level constant in
-`control_gui.py`) — currently `{red: [red_2x2, red_2x3], green: [...],
-blue: [blue_2x2, blue_2x3]}` to give 2 episodes per scene. Update the
-constant to change which legos cycle.
+`control_gui.py`) — currently 2 of each color × 2x3 only:
+`red_2x3_0/1`, `green_2x3_0/1`, `blue_2x3_0/1`. To add 2x2s back, edit
+the constant AND update the isaac-sim-mcp scene contract together — they
+have to stay in sync (the scene must spawn whatever the orchestrator
+expects to grasp).
 
 ## Datasets
 
@@ -112,8 +145,9 @@ Saved to `~/.cache/huggingface/lerobot/local/<repo_id>/` — three subdirs
 DON'T write a custom rerun loader** (see gotcha below).
 
 ```bash
-cd ~/Projects/Exploring-VLAs/linux-env
-pixi run --manifest-path ./pixi.toml lerobot-dataset-viz \
+# from anywhere — REPO_ROOT/linux-env/pixi.toml is the manifest
+pixi run --manifest-path "$(git rev-parse --show-toplevel)/linux-env/pixi.toml" \
+  lerobot-dataset-viz \
   --repo-id local/<name> --root <full_path> --episode-index 0 --mode local
 ```
 
