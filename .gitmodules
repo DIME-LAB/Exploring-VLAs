@@ -2,3 +2,7 @@
 	path = lerobot
 	url = git@github.com:inbarajaldrin/lerobot.git
 	branch = ros2_camera
+[submodule "isaac-sim-mcp"]
+	path = isaac-sim-mcp
+	url = git@github.com:inbarajaldrin/isaac-sim-mcp.git
+	branch = so-arm101
