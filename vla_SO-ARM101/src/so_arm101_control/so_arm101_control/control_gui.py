@@ -211,19 +211,47 @@ _CUP_COLLISION_PADDING = 1.0  # 0% default pad — empirical: 2.5% inflation
 # --- Record Sim tab constants -----------------------------------------------
 # Module-level (not class-level) so hot_reload picks them up on the running
 # instance — class attributes only attach to a fresh class object on import.
-REC_LEROBOT_SCRIPT = os.path.expanduser(
-    "~/Projects/Exploring-VLAs/linux-env/scripts/record_sim_isaac.sh")
-REC_MIRROR_SCRIPT = os.path.expanduser(
-    "~/Projects/Exploring-VLAs/linux-env/scripts/joint_states_to_commands.py")
-REC_DATASET_ROOT = os.path.expanduser("~/.cache/huggingface/lerobot/local")
-REC_SIM_RESET_SCRIPT = os.path.expanduser(
-    "~/Projects/Exploring-VLAs/vla_SO-ARM101/scripts/sim_reset.sh")
-REC_MCP_HOST = "localhost"
-REC_MCP_PORT = 8767
+
+def _resolve_repo_root():
+    """Locate the Exploring-VLAs repo root.
+
+    Resolution order:
+      1. ``SOARM_REPO_ROOT`` env var (highest precedence — colleague override).
+      2. Walk up from this file's realpath. With ``colcon build --symlink-install``
+         the install path's symlink resolves into the source tree, so 4 levels
+         up gives the repo root regardless of where the workspace was built.
+      3. Legacy fallback: ``~/Projects/Exploring-VLAs`` (matches the maintainer
+         layout that was hardcoded before the cleanup).
+    Returns an absolute path (not necessarily existing on disk).
+    """
+    env = os.environ.get("SOARM_REPO_ROOT", "").strip()
+    if env:
+        return os.path.abspath(os.path.expanduser(env))
+    here = os.path.dirname(os.path.realpath(__file__))
+    # Expected layout: <root>/vla_SO-ARM101/src/so_arm101_control/so_arm101_control/control_gui.py
+    candidate = os.path.abspath(os.path.join(here, "..", "..", "..", ".."))
+    if (os.path.isdir(os.path.join(candidate, "linux-env")) and
+            os.path.isdir(os.path.join(candidate, "vla_SO-ARM101"))):
+        return candidate
+    return os.path.expanduser("~/Projects/Exploring-VLAs")
+
+
+_REPO_ROOT = _resolve_repo_root()
+REC_LEROBOT_SCRIPT = os.path.join(_REPO_ROOT, "linux-env/scripts/record_sim_isaac.sh")
+REC_MIRROR_SCRIPT = os.path.join(_REPO_ROOT, "linux-env/scripts/joint_states_to_commands.py")
+REC_SIM_RESET_SCRIPT = os.path.join(_REPO_ROOT, "vla_SO-ARM101/scripts/sim_reset.sh")
+# Datasets land in HuggingFace's cache by convention — env-overridable for CI / tmpfs.
+REC_DATASET_ROOT = os.environ.get(
+    "LEROBOT_LOCAL_DATASET_ROOT",
+    os.path.expanduser("~/.cache/huggingface/lerobot/local"),
+)
+# MCP socket — Isaac Sim digital twin (soarm101-dt extension).
+REC_MCP_HOST = os.environ.get("SOARM_MCP_HOST", "localhost")
+REC_MCP_PORT = int(os.environ.get("SOARM_MCP_PORT", "8767"))
 # Hardcoded scene contract — MUST stay in sync with extension.py
 # LEGO_USDS block_names. 1 episode = 1 lego pick-place. Lego rotates
 # through this list per episode for uniform dataset coverage.
-# Current scene contract: 2 of each color × 2x3 (suffixed _a / _b),
+# Current scene contract: 2 of each color × 2x3 (suffixed _0 / _1),
 # spawned via Cloner(replicate_physics=True).
 REC_LEGOS_BY_COLOR = {
     "red":   ["red_2x3_0", "red_2x3_1"],
@@ -231,6 +259,11 @@ REC_LEGOS_BY_COLOR = {
     "blue":  ["blue_2x3_0", "blue_2x3_1"],
 }
 REC_MAX_RETRIES_PER_LEGO = 5
+# Per-episode lerobot timing (seconds). Caller can also pass these flags
+# directly to record_sim_isaac.sh for ad-hoc runs; the Record Sim tab uses
+# these constants so hot-reload picks up changes without a process restart.
+REC_EPISODE_TIME_S = int(os.environ.get("SOARM_REC_EPISODE_TIME_S", "120"))
+REC_RESET_TIME_S = int(os.environ.get("SOARM_REC_RESET_TIME_S", "15"))
 
 
 def _load_cup_mesh():
@@ -5968,14 +6001,18 @@ class SOArm101ControlGUI(Node):
                 self._rec_finalize(error=True)
                 return
 
-        # Spawn lerobot-record (pixi-Jazzy via bash wrapper).
+        # Spawn lerobot-record (pixi-Jazzy via bash wrapper). The task string
+        # tracks Block color so the dataset's single_task field reflects what
+        # actually got recorded (was hardcoded to "blue" before — drift bug).
+        rec_color = self._rec_color_var.get() if hasattr(self, '_rec_color_var') else 'blue'
+        single_task = f'Pick a {rec_color} lego and place it in {rec_color} cup'
         cmd = [
             'bash', REC_LEROBOT_SCRIPT,
             f'--dataset.repo_id={repo_id}',
             f'--dataset.num_episodes={self._rec_state["n_episodes"]}',
-            '--dataset.episode_time_s=120',
-            '--dataset.reset_time_s=15',
-            '--dataset.single_task=Pick a blue lego and place it in blue cup',
+            f'--dataset.episode_time_s={REC_EPISODE_TIME_S}',
+            f'--dataset.reset_time_s={REC_RESET_TIME_S}',
+            f'--dataset.single_task={single_task}',
             '--dataset.push_to_hub=false',
             '--display_data=false',
         ]

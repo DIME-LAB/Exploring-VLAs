@@ -9,15 +9,19 @@
 # lerobot do the mapping at config time. Result: byte-identical schema to
 # the real parity target dataset, zero code changes anywhere on the wire.
 #
-# Prereqs (do once):
+# Prereqs (do once — easiest path is the bootstrap):
+#   bash linux-env/scripts/bootstrap.sh
+#
+# Or each step manually:
 #   1. Pixi env installed:  cd linux-env && pixi install
 #   2. Lerobot installed:   pixi run pip install -e "../lerobot[viz,dataset]"
-#   3. Isaac Sim running with quick_start scene:
-#        bash ~/.claude/skills/isaac-sim-extension-dev/scripts/isaacsim_launch.sh launch soarm101-dt
+#   3. Isaac Sim + control stack running:
+#        bash linux-env/scripts/stack_start.sh   # easiest
+#      Or manually:
+#        bash linux-env/scripts/isaac/isaacsim_launch.sh launch soarm101-dt
 #        # then send {"type": "quick_start"} on socket 8767
-#   4. Control stack running (publishes /joint_states, accepts /joint_commands):
 #        ros2 launch so_arm101_control control.launch.py rviz:=true
-#   5. Verify topics live:
+#   4. Verify topics live:
 #        ros2 topic hz /wrist_camera_rgb_sim
 #        ros2 topic hz /workspace_camera_sim
 #        ros2 topic hz /joint_states
