@@ -27,7 +27,7 @@ multicast-on-`lo` config (system default disables multicast).
 | `pixi.toml` / `pixi.lock` | ros-jazzy-ros-base + lerobot deps | (env definition) |
 | `cyclonedds.xml` | Multicast-on-lo for cross-boundary discovery | (DDS config) |
 | `scripts/record_sim_isaac.sh` | lerobot-record wrapper. Subscribes to `/wrist_camera_rgb_sim` + `/workspace_camera_sim` @ 640×480, action topic `/joint_commands_lerobot` | pixi-Jazzy (via bash wrapper) |
-| `scripts/joint_states_to_commands.py` | Mirrors `/joint_states` → `/joint_commands_lerobot` so lerobot's teleop has an action source in sim | system Humble Python 3.10 |
+| `scripts/joint_states_to_commands.py` | Publishes controller-reference (commanded) positions → `/joint_commands_lerobot` at 30 Hz so lerobot's `action` column genuinely leads `observation.state` (not action == state). Filename is historical; *reads* `/{arm,gripper}_controller/controller_state.reference.positions`, not `/joint_states`. See gotcha below. | system Humble Python 3.10 |
 | `scripts/drive_pick_place.py` | Mac-style direct-publish driver via FollowJointTrajectory action client (alternative to control_gui's `qs_*` services for smoke tests) | system Humble |
 | `scripts/drive_pick_place_loop.sh` | Thin wrapper around drive_pick_place.py; sources ROS2 then exec's the python | system Humble |
 | `scripts/_lib.sh` | Shared paths/env (currently mac-style stub; Linux scripts source ROS2 directly) | (lib) |
@@ -108,7 +108,8 @@ constant to change which legos cycle.
 ## Datasets
 
 Saved to `~/.cache/huggingface/lerobot/local/<repo_id>/` — three subdirs
-(`data/`, `videos/`, `meta/`). View via:
+(`data/`, `videos/`, `meta/`). **Use `lerobot-dataset-viz` to view —
+DON'T write a custom rerun loader** (see gotcha below).
 
 ```bash
 cd ~/Projects/Exploring-VLAs/linux-env
@@ -118,6 +119,9 @@ pixi run --manifest-path ./pixi.toml lerobot-dataset-viz \
 
 Local mode pushes into the rerun viewer at `localhost:9876` (start one
 first: `pixi run rerun --port=9876 --memory-limit=10% --expect-data-soon`).
+Re-running with a different `--episode-index` while the viewer is alive
+attaches the new recording to the dropdown — don't kill/restart between
+episodes.
 
 ## Gotchas
 
@@ -140,3 +144,32 @@ first: `pixi run rerun --port=9876 --memory-limit=10% --expect-data-soon`).
 - **Don't run dataset viz in parallel with the live ROS→rerun bridge** —
   both push into port 9876 and the streams interleave. Kill the bridge
   (`pkill -f ros_to_rerun`) before pushing dataset frames.
+- **NEVER write a custom rerun viewer for lerobot datasets.** Use the
+  documented `lerobot-dataset-viz` command above. Reasons:
+  - The official tool decodes videos via lerobot's pyav/torchvision
+    path inside the pixi-Jazzy env, which works regardless of system
+    ffmpeg version.
+  - rerun's own `rr.AssetVideo` route requires **system ffmpeg ≥ 5.1**;
+    Ubuntu 22.04 ships ffmpeg 4.4.2, which yields:
+    `Failed to decode video: FFmpeg version is 4.4.2-0ubuntu0.22.04.1.
+    Only versions >= 5.1 are officially supported.`
+    Going down the AssetVideo path led to a 100-line cv2-frame-by-frame
+    fallback that re-implemented what `lerobot-dataset-viz` already
+    does. Don't repeat that mistake.
+  - The viewer accumulates recordings as you re-invoke with different
+    `--episode-index`, so per-episode review is one CLI call per ep.
+  - If the dataset is on a remote machine, use `--mode distant`
+    + `scp` the `.rrd` and open with local `rerun foo.rrd`.
+- **action mirror semantics** — `joint_states_to_commands.py` no longer
+  mirrors `/joint_states` despite the filename. It reads
+  `/{arm,gripper}_controller/controller_state.reference.positions`
+  (the JTC's per-tick commanded setpoint) and republishes as JointState
+  on `/joint_commands_lerobot` at 30 Hz. This makes action genuinely
+  lead state in the saved parquet (real-world property; previous mirror
+  produced action == state to 14 decimals). Note: in sim, the magnitude
+  of the lead is sub-degree because Isaac Sim physics tracks the
+  smoothed planner trajectory closely. Real-world teleop sees 2-4° lead
+  due to motor lag + human-jitter on the leader arm. For BC training
+  this is still informative; for tighter sim2real fidelity, add a
+  `reference.positions + reference.velocities × lookahead_s` projection
+  (~100 ms) or detune the joint drives.
