@@ -6443,7 +6443,15 @@ class SOArm101ControlGUI(Node):
         self._rec_call_trigger('detach_lego', timeout=5)
         self._rec_mcp_call('match_real_world', {'reposition': True})
         self._rec_mcp_call('update_cups', {})
-        self._rec_mcp_call('randomize_object_poses', {})
+        # Force at least one lego of the active Block color to land in the
+        # workspace camera's FOV — without this, episodes record an empty
+        # observation feed (the policy has no target object to ground on).
+        rec_color = self._rec_color_var.get() if hasattr(self, '_rec_color_var') else None
+        randomize_params = {}
+        if rec_color in REC_LEGOS_BY_COLOR:
+            randomize_params['required_visible_color'] = rec_color
+            randomize_params['required_visible_count'] = 1
+        self._rec_mcp_call('randomize_object_poses', randomize_params)
         time.sleep(1.0)  # physics settle
         self._rec_call_trigger('qs_refresh_all', timeout=10)
         time.sleep(2.0)  # listbox repop + collision-scene rebuild
@@ -6526,7 +6534,14 @@ class SOArm101ControlGUI(Node):
             self._append_log(
                 f'Record: episode {episode_idx + 1} failed on {lego} '
                 f'(attempt {attempt + 1}); re-randomizing')
-            self._rec_mcp_call('randomize_object_poses', {})
+            # Same FOV constraint on the retry randomize.
+            rec_color_retry = (self._rec_color_var.get()
+                               if hasattr(self, '_rec_color_var') else None)
+            retry_params = {}
+            if rec_color_retry in REC_LEGOS_BY_COLOR:
+                retry_params['required_visible_color'] = rec_color_retry
+                retry_params['required_visible_count'] = 1
+            self._rec_mcp_call('randomize_object_poses', retry_params)
             time.sleep(1.0)
 
         # Exhausted retries — log and skip.
