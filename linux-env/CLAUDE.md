@@ -62,7 +62,7 @@ nohup bash scripts/record_sim_isaac.sh \
   --dataset.repo_id=local/<name> \
   --dataset.num_episodes=4 \
   --dataset.episode_time_s=120 \
-  --dataset.single_task="sort blue blocks" \
+  --dataset.single_task="Pick a blue lego and place it in blue cup" \
   --dataset.push_to_hub=false \
   --display_data=false \
   > /tmp/lerobot.log 2>&1 &

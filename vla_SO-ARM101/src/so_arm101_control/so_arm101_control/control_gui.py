@@ -5955,7 +5955,7 @@ class SOArm101ControlGUI(Node):
             f'--dataset.num_episodes={self._rec_state["n_episodes"]}',
             '--dataset.episode_time_s=120',
             '--dataset.reset_time_s=15',
-            '--dataset.single_task=sort blue blocks',
+            '--dataset.single_task=Pick a blue lego and place it in blue cup',
             '--dataset.push_to_hub=false',
             '--display_data=false',
         ]
@@ -6085,23 +6085,29 @@ class SOArm101ControlGUI(Node):
     def _rec_loop_thread(self):
         """Orchestration loop. Runs on a daemon background thread.
 
-        Episode contract (Phase 10.2 v2):
+        Episode contract (Phase 10.2 v3 — parity item #6 fix):
           - 1 episode = 1 random blue lego pick-place.
-          - Full sim_reset (cups → real-world default, legos randomized,
-            arm → grasp_home_data) runs between every episode.
-          - On any failure: lerobot's left-arrow signal (`rerecord_episode`)
-            discards the captured buffer; orchestrator does NOT retry the
-            same lego, just re-resets and tries a new random pick.
+          - Phase B (lerobot's non-recording reset window) does ALL prep:
+            sim_reset (cups + legos + arm) PLUS ik_target + qs_select
+            for the NEXT episode's lego. So when Phase A starts, the
+            next call into _rec_run_one_qs_cycle is just qs_play + poll.
+          - Real episodes are pure motion (~278 frames @ 30fps); pre-
+            v3 sim recorded refresh+select inside Phase A and clocked
+            ~459 frames per episode. v3 closes that gap.
+          - On any failure: lerobot's left-arrow signal discards the
+            captured buffer; orchestrator does NOT retry the same lego,
+            just re-resets, picks a new random lego, and continues.
           - No retry budget — loop continues until `n_target` SUCCESSES
-            are recorded by lerobot, or stop_evt fires, or lerobot
-            subprocess exits.
+            are recorded, or stop_evt fires, or lerobot subprocess exits.
 
-        Sync with lerobot's record loop: lerobot runs Phase A (record,
-        episode_time_s=120s) → Phase B (reset window, reset_time_s=15s).
-        We pace ourselves: pick-place during Phase A → key-press to
-        end Phase A early → sim_reset overlaps Phase B (15s budget vs
-        ~10-15s sim_reset duration). Pick-place starts again at next
-        Phase A.
+        Lerobot phase sync: Phase A (episode_time_s=120s) → Phase B
+        (reset_time_s=15s). Each iteration of the main loop does:
+          1. Phase A: qs_play + poll  (lerobot is recording)
+          2. Send key (Right=save / Left=discard)
+          3. Pick next_lego
+          4. Phase B: sim_reset + ik_target + qs_select(next_lego)
+          5. Wait for new Phase A
+          6. current_lego = next_lego, repeat
         """
         st = self._rec_state
         legos = list(REC_LEGOS_BY_COLOR[self._rec_color_var.get()])
@@ -6127,22 +6133,47 @@ class SOArm101ControlGUI(Node):
         # Step 1: discard the just-opened Phase A immediately. Sending
         # Left makes lerobot exit Phase A early (captured ~0s of data),
         # run Phase B (reset_time_s=15s), clear the buffer, then start
-        # a fresh Phase A. This is what shifts our initial sim_reset
-        # OUT of any saved episode — Phase B is non-recording.
+        # a fresh Phase A. This is what shifts our initial prep OUT of
+        # any saved episode — Phase B is non-recording.
         prev_phase_a = self._rec_count_phase_a_starts()
         self._append_log(
             'Record: discarding initial Phase A so first pick-place lands '
             'in a clean episode')
         self._rec_lerobot_discard()
 
-        # Step 2: do the initial sim_reset DURING Phase B. ~10-12s of
-        # arm + cup + lego work; Phase B has 15s budget.
-        self._rec_set_status(status_text='RESETTING (initial)')
-        self._rec_full_sim_reset()
+        # Step 2: pick the FIRST lego now so we can pre-select it during
+        # the initial Phase B prep. Subsequent legos are chosen at the
+        # tail of each loop iteration.
+        current_lego = random.choice(legos)
+        st['last_lego'] = current_lego
 
-        # Step 3: wait for lerobot to enter the fresh Phase A (post-
-        # discard). Same gate the loop uses between iterations — keeps
-        # us from racing the next pick-place into Phase B's tail.
+        # Step 3: do the initial pre-episode setup DURING Phase B.
+        # ~12-15s of arm + cup + lego + ik_target + qs_select work;
+        # Phase B has 15s budget — tight but reset_time_s can be raised
+        # via record_sim_isaac.sh if needed.
+        self._rec_set_status(status_text='RESETTING (initial)')
+        self._rec_pre_episode_setup(current_lego)
+
+        # Step 4: if initial prep raced past Phase B's 15s budget,
+        # lerobot's first post-discard Phase A is already live and has
+        # been capturing the tail of our prep — that's how ep1 ended
+        # up at 750 frames in v7 vs the 388-frame steady-state. Detect
+        # this race by checking whether Phase A advanced DURING prep,
+        # and discard the contaminated buffer if so. Steady-state
+        # iterations don't pay this cost — only fires when the race
+        # actually happened.
+        cur_phase_a = self._rec_count_phase_a_starts()
+        if cur_phase_a > prev_phase_a:
+            self._append_log(
+                'Record: initial prep raced past Phase B — '
+                'discarding contaminated Phase A so first saved episode '
+                'starts clean')
+            self._rec_lerobot_discard()
+            prev_phase_a = cur_phase_a
+
+        # Step 5: wait for lerobot to enter the fresh Phase A. Same
+        # gate the loop uses between iterations — keeps us from racing
+        # the next pick-place into Phase B's tail.
         self._rec_wait_for_new_phase_a(prev_phase_a, timeout_s=25.0)
 
         with self._rec_lock:
@@ -6175,19 +6206,15 @@ class SOArm101ControlGUI(Node):
             st['scene'] = attempt
             st['episode'] = success_count
 
-            # Pick a random blue lego (any one of the 2 in scene). User
-            # spec: any one blue lego. No rotation; uniform random.
-            lego = random.choice(legos)
-            st['last_lego'] = lego
-
             self._rec_set_status(
                 status_text='RUNNING',
                 progress_text=(
                     f'episode {success_count + 1}/{n_target}, '
-                    f'attempt {attempt}, lego {lego}'))
+                    f'attempt {attempt}, lego {current_lego}'))
 
-            # Run pick-place ONCE (no retry per user spec).
-            verdict = self._rec_run_one_qs_cycle(lego)
+            # Phase A: qs_play + poll only — prep was done in last
+            # Phase B (or initial setup for the first iteration).
+            verdict = self._rec_run_one_qs_cycle(current_lego)
 
             if verdict == 'ABORT':
                 break
@@ -6207,16 +6234,22 @@ class SOArm101ControlGUI(Node):
                 success_count += 1
                 self._append_log(
                     f'Record: ✓ episode {success_count}/{n_target} saved '
-                    f'(lego={lego}, attempt {attempt})')
+                    f'(lego={current_lego}, attempt {attempt})')
             else:
                 self._rec_lerobot_discard()
                 self._append_log(
                     f'Record: ✗ episode discarded '
-                    f'(verdict={verdict}, lego={lego}, attempt {attempt})')
+                    f'(verdict={verdict}, lego={current_lego}, '
+                    f'attempt {attempt})')
 
-            # Full sim_reset for the NEXT episode. Runs in parallel with
-            # lerobot's Phase B reset window (reset_time_s=15s budget).
-            self._rec_full_sim_reset()
+            # Choose NEXT lego before prep so qs_select can target it.
+            current_lego = random.choice(legos)
+            st['last_lego'] = current_lego
+
+            # Phase B: sim_reset + ik_target + qs_select for next episode.
+            # Runs in parallel with lerobot's Phase B reset window
+            # (reset_time_s=15s budget; this prep is ~12-15s).
+            self._rec_pre_episode_setup(current_lego)
 
             # Wait until lerobot's log shows a NEW "Recording episode"
             # line — guarantees Phase B has finished and Phase A is
@@ -6276,18 +6309,30 @@ class SOArm101ControlGUI(Node):
 
     # -- Helpers for new orchestration ------------------------------------
 
-    def _rec_full_sim_reset(self):
-        """Reset cups + legos + arm to a known clean starting state.
+    def _rec_pre_episode_setup(self, lego):
+        """Phase-B prep: full sim_reset + ik_target + qs_select for `lego`.
 
-        Mirrors scripts/sim_reset.sh in-process so each episode begins
-        from the same well-defined pose distribution. Sequence:
+        Runs in lerobot's reset_time_s window (NOT recorded), so the
+        next Phase A starts already pointing at a chosen target — the
+        recorded episode contains only qs_play motion. This is what
+        keeps sim episodes ~278 frames (real-equivalent) instead of
+        ~459 frames (the prior layout that did all this prep inside
+        the recording window).
+
+        Sequence:
           1. Force-detach any held lego (safe no-op if none attached).
           2. MCP match_real_world → reset CUP_LAYOUT to real-world defaults.
           3. MCP update_cups → re-snap cup prims.
           4. MCP randomize_object_poses → scatter legos for diversity.
           5. qs_refresh_all → resync MoveIt collision scene.
           6. grasp_home_data → arm to calibrated data-collection home.
+          7. Set ik_target param to `lego`.
+          8. qs_select → choose pick + drop poses for `lego`.
         """
+        from rcl_interfaces.srv import SetParameters
+        from rcl_interfaces.msg import (
+            Parameter, ParameterValue, ParameterType)
+
         st = self._rec_state
         if st['stop_evt'].is_set():
             return
@@ -6300,6 +6345,26 @@ class SOArm101ControlGUI(Node):
         self._rec_call_trigger('qs_refresh_all', timeout=10)
         time.sleep(2.0)  # listbox repop + collision-scene rebuild
         self._rec_call_trigger('grasp_home_data', timeout=20)
+
+        # Pre-select the next lego — keeps Phase A pure motion.
+        if st['stop_evt'].is_set():
+            return
+        params_cli = self.create_client(
+            SetParameters, '~/set_parameters')
+        params_cli.wait_for_service(timeout_sec=5)
+        p = Parameter(name='ik_target',
+                      value=ParameterValue(
+                          type=ParameterType.PARAMETER_STRING,
+                          string_value=lego))
+        fut = params_cli.call_async(SetParameters.Request(parameters=[p]))
+        t0 = time.time()
+        while not fut.done() and time.time() - t0 < 10:
+            time.sleep(0.05)
+
+        if st['stop_evt'].is_set():
+            return
+        self._rec_call_trigger('qs_select', timeout=15)
+        time.sleep(0.5)
 
     def _rec_lerobot_advance(self):
         """Send Right-arrow to lerobot's keyboard listener → save current
@@ -6368,40 +6433,23 @@ class SOArm101ControlGUI(Node):
         return 'SKIP'
 
     def _rec_run_one_qs_cycle(self, lego, timeout_s=90):
-        """Drive one QuickStart pick-and-drop cycle for the named lego.
-        Returns 'PASS' / 'FAIL' / 'ABORT'.
+        """Phase-A-only motion: qs_play + sentinel poll.
 
-        Per Q1 (Always PASS — never verify), success is the
-        'pick-and-drop cycle complete' sentinel in get_log. No pose check.
+        All scene prep (ik_target, qs_refresh_all, qs_select) is
+        performed by _rec_pre_episode_setup during Phase B before this
+        runs, so the lerobot-recorded window contains only the
+        physical pick-and-drop motion. This is what makes sim episode
+        length match real (~278 frames vs the previous ~459).
+
+        Returns 'PASS' / 'FAIL' / 'ABORT'. Per Q1 (Always PASS — never
+        verify), success is the 'pick-and-drop cycle complete' sentinel
+        in get_log. No pose check.
         """
-        from rcl_interfaces.srv import SetParameters
-        from rcl_interfaces.msg import Parameter, ParameterValue, ParameterType
         st = self._rec_state
-
-        # 1) Set ik_target.
-        params_cli = self.create_client(
-            SetParameters, '~/set_parameters')
-        params_cli.wait_for_service(timeout_sec=5)
-        p = Parameter(name='ik_target',
-                      value=ParameterValue(
-                          type=ParameterType.PARAMETER_STRING,
-                          string_value=lego))
-        fut = params_cli.call_async(SetParameters.Request(parameters=[p]))
-        t0 = time.time()
-        while not fut.done() and time.time() - t0 < 10:
-            time.sleep(0.05)
-
-        # 2) qs_refresh_all → sleep → qs_select → sleep
         if st['stop_evt'].is_set():
             return 'ABORT'
-        self._rec_call_trigger('qs_refresh_all', timeout=15)
-        time.sleep(2.5)
-        if st['stop_evt'].is_set():
-            return 'ABORT'
-        self._rec_call_trigger('qs_select', timeout=15)
-        time.sleep(0.5)
 
-        # 3) Snapshot pre-cycle log line count.
+        # Snapshot pre-cycle log line count.
         # NOTE: log_resp.message contains REAL newlines (\n char), not the
         # escaped two-character literal "\n" that an earlier version of
         # this code split on. The literal-string split produced len=1
@@ -6415,12 +6463,12 @@ class SOArm101ControlGUI(Node):
             return 'FAIL'
         pre_lines = len(log_resp.message.split('\n'))
 
-        # 4) qs_play.
+        # Fire the motion. This is the ONLY step inside Phase A.
         if st['stop_evt'].is_set():
             return 'ABORT'
         self._rec_call_trigger('qs_play', timeout=15)
 
-        # 5) Poll get_log for terminal sentinel.
+        # Poll get_log for terminal sentinel.
         deadline = time.time() + timeout_s
         while time.time() < deadline:
             if st['stop_evt'].is_set():
