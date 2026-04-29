@@ -6,18 +6,42 @@
 # Re-run any time after editing EpisodeBrowser.swift; the script is
 # idempotent and rebuilds in-place.
 #
-# Output: /tmp/EpisodeBrowser.app  (regenerable; not committed anywhere)
+# Output: /tmp/EpisodeBrowser.app  (regenerable; wiped on reboot)
 #
-# Why /tmp: same convention as soarm-ws / mac-env — built artefacts live
-# at spaceless paths and can be wiped on reboot. Source stays in
-# mac-env/scripts/ where it's version-controlled.
+# Optional flags:
+#   --install   After building, also rsync the .app into /Applications/
+#               (or ~/Applications/ if /Applications isn't writable) so
+#               it shows up in Launchpad and survives reboots. Re-run
+#               with --install whenever you ship a new version.
+#   --no-launch Skip the auto-launch at the end (useful in CI).
+#
+# Why /tmp for the working bundle: same convention as soarm-ws / mac-env
+# — built artefacts live at spaceless paths and can be wiped on reboot.
+# Source stays in mac-env/scripts/ where it's version-controlled.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$SCRIPT_DIR/EpisodeBrowser.swift"
-APP="/tmp/EpisodeBrowser.app"
-BIN="$APP/Contents/MacOS/EpisodeBrowser"
+# Display name in Finder / Dock / Launchpad. Bundle identifier
+# (local.lerobot.episodebrowser) is intentionally NOT renamed here
+# so @AppStorage persistence carries across rebuilds.
+APP_NAME="ReRunEpisodeBrowser"
+APP="/tmp/${APP_NAME}.app"
+BIN="$APP/Contents/MacOS/${APP_NAME}"
+
+INSTALL_TO_APPLICATIONS=0
+NO_LAUNCH=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --install)   INSTALL_TO_APPLICATIONS=1; shift ;;
+        --no-launch) NO_LAUNCH=1; shift ;;
+        --help|-h)
+            sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0 ;;
+        *) echo "unknown arg: $1" >&2; exit 1 ;;
+    esac
+done
 
 if [ ! -f "$SRC" ]; then
     echo "ERROR: $SRC missing" >&2
@@ -41,13 +65,14 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 swiftc -O -parse-as-library -o "$BIN" "$SRC"
 
 echo "== 2. Write Info.plist =="
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key>                <string>EpisodeBrowser</string>
-  <key>CFBundleExecutable</key>          <string>EpisodeBrowser</string>
+  <key>CFBundleName</key>                <string>${APP_NAME}</string>
+  <key>CFBundleDisplayName</key>         <string>ReRun Episode Browser</string>
+  <key>CFBundleExecutable</key>          <string>${APP_NAME}</string>
   <key>CFBundleIdentifier</key>          <string>local.lerobot.episodebrowser</string>
   <key>CFBundleVersion</key>             <string>1</string>
   <key>CFBundleShortVersionString</key>  <string>1.0</string>
@@ -67,8 +92,40 @@ echo "== 4. Done =="
 echo "  bundle: $APP"
 echo "  binary: $BIN  ($(wc -c <"$BIN") bytes)"
 echo ""
-echo "Launch:"
-echo "  open $APP"
+
+# --- Optional: install to /Applications so it sticks around ----------------
+if [ "$INSTALL_TO_APPLICATIONS" -eq 1 ]; then
+    INSTALL_TARGET="/Applications/${APP_NAME}.app"
+    if [ ! -w "/Applications" ]; then
+        # /Applications usually requires admin to write to. Fall back to
+        # ~/Applications/ which is per-user, no sudo needed. macOS treats
+        # both identically for Launchpad / Spotlight.
+        mkdir -p "$HOME/Applications"
+        INSTALL_TARGET="$HOME/Applications/${APP_NAME}.app"
+        echo "== 5. Install -> $INSTALL_TARGET (per-user, /Applications not writable) =="
+    else
+        echo "== 5. Install -> $INSTALL_TARGET =="
+    fi
+    rm -rf "$INSTALL_TARGET"
+    cp -R "$APP" "$INSTALL_TARGET"
+    # Re-sign at the new location — the bundle's identifier is now bound
+    # to a different absolute path; ad-hoc resign keeps Gatekeeper happy.
+    codesign --force --sign - "$INSTALL_TARGET" 2>/dev/null || true
+    echo "  installed: $INSTALL_TARGET"
+    echo ""
+fi
+
+if [ "$NO_LAUNCH" -eq 0 ]; then
+    LAUNCH_TARGET="$APP"
+    if [ "$INSTALL_TO_APPLICATIONS" -eq 1 ]; then
+        LAUNCH_TARGET="$INSTALL_TARGET"
+    fi
+    echo "Launching: open '$LAUNCH_TARGET'"
+    open "$LAUNCH_TARGET"
+else
+    echo "Launch:"
+    echo "  open $APP"
+fi
 echo ""
 echo "First run: macOS may prompt 'cannot verify developer'."
 echo "  Right-click the .app in Finder → Open → Open. Allowed permanently after."

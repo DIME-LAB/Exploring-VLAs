@@ -164,7 +164,7 @@ private final class LineBuffer {
 @main
 struct EpisodeBrowserApp: App {
     var body: some Scene {
-        WindowGroup("Lerobot Episode Browser") {
+        WindowGroup("ReRun Episode Browser") {
             ContentView()
                 .frame(minWidth: 760, idealWidth: 860,
                        minHeight: 780, idealHeight: 920)
