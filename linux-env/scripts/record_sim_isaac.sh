@@ -52,6 +52,14 @@ ENV_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 export CYCLONEDDS_URI="file://$ENV_DIR/cyclonedds.xml"
 export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
 
+# Disable lerobot's global pynput keyboard listener. Sim recording is fully
+# script-driven (no human teleop), so the listener has no purpose — and it
+# captures arrow keys / Esc system-wide, so a stray keypress in any other
+# window aborts the record loop with rc=1 mid-episode. Honored by our
+# patched init_keyboard_listener() in lerobot/common/control_utils.py.
+# Override by exporting LEROBOT_DISABLE_KEYBOARD= (empty) before invoking.
+export LEROBOT_DISABLE_KEYBOARD="${LEROBOT_DISABLE_KEYBOARD:-1}"
+
 # Camera config — pointed at Isaac Sim's existing _sim-suffixed topics.
 # Feature keys (`wrist`, `top`) become `observation.images.{wrist,top}` in
 # the v3 dataset, matching the real parity target's schema.
