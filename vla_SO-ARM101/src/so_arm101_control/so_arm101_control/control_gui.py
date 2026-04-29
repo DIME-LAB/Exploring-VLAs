@@ -349,20 +349,40 @@ def _lego_size_from_name(name):
     return None
 
 
-def _normalize_grasp_yaw(yaw, pan):
-    """Pick yaw or yaw±π that keeps wrist_roll within joint limits.
+def _normalize_grasp_yaw(yaw, pan, current_wrist_roll=None):
+    """Pick yaw or yaw±π that minimizes wrist_roll motion from the current pose.
 
     Gripper jaws are symmetric about the grip axis, so yaw and yaw+π
-    produce equivalent grasps. We pick whichever keeps wrist_roll
-    closest to the center of its range.
+    produce equivalent grasps. Among the in-limit candidates we pick
+    whichever puts the target wrist_roll closest to ``current_wrist_roll`` —
+    this minimizes the swing the arm has to perform to reach the grasp.
+    Falls back to the joint-range center as the reference when
+    ``current_wrist_roll`` is None (preserves deterministic behavior for
+    callers that don't track joint state).
     """
     wr_lo, wr_hi = JOINT_LIMITS['wrist_roll']
-    wr_center = (wr_lo + wr_hi) / 2
-    best, best_dist = yaw, abs(pan + yaw - _CHAIN_BASE_ROTATION - wr_center)
-    for candidate in (yaw + math.pi, yaw - math.pi):
-        dist = abs(pan + candidate - _CHAIN_BASE_ROTATION - wr_center)
+    ref = current_wrist_roll if current_wrist_roll is not None else (wr_lo + wr_hi) / 2
+
+    best = None
+    best_dist = float('inf')
+    for candidate in (yaw, yaw + math.pi, yaw - math.pi):
+        target_wr = pan + candidate - _CHAIN_BASE_ROTATION
+        if not (wr_lo <= target_wr <= wr_hi):
+            continue
+        dist = abs(target_wr - ref)
         if dist < best_dist:
             best, best_dist = candidate, dist
+
+    # Safety net: if no candidate respects joint limits (shouldn't happen
+    # for reachable grasps), return the unfiltered center-closest pick so
+    # downstream IK can still try and emit a clear failure.
+    if best is None:
+        wr_center = (wr_lo + wr_hi) / 2
+        best, best_dist = yaw, abs(pan + yaw - _CHAIN_BASE_ROTATION - wr_center)
+        for candidate in (yaw + math.pi, yaw - math.pi):
+            dist = abs(pan + candidate - _CHAIN_BASE_ROTATION - wr_center)
+            if dist < best_dist:
+                best, best_dist = candidate, dist
     return best
 
 # ---------------------------------------------------------------------------
@@ -10087,10 +10107,13 @@ class SOArm101ControlGUI(Node):
         if cross:
             obj_yaw += math.pi / 2
 
-        # Normalize yaw so wrist_roll stays within joint limits
-        # (gripper jaws are symmetric: yaw ≡ yaw+π for grasping)
+        # Pick yaw vs yaw+π so the arm's wrist_roll swings as little as possible
+        # from where it actually is right now (gripper jaws are symmetric, so
+        # both yaw and yaw+π are equivalent grasps).
         pan = math.atan2(pos['y'], pos['x']) if abs(pos['x']) + abs(pos['y']) > 0.001 else 0.0
-        obj_yaw = _normalize_grasp_yaw(obj_yaw, pan)
+        with self.joint_lock:
+            current_wr = self._actual_positions.get('wrist_roll')
+        obj_yaw = _normalize_grasp_yaw(obj_yaw, pan, current_wrist_roll=current_wr)
 
         # Jaw offset: shift target so object sits between both jaws
         jaw_dx, jaw_dy = self._compute_jaw_offset(obj_name, obj_yaw)
