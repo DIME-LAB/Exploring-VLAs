@@ -5758,6 +5758,7 @@ class SOArm101ControlGUI(Node):
                 'stop_evt': threading.Event(),
                 'pause_evt': threading.Event(),  # set = run, clear = pause
                 'total_retries': 0,
+                'resume_mode': False,
             }
             self._rec_state['pause_evt'].set()  # not paused on init
 
@@ -5788,7 +5789,7 @@ class SOArm101ControlGUI(Node):
         settings.pack(fill=tk.X, padx=10, pady=(8, 4))
 
         row1 = ttk.Frame(settings); row1.pack(fill=tk.X, padx=5, pady=4)
-        tk.Label(row1, text='Episodes:').pack(side=tk.LEFT, padx=(0, 4))
+        tk.Label(row1, text='Target episodes:').pack(side=tk.LEFT, padx=(0, 4))
         self._register_spinbox(
             row1, label='Episodes', tab='Record Sim', section='Settings',
             textvariable=self._rec_episodes_var,
@@ -6005,21 +6006,60 @@ class SOArm101ControlGUI(Node):
 
         repo_id = self._rec_dataset_repo_id()
         ds_path = os.path.join(REC_DATASET_ROOT, repo_id.split('/', 1)[-1])
-        if os.path.exists(ds_path):
-            self._append_log(
-                f'Record: dataset {ds_path} already exists; pick a new name',
-                'err')
-            with self._rec_lock:
-                self._rec_state['phase'] = 'idle'
-            self._rec_set_status(status_text='IDLE')
-            return
 
+        # Episodes input is the TARGET TOTAL for the dataset (not per-session).
+        # If the dataset already exists, compute remaining = target - existing
+        # and pass --resume=true so lerobot appends with continuous episode
+        # indices. If remaining <=0, no-op cleanly. Schema compatibility is
+        # checked by lerobot itself via sanity_check_dataset_robot_compatibility
+        # after LeRobotDataset.resume() loads the existing meta/info.json.
+        target_episodes = int(self._rec_episodes_var.get())
+        resume_mode = False
+        info_path = os.path.join(ds_path, 'meta', 'info.json')
+        if os.path.exists(ds_path):
+            if not os.path.exists(info_path):
+                self._append_log(
+                    f'Record: {ds_path} exists but has no meta/info.json — '
+                    'incomplete dataset; pick a new name or delete the folder',
+                    'err')
+                with self._rec_lock:
+                    self._rec_state['phase'] = 'idle'
+                self._rec_set_status(status_text='IDLE')
+                return
+            try:
+                with open(info_path) as f:
+                    existing_total = int(json.load(f).get('total_episodes', 0))
+            except Exception as exc:
+                self._append_log(
+                    f'Record: failed to read {info_path}: {exc}', 'err')
+                with self._rec_lock:
+                    self._rec_state['phase'] = 'idle'
+                self._rec_set_status(status_text='IDLE')
+                return
+            remaining = target_episodes - existing_total
+            if remaining <= 0:
+                self._append_log(
+                    f'Record: {repo_id} already has {existing_total} episodes '
+                    f'(target {target_episodes}); nothing to do')
+                with self._rec_lock:
+                    self._rec_state['phase'] = 'idle'
+                self._rec_set_status(status_text='IDLE')
+                return
+            resume_mode = True
+            with self._rec_lock:
+                self._rec_state['n_episodes'] = remaining
+            self._append_log(
+                f'Record: resuming {repo_id} '
+                f'({existing_total} existing → +{remaining} = {target_episodes} target)')
+        else:
+            self._append_log(f'Record: starting → {repo_id}')
+
+        self._rec_state['resume_mode'] = resume_mode
         self._rec_state['dataset_dir'] = ds_path
         self._rec_set_status(
             status_text='STARTING (spawning subprocesses)',
             progress_text=f'0/{self._rec_state["n_episodes"]}',
             dataset_text=ds_path)
-        self._append_log(f'Record: starting → {repo_id}')
 
         # Mirror dedup: if /joint_commands_lerobot already has a publisher
         # (mirror left over from a prior session or started manually),
@@ -6062,6 +6102,14 @@ class SOArm101ControlGUI(Node):
             '--dataset.push_to_hub=false',
             '--display_data=false',
         ]
+        if resume_mode:
+            # LeRobotDataset.resume() requires an explicit root (won't write
+            # into the revision-safe Hub snapshot cache). Pass the absolute
+            # path the GUI already computed.
+            cmd += [
+                '--resume=true',
+                f'--dataset.root={ds_path}',
+            ]
         try:
             log_path = f"/tmp/rec_{datetime.datetime.now():%H%M%S}.log"
             log_fd = open(log_path, 'w')
