@@ -37,26 +37,39 @@ ONLY_RESTORE=0
 ONLY_CHECK=0
 EPISODE=0
 REPO_ID="$DEFAULT_REPO_ID"
+LOCAL_ROOT=""
+POSITIONAL_NON_NUMERIC=()
 
 while (( $# )); do
   case "$1" in
     --restore) ONLY_RESTORE=1; shift ;;
     --check)   ONLY_CHECK=1;   shift ;;
+    --root)    LOCAL_ROOT="$2"; shift 2 ;;
     -h|--help)
       sed -n '2,28p' "$0"
       exit 0
       ;;
     *)
-      # First positional = episode, second = repo_id
+      # Positional precedence: numeric → episode; first non-numeric → repo_id;
+      # second non-numeric → local root (a directory path, only used if --root
+      # wasn't already given). This matches the EpisodeBrowser app contract:
+      # `dataset_viz.sh <episode> <repo_id> [<local_root>]`.
       if [[ "$1" =~ ^[0-9]+$ ]]; then
         EPISODE="$1"
       else
-        REPO_ID="$1"
+        POSITIONAL_NON_NUMERIC+=("$1")
       fi
       shift
       ;;
   esac
 done
+
+if (( ${#POSITIONAL_NON_NUMERIC[@]} >= 1 )); then
+  REPO_ID="${POSITIONAL_NON_NUMERIC[0]}"
+fi
+if (( ${#POSITIONAL_NON_NUMERIC[@]} >= 2 )) && [[ -z "$LOCAL_ROOT" ]]; then
+  LOCAL_ROOT="${POSITIONAL_NON_NUMERIC[1]}"
+fi
 
 # --- Sanity checks ----------------------------------------------------------
 if [[ ! -f "$MAC_ENV_MANIFEST" ]]; then
@@ -142,9 +155,17 @@ echo "============================================================"
 echo "  launching lerobot-dataset-viz"
 echo "    repo_id      = $REPO_ID"
 echo "    episode      = $EPISODE"
+if [[ -n "$LOCAL_ROOT" ]]; then
+  echo "    local root   = $LOCAL_ROOT"
+fi
 echo "    mode         = local (rerun spawns its own viewer window)"
 echo "============================================================"
 echo
+
+ROOT_FLAG=""
+if [[ -n "$LOCAL_ROOT" ]]; then
+  ROOT_FLAG="--root '$LOCAL_ROOT'"
+fi
 
 cd /tmp/soarm-ws
 pixi run --manifest-path "$MAC_ENV_MANIFEST" bash -c "
@@ -153,5 +174,5 @@ pixi run --manifest-path "$MAC_ENV_MANIFEST" bash -c "
   lerobot-dataset-viz \
     --repo-id '$REPO_ID' \
     --episode-index '$EPISODE' \
-    --mode local
+    --mode local $ROOT_FLAG
 "
