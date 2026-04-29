@@ -6323,13 +6323,24 @@ class SOArm101ControlGUI(Node):
                 break
             st['last_verdict'] = verdict
 
-            # Snapshot lerobot's current Phase A index BEFORE signalling.
-            # We use this to gate the next pick-place on lerobot reaching
-            # a NEW Phase A (otherwise an early-failing next cycle could
-            # send Left during the current Phase B and discard the
-            # previously-successful save — see commit history for the
-            # ep6 loss bug).
+            # Snapshot lerobot's current Phase A and B indices BEFORE signalling.
+            # Phase A index gates the next pick-place on lerobot reaching a NEW
+            # Phase A (so an early-failing next cycle can't send Left during
+            # the current Phase B and discard the previously-successful save —
+            # see commit history for the ep6 loss bug). Phase B index lets us
+            # wait for lerobot to definitively transition out of Phase A
+            # before we start our scene reset (otherwise our randomize call
+            # races the tail of the still-recording Phase A).
             prev_phase_a = self._rec_count_phase_a_starts()
+            prev_phase_b = self._rec_count_phase_b_starts()
+
+            # Settle window: arm just returned to grasp_home — give lerobot
+            # ~2s of clean idle-at-home frames at the END of the episode so
+            # the policy sees an unambiguous "task complete" signal in the
+            # final observations. Without this, the recorded episode ends
+            # while the arm is still decelerating and the last frame's
+            # joint state vs target diverges visibly.
+            time.sleep(2.0)
 
             # Signal lerobot via global keyboard event.
             if verdict == 'PASS':
@@ -6345,21 +6356,28 @@ class SOArm101ControlGUI(Node):
                     f'(verdict={verdict}, lego={current_lego}, '
                     f'attempt {attempt})')
 
+            # Wait for lerobot to confirm it has actually exited Phase A.
+            # On PASS this means "Reset the environment" line appeared (lerobot
+            # is now in its non-recording reset_time_s window — safe to
+            # randomize the scene). On discard the rerecord branch in lerobot
+            # skips the reset window, so we don't gate on Phase B for that.
+            if verdict == 'PASS':
+                self._rec_wait_for_new_phase_b(prev_phase_b, timeout_s=10.0)
+
             # Choose NEXT lego before prep so qs_select can target it.
             current_lego = random.choice(legos)
             st['last_lego'] = current_lego
 
-            # Phase B: sim_reset + ik_target + qs_select for next episode.
-            # Runs in parallel with lerobot's Phase B reset window
-            # (reset_time_s=15s budget; this prep is ~12-15s).
+            # Scene reset: now safe — lerobot is in its non-recording reset_time_s
+            # window (or has discarded the buffer). Randomize legos, update cups,
+            # send arm to data-home, pre-select next target. Runs in parallel
+            # with the remainder of lerobot's reset_time_s budget.
             self._rec_pre_episode_setup(current_lego)
 
-            # Wait until lerobot's log shows a NEW "Recording episode"
-            # line — guarantees Phase B has finished and Phase A is
-            # back live before the next pick-place dispatches. Without
-            # this, a fast-failing next cycle can send Left while we're
-            # still in Phase B and lerobot's post-Phase-B rerecord check
-            # then drops the current buffer (the previous success).
+            # Block until lerobot starts its next Phase A. Without this gate
+            # an early-failing next cycle could send Left during lerobot's
+            # post-Phase-B rerecord-decision window and drop the previous
+            # success buffer.
             self._rec_wait_for_new_phase_a(prev_phase_a, timeout_s=25.0)
 
         # Drain window: give lerobot time to finalize the last save
@@ -6407,6 +6425,46 @@ class SOArm101ControlGUI(Node):
         self._append_log(
             f'Record: WARN — timeout waiting for new Phase A '
             f'(prev={prev_count}, cur={self._rec_count_phase_a_starts()})',
+            'warn')
+        return False
+
+    def _rec_count_phase_b_starts(self):
+        """Count "Reset the environment" lines in lerobot's stdout log.
+        Lerobot logs this when it transitions from the recording inner-loop
+        (Phase A) into the non-recording reset_time_s inner-loop (Phase B).
+        Used as the orchestrator's "Phase A is definitively done" signal —
+        we wait for this count to advance after sending Right arrow before
+        starting our own scene reset, otherwise the randomize call can race
+        the tail of the still-recording Phase A and contaminate the saved
+        episode with a teleporting-lego frame.
+        """
+        log_path = self._rec_state.get('lerobot_log', '')
+        if not log_path or not os.path.exists(log_path):
+            return 0
+        try:
+            with open(log_path) as f:
+                return f.read().count('Reset the environment')
+        except Exception:
+            return 0
+
+    def _rec_wait_for_new_phase_b(self, prev_count, timeout_s=10.0):
+        """Block until lerobot's log shows MORE Phase B starts than prev_count,
+        or until timeout_s elapses. Returns True on new Phase B detected,
+        False on timeout. Phase B follows quickly (~50ms) after Right arrow,
+        so the default 10s budget is generous."""
+        st = self._rec_state
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            if st['stop_evt'].is_set():
+                return False
+            cur = self._rec_count_phase_b_starts()
+            if cur > prev_count:
+                return True
+            time.sleep(0.2)
+        self._append_log(
+            f'Record: WARN — timeout waiting for new Phase B '
+            f'(prev={prev_count}, cur={self._rec_count_phase_b_starts()}); '
+            f'proceeding to scene reset anyway',
             'warn')
         return False
 

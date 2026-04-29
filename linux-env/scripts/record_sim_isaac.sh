@@ -52,13 +52,21 @@ ENV_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 export CYCLONEDDS_URI="file://$ENV_DIR/cyclonedds.xml"
 export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
 
-# Disable lerobot's global pynput keyboard listener. Sim recording is fully
-# script-driven (no human teleop), so the listener has no purpose — and it
-# captures arrow keys / Esc system-wide, so a stray keypress in any other
-# window aborts the record loop with rc=1 mid-episode. Honored by our
-# patched init_keyboard_listener() in lerobot/common/control_utils.py.
-# Override by exporting LEROBOT_DISABLE_KEYBOARD= (empty) before invoking.
-export LEROBOT_DISABLE_KEYBOARD="${LEROBOT_DISABLE_KEYBOARD:-1}"
+# NOTE on lerobot's keyboard listener:
+# The orchestrator (control_gui.py:_rec_lerobot_advance / _rec_lerobot_discard)
+# signals lerobot to end-and-save or discard the current episode by injecting
+# Right / Left arrow events via xdotool — pynput's global X11 listener catches
+# them. Disabling the listener BREAKS per-episode timing: pick-place cycles
+# accumulate inside one lerobot episode (whose episode_time_s is the only fall-
+# back end signal), producing 2-3 picks per saved episode and a misleading
+# single_task string. So we leave the listener ON by default.
+#
+# To opt out (e.g. for unattended runs where you can guarantee no arrow keys
+# get pressed and you don't care about per-episode boundaries):
+#   LEROBOT_DISABLE_KEYBOARD=1 bash linux-env/scripts/record_sim_isaac.sh ...
+#
+# Patched in lerobot/common/control_utils.py (env-var honored before the
+# is_headless() check).
 
 # Camera config — pointed at Isaac Sim's existing _sim-suffixed topics.
 # Feature keys (`wrist`, `top`) become `observation.images.{wrist,top}` in
