@@ -5954,7 +5954,7 @@ class SOArm101ControlGUI(Node):
             f'--dataset.repo_id={repo_id}',
             f'--dataset.num_episodes={self._rec_state["n_episodes"]}',
             '--dataset.episode_time_s=120',
-            '--dataset.reset_time_s=2',
+            '--dataset.reset_time_s=15',
             '--dataset.single_task=sort blue blocks',
             '--dataset.push_to_hub=false',
             '--display_data=false',
@@ -6085,20 +6085,35 @@ class SOArm101ControlGUI(Node):
     def _rec_loop_thread(self):
         """Orchestration loop. Runs on a daemon background thread.
 
-        Episode contract: 1 episode = 1 lego pick-place. The scene is
-        re-randomized before every episode (not every K), and the lego
-        size rotates through `legos` for uniform coverage.
+        Episode contract (Phase 10.2 v2):
+          - 1 episode = 1 random blue lego pick-place.
+          - Full sim_reset (cups → real-world default, legos randomized,
+            arm → grasp_home_data) runs between every episode.
+          - On any failure: lerobot's left-arrow signal (`rerecord_episode`)
+            discards the captured buffer; orchestrator does NOT retry the
+            same lego, just re-resets and tries a new random pick.
+          - No retry budget — loop continues until `n_target` SUCCESSES
+            are recorded by lerobot, or stop_evt fires, or lerobot
+            subprocess exits.
+
+        Sync with lerobot's record loop: lerobot runs Phase A (record,
+        episode_time_s=120s) → Phase B (reset window, reset_time_s=15s).
+        We pace ourselves: pick-place during Phase A → key-press to
+        end Phase A early → sim_reset overlaps Phase B (15s budget vs
+        ~10-15s sim_reset duration). Pick-place starts again at next
+        Phase A.
         """
         st = self._rec_state
         legos = list(REC_LEGOS_BY_COLOR[self._rec_color_var.get()])
         n_target = st['n_episodes']
 
-        # Warm-up wait — give lerobot ~10s to subscribe + emit first frame.
-        for _ in range(50):
+        # Warm-up wait — block until lerobot logs "Recording episode 0".
+        # Lerobot enters Phase A immediately on spawn; we need the buffer
+        # to be live before our discard signal lands.
+        for _ in range(75):
             if st['stop_evt'].is_set():
                 return
             if st.get('lerobot_proc') and st['lerobot_proc'].poll() is None:
-                # Probe its log for "Recording episode" sentinel
                 log_path = st.get('lerobot_log', '')
                 if log_path and os.path.exists(log_path):
                     try:
@@ -6109,51 +6124,208 @@ class SOArm101ControlGUI(Node):
                         pass
             time.sleep(0.2)
 
+        # Step 1: discard the just-opened Phase A immediately. Sending
+        # Left makes lerobot exit Phase A early (captured ~0s of data),
+        # run Phase B (reset_time_s=15s), clear the buffer, then start
+        # a fresh Phase A. This is what shifts our initial sim_reset
+        # OUT of any saved episode — Phase B is non-recording.
+        prev_phase_a = self._rec_count_phase_a_starts()
+        self._append_log(
+            'Record: discarding initial Phase A so first pick-place lands '
+            'in a clean episode')
+        self._rec_lerobot_discard()
+
+        # Step 2: do the initial sim_reset DURING Phase B. ~10-12s of
+        # arm + cup + lego work; Phase B has 15s budget.
+        self._rec_set_status(status_text='RESETTING (initial)')
+        self._rec_full_sim_reset()
+
+        # Step 3: wait for lerobot to enter the fresh Phase A (post-
+        # discard). Same gate the loop uses between iterations — keeps
+        # us from racing the next pick-place into Phase B's tail.
+        self._rec_wait_for_new_phase_a(prev_phase_a, timeout_s=25.0)
+
         with self._rec_lock:
             if st['phase'] != 'starting':
                 return
             st['phase'] = 'running'
         self._rec_set_status(status_text='RUNNING')
 
-        episode_idx = 0  # 0-indexed
-        scene_idx = 0
-        while episode_idx < n_target and not st['stop_evt'].is_set():
+        success_count = 0
+        attempt = 0
+        while not st['stop_evt'].is_set():
+            # Stop if lerobot subprocess exited (it manages its own
+            # n_target and exits when reached or on error).
+            lp = st.get('lerobot_proc')
+            if lp and lp.poll() is not None:
+                self._append_log(
+                    f'Record: lerobot exited (rc={lp.returncode})')
+                break
+
+            # Belt-and-suspenders: also stop after our own success count
+            # hits n_target — covers the case where lerobot's still alive
+            # but should have saved enough.
+            if success_count >= n_target:
+                self._append_log(
+                    f'Record: reached n_target={n_target} successes')
+                break
+
             st['pause_evt'].wait()  # block while paused
+            attempt += 1
+            st['scene'] = attempt
+            st['episode'] = success_count
 
-            # Re-randomize before every episode. scene_idx ≡ episode_idx
-            # under the new contract; kept distinct for status display
-            # parity with prior versions.
-            scene_idx += 1
-            st['scene'] = scene_idx
-            self._rec_set_status(
-                status_text='RANDOMIZING',
-                progress_text=(
-                    f'Episode {episode_idx + 1}/{n_target}, '
-                    f'scene {scene_idx}'))
-            if self._rec_randomize_legos_var.get():
-                self._rec_mcp_call('randomize_object_poses', {})
-            if self._rec_randomize_cups_var.get():
-                self._rec_mcp_call('randomize_cups', {})
-            time.sleep(1.0)  # let physics settle
-
-            lego = legos[episode_idx % len(legos)]
+            # Pick a random blue lego (any one of the 2 in scene). User
+            # spec: any one blue lego. No rotation; uniform random.
+            lego = random.choice(legos)
             st['last_lego'] = lego
 
-            verdict = self._rec_run_episode_with_retry(lego, episode_idx, n_target)
+            self._rec_set_status(
+                status_text='RUNNING',
+                progress_text=(
+                    f'episode {success_count + 1}/{n_target}, '
+                    f'attempt {attempt}, lego {lego}'))
+
+            # Run pick-place ONCE (no retry per user spec).
+            verdict = self._rec_run_one_qs_cycle(lego)
 
             if verdict == 'ABORT':
                 break
             st['last_verdict'] = verdict
-            episode_idx += 1
-            st['episode'] = episode_idx
 
-            if self._rec_pause_between_var.get():
-                time.sleep(2.5)
+            # Snapshot lerobot's current Phase A index BEFORE signalling.
+            # We use this to gate the next pick-place on lerobot reaching
+            # a NEW Phase A (otherwise an early-failing next cycle could
+            # send Left during the current Phase B and discard the
+            # previously-successful save — see commit history for the
+            # ep6 loss bug).
+            prev_phase_a = self._rec_count_phase_a_starts()
 
-        # Clean exit: signal stop, finalize.
+            # Signal lerobot via global keyboard event.
+            if verdict == 'PASS':
+                self._rec_lerobot_advance()
+                success_count += 1
+                self._append_log(
+                    f'Record: ✓ episode {success_count}/{n_target} saved '
+                    f'(lego={lego}, attempt {attempt})')
+            else:
+                self._rec_lerobot_discard()
+                self._append_log(
+                    f'Record: ✗ episode discarded '
+                    f'(verdict={verdict}, lego={lego}, attempt {attempt})')
+
+            # Full sim_reset for the NEXT episode. Runs in parallel with
+            # lerobot's Phase B reset window (reset_time_s=15s budget).
+            self._rec_full_sim_reset()
+
+            # Wait until lerobot's log shows a NEW "Recording episode"
+            # line — guarantees Phase B has finished and Phase A is
+            # back live before the next pick-place dispatches. Without
+            # this, a fast-failing next cycle can send Left while we're
+            # still in Phase B and lerobot's post-Phase-B rerecord check
+            # then drops the current buffer (the previous success).
+            self._rec_wait_for_new_phase_a(prev_phase_a, timeout_s=25.0)
+
+        # Drain window: give lerobot time to finalize the last save
+        # AFTER Phase B before we send SIGINT. save_episode() runs after
+        # Phase B; SIGINT during it loses the episode (cf. ep10 loss in
+        # earlier run). Wait at least reset_time_s + a small buffer.
+        if success_count >= n_target and not st['stop_evt'].is_set():
+            self._append_log(
+                f'Record: target reached, draining last save '
+                f'(reset_time_s + buffer)…')
+            time.sleep(20.0)
+
+        # Clean exit
         if not st['stop_evt'].is_set():
-            self._append_log(f'Record: completed {episode_idx} episodes')
+            self._append_log(
+                f'Record: completed {success_count} successes '
+                f'({attempt} attempts, {attempt - success_count} discarded)')
             self._cmd_rec_stop()
+
+    def _rec_count_phase_a_starts(self):
+        """Count "Recording episode " lines in lerobot's stdout log.
+        Used as a phase-tracking signal — every Phase A start emits one."""
+        log_path = self._rec_state.get('lerobot_log', '')
+        if not log_path or not os.path.exists(log_path):
+            return 0
+        try:
+            with open(log_path) as f:
+                return f.read().count('Recording episode ')
+        except Exception:
+            return 0
+
+    def _rec_wait_for_new_phase_a(self, prev_count, timeout_s=25.0):
+        """Block until lerobot's log shows MORE Phase A starts than
+        prev_count, or until timeout_s elapses. Returns True on
+        new Phase A detected, False on timeout."""
+        st = self._rec_state
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            if st['stop_evt'].is_set():
+                return False
+            cur = self._rec_count_phase_a_starts()
+            if cur > prev_count:
+                return True
+            time.sleep(0.5)
+        self._append_log(
+            f'Record: WARN — timeout waiting for new Phase A '
+            f'(prev={prev_count}, cur={self._rec_count_phase_a_starts()})',
+            'warn')
+        return False
+
+    # -- Helpers for new orchestration ------------------------------------
+
+    def _rec_full_sim_reset(self):
+        """Reset cups + legos + arm to a known clean starting state.
+
+        Mirrors scripts/sim_reset.sh in-process so each episode begins
+        from the same well-defined pose distribution. Sequence:
+          1. Force-detach any held lego (safe no-op if none attached).
+          2. MCP match_real_world → reset CUP_LAYOUT to real-world defaults.
+          3. MCP update_cups → re-snap cup prims.
+          4. MCP randomize_object_poses → scatter legos for diversity.
+          5. qs_refresh_all → resync MoveIt collision scene.
+          6. grasp_home_data → arm to calibrated data-collection home.
+        """
+        st = self._rec_state
+        if st['stop_evt'].is_set():
+            return
+        self._rec_set_status(status_text='RESETTING')
+        self._rec_call_trigger('detach_lego', timeout=5)
+        self._rec_mcp_call('match_real_world', {'reposition': True})
+        self._rec_mcp_call('update_cups', {})
+        self._rec_mcp_call('randomize_object_poses', {})
+        time.sleep(1.0)  # physics settle
+        self._rec_call_trigger('qs_refresh_all', timeout=10)
+        time.sleep(2.0)  # listbox repop + collision-scene rebuild
+        self._rec_call_trigger('grasp_home_data', timeout=20)
+
+    def _rec_lerobot_advance(self):
+        """Send Right-arrow to lerobot's keyboard listener → save current
+        episode, advance to next one. Picked up by pynput's global X11
+        listener regardless of window focus."""
+        self._rec_send_key('Right')
+
+    def _rec_lerobot_discard(self):
+        """Send Left-arrow to lerobot's keyboard listener → discard the
+        episode buffer, redo (which we'll start fresh on the next
+        iteration). Picked up by pynput's global X11 listener."""
+        self._rec_send_key('Left')
+
+    def _rec_send_key(self, key):
+        """Inject a global key event via xdotool. Lerobot's
+        init_keyboard_listener (pynput) catches arrow keys with no
+        focus dependency. --clearmodifiers prevents stuck Shift/Ctrl
+        from prior interactive use."""
+        try:
+            subprocess.run(
+                ['xdotool', 'key', '--clearmodifiers', key],
+                check=False, timeout=2,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as exc:
+            self._append_log(
+                f'Record: xdotool key {key} failed: {exc}', 'err')
 
     def _rec_run_episode_with_retry(self, lego, episode_idx, n_target):
         """Run one episode for `lego`, re-randomizing on QS halt up to
@@ -6230,10 +6402,18 @@ class SOArm101ControlGUI(Node):
         time.sleep(0.5)
 
         # 3) Snapshot pre-cycle log line count.
+        # NOTE: log_resp.message contains REAL newlines (\n char), not the
+        # escaped two-character literal "\n" that an earlier version of
+        # this code split on. The literal-string split produced len=1
+        # always, so the "new lines since pre-cycle" slice was empty and
+        # the success sentinel was never matched — every successful cycle
+        # got mislabeled FAIL after the 90 s timeout, which then fired the
+        # discard path on a perfectly valid pick-place. Fixed to split on
+        # actual '\n'.
         log_resp = self._rec_call_trigger('get_log', timeout=10)
         if log_resp is None:
             return 'FAIL'
-        pre_lines = len(log_resp.message.split('\\n'))
+        pre_lines = len(log_resp.message.split('\n'))
 
         # 4) qs_play.
         if st['stop_evt'].is_set():
@@ -6250,7 +6430,7 @@ class SOArm101ControlGUI(Node):
             log_resp = self._rec_call_trigger('get_log', timeout=10)
             if log_resp is None:
                 continue
-            new = '\\n'.join(log_resp.message.split('\\n')[pre_lines:])
+            new = '\n'.join(log_resp.message.split('\n')[pre_lines:])
             if 'pick-and-drop cycle complete' in new:
                 return 'PASS'
             if ('Quickstart halted' in new or
