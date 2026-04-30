@@ -32,6 +32,14 @@ ros-jazzy-sensor-msgs-py = "*"
 ros-jazzy-std-msgs = "*"
 ros-jazzy-geometry-msgs = "*"
 
+# --- Action types for SmolVLA inference (smolvla_inference.py) ----------
+# FollowJointTrajectory action client publishes setpoints directly to
+# ros2_controllers (mirrors drive_pick_place.py's pattern from the system-
+# Humble side). control_msgs ships the action def; trajectory_msgs is
+# already pulled in transitively but we name it explicitly.
+ros-jazzy-control-msgs = "*"
+ros-jazzy-trajectory-msgs = "*"
+
 # --- Image I/O for lerobot's video encoding pipeline --------------------
 opencv = "*"
 ffmpeg = "*"

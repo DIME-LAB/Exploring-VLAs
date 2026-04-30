@@ -266,6 +266,58 @@ REC_EPISODE_TIME_S = int(os.environ.get("SOARM_REC_EPISODE_TIME_S", "120"))
 REC_RESET_TIME_S = int(os.environ.get("SOARM_REC_RESET_TIME_S", "15"))
 
 
+# --- Inference tab constants ----------------------------------------------
+# Same module-level rationale as REC_*: hot-reload picks up changes on the
+# running instance.
+
+INF_SCRIPT = os.path.join(_REPO_ROOT, "linux-env/scripts/inference_smolvla.sh")
+INF_ASYNC_SCRIPT = os.path.join(_REPO_ROOT, "linux-env/scripts/inference_async_lerobot.sh")
+
+# Two inference methods, selected via the Method radio in the Inference tab:
+#   "custom"   — our chunk-replan node (linux-env/scripts/smolvla_inference.py).
+#                Three-process orchestration with mirror + lerobot-record when
+#                "Record this run" is on. Maximum control over chunk replay.
+#   "async_rtc"— LeRobot's async inference + Real-Time Action Chunking.
+#                Two-process (policy server + robot client). Threshold-based
+#                replan with weighted-average aggregation between consecutive
+#                chunks (no queue starvation, smoother transitions). Same code
+#                path that ships for real-hardware deploy → easier transition.
+INF_METHOD_LABELS = {
+    "custom":    "Custom (chunk replan @ 1 Hz)",
+    "async_rtc": "Async + RTC (lerobot canonical)",
+}
+
+# Preset model dropdown — keys feed the combobox; values are
+# (model_path, default_checkpoint, default_rename_map_json).
+# The two real-world checkpoints are useful for plumbing smoke tests
+# (verifying the loop closes end-to-end). The "Sim FT (custom)" entry is the
+# slot for the sim-trained model that's currently in flight — pick it and
+# fill in the custom path/checkpoint fields.
+INF_MODEL_PRESETS = {
+    # First entry is the default (Tk picks first as initial Combobox value).
+    # Sim FT is the model we expect to actually perform the task — listed
+    # first so a fresh GUI session lands on it without manual selection.
+    "Sim FT (full, blue_sort 100ep)":
+        ("anirudhrani/smolvla_sim_100ep_fft__10ksteps_h200", "", "{}"),
+    "Full FT (real-world, smoke)":
+        ("anirudhrani/smolvla_blue_sort_ven_50k", "050000", "{}"),
+    "LoRA (real-world, smoke)":
+        ("anirudhrani/smolvla_blue_sort_v2_lora", "050000",
+         '{"wrist": "camera1", "top": "camera2"}'),
+    "Custom":
+        ("", "", "{}"),
+}
+INF_DEFAULT_TASK = "Pick a blue lego and place it in blue cup"
+# Match NVIDIA so101-ros2 reference + record_sim_isaac.sh's dataset.fps=30.
+# Rationale (see smolvla_inference.py argparse help): publish=30 mirrors
+# training-time trajectory cadence so joint deltas execute at the real-time
+# speed the model expects; inference=1.0 lets the publisher consume ~60% of
+# each 50-action chunk before replanning, which captures the descend+close
+# portion of a typical pick trajectory (lower inference_rate trims that off).
+INF_DEFAULT_INFERENCE_RATE = 1.0
+INF_DEFAULT_PUBLISH_RATE = 30.0
+
+
 def _load_cup_mesh():
     """Load cup.stl as a shape_msgs/Mesh for MoveIt collision objects.
 
@@ -2062,6 +2114,7 @@ class SOArm101ControlGUI(Node):
         self._build_quickstart_tab(notebook)
         self._build_real_test_tab(notebook)
         self._build_record_sim_tab(notebook)
+        self._build_inference_tab(notebook)
         self._build_display_tab(notebook)
 
         # Auto-populate IK fields when switching to IK tab
@@ -3168,6 +3221,7 @@ class SOArm101ControlGUI(Node):
                 (self._build_quickstart_tab, 'Quickstart'),
                 (self._build_real_test_tab, 'Real Test'),
                 (self._build_record_sim_tab, 'Record Sim'),
+                (self._build_inference_tab, 'Inference'),
                 (self._build_display_tab, 'RViz'),
             ]:
                 try:
@@ -6712,6 +6766,692 @@ class SOArm101ControlGUI(Node):
 
     # ==================================================================
     # End Record Sim
+    # ==================================================================
+
+    # ==================================================================
+    # Inference — closed-loop SmolVLA deployment in Isaac Sim
+    # ==================================================================
+    #
+    # Spawns linux-env/scripts/inference_smolvla.sh as a subprocess (mirrors
+    # Record Sim's two-process architecture — control_gui runs system Humble
+    # Python 3.10, the inference script runs pixi-Jazzy Python 3.12 because
+    # SmolVLA + lerobot need 3.12+).
+    #
+    # The subprocess is the source of truth for the closed loop: it
+    # subscribes to /joint_states + /wrist_camera_rgb_sim + /workspace_camera_sim,
+    # runs SmolVLA, and dispatches FollowJointTrajectory action goals
+    # directly to the controllers — control_gui is NOT on the critical path
+    # (avoids /joint_commands executor saturation).
+    #
+    # The tab is a launcher. Status comes from log tail + subprocess poll;
+    # we don't try to mirror per-step state into the GUI (would couple the
+    # GUI to inference cadence).
+
+    def _build_inference_tab(self, notebook):
+        """Tab: closed-loop SmolVLA inference. Launches inference_smolvla.sh
+        with the chosen model + task; subprocess publishes FJT action goals
+        to ros2_control. Hot-reload safe (state lazy-init below)."""
+        frame = ttk.Frame(notebook)
+        notebook.add(frame, text='Inference')
+
+        # --- State (lazy init — survives hot-reload) ---
+        if not hasattr(self, '_inf_lock'):
+            self._inf_lock = threading.Lock()
+        if not hasattr(self, '_inf_state'):
+            self._inf_state = {
+                'phase': 'idle',     # idle | starting | running | stopping
+                'proc': None,
+                'log_path': '',
+                'started_at': 0.0,
+            }
+
+        # --- Tk vars ---
+        if not hasattr(self, '_inf_preset_var'):
+            self._inf_preset_var = tk.StringVar(
+                value=next(iter(INF_MODEL_PRESETS)))
+        if not hasattr(self, '_inf_model_path_var'):
+            self._inf_model_path_var = tk.StringVar(value='')
+        if not hasattr(self, '_inf_checkpoint_var'):
+            self._inf_checkpoint_var = tk.StringVar(value='')
+        if not hasattr(self, '_inf_task_var'):
+            self._inf_task_var = tk.StringVar(value=INF_DEFAULT_TASK)
+        if not hasattr(self, '_inf_rename_var'):
+            self._inf_rename_var = tk.StringVar(value='{}')
+        if not hasattr(self, '_inf_inf_rate_var'):
+            self._inf_inf_rate_var = tk.DoubleVar(
+                value=INF_DEFAULT_INFERENCE_RATE)
+        if not hasattr(self, '_inf_pub_rate_var'):
+            self._inf_pub_rate_var = tk.DoubleVar(
+                value=INF_DEFAULT_PUBLISH_RATE)
+        if not hasattr(self, '_inf_status_var'):
+            self._inf_status_var = tk.StringVar(value='IDLE')
+        if not hasattr(self, '_inf_log_path_var'):
+            self._inf_log_path_var = tk.StringVar(value='—')
+        # Default-on convenience: after the inference subprocess exits, drive
+        # the arm back to the calibrated data-collection home pose so the
+        # next inference / record run starts from a consistent baseline.
+        if not hasattr(self, '_inf_return_home_var'):
+            self._inf_return_home_var = tk.BooleanVar(value=True)
+        # Recording-while-inferring: when ON, _cmd_inf_start additionally
+        # spawns the JTC-reference mirror + lerobot-record (same
+        # subprocesses Record Sim uses), so the rollout produces a
+        # standard v3 dataset. The subprocesses get torn down with
+        # inference on Stop (or on inference crash via _inf_watch_proc).
+        if not hasattr(self, '_inf_record_var'):
+            self._inf_record_var = tk.BooleanVar(value=False)
+        if not hasattr(self, '_inf_record_dataset_var'):
+            self._inf_record_dataset_var = tk.StringVar(value='')
+        # Inference method radio — see INF_METHOD_LABELS for the two options.
+        # Default to async_rtc since RTC overlaps inference with execution
+        # (no queue-starvation gaps the custom 1Hz replan suffers).
+        if not hasattr(self, '_inf_method_var'):
+            self._inf_method_var = tk.StringVar(value='async_rtc')
+
+        # Apply current preset to the path/checkpoint/rename fields on first
+        # build (and on every preset change).
+        self._inf_apply_preset()
+
+        # ===== Section: Model =====
+        model = ttk.LabelFrame(frame, text='Model')
+        model.pack(fill=tk.X, padx=10, pady=(8, 4))
+
+        row1 = ttk.Frame(model); row1.pack(fill=tk.X, padx=5, pady=4)
+        tk.Label(row1, text='Preset:').pack(side=tk.LEFT, padx=(0, 4))
+        preset_cb = ttk.Combobox(
+            row1, textvariable=self._inf_preset_var,
+            values=list(INF_MODEL_PRESETS.keys()),
+            state='readonly', width=30,
+        )
+        preset_cb.pack(side=tk.LEFT, padx=(0, 8))
+        preset_cb.bind('<<ComboboxSelected>>',
+                       lambda _e: self._inf_apply_preset())
+        self._widget_registry_add(
+            'Inference preset', 'Combobox', preset_cb,
+            self._inf_preset_var, tab='Inference', section='Model',
+            writable=True)
+
+        row2 = ttk.Frame(model); row2.pack(fill=tk.X, padx=5, pady=4)
+        tk.Label(row2, text='Model path:', width=12, anchor='w').pack(side=tk.LEFT)
+        path_entry = ttk.Entry(row2, textvariable=self._inf_model_path_var,
+                               width=50)
+        path_entry.pack(side=tk.LEFT, padx=(0, 4), fill=tk.X, expand=True)
+        self._widget_registry_add(
+            'Model path', 'Entry', path_entry,
+            self._inf_model_path_var, tab='Inference', section='Model',
+            writable=True)
+
+        row3 = ttk.Frame(model); row3.pack(fill=tk.X, padx=5, pady=4)
+        tk.Label(row3, text='Checkpoint:', width=12, anchor='w').pack(side=tk.LEFT)
+        ckpt_entry = ttk.Entry(row3, textvariable=self._inf_checkpoint_var,
+                               width=12)
+        ckpt_entry.pack(side=tk.LEFT, padx=(0, 4))
+        self._widget_registry_add(
+            'Checkpoint', 'Entry', ckpt_entry,
+            self._inf_checkpoint_var, tab='Inference', section='Model',
+            writable=True)
+        tk.Label(row3, text='(e.g. 050000; blank → top-level path)',
+                 fg='#888').pack(side=tk.LEFT)
+
+        row4 = ttk.Frame(model); row4.pack(fill=tk.X, padx=5, pady=4)
+        tk.Label(row4, text='Rename map:', width=12, anchor='w').pack(side=tk.LEFT)
+        rename_entry = ttk.Entry(row4, textvariable=self._inf_rename_var,
+                                 width=50)
+        rename_entry.pack(side=tk.LEFT, padx=(0, 4), fill=tk.X, expand=True)
+        self._widget_registry_add(
+            'Rename map', 'Entry', rename_entry,
+            self._inf_rename_var, tab='Inference', section='Model',
+            writable=True)
+
+        # ===== Section: Method =====
+        # NOTE: Temporarily commented out — investigating SEGV during tab
+        # build. Method var still defaults to 'async_rtc' via lazy init,
+        # so _inf_build_cmd's branching still works; users just can't
+        # toggle to 'custom' from the GUI right now (use the CLI for that).
+        # method = ttk.LabelFrame(frame, text='Method')
+        # method.pack(fill=tk.X, padx=10, pady=4)
+        # for key, label in INF_METHOD_LABELS.items():
+        #     rb = tk.Radiobutton(
+        #         method, text=label, variable=self._inf_method_var, value=key,
+        #         anchor=tk.W,
+        #     )
+        #     rb.pack(anchor=tk.W, padx=8, pady=1)
+        # self._widget_registry_add(
+        #     'Inference method', 'Radiobutton', method,
+        #     self._inf_method_var, tab='Inference', section='Method',
+        #     writable=True)
+
+        # ===== Section: Task =====
+        task = ttk.LabelFrame(frame, text='Task')
+        task.pack(fill=tk.X, padx=10, pady=4)
+        task_row = ttk.Frame(task); task_row.pack(fill=tk.X, padx=5, pady=4)
+        tk.Label(task_row, text='Instruction:', width=12, anchor='w').pack(side=tk.LEFT)
+        task_entry = ttk.Entry(task_row, textvariable=self._inf_task_var, width=60)
+        task_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._widget_registry_add(
+            'Task instruction', 'Entry', task_entry,
+            self._inf_task_var, tab='Inference', section='Task',
+            writable=True)
+
+        # ===== Section: Rates =====
+        rates = ttk.LabelFrame(frame, text='Rates')
+        rates.pack(fill=tk.X, padx=10, pady=4)
+        rate_row = ttk.Frame(rates); rate_row.pack(fill=tk.X, padx=5, pady=4)
+        tk.Label(rate_row, text='Inference (Hz):').pack(side=tk.LEFT, padx=(0, 4))
+        self._register_spinbox(
+            rate_row, label='Inference rate', tab='Inference', section='Rates',
+            textvariable=self._inf_inf_rate_var,
+            from_=0.5, to=10.0, increment=0.5, width=6,
+        ).pack(side=tk.LEFT, padx=(0, 12))
+        tk.Label(rate_row, text='Publish (Hz):').pack(side=tk.LEFT, padx=(0, 4))
+        self._register_spinbox(
+            rate_row, label='Publish rate', tab='Inference', section='Rates',
+            textvariable=self._inf_pub_rate_var,
+            from_=5.0, to=50.0, increment=5.0, width=6,
+        ).pack(side=tk.LEFT)
+
+        # ===== Section: Control =====
+        control = ttk.LabelFrame(frame, text='Control')
+        control.pack(fill=tk.X, padx=10, pady=4)
+        ctrl_row = ttk.Frame(control); ctrl_row.pack(fill=tk.X, padx=5, pady=6)
+        self._inf_btn_start = self._register_button(
+            ctrl_row, text='▶ Start', tab='Inference', section='Control',
+            command=self._cmd_inf_start,
+        )
+        self._inf_btn_start.pack(side=tk.LEFT, fill=tk.X, expand=True,
+                                 padx=2, ipady=4)
+        self._inf_btn_stop = self._register_button(
+            ctrl_row, text='⏹ Stop', tab='Inference', section='Control',
+            command=self._cmd_inf_stop,
+        )
+        self._inf_btn_stop.pack(side=tk.LEFT, fill=tk.X, expand=True,
+                                padx=2, ipady=4)
+        self._register_button(
+            ctrl_row, text='🔍 Dry-run (no ROS)', tab='Inference',
+            section='Control', command=self._cmd_inf_dry_run,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2, ipady=4)
+        self._register_button(
+            ctrl_row, text='📄 Tail log', tab='Inference', section='Control',
+            command=self._cmd_inf_tail_log,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2, ipady=4)
+
+        # ===== Section: Recovery (post-stop arm pose) =====
+        recovery = ttk.LabelFrame(frame, text='Recovery')
+        recovery.pack(fill=tk.X, padx=10, pady=4)
+        self._register_check(
+            recovery, label='Return to grasp_home (data) on Stop',
+            tab='Inference', section='Recovery',
+            variable=self._inf_return_home_var,
+        ).pack(anchor=tk.W, padx=8, pady=2)
+
+        # ===== Section: Record this run (optional) =====
+        record = ttk.LabelFrame(frame, text='Record this run')
+        record.pack(fill=tk.X, padx=10, pady=4)
+        self._register_check(
+            record, label='Record observation + action to a v3 dataset',
+            tab='Inference', section='Record',
+            variable=self._inf_record_var,
+        ).pack(anchor=tk.W, padx=8, pady=2)
+        rec_row = ttk.Frame(record); rec_row.pack(fill=tk.X, padx=8, pady=4)
+        tk.Label(rec_row, text='Dataset name:', width=12, anchor='w').pack(side=tk.LEFT)
+        rec_entry = ttk.Entry(
+            rec_row, textvariable=self._inf_record_dataset_var, width=30,
+        )
+        rec_entry.pack(side=tk.LEFT, padx=(0, 4))
+        self._widget_registry_add(
+            'Inference dataset name', 'Entry', rec_entry,
+            self._inf_record_dataset_var, tab='Inference', section='Record',
+            writable=True)
+        tk.Label(rec_row, text='(blank → auto inf_<HHMMSS>)',
+                 fg='#888').pack(side=tk.LEFT)
+
+        # ===== Section: Status =====
+        status = ttk.LabelFrame(frame, text='Status')
+        status.pack(fill=tk.X, padx=10, pady=4)
+        st_row1 = ttk.Frame(status); st_row1.pack(fill=tk.X, padx=8, pady=2)
+        tk.Label(st_row1, text='State:', width=10, anchor=tk.W).pack(side=tk.LEFT)
+        tk.Label(st_row1, textvariable=self._inf_status_var,
+                 font=('TkDefaultFont', 10, 'bold')).pack(side=tk.LEFT)
+        st_row2 = ttk.Frame(status); st_row2.pack(fill=tk.X, padx=8, pady=2)
+        tk.Label(st_row2, text='Log:', width=10, anchor=tk.W).pack(side=tk.LEFT)
+        tk.Label(st_row2, textvariable=self._inf_log_path_var,
+                 fg='#0066cc').pack(side=tk.LEFT)
+
+    # -- Helpers ------------------------------------------------------------
+
+    def _inf_apply_preset(self):
+        """Copy the selected preset's defaults into the editable fields.
+        Custom preset leaves them blank for the user to fill."""
+        preset = self._inf_preset_var.get()
+        path, ckpt, rename = INF_MODEL_PRESETS.get(preset, ('', '', '{}'))
+        # Only overwrite non-empty preset values so editing then re-selecting
+        # the same preset doesn't clobber user input.
+        if path:
+            self._inf_model_path_var.set(path)
+        if ckpt:
+            self._inf_checkpoint_var.set(ckpt)
+        # Rename map is always overwritten — it's tightly coupled to the
+        # checkpoint's training-time camera-key convention.
+        self._inf_rename_var.set(rename)
+
+    def _inf_set_status(self, status_text=None, log_text=None):
+        """Marshal a status update onto the Tk thread."""
+        def _apply():
+            if status_text is not None:
+                self._inf_status_var.set(status_text)
+            if log_text is not None:
+                self._inf_log_path_var.set(log_text)
+        try:
+            self.root.after(0, _apply)
+        except Exception:
+            pass
+
+    def _inf_build_cmd(self, dry_run=False):
+        """Assemble the bash invocation. Returns (cmd_list, ok, err).
+
+        The chosen Method radio dispatches to the right wrapper:
+          * custom    → linux-env/scripts/inference_smolvla.sh
+                        (smolvla_inference.py, our chunk-replan node)
+          * async_rtc → linux-env/scripts/inference_async_lerobot.sh
+                        (run_async_inference_sim.py wrapping
+                         lerobot.async_inference.{policy_server,robot_client})
+
+        Both scripts accept --task and a model path, but their flag
+        conventions differ — custom uses `--model.path`/`--model.checkpoint`,
+        async uses `--pretrained` (HF repo or local dir; checkpoint subfolders
+        not supported by lerobot's async inference loader, so we resolve
+        them locally here when needed).
+        """
+        path = self._inf_model_path_var.get().strip()
+        if not path:
+            return None, False, 'Model path is empty — fill it in.'
+        task = self._inf_task_var.get().strip()
+        if not task:
+            return None, False, 'Task instruction is empty.'
+        method = self._inf_method_var.get() if hasattr(self, '_inf_method_var') else 'custom'
+
+        if method == 'async_rtc':
+            # Async inference path. lerobot's async loader expects a single
+            # path that points DIRECTLY at a `pretrained_model` dir or HF
+            # repo root. If the user specified a checkpoint subfolder via
+            # the Checkpoint field, splice it onto the path (works for HF
+            # repos with `checkpoints/<step>/pretrained_model` layouts).
+            ckpt = self._inf_checkpoint_var.get().strip()
+            full_path = path
+            if ckpt:
+                full_path = f'{path}/checkpoints/{ckpt}/pretrained_model'
+            cmd = [
+                'bash', INF_ASYNC_SCRIPT,
+                f'--pretrained={full_path}',
+                f'--task={task}',
+            ]
+            if dry_run:
+                cmd.append('--dry-run')
+            return cmd, True, ''
+
+        # Default: custom chunk-replan path.
+        cmd = [
+            'bash', INF_SCRIPT,
+            f'--model.path={path}',
+            f'--task={task}',
+            f'--inference-rate={float(self._inf_inf_rate_var.get())}',
+            f'--publish-rate={float(self._inf_pub_rate_var.get())}',
+        ]
+        ckpt = self._inf_checkpoint_var.get().strip()
+        if ckpt:
+            cmd.append(f'--model.checkpoint={ckpt}')
+        rename = self._inf_rename_var.get().strip()
+        if rename and rename != '{}':
+            cmd.append(f'--rename-map={rename}')
+        if dry_run:
+            cmd.append('--dry-run')
+        return cmd, True, ''
+
+    # -- Commands -----------------------------------------------------------
+
+    def _inf_record_repo_id(self):
+        """Resolve dataset repo_id from the record entry; auto-name if blank.
+        Mirrors Record Sim's _rec_dataset_repo_id convention so both tabs
+        write to the same `local/<name>` namespace under REC_DATASET_ROOT."""
+        name = (self._inf_record_dataset_var.get() or '').strip()
+        if not name:
+            name = f"inf_{datetime.datetime.now():%H%M%S}"
+        if '/' not in name:
+            name = f"local/{name}"
+        return name
+
+    def _cmd_inf_start(self):
+        """Spawn the inference subprocess (and optionally mirror +
+        lerobot-record). Idempotent — refuses if already running."""
+        with self._inf_lock:
+            if self._inf_state['phase'] != 'idle':
+                self._append_log('Inference: already running', 'warn')
+                return
+            self._inf_state['phase'] = 'starting'
+
+        cmd, ok, err = self._inf_build_cmd(dry_run=False)
+        if not ok:
+            self._append_log(f'Inference: {err}', 'err')
+            with self._inf_lock:
+                self._inf_state['phase'] = 'idle'
+            self._inf_set_status(status_text='IDLE')
+            return
+
+        # ----- If recording is requested, spin up mirror + lerobot-record
+        # BEFORE the inference subprocess so the recorder's 2 s action-
+        # warmup sees /joint_commands_lerobot publishing. Mirrors the
+        # ordering in _cmd_rec_start (mirror first, then lerobot-record).
+        record_on = False
+        try:
+            record_on = bool(self._inf_record_var.get())
+        except Exception:
+            record_on = False
+        # Async-RTC path uses lerobot.async_inference.robot_client which
+        # drives the arm via SO101ROS2Robot.send_action (with actuate=true).
+        # The mirror + separate lerobot-record processes would conflict —
+        # mirror writes /joint_commands_lerobot which the recorder needs,
+        # but the recorder's `robot.get_observation()` call would race the
+        # async client's own observation polling. Skip recording in async
+        # mode for now and surface a log warning.
+        method = self._inf_method_var.get() if hasattr(self, '_inf_method_var') else 'custom'
+        if record_on and method == 'async_rtc':
+            self._append_log(
+                'Inference: Record this run is not yet supported with '
+                'Async + RTC method — skipping recording subprocesses. '
+                'Use Custom method to record, or read about the canonical '
+                'lerobot-record + policy mode for the async case.', 'warn')
+            record_on = False
+        rec_repo_id = ''
+        rec_ds_path = ''
+        if record_on:
+            rec_repo_id = self._inf_record_repo_id()
+            rec_ds_path = os.path.join(
+                REC_DATASET_ROOT, rec_repo_id.split('/', 1)[-1])
+            if os.path.exists(rec_ds_path):
+                self._append_log(
+                    f'Inference: dataset {rec_ds_path} already exists — '
+                    'pick a new name (no resume support in inference path)',
+                    'err')
+                with self._inf_lock:
+                    self._inf_state['phase'] = 'idle'
+                self._inf_set_status(status_text='IDLE')
+                return
+
+            # Mirror dedup — same logic as _cmd_rec_start. The mirror's
+            # output topic /joint_commands_lerobot is the actual contract
+            # the recorder needs; reuse if a publisher already exists.
+            mirror_proc = None
+            if self._rec_topic_has_publisher('/joint_commands_lerobot'):
+                self._append_log(
+                    'Inference: reusing existing /joint_commands_lerobot '
+                    'publisher')
+            else:
+                try:
+                    mirror_proc = subprocess.Popen(
+                        ['python3', '-u', REC_MIRROR_SCRIPT],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        stdin=subprocess.DEVNULL,
+                        start_new_session=True)
+                except Exception as e:
+                    self._append_log(
+                        f'Inference: mirror spawn failed: {e}', 'err')
+                    with self._inf_lock:
+                        self._inf_state['phase'] = 'idle'
+                    self._inf_set_status(status_text='IDLE')
+                    return
+
+            # Spawn lerobot-record. Single long episode — user closes via
+            # Stop (which SIGINTs the recorder, finalizing the dataset
+            # cleanly). num_episodes=1 + episode_time_s=600 gives a 10-min
+            # ceiling; SIGINT before that produces a partial episode that
+            # still finalizes correctly per lerobot-record's signal handler.
+            single_task = self._inf_task_var.get().strip() or 'inference rollout'
+            rec_log = (
+                f"/tmp/inf_rec_{datetime.datetime.now():%H%M%S}.log"
+            )
+            rec_cmd = [
+                'bash', REC_LEROBOT_SCRIPT,
+                f'--dataset.repo_id={rec_repo_id}',
+                '--dataset.num_episodes=1',
+                '--dataset.episode_time_s=600',
+                '--dataset.reset_time_s=0',
+                f'--dataset.single_task={single_task}',
+                '--dataset.push_to_hub=false',
+                '--display_data=false',
+            ]
+            try:
+                rec_log_fd = open(rec_log, 'w')
+                lerobot_proc = subprocess.Popen(
+                    rec_cmd, stdout=rec_log_fd, stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL, start_new_session=True)
+            except Exception as e:
+                self._append_log(
+                    f'Inference: lerobot-record spawn failed: {e}', 'err')
+                if mirror_proc is not None:
+                    try:
+                        os.killpg(os.getpgid(mirror_proc.pid), signal.SIGINT)
+                    except Exception:
+                        pass
+                with self._inf_lock:
+                    self._inf_state['phase'] = 'idle'
+                self._inf_set_status(status_text='IDLE')
+                return
+
+            with self._inf_lock:
+                self._inf_state['mirror_proc'] = mirror_proc
+                self._inf_state['lerobot_proc'] = lerobot_proc
+                self._inf_state['lerobot_log'] = rec_log
+                self._inf_state['dataset_dir'] = rec_ds_path
+            self._append_log(
+                f'Inference: recording → {rec_ds_path}\n'
+                f'  lerobot log: {rec_log}'
+            )
+
+        # ----- Now spawn the inference subprocess.
+        log_path = f'/tmp/inf_{datetime.datetime.now():%H%M%S}.log'
+        self._append_log(
+            f'Inference: starting subprocess → {log_path}\n'
+            f'  cmd = {" ".join(cmd)}'
+        )
+        try:
+            log_fd = open(log_path, 'w')
+            proc = subprocess.Popen(
+                cmd, stdout=log_fd, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL, start_new_session=True,
+            )
+        except Exception as e:
+            self._append_log(f'Inference: spawn failed: {e}', 'err')
+            # Tear down mirror + lerobot-record if we already started them.
+            self._inf_kill_recorders()
+            with self._inf_lock:
+                self._inf_state['phase'] = 'idle'
+            self._inf_set_status(status_text='IDLE')
+            return
+
+        with self._inf_lock:
+            self._inf_state['proc'] = proc
+            self._inf_state['log_path'] = log_path
+            self._inf_state['phase'] = 'running'
+            self._inf_state['started_at'] = time.time()
+        status = ('RUNNING (recording)' if record_on else 'RUNNING')
+        self._inf_set_status(status_text=status, log_text=log_path)
+
+        # Watcher thread: on subprocess exit, transition phase back to idle.
+        threading.Thread(target=self._inf_watch_proc, daemon=True).start()
+
+    def _inf_kill_recorders(self):
+        """SIGINT lerobot-record + mirror in the order that finalizes the
+        dataset cleanly. Order: lerobot-record FIRST (it needs to fsync
+        meta/info.json + close the parquet writer), then mirror. Each
+        wait has a generous timeout — lerobot's finalize can take 5-10 s
+        for video encoding.
+
+        Safe to call when neither proc exists; this is the recovery path
+        for spawn failures and the normal teardown path on Stop."""
+        with self._inf_lock:
+            lp = self._inf_state.get('lerobot_proc')
+            mp = self._inf_state.get('mirror_proc')
+
+        if lp is not None and lp.poll() is None:
+            try:
+                os.killpg(os.getpgid(lp.pid), signal.SIGINT)
+                self._append_log(
+                    'Inference: SIGINT → lerobot-record (finalizing dataset…)')
+            except Exception as e:
+                self._append_log(
+                    f'Inference: lerobot-record SIGINT failed: {e}', 'warn')
+            try:
+                lp.wait(timeout=20.0)
+                self._append_log('Inference: lerobot-record exited')
+            except subprocess.TimeoutExpired:
+                self._append_log(
+                    'Inference: lerobot-record did not finalize in 20 s; '
+                    'sending SIGTERM', 'warn')
+                try:
+                    lp.terminate()
+                except Exception:
+                    pass
+
+        if mp is not None and mp.poll() is None:
+            try:
+                os.killpg(os.getpgid(mp.pid), signal.SIGINT)
+            except Exception:
+                try:
+                    mp.terminate()
+                except Exception:
+                    pass
+            try:
+                mp.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                pass
+
+        with self._inf_lock:
+            self._inf_state['lerobot_proc'] = None
+            self._inf_state['mirror_proc'] = None
+
+    def _inf_watch_proc(self):
+        with self._inf_lock:
+            proc = self._inf_state.get('proc')
+        if proc is None:
+            return
+        try:
+            rc = proc.wait()
+        except Exception:
+            rc = -1
+        with self._inf_lock:
+            if self._inf_state.get('phase') in ('running', 'stopping'):
+                self._inf_state['phase'] = 'idle'
+                self._inf_state['proc'] = None
+        # Surface non-zero exits since the subprocess is the source of truth
+        # for inference health (model load failures, OOM, etc. show up here).
+        if rc != 0:
+            self._append_log(
+                f'Inference: subprocess exited with code {rc} '
+                f'(see {self._inf_state.get("log_path", "?")})', 'warn')
+        else:
+            self._append_log('Inference: subprocess exited cleanly')
+
+        # Tear down recording subprocesses (no-op if recording wasn't on).
+        # Done BEFORE grasp_home so the dataset captures the final inference
+        # state, not the recovery motion (which would pollute the episode).
+        self._inf_kill_recorders()
+
+        # Optional: drive arm back to calibrated data-collection home so the
+        # next run starts from a known pose. _cmd_grasp_home_data is a Tk-
+        # thread method (uses self._motion_event + threading), so marshal
+        # via root.after; matches the marshaling pattern in _inf_set_status.
+        # The grasp_home action is fire-and-forget here — we don't block the
+        # watcher waiting for arm motion (would prevent the watcher from
+        # being recycled if the user clicks Start again before the home
+        # finishes). The motion still runs to completion in the background.
+        try:
+            return_home = bool(self._inf_return_home_var.get())
+        except Exception:
+            return_home = False
+        if return_home:
+            self._append_log(
+                'Inference: dispatching gripper open + grasp_home (data) recovery')
+            try:
+                # Two-phase recovery:
+                #   1. open the gripper (separate controller — _cmd_grasp_home
+                #      only commands the arm group, leaves gripper wherever
+                #      inference left it, often closed around nothing).
+                #   2. drive the arm to the calibrated data home pose.
+                # Both are fire-and-forget; the gripper goal completes in
+                # ~0.5s while the arm motion takes ~3s, so they overlap
+                # cleanly without a planning-group conflict (separate
+                # controllers, separate FJT actions).
+                #
+                # 1.4 rad ≈ 80° — neutral-open jaw matching the
+                # GRIPPER_OPEN_RAD value in linux-env/scripts/drive_pick_place.py.
+                self.root.after(0, lambda: self._send_gripper_goal(
+                    1.4, duration_s=0.6, blocking=False))
+                self.root.after(0, self._cmd_grasp_home_data)
+            except Exception as e:
+                self._append_log(
+                    f'Inference: recovery dispatch failed: {e}', 'warn')
+        self._inf_set_status(status_text='IDLE')
+
+    def _cmd_inf_stop(self):
+        """SIGINT the subprocess; rclpy + torch teardown runs in our signal
+        handler. Fall back to SIGTERM after a few seconds if it's stuck."""
+        with self._inf_lock:
+            proc = self._inf_state.get('proc')
+            if proc is None or proc.poll() is not None:
+                self._append_log('Inference: nothing to stop')
+                self._inf_state['phase'] = 'idle'
+                self._inf_set_status(status_text='IDLE')
+                return
+            self._inf_state['phase'] = 'stopping'
+        self._inf_set_status(status_text='STOPPING')
+        # SIGINT propagates to the whole process group thanks to
+        # start_new_session=True at spawn time.
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+        except Exception as e:
+            self._append_log(f'Inference: SIGINT failed: {e}', 'warn')
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
+    def _cmd_inf_dry_run(self):
+        """Run the inference pipeline once without ROS — load the model,
+        run a single forward pass on synthetic obs, print the action chunk,
+        exit. Useful to verify model load + processor wiring without
+        spinning up the closed loop."""
+        cmd, ok, err = self._inf_build_cmd(dry_run=True)
+        if not ok:
+            self._append_log(f'Inference: {err}', 'err')
+            return
+        log_path = f'/tmp/inf_dryrun_{datetime.datetime.now():%H%M%S}.log'
+        self._append_log(f'Inference DRY-RUN → {log_path}')
+        try:
+            log_fd = open(log_path, 'w')
+            subprocess.Popen(
+                cmd, stdout=log_fd, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL, start_new_session=True,
+            )
+        except Exception as e:
+            self._append_log(f'Inference: dry-run spawn failed: {e}', 'err')
+            return
+        self._inf_set_status(log_text=log_path)
+
+    def _cmd_inf_tail_log(self):
+        """Open the current inference log in xdg-open (or just print location)."""
+        log_path = self._inf_state.get('log_path', '')
+        if not log_path or not os.path.exists(log_path):
+            self._append_log('Inference: no log to tail yet')
+            return
+        try:
+            subprocess.Popen(['xdg-open', log_path],
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        except Exception as e:
+            self._append_log(f'Inference: tail open failed: {e}', 'warn')
+
+    # ==================================================================
+    # End Inference
     # ==================================================================
 
     def _build_display_tab(self, notebook):
