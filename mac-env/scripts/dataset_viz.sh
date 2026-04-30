@@ -38,13 +38,16 @@ ONLY_CHECK=0
 EPISODE=0
 REPO_ID="$DEFAULT_REPO_ID"
 LOCAL_ROOT=""
+LAYOUT="grid4"   # SO-ARM101 fork: 'grid4' (default) | 'default' (upstream lerobot)
 POSITIONAL_NON_NUMERIC=()
 
 while (( $# )); do
   case "$1" in
-    --restore) ONLY_RESTORE=1; shift ;;
-    --check)   ONLY_CHECK=1;   shift ;;
-    --root)    LOCAL_ROOT="$2"; shift 2 ;;
+    --restore)    ONLY_RESTORE=1; shift ;;
+    --check)      ONLY_CHECK=1;   shift ;;
+    --root)       LOCAL_ROOT="$2"; shift 2 ;;
+    --layout)     LAYOUT="$2"; shift 2 ;;
+    --layout=*)   LAYOUT="${1#--layout=}"; shift ;;
     -h|--help)
       sed -n '2,28p' "$0"
       exit 0
@@ -158,6 +161,7 @@ echo "    episode      = $EPISODE"
 if [[ -n "$LOCAL_ROOT" ]]; then
   echo "    local root   = $LOCAL_ROOT"
 fi
+echo "    layout       = $LAYOUT"
 echo "    mode         = local (rerun spawns its own viewer window)"
 echo "============================================================"
 echo
@@ -174,5 +178,6 @@ pixi run --manifest-path "$MAC_ENV_MANIFEST" bash -c "
   lerobot-dataset-viz \
     --repo-id '$REPO_ID' \
     --episode-index '$EPISODE' \
-    --mode local $ROOT_FLAG
+    --mode local $ROOT_FLAG \
+    --blueprint-preset '$LAYOUT'
 "

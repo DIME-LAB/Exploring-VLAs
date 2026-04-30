@@ -184,6 +184,8 @@ struct ContentView: View {
     private var timestampMs: Int = 0
     @AppStorage("exportEpisodesCsv")
     private var exportEpisodesCsv: String = ""
+    @AppStorage("rerunLayout")
+    private var rerunLayout: String = "grid4"
 
     @StateObject private var runtime = BrowserRuntime()
     @State private var jumpInput: String = ""
@@ -430,6 +432,18 @@ struct ContentView: View {
                     } label: {
                         Label("Stop Rerun", systemImage: "stop.fill")
                     }
+                }
+
+                HStack(spacing: 10) {
+                    Text("Layout")
+                        .font(.headline)
+                    Picker("", selection: $rerunLayout) {
+                        Text("Grid (4-view)").tag("grid4")
+                        Text("Default lerobot").tag("default")
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 320)
+                    .labelsHidden()
                 }
 
                 ResultCard(feedback: runtime.rerunFeedback)
@@ -798,6 +812,7 @@ struct ContentView: View {
         if !localRoot.isEmpty {
             args.append(localRoot)
         }
+        args.append(contentsOf: ["--layout", rerunLayout])
         task.arguments = args
 
         var env = ProcessInfo.processInfo.environment
