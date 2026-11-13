@@ -90,11 +90,11 @@ def test_closing_old_context_does_not_stop_replacement(ros):
     second.close()
 
 
-def test_existing_context_does_not_need_environment_reinitialization(ros, monkeypatch):
+def test_existing_context_also_requires_explicit_cyclone_transport(ros, monkeypatch):
     context = Context()
     context.running = True
     monkeypatch.setenv("RMW_IMPLEMENTATION", "rmw_cyclonedds_cpp")
     monkeypatch.delenv("CYCLONEDDS_URI", raising=False)
-    with acquire(context=context, executor=Executor(context)) as lease:
-        assert lease.node.context is context
+    with pytest.raises(RuntimeError, match="CYCLONEDDS_URI"):
+        acquire(context=context, executor=Executor(context))
     assert context.ok()

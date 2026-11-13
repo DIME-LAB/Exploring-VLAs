@@ -5,7 +5,7 @@ import json
 import math
 import os
 
-MCP_NAMESPACE = "soarm101"
+MCP_NAMESPACE = "lerobot_task"
 DOORWAY_ADMISSION = 1
 
 
@@ -50,3 +50,12 @@ def register(registrar):
     registrar.tool("Change the active task instruction", {
         "instruction": {"type": "string"}}, name="set_task_instruction")(set_task_instruction)
     registrar.tool("Cancel the active task and return home", {}, name="cancel_task")(cancel_task)
+
+
+def attach_to_soarm101(bridge):
+    """Add the requested aliases to the existing SO-ARM tool owner explicitly."""
+    from omni_kit_mcp import OwnerRegistrar
+    if "soarm101_tools" not in bridge.get_owners():
+        raise RuntimeError("Load soarm101_tools before attaching RunTask aliases")
+    register(OwnerRegistrar(bridge, "soarm101_tools", "soarm101"))
+    return ["soarm101.run_task", "soarm101.set_task_instruction", "soarm101.cancel_task"]

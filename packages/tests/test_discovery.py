@@ -42,3 +42,15 @@ print("fresh-interpreter discovery and factories passed")
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "factories passed" in result.stdout
+
+
+def test_documented_task_robot_config_uses_registered_presets(ros):
+    import json
+    from pathlib import Path
+    register_third_party_plugins()
+    config_path = Path(__file__).resolve().parents[1] / "lerobot_ros2_task/examples/so101.json"
+    config = draccus.decode(RobotConfig, json.loads(config_path.read_text()))
+    assert config.type == "so101_ros2_joint"
+    assert config.robot_type == "so_follower"
+    assert list(config.cameras) == ["top", "wrist"]
+    assert all(camera.type == "ros2_image" and camera.encoding == "rgb8" for camera in config.cameras.values())

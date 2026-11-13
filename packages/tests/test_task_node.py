@@ -93,3 +93,19 @@ def test_real_node_cancel_is_seen_during_home(ros, monkeypatch):
     assert result.outcome == "cancel" and goal.status == "cancel"
     assert len(robot.homes) == 2 and not policy.starts
     server.destroy_node()
+
+
+def test_finish_supplies_result_for_transition_time_response_api():
+    from lerobot_ros2_task.node import finish_goal
+    class ImmediateGoal:
+        def __init__(self):
+            self.published = None
+        def abort(self, response=None):
+            self.published = response or RunTask.Result()
+    goal = ImmediateGoal()
+    result = RunTask.Result(outcome="timeout", success=False, message="")
+    finish_goal(goal, "abort", result)
+    assert goal.published is result
+    stock = Goal(RunTask.Goal())
+    finish_goal(stock, "abort", result)
+    assert stock.status == "abort"

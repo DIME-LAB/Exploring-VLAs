@@ -90,3 +90,86 @@ def test_real_task_action_timeout_cancel_prompt_and_success():
         server.destroy_node()
         client_node.destroy_node()
         rclpy.shutdown()
+
+
+def test_real_node_reads_robot_and_model_json_parameter_overrides():
+    import json
+    from pathlib import Path
+    import rclpy
+    from rclpy.parameter import Parameter
+    from lerobot_ros2_task.node import create_node
+    from test_task import Robot, Policy
+    example = Path(__file__).resolve().parents[1] / "lerobot_ros2_task/examples/so101.json"
+    rclpy.init()
+    node = create_node(robot=Robot(), policy_factory=Policy, parameter_overrides=[
+        Parameter("robot_config", value=example.read_text()),
+        Parameter("models", value=json.dumps({"base-ft": "/models/base-ft"})),
+        Parameter("model", value="base-ft")])
+    try:
+        assert node._model("") == "/models/base-ft"
+        assert list(node._policy_config.cameras) == ["top", "wrist"]
+        assert node._policy_config.robot_type == "so_follower"
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+@pytest.mark.parametrize("state", ["abort", "succeed", "canceled"])
+def test_early_result_request_survives_work_after_terminal_transition(state):
+    import inspect
+    import rclpy
+    from rclpy.action import ActionServer, ActionClient, CancelResponse
+    from rclpy.callback_groups import ReentrantCallbackGroup
+    from rclpy.executors import MultiThreadedExecutor
+    from lerobot_ros2_interfaces.action import RunTask
+    from lerobot_ros2_task.node import finish_goal
+    rclpy.init()
+    node = rclpy.create_node("phase2_transition_result")
+    proceed, transitioned, may_return = threading.Event(), threading.Event(), threading.Event()
+    def execute(goal):
+        assert proceed.wait(5)
+        result = RunTask.Result(success=state == "succeed", outcome=state, message="completed result")
+        finish_goal(goal, state, result)
+        transitioned.set()
+        assert may_return.wait(5)
+        return result
+    server = ActionServer(node, RunTask, "transition_result", execute_callback=execute,
+                          cancel_callback=lambda _: CancelResponse.ACCEPT,
+                          callback_group=ReentrantCallbackGroup())
+    client = ActionClient(node, RunTask, "transition_result")
+    executor = MultiThreadedExecutor(num_threads=6)
+    executor.add_node(node)
+    thread = threading.Thread(target=executor.spin, daemon=True)
+    thread.start()
+    try:
+        assert client.wait_for_server(timeout_sec=5)
+        handle = wait(client.send_goal_async(RunTask.Goal(instruction="pick", max_duration=1.)))
+        result_future = handle.get_result_async()
+        # Wait for the server's GetResult callback to be registered before allowing
+        # the transition. This deliberately covers the installed rclpy race.
+        server_future = server._result_futures[bytes(handle.goal_id.uuid)]
+        deadline = time.monotonic() + 5
+        while not server_future._callbacks and time.monotonic() < deadline:
+            threading.Event().wait(.001)
+        assert server_future._callbacks
+        if state == "canceled":
+            assert wait(handle.cancel_goal_async()).goals_canceling
+        proceed.set()
+        assert transitioned.wait(5)
+        from rclpy.action.server import ServerGoalHandle
+        immediate_api = "response" in inspect.signature(getattr(ServerGoalHandle, state)).parameters
+        if not immediate_api:
+            may_return.set()
+        response = wait(result_future)
+        assert response.result.outcome == state
+        assert response.result.message == "completed result"
+        may_return.set()
+    finally:
+        proceed.set()
+        may_return.set()
+        executor.shutdown(timeout_sec=10)
+        thread.join(2)
+        client.destroy()
+        server.destroy()
+        node.destroy_node()
+        rclpy.shutdown()

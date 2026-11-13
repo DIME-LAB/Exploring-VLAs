@@ -8,6 +8,7 @@ def main():
     from rclpy.action import ActionClient
     from action_msgs.srv import CancelGoal
     from lerobot_ros2_interfaces.action import RunTask
+    from lerobot_ros2_context import require_transport_config
     parser = argparse.ArgumentParser(description="Submit, update or cancel a RunTask goal")
     parser.add_argument("--instruction", default="")
     parser.add_argument("--max-duration", type=float, default=60)
@@ -17,6 +18,7 @@ def main():
     parser.add_argument("--cancel", action="store_true")
     parser.add_argument("--wait", action="store_true")
     args, ros_args = parser.parse_known_args()
+    require_transport_config()
     rclpy.init(args=ros_args)
     node = rclpy.create_node("lerobot_task_client")
     try:
@@ -46,9 +48,13 @@ def main():
         if args.wait or args.update_instruction:
             result_future = handle.get_result_async()
             rclpy.spin_until_future_complete(node, result_future)
-            result = result_future.result().result
+            response = result_future.result()
+            result = response.result
+            if not result.outcome:
+                raise RuntimeError(f"RunTask returned no outcome (action status {response.status})")
             print(json.dumps({"status": "success", "outcome": result.outcome,
-                              "success": result.success, "message": result.message}))
+                              "success": result.success, "message": result.message,
+                              "action_status": response.status}))
         else:
             print(json.dumps({"status": "success", "outcome": "accepted"}))
     finally:

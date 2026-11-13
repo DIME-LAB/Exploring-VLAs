@@ -24,12 +24,17 @@ export ROS_DOMAIN_ID=0  # standard deployment; live use needs the lead's sim win
 # Resolve/pin GPU 1 as deployment does. Supply its UUID, not CUDA's device order.
 export CUDA_VISIBLE_DEVICES='<GPU-1 UUID from nvidia-smi>'
 
-lerobot-ros2-run-task --ros-args \
-  -p robot_config:="$(cat packages/lerobot_ros2_task/examples/so101.json)" \
+lerobot-ros2-run-task \
+  --robot-config packages/lerobot_ros2_task/examples/so101.json \
+  --models-file /path/to/models.json --ros-args \
   -p model:=/path/to/pretrained_model \
-  -p 'models:={"base-ft":"/path/to/pretrained_model"}' \
   -p fps:=17.4 -p device:=cuda
 ```
+
+The models file is a JSON object such as `{"base-ft":"/path/to/pretrained_model"}`.
+The file options set string parameters directly, avoiding ROS YAML command-line
+interpretation of nested JSON. They can also be supplied as properly quoted string
+parameters in a ROS parameter YAML file.
 
 The example retains `/joint_states` for old models. Models trained on physical
 feedback require `/joint_states_measured` in robot_config; do not change only the
@@ -62,7 +67,10 @@ start and ignores signals outside the run phase. This is an input contract, not
 an automatic claim that an object reached a cup; connect the intended evaluator.
 Feedback reports `home`, `run`, `return_home`, live instruction/model and elapsed
 run time. Timeout and error abort the action; action cancellation reports canceled
-only after final home. Process termination is not the action-cancel interface;
+only after final home. Result transitions supply the completed response on rclpy versions that publish
+it immediately, avoiding an empty result for clients waiting before completion.
+The node also supports the callback-return API used by other ROS releases.
+Process termination is not the action-cancel interface;
 use the cancel client and wait for result before stopping ROS.
 
 Policy loading, fresh image/state capture, preprocessing and chunk inference run
@@ -106,14 +114,20 @@ export LEROBOT_RUN_TASK_COMMAND='["/absolute/path/to/sourced-task-client-wrapper
 ```
 
 The wrapper must source the generated ROS overlay, activate the intended ROS
-libraries and invoke `lerobot-ros2-task-client "$@"` in the task venv. It runs
+libraries, set the explicit CycloneDDS URI and invoke
+`exec lerobot-ros2-task-client "$@"` in the task venv. It runs
 outside Isaac's Python. The bridge calls that JSON argv directly, with no shell
-expansion. Tools are `soarm101.run_task`, `soarm101.set_task_instruction`, and
-`soarm101.cancel_task`; they return goal acceptance/update results. To show the
+expansion. The module owns the distinct `lerobot_task` namespace. Attach the
+requested `soarm101.run_task`, `soarm101.set_task_instruction`, and
+`soarm101.cancel_task` aliases explicitly to the existing SO-ARM tool owner;
+the bridge permits only one owner per namespace. To attach aliases and show the
 panel inside Kit with the module on its Python path, call through `run_python`:
 
 ```python
+from omni_kit_mcp import get_mcp_bridge
+from soarm101_task_tools import attach_to_soarm101
 from soarm101_task_tools.panel import show
+attach_to_soarm101(get_mcp_bridge())
 show()
 ```
 
@@ -139,8 +153,9 @@ owners. Sim/controller/model checks require a separate window and are not replac
 by these tests. The workflow in `.github/workflows/ros2-plugins.yml` builds wheels,
 checks PyPI and fork interfaces, builds the action and runs native transport checks.
 
-For CycloneDDS an explicit `CYCLONEDDS_URI` is required. The context module refuses
-to initialize `rmw_cyclonedds_cpp` when it is absent and names the project's
+For CycloneDDS an explicit `CYCLONEDDS_URI` is required, including attachment to
+an initialized context. The node, client and context module refuse
+to use `rmw_cyclonedds_cpp` when it is absent and name the project's
 `linux-env/cyclonedds.xml` loopback config. Bare installed Jazzy/Cyclone node
 teardown can hang when the transport config is unset.
 

@@ -45,7 +45,7 @@ class Executor:
 
 
 class Node:
-    def __init__(self, name, context=None):
+    def __init__(self, name, context=None, **kwargs):
         self.name = name
         self.context = context
         self.subs = []

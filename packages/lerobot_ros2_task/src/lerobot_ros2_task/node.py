@@ -1,12 +1,22 @@
 # Copyright 2026 Exploring-VLAs contributors. Licensed under Apache-2.0.
 import json
 import threading
+import inspect
 from copy import deepcopy
 
 from .episode import Episode, TaskRequest
 
 
-def create_node(*, robot=None, policy_factory=None):
+def finish_goal(goal, state, result):
+    """Supply a result when the ROS distribution publishes it at transition time."""
+    transition = getattr(goal, state)
+    if "response" in inspect.signature(transition).parameters:
+        transition(response=result)
+    else:
+        transition()
+
+
+def create_node(*, robot=None, policy_factory=None, parameter_overrides=None):
     """Construct the real ROS node; injectable owners let offline tests use the same entrance."""
     import draccus
     import rclpy
@@ -23,7 +33,7 @@ def create_node(*, robot=None, policy_factory=None):
 
     class RunTaskNode(Node):
         def __init__(self):
-            super().__init__("lerobot_run_task")
+            super().__init__("lerobot_run_task", parameter_overrides=parameter_overrides or [])
             self.declare_parameter("robot_config", "{}")
             self.declare_parameter("home", json.dumps({
                 "shoulder_pan.pos": 0.874, "shoulder_lift.pos": -14.829, "elbow_flex.pos": 14.829,
@@ -117,10 +127,10 @@ def create_node(*, robot=None, policy_factory=None):
                             raise RuntimeError("Task has already finished")
                         self._episode.set_instruction(goal.request.instruction)
                     result.success, result.outcome = True, "instruction_updated"
-                    goal.succeed()
+                    finish_goal(goal, "succeed", result)
                 except Exception as exc:
                     result.outcome, result.message = "error", str(exc)
-                    goal.abort()
+                    finish_goal(goal, "abort", result)
                 return result
             try:
                 request = TaskRequest(goal.request.instruction, goal.request.max_duration,
@@ -139,16 +149,17 @@ def create_node(*, robot=None, policy_factory=None):
                     message.phase, message.instruction, message.model, message.elapsed = phase, instruction, model, elapsed
                     goal.publish_feedback(message)
                 outcome = episode.run(request, feedback)
-                result.success, result.outcome, result.message = outcome.success, outcome.outcome, outcome.message
+                self.get_logger().info(f"RunTask finished: {outcome.outcome}; {outcome.message}")
+                result.success, result.outcome, result.message = bool(outcome.success), str(outcome.outcome), str(outcome.message)
                 if outcome.outcome == "cancel":
-                    goal.canceled()
+                    finish_goal(goal, "canceled", result)
                 elif outcome.success:
-                    goal.succeed()
+                    finish_goal(goal, "succeed", result)
                 else:
-                    goal.abort()
+                    finish_goal(goal, "abort", result)
             except Exception as exc:
                 result.outcome, result.message = "error", str(exc)
-                goal.abort()
+                finish_goal(goal, "abort", result)
             finally:
                 with self._lock:
                     self._episode = self._goal = None
@@ -169,13 +180,27 @@ def create_node(*, robot=None, policy_factory=None):
 
 
 def main():
+    import argparse
+    from pathlib import Path
     import rclpy
     from rclpy.executors import MultiThreadedExecutor
-    rclpy.init()
+    from rclpy.parameter import Parameter
+    from lerobot_ros2_context import require_transport_config
+    parser = argparse.ArgumentParser(description="Run LeRobot policy episodes through a ROS action")
+    parser.add_argument("--robot-config", type=Path, help="JSON LeRobot robot configuration")
+    parser.add_argument("--models-file", type=Path, help="JSON mapping of model keys to pretrained paths")
+    args, ros_args = parser.parse_known_args()
+    overrides = []
+    for path, name in [(args.robot_config, "robot_config"), (args.models_file, "models")]:
+        if path is not None:
+            value = json.loads(path.read_text())
+            overrides.append(Parameter(name, value=json.dumps(value)))
+    require_transport_config()
+    rclpy.init(args=ros_args)
     node = None
     executor = MultiThreadedExecutor(num_threads=4)
     try:
-        node = create_node()
+        node = create_node(parameter_overrides=overrides)
         executor.add_node(node)
         executor.spin()
     except KeyboardInterrupt:
