@@ -17,6 +17,7 @@ stdout lines starting with "READY", "EPSTART", "EPDONE" are for the orchestrator
 from __future__ import annotations
 
 import json
+import argparse
 import os
 import sys
 import threading
@@ -35,7 +36,16 @@ def emit(tag: str, payload: dict | None = None) -> None:
 
 
 def main() -> int:
-    cfg = draccus.parse(RobotClientConfig, args=sys.argv[1:])
+    diagnostic_parser = argparse.ArgumentParser(add_help=False)
+    diagnostic_parser.add_argument("--dataset-brightness", action="store_true")
+    diagnostic, remaining = diagnostic_parser.parse_known_args(sys.argv[1:])
+    cfg = draccus.parse(RobotClientConfig, args=remaining)
+    from observation_transform import enable_isolated_correction, transform_metadata
+    correction = transform_metadata(diagnostic.dataset_brightness)
+    if diagnostic.dataset_brightness:
+        if not cfg.observation_process:
+            raise ValueError("--dataset-brightness requires isolated observation capture")
+        enable_isolated_correction()
     client = RobotClient(cfg)
     status_arrays = {}
     for label in ("arm", "gripper"):
@@ -96,6 +106,9 @@ def main() -> int:
                 state["request_events"].append(dict(request_context, error=str(error), error_wall_time=time.time()))
                 raise
             if captured.sent and not captured.cancelled:
+                proof = getattr(captured, "observation_transform_proof", None)
+                if proof:
+                    state["observation_transform_proof"] = proof
                 state["request_events"].append(dict(request_context,
                     observation_timestamp=captured.timestamp, timestep=captured.timestep,
                     capture_rpc_s=captured.capture_s, capture_return_wall_time=time.time()))
@@ -193,6 +206,7 @@ def main() -> int:
                     chunks=0, first_chunk_t=None, ep_t0=time.time(), paused=False,
                     request_events=[], chunk_events=[]
                 )
+                state["observation_transform_proof"] = None
             emit("EPSTART", {"ep": ep, "t0": state["ep_t0"]})
             try:
                 client.control_loop(
@@ -222,6 +236,8 @@ def main() -> int:
                 "EPDONE",
                 {
                     "ep": ep,
+                    "observation_transform": correction,
+                    "observation_transform_proof": state.get("observation_transform_proof"),
                     "duration_s": round(dur, 2),
                     **metrics,
                     "resources_before": resources_before,

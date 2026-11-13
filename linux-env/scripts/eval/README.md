@@ -54,6 +54,16 @@ separately from effective Hz. The scoring rule requires zero missed dispatch
 slots, no stale-camera aborts, and bounded send costs. Earlier untraced runs
 are diagnostics. The refill threshold remains 0.5 with 50 actions per chunk.
 
+`--dataset-brightness` is an opt-in photometric diagnostic for the isolated
+evaluation sensor process. Both raw RGB camera arrays are divided by
+`[1.12162, 1.11828, 1.11650]`, clipped, rounded and converted back to uint8 before
+the existing observation RPC. State/task, viewport images and dispatch are
+unchanged. Default is off; each result records the enabled flag, divisors and
+camera names. The first actual sensor observation also returns raw/corrected
+image hashes and ROI medians as a child-process wiring proof, written at episode
+end. The top ROI is the calibration table patch; the wrist ROI is only a fixed
+image patch. This harness wrapper does not modify the LeRobot fork.
+
 The orchestration process records clock/wrist/workspace message arrival stamps.
 An in-memory Kit update probe records wall/sim time without touching extension
 files, and per-episode Isaac major-fault counts test page-in stalls. This allows

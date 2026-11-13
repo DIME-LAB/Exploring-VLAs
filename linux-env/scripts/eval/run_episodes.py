@@ -395,6 +395,11 @@ def add_telemetry(result, epdir, cfg):
             writer.writeheader();writer.writerows(chunks)
 
 
+def episode_client_command(command, corrected=False):
+    return command[:2]+[str(Path(__file__).with_name("episode_client.py"))]+command[4:]+(
+        ["--dataset-brightness"] if corrected else [])
+
+
 def main():
     p = build_parser()
     p.description = __doc__
@@ -407,7 +412,10 @@ def main():
     p.add_argument("--scene-bank", type=Path, help="Shared physical scene bank for paired conditions")
     p.add_argument("--sim-rate-hz", type=float, default=17.4, help="Kit frame ceiling, applied after each reset")
     p.add_argument("--fresh-client-per-episode", action="store_true", help="Diagnose persistent-client resource accumulation")
+    p.add_argument("--dataset-brightness", action="store_true", help="Diagnostic only: divide both policy RGB feeds by calibrated live gain")
     args = parse_args(parser=p)
+    if args.dataset_brightness and not args.observation_process:
+        p.error("--dataset-brightness requires isolated observation capture")
     args.seeds = [int(s) for s in args.seeds.split(",")] if args.seeds else list(range(900000, 900000 + args.episodes))
     if len(args.seeds) != args.episodes or len(set(args.seeds)) != args.episodes:
         p.error("Provide exactly one unique seed per episode")
@@ -420,6 +428,7 @@ def main():
         raise FileExistsError("Choose a new output directory; results already exist")
     if cfg.dry_run:
         server_cmd, client_cmd = build_commands(cfg, python="python3")
+        client_cmd = episode_client_command(client_cmd, args.dataset_brightness)
         print(
             json.dumps(
                 {
@@ -453,7 +462,8 @@ def main():
         source_sha256={str(path.relative_to(REPO)): hashlib.sha256(path.read_bytes()).hexdigest()
                        for path in [Path(__file__), Path(__file__).with_name("scene_reset.py"),
                                     Path(__file__).with_name("episode_client.py"),
-                                    SCRIPTS / "run_async_inference_sim.py"]},
+                                    SCRIPTS / "run_async_inference_sim.py",
+                                    Path(__file__).with_name("observation_transform.py")]},
     )
     (args.out / "run_config.json").write_text(
         json.dumps(metadata, indent=2, default=str) + "\n"
@@ -489,11 +499,7 @@ def main():
         ):
             raise RuntimeError("Policy server startup failed")
         # Same client configuration entrance as the deployment launcher.
-        client_cmd = (
-            pixi
-            + ["python3", "-u", str(Path(__file__).with_name("episode_client.py"))]
-            + commands[1][4:]
-        )
+        client_cmd = pixi+episode_client_command(commands[1], args.dataset_brightness)
         client = Client(client_cmd, env, args.out)
         print("READY", client.tagged("READY", 240), flush=True)
         ros = Ros()
@@ -521,6 +527,12 @@ def main():
                 "seed": args.seeds[index],
                 "rtc_enabled": cfg.rtc_enabled,
                 "requested_fps": cfg.fps,
+                "observation_transform": {
+                    "name": "inverse_dataset_gain" if args.dataset_brightness else "identity",
+                    "enabled": args.dataset_brightness,
+                    "divisor": [1.12162, 1.11828, 1.11650] if args.dataset_brightness else [1., 1., 1.],
+                    "cameras": ["wrist", "top"],
+                },
                 "time_to_grasp_s": None,
                 "time_to_place_s": None,
                 "time_s": 0.0,
