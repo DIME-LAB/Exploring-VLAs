@@ -26,6 +26,36 @@ The runner accepts deployment launcher flags, including `--pretrained`, `--task`
 
 ## Outputs and scoring
 
+For paired evaluation, pass `--condition NAME --seeds 900000,900001` (one
+unique seed per episode), with the same `--scene-bank /persistent/path` across
+conditions. `scene_reset.py` runs through `run_python`, reuses the extension's
+blue-visible sampler, saves exact physical block/cup poses, and restores those
+poses with zero velocities before subsequent uses of a seed. It neither edits
+the extension nor adds/removes scene bodies. The bank's baseline must come from
+the intended evaluation scene. The arm is homed through the normal FJT path.
+Kit's frame cap is reapplied/read back after each reset; `--sim-rate-hz` defaults
+to 17.4. A mismatch is refused. Use `--fps 19.4 --sim-rate-hz 19.4` for matched
+camera/client cadence. These rec_222812 models keep `/joint_states` feedback.
+
+The CSV includes condition, seed, RTC setting, requested/effective action Hz,
+sim cap read-back and onset times of sustained grasp/place. Outcomes are
+`success`, `grasped-not-placed`, and `no-grasp`. A grasp requires one particular
+blue block to sustain its lift; success also requires a sustained lift.
+Per-episode JSON additionally retains physical scene receipts, GPU snapshots,
+CPU load, all dispatch measurements and resolved sim timing settings.
+
+`--model PRESET` resolves the same definition as the GUI and `deploy_sim.sh`.
+The shared async launcher applies the preset's camera-key mapping even when
+the GUI/deployer passes its resolved checkpoint path; explicit `--cameras-json`
+takes precedence. `--pretrained` still accepts local directories and HF IDs.
+
+To reproduce the report on the Mac, copy each condition beneath `raw/` and
+the shared bank into the report directory, then run
+`python3 linux-env/scripts/eval/report_results.py /path/to/report [--complete]`.
+The report generator needs matplotlib, Pillow and ffmpeg. It writes the combined
+CSV, Wilson-interval chart, paired differences/exact McNemar probabilities,
+video contact sheet and README. `--complete` refuses a partial 50-episode matrix.
+
 `results.csv` and `results.jsonl` contain episode ID, outcome, elapsed policy wall time, dispatched actions, received chunks, measured effective action fps, maximum blue lift, failure note and video path. `effective_action_fps` measures the first-to-last dispatch interval, excluding initial chunk wait. Each `epNN/` contains `viewport.mp4`, pose samples and a detailed result JSON. `server.log`/`client.log` record inference and reset behavior. `run_config.json` captures resolved settings, GPU UUID and repository/fork commits; each episode also reports nonmonotonic action-index count. The viewport bridge encodes at nominal 30 fps; the harness rescales MP4 packet timestamps to measured recording wall time, so slow simulator rendering does not speed up playback.
 
 Success requires a blue lego centre inside `drop_1` continuously for two wall seconds and still inside when the client acknowledges its stop. The check transforms `/objects_poses_sim` coordinates into the cup-local frame from `/drop_poses`, including cup orientation. It uses a conservative interior radius of 0.033 m (measured outer radius ≈0.039 m) and height 0.0965 m with floor/rim clearance. This is a geometric centre test, not a contact or full-object containment sensor. `grasped-only` means a blue lego centre rose ≥0.024 m from its randomized initial height for at least 0.5 s, without a final success; it is a sustained-lift proxy for grasping. `fail` means neither condition occurred. Missing/stale pose streams or unavailable actions fail visibly; they never become success. Timeout/failure notes distinguish the cause.

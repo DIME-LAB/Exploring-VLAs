@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 import os
@@ -61,6 +62,8 @@ def mcp(tool, params=None):
     if proc.returncode:
         raise RuntimeError(f"{tool}: {proc.stderr[-1000:]} {proc.stdout[-1000:]}")
     result = json.loads(proc.stdout)
+    if tool == "run_python":
+        return result["result"]
     if result.get("status") != "success":
         raise RuntimeError(f"{tool}: {result}")
     return result
@@ -275,6 +278,13 @@ def save_result(out, result):
     fields = [
         "episode",
         "outcome",
+        "condition",
+        "seed",
+        "rtc_enabled",
+        "requested_fps",
+        "sim_cap_hz",
+        "time_to_grasp_s",
+        "time_to_place_s",
         "time_s",
         "actions_sent",
         "chunks",
@@ -299,10 +309,18 @@ def main():
     p.add_argument("--max-s", type=float, default=45)
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--success-hold-s", type=float, default=2)
+    p.add_argument("--condition", default="unnamed")
+    p.add_argument("--seeds", help="Comma-separated scene seeds, exactly one per episode")
+    p.add_argument("--scene-bank", type=Path, help="Shared physical scene bank for paired conditions")
+    p.add_argument("--sim-rate-hz", type=float, default=17.4, help="Kit frame ceiling, applied after each reset")
     args = parse_args(parser=p)
+    args.seeds = [int(s) for s in args.seeds.split(",")] if args.seeds else list(range(900000, 900000 + args.episodes))
+    if len(args.seeds) != args.episodes or len(set(args.seeds)) != args.episodes:
+        p.error("Provide exactly one unique seed per episode")
+    args.scene_bank = (args.scene_bank or Path.home() / "w_policy_phase1/1.9/scene-bank").expanduser().resolve()
     cfg = args
     args.out = args.out.expanduser().resolve()
-    if args.episodes < 1 or args.max_s <= 0:
+    if args.episodes < 1 or args.max_s <= 0 or args.sim_rate_hz <= 0:
         raise ValueError("Positive episodes/max-s required")
     if args.out.exists() and (args.out / "results.csv").exists():
         raise FileExistsError("Choose a new output directory; results already exist")
@@ -338,6 +356,10 @@ def main():
         repo_commit=subprocess.check_output(
             ["git", "-C", str(REPO), "rev-parse", "HEAD"], text=True
         ).strip(),
+        source_sha256={str(path.relative_to(REPO)): hashlib.sha256(path.read_bytes()).hexdigest()
+                       for path in [Path(__file__), Path(__file__).with_name("scene_reset.py"),
+                                    Path(__file__).with_name("episode_client.py"),
+                                    SCRIPTS / "run_async_inference_sim.py"]},
     )
     (args.out / "run_config.json").write_text(
         json.dumps(metadata, indent=2, default=str) + "\n"
@@ -396,7 +418,13 @@ def main():
             epdir.mkdir()
             result = {
                 "episode": ep,
-                "outcome": "fail",
+                "outcome": "no-grasp",
+                "condition": args.condition,
+                "seed": args.seeds[index],
+                "rtc_enabled": cfg.rtc_enabled,
+                "requested_fps": cfg.fps,
+                "time_to_grasp_s": None,
+                "time_to_place_s": None,
                 "time_s": 0.0,
                 "actions_sent": 0,
                 "chunks": 0,
@@ -408,10 +436,12 @@ def main():
             running = False
             try:
                 result["home_error_deg"] = ros.home()
-                result["randomize"] = mcp(
-                    "soarm101.randomize_object_poses",
-                    {"required_visible_color": "blue", "required_visible_count": 1},
-                )
+                result["randomize"] = mcp("run_python", {"code":
+                    f"import sys; sys.path.insert(0, {str(Path(__file__).parent)!r}); "
+                    f"import scene_reset; result = scene_reset.prepare({args.seeds[index]}, {str(args.scene_bank)!r})"})
+                result["host_load_start"] = list(os.getloadavg())
+                result["gpu_start"] = subprocess.check_output([
+                    "nvidia-smi", "--query-gpu=index,uuid,utilization.gpu,memory.used", "--format=csv"], text=True)
                 # Wait for a pose publication after randomization; monotonic receipt ages
                 # guard data freshness despite zero ROS header stamps in older scenes.
                 randomized = time.monotonic()
@@ -424,6 +454,16 @@ def main():
                         raise TimeoutError("No post-randomization poses")
                     time.sleep(0.05)
                 objects, drops, _ = ros.snapshot()
+                result["sim_timing"] = mcp("run_python", {"code":
+                    "s=carb.settings.get_settings(); "
+                    "s.set_bool('/app/runLoops/main/syncToPresent', False); "
+                    "s.set_bool('/app/runLoops/main/rateLimitEnabled', True); "
+                    f"s.set_float('/app/runLoops/main/rateLimitFrequency', {args.sim_rate_hz!r}); "
+                    "result={k:s.get(k) for k in ['/app/runLoops/main/rateLimitFrequency', "
+                    "'/app/runLoops/main/rateLimitEnabled', '/app/runLoops/main/syncToPresent']}"})
+                result["sim_cap_hz"] = result["sim_timing"]["/app/runLoops/main/rateLimitFrequency"]
+                if abs(result["sim_cap_hz"] - args.sim_rate_hz) > 1e-4 or not result["sim_timing"]["/app/runLoops/main/rateLimitEnabled"]:
+                    raise RuntimeError(f"Kit rate read-back mismatch: {result['sim_timing']}")
                 starts = {k: v[2] for k, v in objects.items() if k.startswith("blue")}
                 blue_in_cup(objects, drops)
                 mcp(
@@ -437,7 +477,7 @@ def main():
                 running = True
                 started = time.monotonic()
                 inside_since = None
-                lift_since = None
+                lift_since = {k: None for k in starts}
                 lifted = False
                 max_lift = 0.0
                 success = False
@@ -462,8 +502,15 @@ def main():
                             default=0.0,
                         )
                         max_lift = max(max_lift, lift)
-                        lift_since = (lift_since or now) if lift > 0.024 else None
-                        lifted |= lift_since is not None and now - lift_since >= 0.5
+                        for name, z0 in starts.items():
+                            is_lifted = name in objects and objects[name][2] - z0 > 0.024
+                            lift_since[name] = (lift_since[name] or now) if is_lifted else None
+                            if lift_since[name] is not None and now - lift_since[name] >= 0.5:
+                                lifted = True
+                                if result["time_to_grasp_s"] is None:
+                                    result["time_to_grasp_s"] = lift_since[name] - started
+                        if inside and not lifted:
+                            inside = False
                         inside_since = (inside_since or now) if inside else None
                         poses.write(
                             json.dumps(
@@ -484,6 +531,7 @@ def main():
                             and not success
                         ):
                             success = True
+                            result["time_to_place_s"] = inside_since - started
                             client.send("ABORT")
                     else:
                         raise TimeoutError("Client did not acknowledge episode stop")
@@ -495,9 +543,9 @@ def main():
                 result.update(
                     outcome="success"
                     if success
-                    else "grasped-only"
+                    else "grasped-not-placed"
                     if lifted
-                    else "fail",
+                    else "no-grasp",
                     time_s=done["duration_s"],
                     actions_sent=done["actions_sent"],
                     chunks=done["chunks"],
@@ -585,7 +633,9 @@ def main():
                         json.dumps(result, indent=2) + "\n"
                     )
                     save_result(args.out, result)
-                    print(json.dumps(result), flush=True)
+                    print(json.dumps({k: result.get(k) for k in (
+                        "episode", "condition", "seed", "outcome", "time_s",
+                        "effective_action_fps", "failure_note", "video")}), flush=True)
                 if cleanup_error is not None:
                     raise cleanup_error
 

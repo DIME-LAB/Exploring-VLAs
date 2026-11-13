@@ -156,12 +156,13 @@ def build_parser():
     p.add_argument("--joint-states-topic", default="/joint_states", help="Measured feedback topic; sim-time collection preset uses /joint_states_measured.")
     p.add_argument(
         "--cameras-json",
-        default=json.dumps(DEFAULTS["cameras"]),
+        default=None,
         help="Cameras dict as JSON. Default points at Isaac Sim's "
         "/wrist_camera_rgb_sim and /workspace_camera_sim topics.",
     )
 
     p.add_argument("--policy-type", default=DEFAULTS["policy_type"])
+    p.add_argument("--model", help="Shared GUI/deploy model preset; cannot combine with --pretrained.")
     p.add_argument(
         "--pretrained",
         default=DEFAULTS["pretrained"],
@@ -244,6 +245,25 @@ def build_parser():
 def parse_args(argv=None, parser=None):
     p = parser or build_parser()
     args = p.parse_args(argv)
+    repo = Path(__file__).resolve().parents[2]
+    sys.path.insert(0, str(repo / "vla_SO-ARM101/src/so_arm101_control/so_arm101_control"))
+    from model_presets import MODEL_PRESETS, resolve_model
+
+    if args.model:
+        if args.pretrained != DEFAULTS["pretrained"]:
+            p.error("Choose --model or --pretrained")
+        try:
+            args.pretrained = resolve_model(args.model)
+        except ValueError as exc:
+            p.error(str(exc))
+    if args.cameras_json is None:
+        rename = {}
+        # Also recognize the resolved path supplied by deploy_sim and the GUI.
+        for key, (_, _, rename_json) in MODEL_PRESETS.items():
+            if resolve_model(key) == os.path.expanduser(args.pretrained):
+                rename = json.loads(rename_json)
+                break
+        args.cameras_json = json.dumps({rename.get(k, k): v for k, v in DEFAULTS["cameras"].items()})
     if not 0 <= args.dispatch_priority <= 99:
         p.error("dispatch-priority must be between 0 and 99")
 
