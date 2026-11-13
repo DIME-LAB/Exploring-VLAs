@@ -3,8 +3,8 @@ import math
 from cup_profile import radial_limit
 
 # Cup body coordinates have their origin at the base; rim height is 96.52 mm.
-# Asset floor is 1.2 mm; block restOffset=-0.5 mm, cup restOffset=0.
-# Allow that resting overlap plus 0.1 mm numerical/collision tolerance.
+# Authored floor is 1.2 mm. The 0.6 mm floor allowance is geometric;
+# effective block/cup rest offsets are zero and do not authorize overlap.
 PHYSICAL_FLOOR_M = .0012
 FLOOR_REST_TOLERANCE_M = .0006
 INTERIOR_FLOOR_M = PHYSICAL_FLOOR_M - FLOOR_REST_TOLERANCE_M

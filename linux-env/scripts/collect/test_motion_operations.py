@@ -44,6 +44,7 @@ class MotionOperationTests(unittest.TestCase):
         names=('_motion_guard','_require_motion_generation','_motion_token','_new_motion_event',
                '_motion_verdict','_set_motion_status','_current_motion_event','_begin_motion',
                '_motion_thread','_operation','_require_operation','_ik_apply_and_act','_dispatch_motion',
+               '_plan_motion_wait','_wait_motion_event',
                '_joint_space_collision_free_execute','_plan_linear_joint_path','_execute_full_trajectory','_trace')
         for name in names:
             fn=method(SHARED,'PickPlaceNode',name)

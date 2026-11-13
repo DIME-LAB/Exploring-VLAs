@@ -403,10 +403,12 @@ noisy labels, changed applied targets, and application latency above one tick.
 A five-sim-second-late application probe must fail.
 
 Success uses a measured height-dependent interior profile from the full cup
-STL, not a single radius. `cup_profile.json` contains a concave envelope verified
-against every active triangle supporting plane, with a 0.1 mm fitting allowance
-and an additional 0.7 mm radial margin (0.5 mm absolute block rest offset plus
-both 0.1 mm contact offsets). All eight oriented block corners must fit their
+STL. `cup_profile.json` contains a concave envelope verified against every active
+triangle supporting plane, with 0.1 mm subtracted at the calibration nodes and
+an additional 0.7 mm inward geometric allowance. Resolved tensor values are
+block contact 1.3625 mm/rest 0 and cup-shape contact 0.1 mm/rest 0. Positive contact
+offsets trigger predictive contacts; they do not define permitted wall overlap.
+The geometric allowance is independent of their sum. All eight oriented block corners must fit their
 height's radius. Concavity makes the admitted volume convex, so fitting the
 corners also bounds the box between them. The 0.6 mm lower gate, 94 mm ceiling,
 15 settled ticks and 25 mm lift requirement remain. Receipts log each corner's
@@ -420,6 +422,19 @@ simulation. The receipt records its frame index and native sim stamp; the settle
 verification tail is outside the video. Production defaults still remove failed
 videos. Both modes exclude failed episodes from LeRobot export. Retention mode
 must stay the same when resuming a run.
+
+The collector installs simulation-clock motion waits; the GUI retains its
+wall-time waits. Each event owns its planned duration and timing origin. Linked
+approach/descent budgets include both stages; the actual trajectory duration
+updates the budget before stepping. A motion gets its planned sim duration plus
+5 sim seconds for convergence. The separate wall watchdog is at least the
+legacy bound or `(sim budget / --wait-rtf-floor) + 30 s`, whichever is larger.
+The default RTF floor is 0.1, allowing the tested 0.27 and 0.15 runs. Whole-cycle
+budgets grow with dispatched trajectories/gripper moves; `--episode-deadline`
+is the minimum wall watchdog, not a fixed robot-motion deadline. Expiry logs its
+kind, epoch, planned/elapsed sim time and wall limit. RPCs, ACKs, frame joins and
+ownership/retirement retain wall deadlines. Wait policy is logged in `run.json`
+and must match on resume. See the [complete wait sweep](docs/notes/collection-wait-clocks.md).
 
 `deploy-clock` restores the ROS follower, keeps physical feedback publishing,
 and caps the identical simulation/camera profile at 30 app Hz (target RTF 1.0).
@@ -458,11 +473,11 @@ bash linux-env/scripts/collect_sim.sh clock-sanity 0 \
   --output /mnt/a4500-backup/exploring-vlas/runtime/instance-0/clock-sanity.json
 
 bash linux-env/scripts/collect_sim.sh run 0 --episodes 5 --seed 310000 --diagnostic \
-  --output /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-physical-v4
+  --output /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-physical-v5
 bash linux-env/scripts/collect_sim.sh export 0 \
-  /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-physical-v4 \
+  /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-physical-v5 \
   --repo-id local/soarm101_headless_smoke \
-  --report-dir /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-physical-v4/report
+  --report-dir /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-physical-v5/report
 
 # Only after the corrected five-episode smoke passes; accepted colours rotate 17/17/16.
 bash linux-env/scripts/collect_sim.sh run 0 --episodes 50 --seed 320000 \
@@ -505,13 +520,14 @@ Only successful audited episodes enter the dataset. Success requires all eight
 corners of the selected block's oriented bounding box inside a conservative cup
 interior in the cup's local frame, below the rim, with low block/cup velocities
 for 15 consecutive sim ticks. The block must also have lifted at least 25 mm.
-The conservative cylinder has radius 25 mm and ceiling 94 mm above the cup
-base (mesh rim 96.52 mm). Its lower bound is 0.6 mm: the asset's 1.2 mm interior
-floor minus the block's authored 0.5 mm negative rest offset and a 0.1 mm numerical
-allowance. Floor-supported placements pass; below-floor, side-protruding and
-above-rim placements fail. Rest offsets affect resting geometry; contact offsets
-control contact generation ([NVIDIA physics documentation](https://docs.isaacsim.omniverse.nvidia.com/6.0.1/physics/simulation_fundamentals.html#contact-and-rest-offset)).
-Confirm the cooked USD collision floor and actual rest height during the smoke;
+The concave height-dependent radial profile and 94 mm ceiling bound the block
+inside the authored shell (rim 96.52 mm). The lower gate remains 0.6 mm, an
+explicit geometric allowance below the authored 1.2 mm floor. Resolved rest
+offsets are zero; a negative authored/default UI parameter is not used to infer
+physical overlap. Floor-supported placements pass; below-floor, side-protruding
+and above-rim placements fail. [PhysX contact/rest semantics](https://nvidia-omniverse.github.io/PhysX/physx/5.4.0/_api_build/class_px_shape.html)
+separate predictive contact distance from resting geometry. Confirm the cooked
+USD collision floor and actual rest height during the smoke;
 the offline asset fixture alone does not establish that live measurement.
 
 State/action use absolute degrees in deployment's six-joint order, including

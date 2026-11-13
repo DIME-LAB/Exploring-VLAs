@@ -18,6 +18,7 @@ from scene_sync import physical_pose_caches, collision_pose_errors
 from success import PHYSICAL_FLOOR_M, INTERIOR_FLOOR_M
 import test_safety
 from test_safety import method
+from so_arm101_control.motion_wait import MotionWaitTimeout
 
 HERE = Path(__file__).parent
 ROOT = HERE.parents[2]
@@ -27,7 +28,7 @@ def load_class(filename, name):
     path = HERE/filename
     tree = ast.parse(path.read_text())
     cls = next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name==name)
-    scope = dict(contextmanager=contextmanager, OwnershipStalled=OwnershipStalled, threading=threading,time=time,np=np,json=json,JOINTS=JOINTS,
+    scope = dict(MotionWaitTimeout=MotionWaitTimeout, contextmanager=contextmanager, OwnershipStalled=OwnershipStalled, threading=threading,time=time,np=np,json=json,JOINTS=JOINTS,
                  String=lambda data:NS(data=data),StepGeneration=StepGeneration,
                  CancelledGeneration=CancelledGeneration,CommandLedger=CommandLedger,
                  corrective_action=corrective_action,JOINT_LIMITS={k:(-3,3) for k in JOINTS},
@@ -77,6 +78,7 @@ class ReviewRegressions(unittest.TestCase):
         v.node=c.node;v.lock=threading.RLock();v.plan=dict(trajectory=NS(points=[NS(time_from_start=NS(sec=2,nanosec=0),positions=[.1]*5)],joint_names=JOINTS[:5]),done=threading.Event(),start=10**9,epoch=1)
         v.grip_plan=None;v.reference=[.1]*5+[0.];v.rng=random.Random(1);v.params=parameters(1,'red')
         v.phase='move';v.previous_executed=None
+        v.planned_sim_seconds=0.;v.planned_operations=0
         def now():
             clock_hook(c,r)
             return NS(nanoseconds=10**9)

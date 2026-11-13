@@ -23,6 +23,7 @@ import time
 import weakref
 from so_arm101_control.scene_transactions import SceneMutationClient, SceneMutationIncomplete
 from so_arm101_control.motion_operation import MotionOperation
+from so_arm101_control.motion_wait import MotionBudget, MotionWaitTimeout
 from pathlib import Path
 
 from so_arm101_control.grasp_trace import tracer
@@ -749,7 +750,7 @@ class PickPlaceNode(Node):
         with self._arm_goal_lock:
             self._arm_goal_handle = goal_handle
         result_future = goal_handle.get_result_async()
-        result = self._wait_future(result_future, timeout_sec=timeout)
+        result = self._wait_motion_future(result_future, duration_s, timeout)
         if result is None:
             self._append_log('Arm trajectory timed out', 'warn')
             return False
@@ -818,7 +819,7 @@ class PickPlaceNode(Node):
         with self._gripper_goal_lock:
             self._gripper_goal_handle = goal_handle
         result_future = goal_handle.get_result_async()
-        result = self._wait_future(result_future, timeout_sec=timeout)
+        result = self._wait_motion_future(result_future, duration_s, timeout)
         if result is None:
             self._append_log('Gripper trajectory timed out', 'warn')
             return False
@@ -1108,15 +1109,23 @@ class PickPlaceNode(Node):
         evt = self._current_motion_event()
         if evt is None:
             return True  # nothing to wait on
-        deadline = time.time() + timeout_s
-        while time.time() < deadline:
+        collector_wait = getattr(self, '_motion_waiter', None) is not None
+        deadline = None if collector_wait else time.time() + timeout_s
+        while deadline is None or time.time() < deadline:
             if self._qs_abort_evt.is_set():
                 return False
             # Soft pause: block here until resume
             if not self._qs_resume_evt.wait(timeout=0.2):
                 continue
             self._require_motion_generation()
-            if evt.wait(timeout=0.2):
+            if collector_wait:
+                try:
+                    finished = self._wait_motion_event(evt, timeout_s, enabled=self._qs_resume_evt.is_set)
+                except MotionWaitTimeout:
+                    return False
+            else:
+                finished = evt.wait(timeout=0.2)
+            if finished:
                 self._require_motion_generation()
                 status = self._motion_verdict(evt)
                 if status is None and getattr(self, '_motion_effect_guard', None):
@@ -1337,7 +1346,7 @@ class PickPlaceNode(Node):
                 self._cmd_plan_execute()
             elif mode == 'grasp_approach':
                 def _wait_then_descend():
-                    finished = operation.event.wait(timeout=60.)
+                    finished = self._wait_motion_event(operation.event, 60.)
                     self._require_operation(operation)
                     self._require_operation(descent)
                     verdict = self._motion_verdict(operation.event)
@@ -2076,6 +2085,12 @@ class PickPlaceNode(Node):
         held = getattr(self, '_simulation_held', None)
         if held and held():
             return True
+        waiter = getattr(self, '_motion_waiter', None)
+        if waiter is not None:
+            # Attach owns the scene transaction here. Waiting while owning it
+            # would prevent capture from advancing. Servo already converged;
+            # require its held snapshot instead of introducing idle physics.
+            raise RuntimeError('Collector attach requires a held physical snapshot')
         import time
         t0 = time.time()
         settled_since = None
@@ -2399,7 +2414,7 @@ class PickPlaceNode(Node):
         # Pre-grasp and post-pick grasp_home calls leave _cycle_detach_seen
         # at False, so they just event and don't close.
         def _emit_home_done():
-            evt.wait(timeout=30.0)
+            self._wait_motion_event(evt, 30.)
             with self._motion_guard():
                 self._trace('event', 'grasp_home_done')
                 if getattr(self, '_cycle_detach_seen', False) and self._trace('is_active'):
@@ -2448,7 +2463,7 @@ class PickPlaceNode(Node):
         evt = self._new_motion_event()
         self._begin_motion(evt)
         def _emit_home_done():
-            evt.wait(timeout=30.0)
+            self._wait_motion_event(evt, 30.)
             with self._motion_guard():
                 self._trace('event', 'grasp_home_done')
                 if getattr(self, '_cycle_detach_seen', False) and self._trace('is_active'):
@@ -3237,7 +3252,7 @@ class PickPlaceNode(Node):
                      gripper_joint=gj)
         self._trace('snapshot_scene', 'drop_sweep_start', self)
         def _close_on_drop_done():
-            evt.wait(timeout=30.0)
+            self._wait_motion_event(evt, 30.)
             with self._motion_guard():
                 self._trace('event', 'drop_sweep_done')
         self._motion_thread(target=_close_on_drop_done, daemon=True).start()
@@ -3294,7 +3309,7 @@ class PickPlaceNode(Node):
         # swap it out from under us.
         evt = self._current_motion_event()
         if evt is not None:
-            if not evt.wait(timeout=10.0):
+            if not self._wait_motion_event(evt, 10.):
                 raise TimeoutError('Gripper release timed out')
             self._require_motion_generation()
             verdict = self._motion_verdict(evt)
@@ -3361,6 +3376,7 @@ class PickPlaceNode(Node):
         # Update slider/UI on tkinter thread, send goal on background thread
         self._gripper_command(open_angle, execute=False, duration_s=duration)
         evt = self._new_motion_event()
+        self._plan_motion_wait(evt, duration)
         self._begin_motion(evt)
         def _send():
             ok = self._send_gripper_goal(open_angle, duration_s=duration, blocking=True)
@@ -3386,6 +3402,7 @@ class PickPlaceNode(Node):
         self._append_log(f'Grasp Close: {math.degrees(close_angle):.1f}° for {obj_name}')
         self._gripper_command(close_angle, execute=False, duration_s=duration)
         evt = self._new_motion_event()
+        self._plan_motion_wait(evt, duration)
         self._begin_motion(evt)
         def _send():
             ok = self._send_gripper_goal(close_angle, duration_s=duration, blocking=True)
@@ -3595,7 +3612,7 @@ class PickPlaceNode(Node):
             if approach_h > 0 and 'approach' in validated and 'final' in validated:
                 final = operation.retarget(validated['final'])
                 approach = operation.retarget(validated['approach'],
-                    self._new_motion_event(origin=operation.epoch))
+                    self._new_motion_event(origin=operation.epoch, parent=operation.event))
                 self._ik_apply_and_act(approach.joints(), 'grasp_approach',
                                        operation=approach, descent=final)
             elif 'final' in validated:
@@ -3751,9 +3768,46 @@ class PickPlaceNode(Node):
 
     def _operation(self, target, event=None, duration_s=3.):
         event = event if event is not None else self._new_motion_event()
-        return MotionOperation.create(self._motion_token(), target, event, duration_s,
+        operation = MotionOperation.create(self._motion_token(), target, event, duration_s,
                                       getattr(self,'speed_scale',1.), getattr(event,'motion_tag','motion'),
                                       self.velocity_scale_var.get(), self._planning_attempts_var.get())
+        self._plan_motion_wait(event, duration_s/operation.speed_scale)
+        return operation
+
+    def _plan_motion_wait(self, event, seconds):
+        if getattr(self, '_motion_waiter', None) is None:
+            return  # GUI timing and externally supplied GUI events retain their contract.
+        with self._motion_guard():
+            if event.motion_epoch != self._motion_token():
+                raise ValueError('Motion timing event and worker origins differ')
+            if event.motion_budget.epoch != event.motion_epoch:
+                raise ValueError('Motion timing budget and event origins differ')
+            event.motion_budget.plan(seconds)
+
+    def _wait_motion_event(self, event, timeout_s, enabled=lambda:True):
+        waiter = getattr(self, '_motion_waiter', None)
+        if waiter is None:
+            return event.wait(timeout=timeout_s)
+        with self._motion_guard():
+            if event.motion_epoch != self._motion_token():
+                raise ValueError('Motion wait event and worker origins differ')
+        try:
+            return waiter.wait(event, wall_min=timeout_s, enabled=enabled)
+        except MotionWaitTimeout as exc:
+            with self._motion_guard():
+                self._qs_abort_evt.set()
+                self._set_motion_status(dict(ok=False,outcome=exc.diagnostic['kind'],msg=str(exc)),event=event)
+                event.set()
+            raise
+
+    def _wait_motion_future(self, future, planned_sim_s, timeout_s):
+        waiter = getattr(self, '_motion_waiter', None)
+        if waiter is None:
+            return self._wait_future(future, timeout_sec=timeout_s)
+        budget = MotionBudget(self._motion_token());budget.plan(planned_sim_s)
+        waiter.wait_until(future.done, time.sleep, budget.total, budget.epoch, timeout_s, 'trajectory result')
+        self._require_motion_generation()
+        return future.result()
 
     def _require_operation(self, operation):
         if operation.event.motion_epoch != operation.epoch:
@@ -3804,11 +3858,12 @@ class PickPlaceNode(Node):
         provider = getattr(self, '_motion_generation_provider', None)
         return provider() if provider else None
 
-    def _new_motion_event(self, origin=Ellipsis):
+    def _new_motion_event(self, origin=Ellipsis, parent=None):
         event = threading.Event()
         event.motion_epoch = self._motion_token() if origin is Ellipsis else origin
         event.motion_tag = getattr(self,'_last_motion_tag','motion')
         event.verdict = None
+        event.motion_budget = MotionBudget(event.motion_epoch, parent.motion_budget if parent is not None else None)
         return event
 
     def _motion_thread(self, target, **kwargs):

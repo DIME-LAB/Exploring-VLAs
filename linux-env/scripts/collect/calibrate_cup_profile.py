@@ -2,7 +2,7 @@
 import argparse,hashlib,json,sys
 from pathlib import Path
 import numpy as np
-from cup_profile import triangles_from_stl,verify_shell
+from cup_profile import PROFILE,triangles_from_stl,verify_shell
 from storage import confined
 repo=Path(__file__).resolve().parents[3]
 source=repo/'vla_SO-ARM101/src/so_arm101_description/meshes/cup/cup.stl'
@@ -47,10 +47,11 @@ for z in [lo,hi,*[np.full(len(tri),z) for z in nodes],-d/np.where(np.abs(normal[
  gap=radius(z)-plane
  violations.extend((float(gap[i]),int(i),float(z[i])) for i in np.flatnonzero(valid & (gap>1e-9)))
 report=dict(source=str(source.relative_to(repo)),source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
- method='Minimum axis distance of each STL/plane slice; concave four-node chord envelope, 100 um fit allowance; each active triangle supporting-plane inequality checked at all affine interval endpoints and zero crossings',
+ method='Minimum axis distance of each STL/plane slice; concave four-node chord envelope, 100 um subtraction at nodes; each active triangle supporting-plane inequality checked at all affine interval endpoints and zero crossings',
  samples=[dict(height_m=float(z),measured_inradius_m=float(r),supporting_plane_inradius_m=float(t),envelope_m=float(b)) for z,r,t,b in zip(nodes,radii,support,bound)],
  slopes=list(map(float,slopes)),fit_allowance_m=fit_margin,radial_margin_m=.0007,
- radial_margin_basis='0.5 mm absolute block rest offset + two 0.1 mm contact offsets; separate 100 um envelope fit allowance',
+ radial_margin_basis=PROFILE['radial_margin_basis'],
+ effective_offsets_m=PROFILE['effective_offsets_m'],effective_offsets_source=PROFILE['effective_offsets_source'],
  triangle_count=len(tri),supporting_plane_violations=len(violations),worst_violations=sorted(violations,reverse=True)[:10])
 assert verify_shell(source.read_bytes(),report)['passed'], report
 parser=argparse.ArgumentParser(description=__doc__)

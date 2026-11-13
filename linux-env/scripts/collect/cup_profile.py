@@ -51,6 +51,7 @@ def verify_shell(raw, profile=PROFILE):
     planes = [lo,hi,*[np.full(count,node['height_m']) for node in profile['samples']],
               -offset/np.where(np.abs(normal[:,2])>1e-30,normal[:,2],1e-30)]
     violations = 0
+    minimum_clearance = math.inf
     for z in planes:
         valid = active&(z>=lo-1e-12)&(z<=hi+1e-12)
         # Vectorize the same concave affine envelope used at runtime.
@@ -58,6 +59,8 @@ def verify_shell(raw, profile=PROFILE):
             (b['height_m']-a['height_m'])*(z-a['height_m'])
             for a,b in zip(profile['samples'],profile['samples'][1:])])
         distance = np.abs(normal[:,2]*z+offset)/np.maximum(length,1e-30)
+        if np.any(valid):
+            minimum_clearance = min(minimum_clearance,float(np.min((distance-envelope)[valid])))
         violations += int(np.count_nonzero(valid&(envelope>distance+1e-9)))
     slopes = profile['slopes']
     concave = all(math.isfinite(s) and s>=0 for s in slopes) and all(a>=b for a,b in zip(slopes,slopes[1:]))
@@ -66,4 +69,5 @@ def verify_shell(raw, profile=PROFILE):
     concave = concave and all(abs(a-b)<1e-12 for a,b in zip(slopes,expected_slopes))
     source_matches = hashlib.sha256(raw).hexdigest()==profile['source_sha256']
     return dict(passed=not violations and concave and source_matches, triangles=count,
-                supporting_plane_violations=violations, concave=concave, source_matches=source_matches)
+                supporting_plane_violations=violations, concave=concave, source_matches=source_matches,
+                min_radial_plane_clearance_m=minimum_clearance)

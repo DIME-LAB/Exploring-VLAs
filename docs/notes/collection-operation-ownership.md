@@ -50,6 +50,15 @@ therefore abort; finite planning outside ownership cannot be mistaken for a
 stalled owner merely because its serial validity checks take longer than the
 retirement deadline.
 
+Motion completion waits release ownership while polling operation-owned
+simulation budgets. Each timing tree carries its immutable origin; timing
+updates validate under the guard and cancellation is revalidated after every
+wait and before status writes. Servo's cumulative dispatched-duration counters
+are guarded and serve only episode watchdog sizing. Timeout diagnostics retain
+their epoch; receipts select only their attempt's motion epochs. Attach requires
+an already held physical snapshot rather than waiting under scene ownership.
+See [motion wait clocks](collection-wait-clocks.md) for the complete sweep.
+
 CPU regressions exercise the actual old-prevalidator/current-approach
 interleaving, selected descent target and event identity, stale origin
 consumption, request immutability, all 51 validity calls concurrent with capture,

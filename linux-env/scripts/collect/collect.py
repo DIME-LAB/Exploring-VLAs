@@ -32,6 +32,7 @@ sys.path.insert(0, str(REPO / 'vla_SO-ARM101/src/so_arm101_control'))
 sys.path.insert(0, str(REPO / 'omni-kit-mcp'))
 from kit_mcp.client import call as kit_call
 from so_arm101_control.grasp_geometry import JOINT_LIMITS
+from so_arm101_control.motion_wait import MotionWaiter, MotionWaitTimeout
 from contract import COLORS, JOINTS, EVAL_SEEDS, corrective_action, parameters, timing_audit
 from checkpoint import progress
 from storage import CANONICAL_ROOT, RootFileGrowth, SceneSafetyMarker, confined, prepare_environment, wait_for_storage
@@ -248,6 +249,12 @@ class Servo:
         self.last_sim_ns = 0
         self.phase = 'hold'
         self.last_command_clock_ns = 0
+        self.planned_sim_seconds = 0.
+        self.planned_operations = 0
+
+    def execution_budget(self):
+        with self.lock:
+            return self.planned_sim_seconds, self.planned_operations
 
     def configure(self, params):
         with self.generation.own('episode parameters'):
@@ -261,6 +268,10 @@ class Servo:
         with self.generation.own('collector motion'):
             self.generation.require(epoch)
             with self.lock:
+                duration = ns(trajectory.points[-1].time_from_start)/1e9
+                self.node._plan_motion_wait(done, duration)
+                self.planned_sim_seconds += duration
+                self.planned_operations += 1
                 self.plan = dict(trajectory=trajectory, done=done, start=None, epoch=epoch)
                 self.phase = operation.tag if operation is not None else getattr(done,'motion_tag','home')
             self.step(True)
@@ -276,13 +287,19 @@ class Servo:
                     self.reference[5] = position
                     return True if blocking else None
             done = self.node._new_motion_event()
+            self.node._plan_motion_wait(done, duration)
             with self.lock:
+                self.planned_sim_seconds += duration
+                self.planned_operations += 1
                 self.grip_plan = dict(target=position, duration=duration, done=done, start=None, epoch=epoch)
                 self.phase = 'gripper'
             self.step(True)
         if not blocking:
             return None
-        finished = done.wait(timeout=60)
+        try:
+            finished = self.node._wait_motion_event(done, 60.)
+        except MotionWaitTimeout:
+            finished = False
         with self.generation.own('gripper wait continuation'):
             self.generation.require(epoch)
             if not finished:
@@ -305,6 +322,7 @@ class Servo:
 
     def tick(self, stamp, state):
         completed = []
+        margin = getattr(getattr(self.node, '_motion_waiter', None), 'sim_margin', 5.)
         with self.lock:
             self.last_sim_ns = stamp
             if self.reference is None:
@@ -323,7 +341,7 @@ class Servo:
                 noise_active = elapsed < duration * .8
                 if elapsed > duration and max(abs(a - b) for a, b in zip(state[:5], self.reference[:5])) < .008:
                     completed.append(plan['done']); self.plan = None
-                elif elapsed > duration + 5:
+                elif elapsed > duration + margin:
                     raise TimeoutError(f'Arm did not converge after {elapsed:.3f} sim seconds: state={state[:5]} reference={self.reference[:5]}')
             if self.grip_plan:
                 plan = self.grip_plan
@@ -335,7 +353,7 @@ class Servo:
                 self.reference[5] = plan['initial'] + alpha * (plan['target'] - plan['initial'])
                 if elapsed > plan['duration'] and abs(state[5] - plan['target']) < .008:
                     completed.append(plan['done']); self.grip_plan = None
-                elif elapsed > plan['duration'] + 5:
+                elif elapsed > plan['duration'] + margin:
                     raise TimeoutError('Gripper did not converge in sim time')
             clean = corrective_action(state, self.reference)
             executed = list(clean)
@@ -395,6 +413,12 @@ class Collector:
         self.writer_lock = threading.Lock()
         self.stop = threading.Event()
         self.failure = None
+        self.wait_diagnostics = []
+        self.node._motion_waiter = MotionWaiter(
+            clock=lambda:self.node.get_clock().now().nanoseconds/1e9,
+            validate=self.generation.require, emit=self.motion_wait_diagnostic,
+            abort=lambda:self.stop.is_set() or self.node._qs_abort_evt.is_set(),
+            rtf_floor=args.wait_rtf_floor)
         self.stalled_abort_lock = threading.Lock()
         self.stalled_abort_started = False
         self.generation.on_stall = self.abort_stalled_owner
@@ -407,6 +431,10 @@ class Collector:
             (REPO/'vla_SO-ARM101/src/so_arm101_moveit_config/config/so_arm101.srdf').read_text())
         self.capture_thread = threading.Thread(target=self.capture, daemon=True)
         self.capture_thread.start()
+
+    def motion_wait_diagnostic(self, record):
+        self.wait_diagnostics.append(record)
+        print(json.dumps(record), flush=True)
 
     @contextmanager
     def motion_effect(self, epoch):
@@ -703,6 +731,10 @@ class Collector:
         previous = json.loads((root / 'run.json').read_text()) if args.resume else None
         if previous and previous.get('diagnostic', False) != args.diagnostic:
             raise ValueError('Resume diagnostic retention mode differs from the existing run')
+        wait_policy = dict(rtf_floor=args.wait_rtf_floor, sim_margin_s=5., wall_margin_s=30.,
+                           episode_wall_min_s=args.episode_deadline)
+        if previous and previous.get('motion_wait_policy') != wait_policy:
+            raise ValueError('Resume motion wait policy differs from the existing run')
         receipts = []
         if previous:
             for trial, path in enumerate(sorted(root.glob('attempt-*'))):
@@ -728,6 +760,16 @@ class Collector:
         clock_config = self.mutate_kit('run_python', {'code': (REPO / 'linux-env/scripts/collect/configure_clock.py').read_text() + '\nresult=configure(30)'})
         transport_config = self.mutate_kit('run_python', {'code': 'import sys\nsys.path.insert(0,' + repr(str(REPO / 'linux-env/scripts/collect')) + ')\nimport collection_runtime as c\nresult=c.install()'})
         self.generation.install(transport_config)
+        expected_bodies = set(transport_config['local_corners']) | {'cup_red','cup_green','cup_blue'}
+        offsets = transport_config['effective_shape_offsets']
+        if set(offsets) != expected_bodies:
+            raise RuntimeError('Effective shape offsets missing bodies')
+        for name, values in offsets.items():
+            kind = 'cup' if name.startswith('cup_') else 'block'
+            for key in ('contact','rest'):
+                expected = PROFILE['effective_offsets_m'][kind+'_'+key]
+                if not values[key+'_m'] or any(abs(value-expected)>1e-7 for value in values[key+'_m']):
+                    raise RuntimeError('Effective shape offsets differ from measured profile metadata: '+name)
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             counts = mcp('run_python', {'code': 'import collection_runtime as c\nr=c.runtime()\nresult=[r.node.count_subscribers("/joint_states_measured"),r.node.count_subscribers("/collection_tick"),r.node.count_subscribers("/collection_command_ack")]'})
@@ -776,6 +818,7 @@ class Collector:
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/pick_place.py',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/grasp_geometry.py',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/motion_operation.py',
+                           'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/motion_wait.py',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/scene_transactions.py',
                            'vla_SO-ARM101/src/so_arm101_moveit_config/config/so_arm101.srdf',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/compute_workspace.py',
@@ -807,6 +850,7 @@ class Collector:
             (root / 'run.json').write_text(json.dumps(dict(instance=args.instance, host=socket.gethostname(), gpu_index=int(os.getenv('ISAACSIM_GPU', '0')),
             recording_version=2, transport_config=transport_config, observation_state_topic='/joint_states_measured',
             diagnostic=args.diagnostic, success_profile=PROFILE,
+            motion_wait_policy=wait_policy,
             application_contract='Held at observation tick; read-back verified PhysX targets before one-frame advance; maximum one sim tick latency',
             clock_config=clock_config, domain=90 + args.instance,
             bridge_port=8777 + 2 * args.instance, fps=30, baseline=baseline, baseline_cup_layout=self.baseline_cup_layout, eval_seeds=EVAL_SEEDS,
@@ -826,12 +870,18 @@ class Collector:
             params['trial'] = trial
             path = root / f'attempt-{trial:04d}'
             receipt = dict(params=params, accepted=False)
+            wait_log_start = len(self.wait_diagnostics)
+            motion_epochs = set()
             duplicate_start = dict(self.sensors.duplicate_messages)
             writer = None
             try:
+                with self.generation.own('attempt start'):
+                    self.node._qs_abort_evt.clear()
+                    motion_epochs.add(self.generation.epoch)
                 # Home with the same shared primitive used by Quickstart, with sim ticks active.
                 home = self.motion_call(self.node._cmd_grasp_home_data)
-                finished = home.wait(timeout=90)
+                motion_epochs.add(home.motion_epoch)
+                finished = self.motion_call(self.node._wait_motion_event, home, 90., epoch=home.motion_epoch)
                 with self.generation.own('home wait continuation'):
                     self.generation.require(home.motion_epoch)
                     if not finished or not home.verdict or not home.verdict.get('ok'):
@@ -862,17 +912,27 @@ class Collector:
                 cycle_result = {}
                 with self.generation.own('cycle request'):
                     cycle_epoch = self.generation.epoch
+                    motion_epochs.add(cycle_epoch)
                 def run_cycle(object_name=params['object'], epoch=cycle_epoch):
                     cycle_result.update(ok=self.motion_call(self.node.run_cycle, object_name, epoch=epoch))
                 cycle = threading.Thread(target=run_cycle, daemon=True)
-                cycle.start(); cycle.join(timeout=args.episode_deadline)
-                if cycle.is_alive():
-                    self.node._qs_abort_evt.set()
-                    self.timeline(False)
-                    cycle.join(timeout=5)
+                budget_start = self.servo.execution_budget()
+                def episode_budget():
+                    current = self.servo.execution_budget()
+                    return current[0]-budget_start[0], current[1]-budget_start[1]
+                cycle.start()
+                try:
+                    self.node._motion_waiter.wait_thread(cycle, episode_budget, cycle_epoch, args.episode_deadline)
+                finally:
                     if cycle.is_alive():
-                        self.failure = 'Timed-out cycle did not stop; refusing overlapping episodes'
-                    raise TimeoutError('Episode wall deadline exceeded')
+                        self.node._qs_abort_evt.set()
+                        try:
+                            self.timeline(False)
+                        finally:
+                            # Retirement is a wall-time lifecycle barrier after motion cancellation.
+                            cycle.join(timeout=5)
+                            if cycle.is_alive():
+                                self.failure = 'Cancelled cycle did not stop; refusing overlapping episodes'
                 if not cycle_result.get('ok'):
                     raise RuntimeError('Scripted cycle failed: ' + repr(self.node._last_motion_status))
                 # Verification ticks are a trailing audit, outside the motion dataset.
@@ -910,6 +970,8 @@ class Collector:
                             receipt['error'] = 'Object did not lift at least 25 mm before placement'
                 receipt['camera_duplicate_messages'] = {key: value - duplicate_start.get(key, 0) for key, value in self.sensors.duplicate_messages.items()}
                 receipt['root_file_growth'] = root_growth.finish()
+                receipt['motion_wait_diagnostics'] = [r for r in self.wait_diagnostics[wait_log_start:]
+                                                       if r['epoch'] in motion_epochs]
                 path.mkdir(parents=True, exist_ok=True)
                 (path / 'receipt.json').write_text(json.dumps(receipt, indent=2))
                 with (root / 'episodes.jsonl').open('a') as log:
@@ -964,11 +1026,18 @@ def main():
     parser.add_argument('--seed', type=int, default=310000)
     parser.add_argument('--replay-receipt', type=Path)
     parser.add_argument('--max-attempts', type=int, default=250)
-    parser.add_argument('--episode-deadline', type=float, default=180)
+    parser.add_argument('--episode-deadline', type=float, default=180,
+                        help='Minimum wall watchdog; grows with planned simulated execution time')
+    parser.add_argument('--wait-rtf-floor', type=float, default=.1,
+                        help='Conservative RTF floor used only for motion wall watchdogs')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--resume', action='store_true', help='Re-audit and continue this output ledger')
     parser.add_argument('--diagnostic', action='store_true', help='Keep failed videos and save final recorded-frame stills')
     args = parser.parse_args()
+    if not math.isfinite(args.wait_rtf_floor) or args.wait_rtf_floor <= 0:
+        parser.error('--wait-rtf-floor must be finite and positive')
+    if not math.isfinite(args.episode_deadline) or args.episode_deadline <= 0:
+        parser.error('--episode-deadline must be a finite positive watchdog')
     if args.replay_receipt:
         if args.resume:
             parser.error('Replay and resume are separate operations')

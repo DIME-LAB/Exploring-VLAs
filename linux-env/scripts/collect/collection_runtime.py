@@ -134,6 +134,19 @@ class Runtime:
         return round(float(og.Controller.attribute(
             '/Graph/ActionGraph_SO_ARM101/isaac_read_simulation_time.outputs:simulationTime').get()) * 1e9)
 
+    def resolved_shape_offsets(self):
+        """Read effective PhysX shape values instead of USD default sentinels."""
+        result = {}
+        for name, view in self.bodies.items():
+            contact = view._physics_view.get_contact_offsets().tolist()
+            rest = view._physics_view.get_rest_offsets().tolist()
+            if len(contact)!=1 or len(rest)!=1 or not contact[0] or len(contact[0])!=len(rest[0]):
+                raise RuntimeError('Incomplete effective shape offsets: '+name)
+            if not all(math.isfinite(v) for v in contact[0]+rest[0]):
+                raise RuntimeError('Unresolved effective shape offsets: '+name)
+            result[name] = dict(contact_m=contact[0],rest_m=rest[0])
+        return result
+
     def snapshot(self):
         self.require_scene()
         positions = self.art.get_joint_positions()[0, self.indices]
@@ -308,7 +321,8 @@ def install(mode='collect'):
                 loaded_dependencies=_LOADED_DEPENDENCIES,
                 cuda_device=torch.cuda.current_device(), renderer_gpu=carb.settings.get_settings().get('/renderer/activeGpu'),
                 physics_gpu=carb.settings.get_settings().get('/physics/cudaDevice'),
-                measured_topic='/joint_states_measured', local_corners=_RUNTIME.local_corners)
+                measured_topic='/joint_states_measured', local_corners=_RUNTIME.local_corners,
+                effective_shape_offsets=_RUNTIME.resolved_shape_offsets())
 
 
 def runtime():

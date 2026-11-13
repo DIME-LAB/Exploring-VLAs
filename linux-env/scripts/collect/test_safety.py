@@ -18,6 +18,7 @@ from success import (contained, initial_arm, settled_containment, SETTLED_TICKS,
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0,str(ROOT/'vla_SO-ARM101/src/so_arm101_control'))
 from so_arm101_control.motion_operation import MotionOperation
+from so_arm101_control.motion_wait import MotionBudget, MotionWaitTimeout
 from so_arm101_control.scene_transactions import SceneMutationIncomplete
 
 
@@ -25,7 +26,7 @@ def method(path, cls, name):
     tree = ast.parse(path.read_text())
     owner = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls)
     node = next(n for n in owner.body if isinstance(n, ast.FunctionDef) and n.name == name)
-    scope = dict(SceneMutationIncomplete=SceneMutationIncomplete, MotionOperation=MotionOperation, contextmanager=contextmanager, math=math, threading=threading, time=time, np=np, json=json,
+    scope = dict(MotionBudget=MotionBudget, MotionWaitTimeout=MotionWaitTimeout, SceneMutationIncomplete=SceneMutationIncomplete, MotionOperation=MotionOperation, contextmanager=contextmanager, math=math, threading=threading, time=time, np=np, json=json,
                  String=lambda data:SimpleNamespace(data=data))
     exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), 'exec'), scope)
     return scope[name]
@@ -99,7 +100,7 @@ class SafetyTests(unittest.TestCase):
         from cup_profile import verify_shell
         self.assertTrue(verify_shell(raw)['passed'])
 
-    def test_floor_supported_block_is_valid_with_authored_rest_offset(self):
+    def test_floor_supported_block_is_valid_with_geometric_floor_allowance(self):
         from success import PHYSICAL_FLOOR_M
         for bottom in (PHYSICAL_FLOOR_M, PHYSICAL_FLOOR_M-.0005):
             rows=[self.snapshot(bottom+.0064) for _ in range(SETTLED_TICKS)]

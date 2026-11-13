@@ -1,7 +1,7 @@
 {
   "source": "vla_SO-ARM101/src/so_arm101_description/meshes/cup/cup.stl",
   "source_sha256": "4abd3eeafc63dff6e4a7f85cd94835ed4f76b941fdf8b26cec62c73484e9a439",
-  "method": "Minimum axis distance of each STL/plane slice; concave four-node chord envelope, 100 um fit allowance; each active triangle supporting-plane inequality checked at all affine interval endpoints and zero crossings",
+  "method": "Minimum axis distance of each STL/plane slice; concave four-node chord envelope, 100 um subtraction at nodes; each active triangle supporting-plane inequality checked at all affine interval endpoints and zero crossings",
   "samples": [
     {
       "height_m": 0.00120001,
@@ -35,8 +35,15 @@
   ],
   "fit_allowance_m": 0.0001,
   "radial_margin_m": 0.0007,
-  "radial_margin_basis": "0.5 mm absolute block rest offset + two 0.1 mm contact offsets; separate 100 um envelope fit allowance",
+  "radial_margin_basis": "Explicit 0.7 mm inward geometric allowance; not a contact-offset sum. Zero effective rest offsets grant no resting overlap. Positive contact offsets govern predictive contact generation.",
   "triangle_count": 24010,
   "supporting_plane_violations": 0,
-  "worst_violations": []
+  "worst_violations": [],
+  "effective_offsets_m": {
+    "block_contact": 0.0013625002466142178,
+    "block_rest": 0.0,
+    "cup_contact": 9.999999747378752e-05,
+    "cup_rest": 0.0
+  },
+  "effective_offsets_source": "Native RigidBody tensor get_contact_offsets/get_rest_offsets on all six blocks and all 16 shapes per cup; smoke-3.1-physical-v4 at cut 3f9c9b2"
 }
