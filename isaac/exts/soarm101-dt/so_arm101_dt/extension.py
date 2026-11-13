@@ -1992,6 +1992,20 @@ class DigitalTwin(omni.ext.IExt):
         else:
             raise RuntimeError(f"Failed to load prim at {prim_path}")
 
+        # Materialize robot geometry before the first Hydra/PhysX update. Visual
+        # and collision references can share prototypes; remove both instance
+        # roots so Fabric never depends on a cold-cache /__Prototype_* path.
+        from pxr import Usd
+        deinstanced = 0
+        while True:
+            roots = [p for p in Usd.PrimRange(prim) if p.IsInstanceable()]
+            if not roots:
+                break
+            for geometry in roots:
+                geometry.SetInstanceable(False)
+                deinstanced += 1
+        print(f"[RobotGeometry] de-instanced {deinstanced} roots before scene build")
+
         # 4. Apply translation and orientation
         xform = UsdGeom.Xform(prim)
         xform.ClearXformOpOrder()

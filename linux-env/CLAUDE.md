@@ -217,29 +217,11 @@ episodes.
   `reference.positions + reference.velocities × lookahead_s` projection
   (~100 ms) or detune the joint drives.
 
-Sim pacing: the launcher's `DEFAULT_SIM_RATE_HZ` is the single default cadence (17.4 Hz, from ROADMAP 1.1).
-`deploy_sim.sh up --rate-hz HZ` applies Kit pacing after World initialization
-and prints the readback; `0` is unthrottled. At 60 Hz physics, RTF = Hz/60 only
-when the box has enough CPU headroom. Do not change physics dt to tune wall pacing.
-
-Pose graphs feed `ROS2PublishTransformTree` its external arrays: ordinary USD
-Xforms (`/World`, `/World/base`, cup-center wrappers) are not physics tensor
-objects. Preserve `World` / `base` and the `drop_1/2/3` frame names. Strip scale
-with `Gf.Transform(matrix).GetRotation()` when extracting mesh orientations.
-The log UI uses a bounded 500-row model; do not rebuild 500 labels per line.
-Physics callback diagnostics are limited to one per source every five seconds.
-
-Kit 110.3 requires `/app/runLoops/main/syncToPresent=false` for the main-loop
-rate limiter to take effect. The launcher sets it per launch and on `rate` calls.
-Keep physics at 60 Hz. The default 17.4 Hz ceiling targets RTF 0.29; overrides
-19.4 and 0 select the alternate timing sweep and unthrottled profiling.
-
-Production camera topics are rgb8, via ROS2CameraHelper: wrist render product
-and the existing stream viewport render product for workspace. Do not start
-a hidden/viewport publisher on either production topic. Manual publishers
-refuse duplicates. Keep `resetSimulationTimeOnStop=true` and the `/clock` /
-pose nodes' `resetOnStop=true` together: camera stamps and `/clock` then share
-the same simulation clock. The 6.1 monotonic frame-time lookup emits warnings
-for rounded Fabric times; the reset-on-stop lookup avoids that path.
-Helper removal also requires its SDGPipeline writer cleanup. Preserve all
-camera intrinsics, transforms and renderer/material settings when changing cadence.
+Simulation timing/camera invariants live in [the root agent context](../CLAUDE.md)
+and [README camera documentation](../README.md#simulation-cameras). The default
+wall ceiling is 17.4 Hz (`--rate-hz 19.4` for the alternate sweep, `0` to profile).
+Cold-launch checks use `ISAACSIM_EXTRA_ARGS="--portable-root /path/to/empty/root"`
+with a new path per run; never clear shared `~/.cache/ov`. `scene_up` waits for
+post-scene camera shader compilation before accepting `/clock` readiness.
+For the shared box's control window, export `DISPLAY=:99` and unset XAUTHORITY
+before `deploy_sim.sh up --stream --gui --no-policy`.

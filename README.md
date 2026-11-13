@@ -165,6 +165,10 @@ yourself is left alone). `down --policy` stops just the policy.
 
 ## Simulation cameras
 
+Combined CPU/camera fixes measured 31.08 ms/frame and RTF 0.5363 unthrottled
+(65.07 s, load 20.81), versus 57.14 ms / RTF 0.2917 before (load 17.52).
+These are shared-box observations, not isolated benchmark claims.
+
 Both image topics publish **640×480 rgb8**, one image per 60 Hz simulation
 frame, paced by the selected wall rate. Headers use simulation time and reset
 with `/clock` on timeline stop. The wrist uses its render product and
@@ -192,11 +196,14 @@ viewport-publisher list only describes the optional manual capture path.
 
 ## Known issues
 
-- **Robot invisible after a cold first launch.** The Isaac log shows
-  `usdrt.hydra.fabric_scene_delegate ... cannot find protoPath: /__Prototype_*`.
-  Workaround: `isaacsim_launch.sh close`, then `deploy_sim.sh up` again (a warm
-  launch renders it). Planned fix: de-instance the robot's visual meshes when
-  the scene is built.
+- **Cold rendering warm-up.** Robot geometry is de-instanced at scene build,
+  including visual/collision reference roots that can share Hydra prototypes.
+  Three independent empty portable roots rendered the robot: 36 meshes,
+  zero instance proxies and zero `cannot find protoPath` errors each.
+  Camera writers can compile shaders after `quick_start` returns; deploy waits
+  through this first-use work until `/clock` ticks, or reports a readiness error.
+  This does not change the separate driver-wedge detection below.
+
 - Pose publishers use the Isaac 6.1 external transform arrays for USD Xforms
   (including cup-center wrappers), avoiding physics-tensor invalid-target warnings.
   The extension log is capped at 500 model rows and draws visible rows through

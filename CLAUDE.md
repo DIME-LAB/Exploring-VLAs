@@ -130,7 +130,7 @@ For real-hardware data collection see [`LEROBOT_ROS2_MAC_SETUP.md`](vla_SO-ARM10
 | Isaac Sim launch fails with `Failed to create any GPU devices` (CUDA 999) | `sudo rmmod nvidia_uvm && sudo modprobe nvidia_uvm` (UVM module reload — safe; doesn't touch display) |
 | Cross-Python DDS discovery silently fails between Humble producers and Jazzy consumers | `linux-env/cyclonedds.xml` enables multicast on `lo`. Sourced automatically by `record_sim_isaac.sh` and the stack_start path |
 | `kill -9` on Isaac Sim / RViz / tkinter cascades KWin BadWindow errors | Always SIGTERM/SIGINT. `stack_stop.sh` handles this; never `pkill -9` X-window-owning procs |
-| Recording loop runs at 13–22 Hz vs 30 Hz target | Known perf issue (Isaac Sim camera bridge + RGBA→RGB cost). Doesn't block recording correctness |
+| Sim timing under shared CPU load | `--rate-hz 17.4` is the default ceiling (RTF 0.29 at 60 Hz physics); use `0` to measure headroom. See README measurements |
 
 ## macOS gotchas (top 5)
 
@@ -150,29 +150,17 @@ For real-hardware data collection see [`LEROBOT_ROS2_MAC_SETUP.md`](vla_SO-ARM10
 - **Trust the planning dir.** `.planning/STATE.md` reflects current truth; if something contradicts it, suspect drift and ask.
 - **Match commit style** — the existing `feat(scope):`, `fix(scope):`, `docs(scope):`, `chore:` convention with multi-paragraph bodies covering motivation + implementation + verification.
 
-Sim pacing: the launcher's `DEFAULT_SIM_RATE_HZ` is the single default cadence (17.4 Hz, from ROADMAP 1.1).
-`deploy_sim.sh up --rate-hz HZ` applies Kit pacing after World initialization
-and prints the readback; `0` is unthrottled. At 60 Hz physics, RTF = Hz/60 only
-when the box has enough CPU headroom. Do not change physics dt to tune wall pacing.
+Simulation invariants (details and measurements: [README](README.md#simulation-cameras)):
 
-Pose graphs feed `ROS2PublishTransformTree` its external arrays: ordinary USD
-Xforms (`/World`, `/World/base`, cup-center wrappers) are not physics tensor
-objects. Preserve `World` / `base` and the `drop_1/2/3` frame names. Strip scale
-with `Gf.Transform(matrix).GetRotation()` when extracting mesh orientations.
-The log UI uses a bounded 500-row model; do not rebuild 500 labels per line.
-Physics callback diagnostics are limited to one per source every five seconds.
-
-Kit 110.3 requires `/app/runLoops/main/syncToPresent=false` for the main-loop
-rate limiter to take effect. The launcher sets it per launch and on `rate` calls.
-Keep physics at 60 Hz. The default 17.4 Hz ceiling targets RTF 0.29; overrides
-19.4 and 0 select the alternate timing sweep and unthrottled profiling.
-
-Production camera topics are rgb8, via ROS2CameraHelper: wrist render product
-and the existing stream viewport render product for workspace. Do not start
-a hidden/viewport publisher on either production topic. Manual publishers
-refuse duplicates. Keep `resetSimulationTimeOnStop=true` and the `/clock` /
-pose nodes' `resetOnStop=true` together: camera stamps and `/clock` then share
-the same simulation clock. The 6.1 monotonic frame-time lookup emits warnings
-for rounded Fabric times; the reset-on-stop lookup avoids that path.
-Helper removal also requires its SDGPipeline writer cleanup. Preserve all
-camera intrinsics, transforms and renderer/material settings when changing cadence.
+- `DEFAULT_SIM_RATE_HZ` in the launcher is the single default (17.4 Hz from
+  ROADMAP 1.1). Apply/read pacing after World creation; keep physics at 60 Hz.
+  Kit 110.3 needs `syncToPresent=false` for the main limiter to take effect.
+- Production cameras use ROS2CameraHelper rgb8. Workspace shares the stream
+  render product. Keep one publisher per topic and camera/clock/pose reset-on-stop
+  settings aligned. Removing a helper also requires its SDGPipeline writer cleanup.
+- USD pose graphs use external TF arrays. Preserve `World`, `base`, `drop_1/2/3`;
+  strip mesh scale before extracting rotations. Keep logs capped/virtualized and
+  physics diagnostics rate-limited.
+- De-instance robot geometry before the first render/physics update. Verify cold
+  starts with distinct `ISAACSIM_EXTRA_ARGS="--portable-root /path/to/empty/root"`;
+  never clear shared `~/.cache/ov`. Deploy waits for post-scene camera shader work.

@@ -210,9 +210,15 @@ scene_up() {
             echo "  /clock alive"
             return 0
         fi
+        # Native camera writers can start a first-use shader compile after
+        # quick_start has returned. Keep the cold deploy on the same watched
+        # readiness path rather than announcing Up with a frozen /clock.
+        echo "  Waiting for scene/render readiness after the missing clock sample..."
+        bash "$ISAAC_LAUNCHER" wait || return $?
         sleep 3
     done
-    echo "  WARNING: /clock not ticking after 30s — sim may not be playing"
+    echo "  ERROR: /clock is not ticking — scene is not ready" >&2
+    return 1
 }
 
 # stack_detect_display   When DISPLAY is unset (an ssh shell), point at the

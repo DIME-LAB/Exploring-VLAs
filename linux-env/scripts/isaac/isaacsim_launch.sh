@@ -37,7 +37,7 @@
 #   ISAACSIM_WEDGE_S   Kit-log silence (no bridge) that counts as a GPU wedge (default 120)
 #   ISAACSIM_EXTRA_ARGS extra Kit args appended verbatim
 #
-# Caches (per user, persistent, safe to keep; shared with any other Isaac 6.1 Kit on the account):
+# Default caches (persistent/shared); ISAACSIM_EXTRA_ARGS="--portable-root PATH" isolates data/cache/logs:
 #   RTX shader cache   ~/.cache/ov/shaders/nv_shadercache/<kit-version>/<build>  (first run fills it)
 #   DerivedDataCache   ~/.cache/ov/DerivedDataCache  (cooked collision/geometry, UJITSO)
 
@@ -158,7 +158,7 @@ do_wait() {
         n="$(rtpso_lines)"
         if [ "$n" -gt "$seen" ]; then
             seen="$n"; last="$(rtpso_last)"
-            echo "  first-run RTX shader compile, ${last:-?} s so far (happens once per GPU/driver/Isaac version; cached in ~/.cache/ov/shaders)"
+            echo "  first-run RTX shader compile, ${last:-?} s so far (cached under this launch's cache root)"
         fi
         if [ $(( $(date +%s) - progress )) -ge "$window" ]; then
             wedge_msg "$window"
@@ -192,7 +192,7 @@ do_quick_start() {
         n="$(rtpso_lines)"
         if [ "$n" -gt "$seen" ]; then
             seen="$n"; last="$(rtpso_last)"
-            echo "  first-run RTX shader compile, ${last:-?} s so far (happens once per GPU/driver/Isaac version)" >&2
+            echo "  first-run RTX shader compile, ${last:-?} s so far (cached under this launch's cache root)" >&2
         fi
         if [ $(( $(date +%s) - progress )) -ge "$WEDGE_S" ] && ! client status --timeout 3 > /dev/null 2>&1; then
             pkill -P "$cpid" 2>/dev/null; kill "$cpid" 2>/dev/null; wait "$cpid" 2>/dev/null

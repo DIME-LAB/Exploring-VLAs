@@ -24,7 +24,7 @@ cadence (~14 Hz) not matching the camera-bound recording loop.
 - [x] 1.5 Per-frame CPU waste: fix the pose graphs' invalid TF targets (~88 PoseTree warnings/s);
       make the extension log pane append-only (no 500-label rebuilds); rate-limit prints inside physics
       callbacks (a broken handle once dropped RTF to 0.12).
-- [ ] 1.6 Invisible robot on cold launch (`cannot find protoPath: /__Prototype_*`): de-instance the
+- [x] 1.6 Invisible robot on cold launch (`cannot find protoPath: /__Prototype_*`): de-instance the
       robot's visual meshes at scene build; verify 3 cold launches.
 - [x] 1.7 Real RTC: policy server tracks the leftover chunk + measured inference delay and passes
       `prev_chunk_left_over` / `inference_delay` to `predict_action_chunk` (fork, branch `dev`);
