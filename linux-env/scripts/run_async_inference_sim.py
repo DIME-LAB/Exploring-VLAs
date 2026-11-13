@@ -10,8 +10,8 @@ tears both down cleanly on Ctrl+C or client exit.
 Differences vs the real-hardware reference:
   * `--robot.type=so101_ros2` (our fork's ROS2-backed plugin) instead of
     `so101_follower` (Feetech serial).
-  * `--robot.actuate=true` enables our plugin's send_action → FJT action
-    client dispatch (defaults to no-op for backward-compat with the
+  * `--robot.actuate=true` enables our plugin's send_action → JointTrajectory
+    topic dispatch (defaults to no-op for backward-compat with the
     recording path).
   * No `--robot.port` / `--robot.id` — sim has no serial / per-arm
     calibration; the URDF and ros2_control launch handle that.
@@ -150,7 +150,7 @@ def build_parser():
         "--action-duration-s",
         type=float,
         default=None,
-        help="FJT target duration; defaults to one client tick (1/fps).",
+        help="Trajectory target duration; defaults to one client tick (1/fps).",
     )
     p.add_argument("--robot-type", default=DEFAULTS["robot_type"])
     p.add_argument("--joint-states-topic", default="/joint_states", help="Measured feedback topic; sim-time collection preset uses /joint_states_measured.")

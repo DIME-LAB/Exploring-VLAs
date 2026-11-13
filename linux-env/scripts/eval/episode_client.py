@@ -39,7 +39,9 @@ def main() -> int:
     client = RobotClient(cfg)
     status_arrays = {}
     for label in ("arm", "gripper"):
-        action_client = getattr(client.robot, f"_{label}_action_client")
+        action_client = getattr(client.robot, f"_{label}_action_client", None)
+        if action_client is None:
+            continue
         status_arrays[label] = {"messages": 0, "latest_size": 0, "max_size": 0}
         original = action_client.take_data
         def counted_take(original=original, label=label):
@@ -57,7 +59,9 @@ def main() -> int:
         executor = node.executor
         action_clients = {}
         for label in ("arm", "gripper"):
-            action_client = getattr(client.robot, f"_{label}_action_client")
+            action_client = getattr(client.robot, f"_{label}_action_client", None)
+            if action_client is None:
+                continue
             action_clients[label] = {attr: len(getattr(action_client, attr, {})) for attr in (
                 "_goal_handles", "_pending_goal_requests", "_pending_result_requests",
                 "_pending_cancel_requests", "_feedback_callbacks", "_futures")}

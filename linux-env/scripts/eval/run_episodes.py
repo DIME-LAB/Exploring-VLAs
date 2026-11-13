@@ -17,10 +17,12 @@ import time
 from pathlib import Path
 
 import rclpy
+from action_msgs.msg import GoalStatusArray
 from builtin_interfaces.msg import Duration
 from control_msgs.action import FollowJointTrajectory
 from rclpy.action import ActionClient
 from rclpy.executors import SingleThreadedExecutor
+from rclpy.qos import QoSProfile, DurabilityPolicy
 from sensor_msgs.msg import JointState
 from tf2_msgs.msg import TFMessage
 from trajectory_msgs.msg import JointTrajectoryPoint
@@ -101,6 +103,12 @@ class Ros:
         self.lock = threading.Lock()
         self.data = {"objects": {}, "drops": {}, "joints": {}}
         self.received = {k: 0.0 for k in self.data}
+        self.controller_status = {}
+        for label in ("arm", "gripper"):
+            self.node.create_subscription(
+                GoalStatusArray, f"/{label}_controller/follow_joint_trajectory/_action/status",
+                lambda m, label=label: self.status(label, m),
+                QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.node.create_subscription(
             TFMessage, "/objects_poses_sim", lambda m: self.tf("objects", m), 10
         )
@@ -135,6 +143,18 @@ class Ros:
 
     def joints(self, msg):
         self.update("joints", dict(zip(msg.name, msg.position)))
+
+    def status(self, label, msg):
+        with self.lock:
+            previous = self.controller_status.get(label, {})
+            self.controller_status[label] = dict(
+                latest_size=len(msg.status_list),
+                max_size=max(len(msg.status_list), previous.get("max_size", 0)),
+                messages=previous.get("messages", 0)+1)
+
+    def status_snapshot(self):
+        with self.lock:
+            return {k: dict(v) for k,v in self.controller_status.items()}
 
     def snapshot(self):
         with self.lock:
@@ -446,6 +466,7 @@ def main():
             running = False
             try:
                 result["home_error_deg"] = ros.home()
+                result["controller_status_start"] = ros.status_snapshot()
                 result["randomize"] = mcp("run_python", {"code":
                     f"import sys; sys.path.insert(0, {str(Path(__file__).parent)!r}); "
                     f"import scene_reset; result = scene_reset.prepare({args.seeds[index]}, {str(args.scene_bank)!r})"})
@@ -563,6 +584,7 @@ def main():
                     max_blue_lift_m=max_lift,
                     final=detail,
                     host_load_end=list(os.getloadavg()),
+                    controller_status_end=ros.status_snapshot(),
                     client=done,
                     failure_note=""
                     if success

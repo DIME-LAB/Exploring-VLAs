@@ -48,8 +48,10 @@ CPU load, all dispatch measurements and resolved sim timing settings.
 alive while each episode gets a new client/sensor process (additional logs are
 under `client-NN/`). Episode client receipts include goal-handle/pending-future
 counts, executor tasks, status-array sizes and thread/process counts before/after
-each episode. Status sizes are observed at the existing ActionClient doorway,
-without adding another subscription or walking every status entry.
+each episode. For action-based clients, status sizes are observed at the existing
+ActionClient doorway. The streaming client has no ActionClient/status subscription;
+the separate orchestration process monitors controller status sizes so only the
+discrete homing goals should add retained history.
 
 `--model PRESET` resolves the same definition as the GUI and `deploy_sim.sh`.
 The shared async launcher applies the preset's camera-key mapping even when

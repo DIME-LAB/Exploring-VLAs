@@ -90,6 +90,10 @@ def main():
         'OLD versus NEW is a **recipe comparison**, not a pure initialization ablation. The NEW recipe also uses '
         'batch 64, learning rate 1e-4, a frozen VLM/expert-only update, and 20,000 training steps. '
         'Both recipes use the same rec_222812 episodes.', '',
+        'Scored runs use JointTrajectory topic commands for policy dispatch and discrete FJT actions for homing. '
+        'The controllers were restarted to clear retained action status history. Earlier per-tick-FJT runs are '
+        'diagnostic only: status arrays grew to thousands of entries and dispatch degraded, including with fresh clients. '
+        'The scored matrix follows a consecutive-episode streaming regression; diagnostic traces remain under `diagnostics/`.', '',
         '## Paired comparisons', '', '| Contrast (B minus A) | Shared seeds | Success difference | B-only successes | A-only successes | Exact McNemar p |',
         '|---|---:|---:|---:|---:|---:|']
     pairs = [('old-before','old-after')]
