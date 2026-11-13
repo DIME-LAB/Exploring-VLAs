@@ -3,18 +3,22 @@ import unittest
 from types import SimpleNamespace as NS
 import test_review_regressions as probes
 from protocol import CancelledGeneration
+from episode_policy import ConvergenceFailure
 
 
 class FailureReceiptTests(unittest.TestCase):
     def test_capture_timeout_keeps_original_cause_and_native_cancel_result(self):
         c,r,entry=probes.ReviewRegressions().collector()
-        def timeout(stamp,state):raise TimeoutError('Arm did not converge after 7.700 sim seconds')
+        def timeout(stamp,state):
+            c.servo.last_sim_ns=stamp
+            raise ConvergenceFailure('arm_nonconvergence',epoch=1,stamp_ns=stamp,phase='move',
+                duration=2.,elapsed=7.7,margin=5.,state=state,reference=c.servo.reference)
         c.servo.tick=timeout
         c.capture()
         self.assertEqual(len(c.capture_failures),1)
         record=c.capture_failures[0]
         self.assertEqual(record['epoch'],1);self.assertEqual(record['phase'],'move')
-        self.assertEqual(record['exception_type'],'TimeoutError')
+        self.assertEqual(record['exception_type'],'ConvergenceFailure')
         self.assertEqual(record['planned_sim_seconds'],2.)
         self.assertEqual(record['convergence_margin_sim_seconds'],5.)
         self.assertEqual(record['operation_start_sim_ns'],10**9)

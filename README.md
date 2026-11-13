@@ -412,6 +412,23 @@ pause. Capture failures retain the original exception, phase, epoch, measured
 state/reference and cancellation result in the episode receipt; an unrelated
 clock/reset/scene/transport failure keeps its own error.
 
+The collector preserves an **idle** clean hold target through a cancellation/reset
+barrier and tags it with the newly installed epoch. Cancelling active motion
+retires its target. Before and after scene reset it explicitly holds the nominal
+calibrated home and checks a six-tick measured window, allowing at most five sim
+seconds to settle. Home motions/holds receive no DART noise. The existing 0.01 rad
+home error, 0.002 rad spread and 0.008 rad motion-convergence limits remain.
+
+A typed physical convergence deadline can reject one episode after native pause,
+worker retirement and contract auditing. Stationary/short data, calibrated-home
+instability, explicit planner collision refusal, failed containment and insufficient
+lift are logged quality rejections. Camera/state joins, ACKs, clock/reset/epoch,
+transport, scene, unknown failures and mixed audit failures stop the run. Three
+consecutive rejections in one reason category also stop it; receipts and summary
+persist that decision and resume refuses a stopped ledger. Runs carry a versioned
+quality policy; use a fresh output directory for this policy rather than migrating
+an older pilot ledger. Failed episodes remain excluded from export.
+
 The CPU GUI parity tests pin 14 scene/wait/dispatch methods to the live-verified
 `6e439ed` implementation and compare service sequences for normal and delayed
 responses. An offline ROS regression boots the actual GUI node against concurrent,

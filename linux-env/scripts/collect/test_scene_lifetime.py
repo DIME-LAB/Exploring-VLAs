@@ -413,7 +413,7 @@ class SceneLifetimeTests(unittest.TestCase):
         self.assertEqual(reference['stamp_ns'],10**9);self.assertEqual(reference['receipt_epoch'],2)
         self.assertIsNone(reference['source_epoch']);self.assertFalse(reference['same_tick'])
         self.assertEqual(reference['validity'],'before_reset_or_unknown')
-        self.assertEqual(rows[0]['expert_reference'],[0.]*6)
+        self.assertEqual(rows[0]['expert_reference'],[.1]*5+[0.])
     def test_reference_callback_does_not_wait_on_generation_ownership(self):
         c,_,_,_,_=self.setup_scene();Sensors,_=load_class('collect.py','Sensors')
         sensors=c.sensors;sensors.generation=c.generation

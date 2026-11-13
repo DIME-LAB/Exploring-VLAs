@@ -40,8 +40,14 @@ def timing_audit(rows, fps):
     errors = []
     if fps not in (20, 30):
         errors.append('fps must be 20 or 30')
-    if len(rows) < fps * 2:
-        return dict(passed=False, errors=['Fewer than two seconds of frames'], frames=len(rows))
+    quality_errors = []
+    if len(rows) < fps*2:
+        errors.append('Fewer than two seconds of frames')
+        quality_errors.append('short_duration')
+    if not rows:
+        contract_errors=[e for e in errors if e!='Fewer than two seconds of frames']
+        return dict(passed=False,contract_passed=not contract_errors,contract_errors=contract_errors,
+                    quality_errors=quality_errors,errors=errors,frames=0,fps=fps)
     wall = [(b['wall_ns'] - a['wall_ns']) / 1e9 for a, b in zip(rows, rows[1:])]
     received = [max(r['wrist_receive_ns'],r['top_receive_ns']) for r in rows]
     camera_wall = [(b-a)/1e9 for a,b in zip(received,received[1:])]
@@ -90,19 +96,22 @@ def timing_audit(rows, fps):
         errors.append('Applied targets did not persist through the next physical frame')
     planning_idle = sum(not r.get('executing', True) for r in rows) / len(rows)
     stationary = sum(max(abs(x - y) for x, y in zip(a['state'], b['state'])) < 1e-4
-                     for a, b in zip(rows, rows[1:])) / (len(rows) - 1)
+                     for a, b in zip(rows, rows[1:])) / max(1, len(rows) - 1)
     if planning_idle > .03:
         errors.append('Planning/hold frames exceed 3%')
     if stationary > .05:
         errors.append('Stationary state frames exceed 5%')
+        quality_errors.append('stationary')
     hz = (len(rows) - 1) / sum(wall) if sum(wall) > 0 else 0
-    p95 = sorted(wall)[int(.95 * (len(wall) - 1))]
+    p95 = sorted(wall)[int(.95 * (len(wall) - 1))] if wall else 0.
     if any(not all(math.isfinite(v) for v in r['action'] + r['state'] + r['executed_action']) for r in rows):
         errors.append('Non-finite joint data')
-    return dict(passed=not errors, errors=errors, frames=len(rows), fps=fps,
+    contract_errors=[e for e in errors if e not in ('Fewer than two seconds of frames','Stationary state frames exceed 5%')]
+    return dict(passed=not errors, contract_passed=not contract_errors, contract_errors=contract_errors,
+                quality_errors=quality_errors, errors=errors, frames=len(rows), fps=fps,
                 measured_wall_hz=hz, wall_gap_p95_ms=p95 * 1000,
                 camera_receipt_wall_hz=(len(rows)-1)/sum(camera_wall) if sum(camera_wall)>0 else 0.,
-                wall_gap_max_ms=max(wall) * 1000,
+                wall_gap_max_ms=max(wall,default=0) * 1000,
                 sim_hz=1e9 * (len(rows) - 1) / sum(sim) if sum(sim) > 0 else 0,
                 real_time_factor=sum(sim) / 1e9 / sum(wall),
                 idle_frame_fraction=planning_idle, stationary_frame_fraction=stationary,
