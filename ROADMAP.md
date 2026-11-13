@@ -68,16 +68,16 @@ cadence (~14 Hz) not matching the camera-bound recording loop.
 
 ## Phase 2 — Own LeRobot ROS 2 packages (architecture; review verdict: build our own from the fork's code)
 
-- [ ] 2.1 Shared ROS context module: init only if rclpy not running, own-what-you-start shutdown,
+- [x] 2.1 Shared ROS context module: init only if rclpy not running, own-what-you-start shutdown,
       ref-counted executor, attach to an external context/executor.
-- [ ] 2.2 Camera plugin: fresh-frame `async_read` (keeps training timing) + `read_latest(max_age_ms)`,
+- [x] 2.2 Camera plugin: fresh-frame `async_read` (keeps training timing) + `read_latest(max_age_ms)`,
       header stamps, configurable QoS, row padding/byte order, mono→3ch, per-instance subscriptions,
       Condition instead of polling, CompressedImage. (Check PyPI name; borrow cv_bridge fallback from
       fiveages-sim, Apache-2.0, with attribution; credit huggingface/lerobot PR #866 for the original camera.)
-- [ ] 2.3 `lerobot_robot_ros2_joint`: controller groups (action + joints) from config, name map,
+- [x] 2.3 `lerobot_robot_ros2_joint`: controller groups (action + joints) from config, name map,
       limits from config/URDF, units, `actuate`, `max_relative_target`, `state_max_age_ms`, merged
       JointState cache, goal tracking; SO-101 preset.
-- [ ] 2.4 `lerobot_teleoperator_ros2_joint` (commanded-joint topic) for recording; reconcile its
+- [x] 2.4 `lerobot_teleoperator_ros2_joint` (commanded-joint topic) for recording; reconcile its
       `action_stale_ms` check with control_gui publishing commands only on change.
 - [ ] 2.5 RunTask ROS 2 node: action {instruction, max_duration} → home → run → success/timeout/cancel
       → home; Isaac panel button `soarm101.run_task`; live prompt per goal.
