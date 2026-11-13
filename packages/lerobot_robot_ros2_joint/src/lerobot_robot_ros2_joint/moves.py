@@ -4,11 +4,16 @@ import threading
 import time
 
 
-def wait_future(future, deadline):
+def wait_future(future, deadline, cancel_event=None):
     event = threading.Event()
     future.add_done_callback(lambda _: event.set())
-    if not event.wait(max(0, deadline - time.monotonic())):
-        raise TimeoutError("Controller response timed out")
+    while not event.is_set():
+        if cancel_event is not None and cancel_event.is_set():
+            raise InterruptedError("Move cancelled")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Controller response timed out")
+        event.wait(min(remaining, 0.05) if cancel_event is not None else remaining)
     return future.result()
 
 
@@ -40,13 +45,13 @@ class Move:
                 if handle.accepted:
                     handle.cancel_goal_async()
 
-    def wait(self, timeout_s):
+    def wait(self, timeout_s, cancel_event=None):
         deadline = time.monotonic() + timeout_s
         try:
-            handles = [wait_future(future, deadline) for future in self.futures]
+            handles = [wait_future(future, deadline, cancel_event) for future in self.futures]
             if not all(handle.accepted for handle in handles):
                 raise RuntimeError("Controller declined a move")
-            results = [wait_future(handle.get_result_async(), deadline) for handle in handles]
+            results = [wait_future(handle.get_result_async(), deadline, cancel_event) for handle in handles]
             for result in results:
                 if result.status != 4 or result.result.error_code != 0:
                     raise RuntimeError(f"Controller move failed: status={result.status}, code={result.result.error_code}")

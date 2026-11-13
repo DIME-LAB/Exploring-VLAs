@@ -19,3 +19,9 @@ A callback failure is available through `lease.check()` and subsequent acquire.
 
 Apache-2.0. Copyright 2026 Exploring-VLAs contributors. Lifecycle is implemented
 here independently; camera/robot lineage is documented by their distributions.
+
+For CycloneDDS, set `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp` and an explicit
+`CYCLONEDDS_URI=file:///absolute/path/to/Exploring-VLAs/linux-env/cyclonedds.xml`
+(loopback transport). The context module refuses to initialize CycloneDDS with
+that setting absent. The bare installed Jazzy/Cyclone node teardown can hang
+without this explicit transport config. Other projects may supply their own XML.

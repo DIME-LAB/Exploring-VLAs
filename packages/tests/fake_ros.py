@@ -1,6 +1,7 @@
 """Small ROS stand-ins used only by offline tests."""
 import sys
 import importlib.machinery
+import os
 import threading
 import types
 from concurrent.futures import Future
@@ -44,12 +45,23 @@ class Executor:
 
 
 class Node:
-    def __init__(self, name, context):
+    def __init__(self, name, context=None):
         self.name = name
         self.context = context
         self.subs = []
         self.pubs = []
         self.destroyed = False
+        self.params = {}
+
+    def declare_parameter(self, name, value):
+        self.params[name] = value
+
+    def get_parameter(self, name):
+        return Message(value=self.params[name])
+
+    def get_logger(self):
+        import logging
+        return logging.getLogger(self.name)
 
     def create_subscription(self, msg_type, topic, callback, qos):
         sub = types.SimpleNamespace(msg_type=msg_type, topic=topic, callback=callback, qos=qos)
@@ -113,7 +125,7 @@ class GoalHandle:
 
 
 class ActionClient:
-    def __init__(self, node, action_type, topic):
+    def __init__(self, node, action_type, topic, **kwargs):
         self.topic = topic
         self.goals = []
         self.handles = []
@@ -132,8 +144,17 @@ class ActionClient:
         self.destroyed = True
 
 
+class ActionServer:
+    def __init__(self, *args, **kwargs):
+        self.callbacks = kwargs
+
+    def destroy(self):
+        pass
+
+
 def install(monkeypatch):
     context = Context()
+    default = [context]
 
     def module(name, **kw):
         obj = types.ModuleType(name)
@@ -143,19 +164,30 @@ def install(monkeypatch):
         monkeypatch.setitem(sys.modules, name, obj)
         return obj
 
-    def init(*, context=context):
-        if context.ok():
-            raise RuntimeError("already initialized")
+    def init(*, context=None):
+        context = context or default[0]
+        if context.starts:
+            raise RuntimeError("Context.init() must only be called once")
         context.starts += 1
         context.running = True
 
-    ros = module("rclpy", init=init, get_default_context=lambda: context,
+    def shutdown():
+        if default[0].ok():
+            default[0].shutdown()
+        default[0] = Context()
+
+    ros = module("rclpy", init=init, get_default_context=lambda: default[0],
+                 get_rmw_implementation_identifier=lambda: os.environ.get("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp"),
                  create_node=lambda name, context=context: Node(name, context),
-                 ok=context.ok, shutdown=context.shutdown)
+                 ok=lambda: default[0].ok(), shutdown=shutdown, try_shutdown=shutdown)
     ros.node = module("rclpy.node", Node=Node)
     ros.subscription = module("rclpy.subscription", Subscription=Message)
     ros.executors = module("rclpy.executors", SingleThreadedExecutor=Executor)
-    ros.action = module("rclpy.action", ActionClient=ActionClient)
+    ros.action = module("rclpy.action", ActionClient=ActionClient, ActionServer=ActionServer,
+                        GoalResponse=Message(ACCEPT=1, REJECT=0), CancelResponse=Message(ACCEPT=1))
+    module("rclpy.callback_groups", ReentrantCallbackGroup=Message)
+    module("std_msgs")
+    module("std_msgs.msg", String=Message, Bool=Message)
     policies = Message(BEST_EFFORT=1, RELIABLE=2, VOLATILE=1, TRANSIENT_LOCAL=2, KEEP_LAST=1)
     ros.qos = module("rclpy.qos", QoSProfile=Message, ReliabilityPolicy=policies,
                      DurabilityPolicy=policies, HistoryPolicy=policies,

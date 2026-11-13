@@ -16,7 +16,7 @@ class ROS2JointTeleoperatorConfig(TeleoperatorConfig):
     use_degrees: bool = True
     action_warmup_s: float = 2.0
     action_stale_ms: float = 500.0
-    command_mode: str = "on_change"
+    command_mode: str = "continuous"
     qos: QoSConfig = field(default_factory=QoSConfig)
 
     def __post_init__(self):

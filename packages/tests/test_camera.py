@@ -21,7 +21,7 @@ def image(encoding="rgb8", *, padding=0, big=False):
 @pytest.mark.parametrize("mode", [ColorMode.RGB, ColorMode.BGR])
 @pytest.mark.parametrize("rotation", list(Cv2Rotation))
 def test_fork_pixel_equivalence(ros, encoding, mode, rotation):
-    from lerobot.cameras.ros2.camera_ros2 import ROS2Camera as ForkCamera
+    ForkCamera = pytest.importorskip("lerobot.cameras.ros2.camera_ros2").ROS2Camera
     config = ROS2CameraConfig(topic="/test", color_mode=mode, rotation=rotation)
     camera = ROS2Camera(config)
     fork = ForkCamera.__new__(ForkCamera)
@@ -31,6 +31,21 @@ def test_fork_pixel_equivalence(ros, encoding, mode, rotation):
     np.testing.assert_array_equal(actual, expected)
     assert actual.dtype == expected.dtype == np.uint8
     assert actual.flags.c_contiguous
+
+
+@pytest.mark.parametrize("encoding", ["rgb8", "bgr8", "rgba8", "bgra8"])
+@pytest.mark.parametrize("mode", [ColorMode.RGB, ColorMode.BGR])
+@pytest.mark.parametrize("rotation", list(Cv2Rotation))
+def test_raw_color_and_rotation(ros, encoding, mode, rotation):
+    camera = ROS2Camera(ROS2CameraConfig(topic="/test", color_mode=mode, rotation=rotation))
+    msg = image(encoding, padding=7)
+    channels = 4 if "a8" in encoding else 3
+    expected = np.arange(2 * 3 * channels, dtype=np.uint8).reshape(2, 3, channels)[:, :, :3]
+    if (encoding.startswith("bgr") and mode == ColorMode.RGB) or (encoding.startswith("rgb") and mode == ColorMode.BGR):
+        expected = expected[:, :, ::-1]
+    turns = {0: 0, 90: -1, 180: 2, -90: 1}
+    expected = np.rot90(expected, turns[rotation.value])
+    np.testing.assert_array_equal(camera._convert(msg), expected)
 
 
 def test_padding_and_big_endian_mono(ros):

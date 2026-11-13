@@ -15,7 +15,7 @@ class ROS2CameraConfig(CameraConfig):
     warmup_s: float = 5.0
     compressed: bool = False
     use_cv_bridge: bool = False
-    qos: QoSConfig = field(default_factory=QoSConfig)
+    qos: QoSConfig = field(default_factory=lambda: QoSConfig(reliability="reliable"))
 
     def __post_init__(self):
         if not self.topic or self.warmup_s <= 0:

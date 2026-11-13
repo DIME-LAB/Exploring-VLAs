@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import os
 import uuid
 
 _lock = threading.RLock()
@@ -15,6 +16,7 @@ class _Session:
         from rclpy.executors import SingleThreadedExecutor
 
         self.context = context
+        self.default_context = context is rclpy.get_default_context()
         self.owns_context = not context.ok()
         self.owns_executor = executor is None
         self.refs = 0
@@ -60,13 +62,18 @@ class _Session:
         try:
             if self.node is not None:
                 self.executor.remove_node(self.node)
-                self.node.destroy_node()
-        finally:
-            try:
                 if self.owns_executor and self.executor is not None:
+                    # Release the stopped spin generator/wait set before native node teardown.
                     self.executor.shutdown()
-            finally:
-                if self.owns_context and self.context.ok():
+                self.node.destroy_node()
+            elif self.owns_executor and self.executor is not None:
+                self.executor.shutdown()
+        finally:
+            if self.owns_context:
+                import rclpy
+                if self.default_context and rclpy.get_default_context() is self.context:
+                    rclpy.try_shutdown()
+                elif self.context.ok():
                     self.context.shutdown()
 
 
@@ -78,7 +85,9 @@ class Lease:
 
     @property
     def node(self):
-        self.check()
+        # The handle remains accessible after ROS stops so teardown can finish.
+        if self._closed:
+            raise RuntimeError("ROS lease is closed")
         return self._session.node
 
     def check(self):
@@ -106,6 +115,13 @@ class Lease:
 def acquire(*, context=None, executor=None):
     """Acquire the shared node. An external executor is spun by its caller."""
     import rclpy
+
+    if rclpy.get_rmw_implementation_identifier() == "rmw_cyclonedds_cpp" and not os.environ.get("CYCLONEDDS_URI"):
+        raise RuntimeError(
+            "CycloneDDS requires an explicit CYCLONEDDS_URI. For Exploring-VLAs set "
+            "CYCLONEDDS_URI=file:///absolute/path/to/Exploring-VLAs/linux-env/cyclonedds.xml "
+            "(loopback transport). No ROS context was started."
+        )
 
     if context is None:
         context = executor.context if executor is not None else rclpy.get_default_context()

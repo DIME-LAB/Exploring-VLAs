@@ -142,9 +142,13 @@ def test_declined_and_failed_moves_cancel_other_groups(make_robot):
 
 def test_missing_and_invalid_joint_data(make_robot):
     robot = make_robot()
+    previous = robot.get_observation()
     robot._on_joint_state(state(["shoulder_pan"], []))
-    with pytest.raises(ValueError, match="Invalid"):
-        robot.get_observation()
+    assert robot.get_observation() == previous
+    robot._on_joint_state(state(["unrelated"], [float("nan")]))
+    assert robot.get_observation() == previous
+    robot._on_joint_state(state(["shoulder_pan"], [float("nan")]))
+    assert robot.get_observation() == previous
     robot._on_joint_state(state())
     assert len(robot.get_observation()) == 6
 
@@ -155,3 +159,27 @@ def test_failed_connect_releases_resources(ros):
         robot.connect()
     assert not robot.is_connected and robot._lease is None
     assert not ros[1].ok()
+
+
+def test_home_ignores_per_tick_relative_cap(make_robot):
+    robot = make_robot(actuate=True, max_relative_target=2.0)
+    target = dict.fromkeys(robot.action_features, 30.0)
+    move = robot.move_to(target)
+    assert all(abs(value - math.pi/6) < 1e-12 for value in move.targets.values())
+
+
+def test_disconnect_after_context_stops_and_camera_cleanup_fails(make_robot):
+    robot = make_robot(actuate=True)
+    node = robot._lease.node
+    class FailedCamera:
+        def disconnect(self):
+            raise RuntimeError("camera cleanup issue")
+    robot.cameras = {"bad": FailedCamera()}
+    node.context.shutdown()
+    with pytest.raises(RuntimeError, match="cleanup"):
+        robot.disconnect()
+    assert robot._lease is None and node.destroyed
+    assert not node.subs and not node.pubs
+    robot.cameras = {}
+    robot.connect()
+    assert robot.is_connected

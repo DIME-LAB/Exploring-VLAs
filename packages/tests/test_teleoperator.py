@@ -23,7 +23,7 @@ def test_fork_command_equivalence(ros):
 
 
 def test_on_change_hold_and_continuous_age(ros):
-    plugin = ROS2JointTeleoperator(ROS2JointTeleoperatorConfig(action_warmup_s=0))
+    plugin = ROS2JointTeleoperator(ROS2JointTeleoperatorConfig(action_warmup_s=0, command_mode="on_change"))
     plugin.connect()
     with pytest.raises(KeyError, match="Missing"):
         plugin.get_action()

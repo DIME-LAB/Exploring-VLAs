@@ -1,6 +1,7 @@
 # Copyright 2026 Exploring-VLAs contributors. Licensed under Apache-2.0.
 """Merged joint cache with per-joint arrival ages."""
 import math
+import logging
 import threading
 import time
 
@@ -17,18 +18,21 @@ class JointCache:
 
     def update(self, msg):
         try:
+            if not msg.position:
+                return  # JointState permits effort/velocity-only messages.
             if len(msg.name) != len(msg.position):
                 raise ValueError("JointState names and positions must have equal lengths")
             incoming = {}
             for name, value in zip(msg.name, msg.position, strict=True):
                 name = self.name_map.get(name, name)
+                if name not in self.names:
+                    continue
                 value = float(value) * self.scale
                 if not math.isfinite(value):
                     raise ValueError("Joint positions must be finite")
                 if name in incoming:
                     raise ValueError("JointState names must be unique after mapping")
-                if name in self.names:
-                    incoming[name] = value
+                incoming[name] = value
             with self.condition:
                 now = time.monotonic()
                 self.values.update(incoming)
@@ -36,9 +40,7 @@ class JointCache:
                 self.error = None
                 self.condition.notify_all()
         except (ValueError, TypeError) as exc:
-            with self.condition:
-                self.error = exc
-                self.condition.notify_all()
+            logging.getLogger(__name__).warning("Joint message ignored: %s", exc)
 
     def wait(self, timeout):
         with self.condition:

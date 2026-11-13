@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import math
+import logging
 import xml.etree.ElementTree as ET
 from lerobot.cameras import make_cameras_from_configs
 from lerobot.robots.robot import Robot
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 from lerobot_ros2_context import acquire
 from lerobot_ros2_context.joints import JointCache
-from .config_ros2_joint import ROS2JointRobotConfig
+from .config_ros2_joint import ROS2JointRobotConfig, SO101ROS2JointRobotConfig
 from .moves import Move
 
 
@@ -109,7 +110,7 @@ class ROS2JointRobot(Robot):
             obs[key] = camera.async_read(timeout_ms=self.config.image_timeout_ms)
         return obs
 
-    def _targets(self, action):
+    def _targets(self, action, *, relative=True):
         goal = {}
         for key, value in action.items():
             name = key.removesuffix(".pos")
@@ -118,7 +119,7 @@ class ROS2JointRobot(Robot):
                 if not math.isfinite(value):
                     raise ValueError("Action positions must be finite")
                 goal[name] = value
-        if self.config.max_relative_target is not None:
+        if relative and self.config.max_relative_target is not None:
             present = self._cache.snapshot(self.config.state_max_age_ms)
             for name, value in goal.items():
                 cap = self.config.max_relative_target
@@ -164,7 +165,7 @@ class ROS2JointRobot(Robot):
             raise RuntimeError("move_to requires actuate=True")
         if not math.isfinite(duration_s) or duration_s <= 0:
             raise ValueError("Move duration must be finite and positive")
-        goal = self._targets(action)
+        goal = self._targets(action, relative=False)
         if set(goal) != set(self.config.joint_names):
             raise ValueError("A discrete move requires every joint")
         if self._move is not None:
@@ -193,26 +194,40 @@ class ROS2JointRobot(Robot):
             Move(futures).cancel()
             raise
         self._move = Move(futures)
+        self._move.targets = dict(goal)
         return self._move
 
     def disconnect(self):
         self._connected = False
-        if self._move is not None:
-            self._move.cancel()
-            self._move = None
-        for client in self._clients:
-            client.destroy()
-        self._clients = []
-        for camera in self.cameras.values():
-            camera.disconnect()
         lease, self._lease = self._lease, None
+        sub, self._sub = self._sub, None
+        clients, self._clients = self._clients, []
+        publishers, self._publishers = self._publishers, []
+        errors = []
+        def clean(callback):
+            try:
+                callback()
+            except Exception as exc:
+                errors.append(exc)
+        if self._move is not None:
+            clean(self._move.cancel)
+            self._move = None
+        for client in clients:
+            clean(client.destroy)
+        for camera in self.cameras.values():
+            clean(camera.disconnect)
         if lease is not None:
             try:
-                if self._sub is not None:
-                    lease.node.destroy_subscription(self._sub)
-                for publisher in self._publishers:
-                    lease.node.destroy_publisher(publisher)
+                if sub is not None:
+                    clean(lambda: lease.node.destroy_subscription(sub))
+                for publisher in publishers:
+                    clean(lambda: lease.node.destroy_publisher(publisher))
             finally:
-                self._sub = None
-                self._publishers = []
-                lease.close()
+                clean(lease.close)
+        if errors:
+            raise RuntimeError("Robot cleanup encountered an error after releasing all handles") from errors[0]
+
+
+class SO101ROS2JointRobot(ROS2JointRobot):
+    config_class = SO101ROS2JointRobotConfig
+    name = "so101_ros2_joint"

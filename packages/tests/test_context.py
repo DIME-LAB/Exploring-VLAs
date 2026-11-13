@@ -16,8 +16,9 @@ def test_shared_context_last_user_and_reconnect(ros):
     assert node.destroyed and context.stops == 1
     with acquire() as three:
         assert three.node is not node
-        assert context.starts == 2
-    assert context.stops == 2
+        assert three.node.context is not context
+        assert three.node.context.starts == 1
+    assert context.stops == 1
 
 
 def test_external_context_and_executor_are_preserved(ros):
@@ -58,3 +59,32 @@ def test_closed_lease_and_callback_failure(ros):
     lease.close()
     with pytest.raises(RuntimeError, match="closed"):
         lease.check()
+
+
+def test_cleanup_handle_access_after_context_stops(ros):
+    lease = acquire()
+    node = lease.node
+    ros[1].shutdown()
+    assert lease.node is node
+    lease.close()
+    assert node.destroyed
+    with acquire() as next_lease:
+        assert next_lease.node.context.ok()
+
+
+def test_cyclone_requires_explicit_transport_config(ros, monkeypatch):
+    monkeypatch.setenv("RMW_IMPLEMENTATION", "rmw_cyclonedds_cpp")
+    monkeypatch.delenv("CYCLONEDDS_URI", raising=False)
+    with pytest.raises(RuntimeError, match="linux-env/cyclonedds.xml"):
+        acquire()
+    assert ros[1].starts == 0
+
+
+def test_closing_old_context_does_not_stop_replacement(ros):
+    first = acquire()
+    ros[0].shutdown()
+    second = acquire()
+    node = second.node
+    first.close()
+    assert node.context.ok()
+    second.close()

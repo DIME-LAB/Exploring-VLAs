@@ -37,3 +37,9 @@ CvBridge fallback pattern is adapted from
 f750af764a8539d321d54955fe58441d94f93e73 (Apache-2.0).
 PyPI's normalized name `lerobot-camera-ros2` returned 404 on 2026-11-13; availability
 is an observation, not a name reservation. No package was uploaded.
+
+For CycloneDDS, set `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp` and an explicit
+`CYCLONEDDS_URI=file:///absolute/path/to/Exploring-VLAs/linux-env/cyclonedds.xml`
+(loopback transport). The context module refuses to initialize CycloneDDS with
+that setting absent. The bare installed Jazzy/Cyclone node teardown can hang
+without this explicit transport config. Other projects may supply their own XML.

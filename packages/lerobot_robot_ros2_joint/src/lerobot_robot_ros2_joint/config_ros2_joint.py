@@ -82,11 +82,17 @@ class ROS2JointRobotConfig(RobotConfig):
                 raise ValueError("max_relative_target must be finite and nonnegative")
 
 
+@RobotConfig.register_subclass("so101_ros2_joint")
+@dataclass
+class SO101ROS2JointRobotConfig(ROS2JointRobotConfig):
+    joint_names: list[str] = field(default_factory=lambda: list(SO101_JOINTS))
+    joint_name_map: dict[str, str] = field(default_factory=lambda: {"gripper_joint": "gripper"})
+    joint_limits: dict[str, tuple[float, float]] = field(default_factory=lambda: dict(SO101_LIMITS))
+    controllers: list[ControllerGroup] = field(default_factory=lambda: [
+        ControllerGroup("/arm_controller/follow_joint_trajectory", SO101_JOINTS[:5]),
+        ControllerGroup("/gripper_controller/follow_joint_trajectory", ["gripper"])])
+
+
 def so101_config(**kwargs):
     """SO-101 preset matching Exploring-VLAs' six position features."""
-    values = dict(joint_names=list(SO101_JOINTS), joint_name_map={"gripper_joint": "gripper"},
-                  joint_limits=dict(SO101_LIMITS), controllers=[
-                      ControllerGroup("/arm_controller/follow_joint_trajectory", SO101_JOINTS[:5]),
-                      ControllerGroup("/gripper_controller/follow_joint_trajectory", ["gripper"])])
-    values.update(kwargs)
-    return ROS2JointRobotConfig(**values)
+    return SO101ROS2JointRobotConfig(**kwargs)

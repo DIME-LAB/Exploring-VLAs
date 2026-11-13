@@ -15,10 +15,10 @@ action = teleop.get_action()
 teleop.disconnect()
 ```
 
-`command_mode="on_change"` (default) holds the last complete command until
+`command_mode="on_change"` holds the last complete command until
 another arrives. This matches control_gui publishers that send only changed
 commands: an unmoving target remains a valid target. It cannot detect a stopped
-publisher; use `continuous` with `action_stale_ms=500` for the recording mirror,
+publisher; the default `continuous` with `action_stale_ms=500` is for the recording mirror,
 which publishes at a fixed rate. In that mode every joint must receive updates
 within the age limit. Both modes merge partial messages and require all configured
 joints before get_action succeeds. connect waits up to action_warmup_s but permits
@@ -30,3 +30,9 @@ constructor arguments attach to external ROS resources. Feedback is empty.
 Apache-2.0; see LICENSE/NOTICE. Derived from the Hugging Face LeRobot interfaces
 and Exploring-VLAs' LeRobot fork e1e20109 (`so101_ros2`), Copyright 2026 The
 HuggingFace Inc. team.
+
+For CycloneDDS, set `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp` and an explicit
+`CYCLONEDDS_URI=file:///absolute/path/to/Exploring-VLAs/linux-env/cyclonedds.xml`
+(loopback transport). The context module refuses to initialize CycloneDDS with
+that setting absent. The bare installed Jazzy/Cyclone node teardown can hang
+without this explicit transport config. Other projects may supply their own XML.

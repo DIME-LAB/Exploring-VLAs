@@ -9,7 +9,6 @@ import os
 import threading
 import time
 
-import cv2
 import numpy as np
 from lerobot.cameras.camera import Camera
 from lerobot.cameras.configs import ColorMode, Cv2Rotation
@@ -63,6 +62,7 @@ class ROS2Camera(Camera):
         self._context, self._executor = context, executor
         self._lease = self._sub = None
         self._condition = threading.Condition()
+        self._read_lock = threading.Lock()
         self._msg = None
         self._sequence = self._consumed = 0
         self._received = 0.0
@@ -84,10 +84,17 @@ class ROS2Camera(Camera):
         return self._stamp_ns
 
     @staticmethod
-    def find_cameras():
+    def find_cameras(discovery_s=2.0):
         with acquire() as lease:
-            return [{"topic": topic, "type": kind} for topic, kinds in lease.node.get_topic_names_and_types()
-                    for kind in kinds if kind in ("sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage")]
+            deadline = time.monotonic() + discovery_s
+            event = lease.node.get_graph_event()
+            while True:
+                cameras = [{"topic": topic, "type": kind} for topic, kinds in lease.node.get_topic_names_and_types()
+                           for kind in kinds if kind in ("sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage")]
+                if cameras or time.monotonic() >= deadline:
+                    return cameras
+                lease.node.wait_for_graph_change(event, timeout_sec=max(0, deadline - time.monotonic()))
+                event.clear()
 
     def connect(self, warmup=True):
         if self.is_connected:
@@ -123,6 +130,7 @@ class ROS2Camera(Camera):
 
     def _convert(self, msg):
         if self.config.compressed:
+            import cv2
             # OpenCV decodes compressed color into BGR, including PNG alpha.
             img = cv2.imdecode(np.frombuffer(msg.data, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
             if img is None:
@@ -163,6 +171,10 @@ class ROS2Camera(Camera):
         return np.ascontiguousarray(np.rot90(img, rotations[self.config.rotation]))
 
     def _get(self, *, fresh, timeout_ms=0, max_age_ms=None, consume=True):
+        with self._read_lock:
+            return self._read_frame(fresh=fresh, timeout_ms=timeout_ms, max_age_ms=max_age_ms, consume=consume)
+
+    def _read_frame(self, *, fresh, timeout_ms, max_age_ms, consume):
         if timeout_ms < 0 or (max_age_ms is not None and max_age_ms < 0):
             raise ValueError("Frame time limits must be nonnegative")
         with self._condition:
@@ -182,7 +194,11 @@ class ROS2Camera(Camera):
                 raise TimeoutError(f"Latest frame on {self.config.topic} is too old")
             msg = self._msg
             sequence = self._sequence
-            frame = self._convert(msg)
+            lease = self._lease
+        frame = self._convert(msg)
+        with self._condition:
+            if self._lease is not lease:
+                raise DeviceNotConnectedError("Camera disconnected while decoding")
             if consume:
                 self._consumed = sequence
             self._stamp_ns = int(msg.header.stamp.sec) * 10**9 + int(msg.header.stamp.nanosec)
