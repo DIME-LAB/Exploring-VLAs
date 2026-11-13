@@ -1011,7 +1011,7 @@ class PickPlaceNode(Node):
         # interpolation + OMPL-with-validated-retry fallback. Same pattern as
         # _cmd_grasp_home.
         if on_complete is None:
-            on_complete = threading.Event()
+            on_complete = self._new_motion_event()
         self._joint_space_collision_free_execute(
             chosen, on_complete_event=on_complete, duration_s=duration_s)
 
@@ -1174,7 +1174,7 @@ class PickPlaceNode(Node):
         # not a per-call local). _make_trigger_callback at line ~845
         # does the same clear on the ROS-service entry path; QS calls
         # handlers directly, so we need to clear here too.
-        self._motion_event = threading.Event()
+        self._motion_event = self._new_motion_event()
         self._last_motion_status = None
         self._cmd_error = None
         # Tag the next trajectory dump with this step's cmd name.
@@ -1320,7 +1320,7 @@ class PickPlaceNode(Node):
                 # clipping ground/cups on low/edge blocks).
                 duration = getattr(self, '_grasp_arm_duration', 2.0)
                 final_joints = getattr(self, '_grasp_final_joints', None)
-                approach_done = threading.Event()
+                approach_done = self._new_motion_event()
 
                 def _wait_then_descend():
                     finished = approach_done.wait(timeout=60.0)
@@ -1337,14 +1337,14 @@ class PickPlaceNode(Node):
                         if evt:
                             evt.set()
 
-                threading.Thread(target=_wait_then_descend, daemon=True).start()
+                self._motion_thread(target=_wait_then_descend, daemon=True).start()
                 self._joint_space_collision_free_execute(
                     target, on_complete_event=approach_done,
                     duration_s=duration)
             elif mode == 'grasp_execute':
                 duration = getattr(self, '_grasp_arm_duration', 2.0)
                 evt = getattr(self, '_grasp_motion_event', None) \
-                    or threading.Event()
+                    or self._new_motion_event()
                 self._joint_space_collision_free_execute(
                     target, on_complete_event=evt, duration_s=duration)
 
@@ -1360,6 +1360,8 @@ class PickPlaceNode(Node):
 
 
     def _objects_callback(self, msg):
+        if getattr(self, '_physical_pose_cache', False):
+            return
         new_any_big_move = False
         with self.objects_lock:
             for tf in msg.transforms:
@@ -1503,6 +1505,8 @@ class PickPlaceNode(Node):
         on a fixed time delay (matching _cmd_grasp_refresh); no event
         signaling happens here.
         """
+        if getattr(self, '_physical_pose_cache', False):
+            return
         with self._drop_lock:
             for tf in msg.transforms:
                 name = tf.child_frame_id
@@ -1650,7 +1654,15 @@ class PickPlaceNode(Node):
                     # Cup STL mesh origin is at the cup's BASE. To place its
                     # base on the ground, set mesh_pose.z = cup_base_z =
                     # cup_center_z − half_height.
-                    p.position.z = pos['z'] - CUP_BODY_HEIGHT_M / 2.0
+                    # Mesh origin is the base in the cup's oriented local frame.
+                    qx,qy,qz,qw = (p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w)
+                    norm = qx*qx+qy*qy+qz*qz+qw*qw
+                    if norm < 1e-15:
+                        raise ValueError('Invalid cup orientation')
+                    h = CUP_BODY_HEIGHT_M / 2.0
+                    p.position.x -= 2*(qx*qz+qw*qy)*h/norm
+                    p.position.y -= 2*(qy*qz-qw*qx)*h/norm
+                    p.position.z = pos['z'] - (1-2*(qx*qx+qy*qy)/norm)*h
                     co.meshes.append(cup_mesh)
                     co.mesh_poses.append(p)
                 else:
@@ -2358,7 +2370,7 @@ class PickPlaceNode(Node):
         target['wrist_roll'] = -math.pi / 2 + WRIST_ROLL_URDF_PITCH
         self._append_log(f'Grasp Home: wrist_flex=90° wrist_roll={math.degrees(target["wrist_roll"]):.1f}°')
         tracer.event('grasp_home_start', target=dict(target))
-        evt = threading.Event()
+        evt = self._new_motion_event()
         self._motion_event = evt
         # Emit grasp_home_done when motion settles. Close the trace cycle
         # iff a detach was seen in this cycle — that signals this is the
@@ -2371,7 +2383,7 @@ class PickPlaceNode(Node):
             if getattr(self, '_cycle_detach_seen', False) and tracer.is_active():
                 tracer.close_cycle('completed')
                 self._cycle_detach_seen = False
-        threading.Thread(target=_emit_home_done, daemon=True).start()
+        self._motion_thread(target=_emit_home_done, daemon=True).start()
         # Speed override: if home_velocity_scale param > 0, temporarily
         # swap velocity_scale_var for this motion's plan, then restore.
         # Lets the speed-vs-lag experiment sweep grasp_home speed live
@@ -2418,7 +2430,7 @@ class PickPlaceNode(Node):
             f'wrist_roll={math.degrees(target["wrist_roll"]):.1f}°')
         tracer.event('grasp_home_start', target=dict(target),
                      calibration='data')
-        evt = threading.Event()
+        evt = self._new_motion_event()
         self._motion_event = evt
         def _emit_home_done():
             evt.wait(timeout=30.0)
@@ -2426,7 +2438,7 @@ class PickPlaceNode(Node):
             if getattr(self, '_cycle_detach_seen', False) and tracer.is_active():
                 tracer.close_cycle('completed')
                 self._cycle_detach_seen = False
-        threading.Thread(target=_emit_home_done, daemon=True).start()
+        self._motion_thread(target=_emit_home_done, daemon=True).start()
         hvs = float(self.get_parameter('home_velocity_scale').value)
         saved_vs = None
         if hvs > 0.0 and hasattr(self, 'velocity_scale_var'):
@@ -3079,7 +3091,7 @@ class PickPlaceNode(Node):
             return
         name, x, y, z = result
 
-        evt = threading.Event()
+        evt = self._new_motion_event()
         self._motion_event = evt
 
 
@@ -3143,7 +3155,7 @@ class PickPlaceNode(Node):
             return
         name, x, y, z = result
 
-        evt = threading.Event()
+        evt = self._new_motion_event()
         self._motion_event = evt
         self._last_motion_status = None
 
@@ -3206,7 +3218,7 @@ class PickPlaceNode(Node):
         def _close_on_drop_done():
             evt.wait(timeout=30.0)
             tracer.event('drop_sweep_done')
-        threading.Thread(target=_close_on_drop_done, daemon=True).start()
+        self._motion_thread(target=_close_on_drop_done, daemon=True).start()
         self._append_log(
             f'Drop Sweep: gap=({gap_x:.3f},{gap_y:.3f},{gap_z:.3f})m '
             f'→ tcp=({target_x:.3f},{target_y:.3f},{target_z:.3f}) '
@@ -3320,14 +3332,14 @@ class PickPlaceNode(Node):
             f'Grasp Open: {math.degrees(open_angle):.1f}° for {obj_name}')
         # Update slider/UI on tkinter thread, send goal on background thread
         self._gripper_command(open_angle, execute=False, duration_s=duration)
-        evt = threading.Event()
+        evt = self._new_motion_event()
         self._motion_event = evt
         def _send():
             ok = self._send_gripper_goal(open_angle, duration_s=duration, blocking=True)
             self._last_motion_status = {'ok': bool(ok), 'outcome': 'gripper_open'}
             evt.set()
             self._select_planning_group('arm')
-        threading.Thread(target=_send, daemon=True).start()
+        self._motion_thread(target=_send, daemon=True).start()
 
 
     def _cmd_gripper_close_for_object(self):
@@ -3344,7 +3356,7 @@ class PickPlaceNode(Node):
         duration = self._grasp_grip_duration_var.get()
         self._append_log(f'Grasp Close: {math.degrees(close_angle):.1f}° for {obj_name}')
         self._gripper_command(close_angle, execute=False, duration_s=duration)
-        evt = threading.Event()
+        evt = self._new_motion_event()
         self._motion_event = evt
         def _send():
             ok = self._send_gripper_goal(close_angle, duration_s=duration, blocking=True)
@@ -3357,7 +3369,7 @@ class PickPlaceNode(Node):
                     self._append_log(f'Attach step errored: {exc}', 'warn')
             self._last_motion_status = {'ok': bool(ok), 'outcome': 'gripper_close_attach'}
             evt.set()
-        threading.Thread(target=_send, daemon=True).start()
+        self._motion_thread(target=_send, daemon=True).start()
 
 
     def _cmd_grasp_move(self):
@@ -3434,7 +3446,7 @@ class PickPlaceNode(Node):
         approach_h = self._grasp_approach_height_var.get()
 
         # Create motion event BEFORE spawning thread so trigger callback can see it
-        evt = threading.Event()
+        evt = self._new_motion_event()
         self._motion_event = evt
 
         # Pre-validate ALL stages before moving the arm
@@ -3566,7 +3578,7 @@ class PickPlaceNode(Node):
                             'recorded — logic bug')}
                 evt.set()  # nothing to execute
 
-        threading.Thread(target=_prevalidate_and_execute, daemon=True).start()
+        self._motion_thread(target=_prevalidate_and_execute, daemon=True).start()
 
 
     def _gripper_command(self, jaw_target, execute=False, duration_s=1.0):
@@ -3679,9 +3691,31 @@ class PickPlaceNode(Node):
         self._dispatch_scene_update(_apply)
 
 
+    def _motion_token(self):
+        context = getattr(self, '_motion_context', None)
+        if context is not None and hasattr(context, 'epoch'):
+            return context.epoch
+        provider = getattr(self, '_motion_generation_provider', None)
+        return provider() if provider else None
+
+    def _new_motion_event(self):
+        event = threading.Event()
+        event.motion_epoch = self._motion_token()
+        return event
+
+    def _motion_thread(self, target, **kwargs):
+        # Capture before starting the worker, never after its planning/waits.
+        epoch = self._motion_token()
+        def run():
+            if not hasattr(self, '_motion_context'):
+                self._motion_context = threading.local()
+            self._motion_context.epoch = epoch
+            target()
+        return threading.Thread(target=run, **kwargs)
+
     def _dispatch_scene_update(self, callback):
         if self._gui_ready:
-            threading.Thread(target=callback, daemon=True).start()
+            self._motion_thread(target=callback, daemon=True).start()
         else:
             callback()
 

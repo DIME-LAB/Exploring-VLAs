@@ -87,11 +87,22 @@ class SafetyTests(unittest.TestCase):
         data=np.frombuffer(raw,offset=84,count=count,dtype=np.dtype([('normal','<f4',3),('v','<f4',(3,3)),('attr','<u2')]))
         centers=data['v'].mean(1);normals=data['normal']
         floor=(normals[:,2]>.9)&(np.linalg.norm(centers[:,:2],axis=1)<20)
-        self.assertGreater(INTERIOR_FLOOR_M,float(data['v'][floor,:,:,][...,2].max())/1000)
+        asset_floor=float(data['v'][floor,:,:,][...,2].max())/1000
+        self.assertLessEqual(INTERIOR_FLOOR_M,asset_floor)
+        self.assertTrue(contained(self.snapshot(asset_floor+.0064),'red_2x3_0','red')['passed'])
         self.assertLess(INTERIOR_RIM_M,float(data['v'][...,2].max())/1000)
         inward=((normals[:,:2]*centers[:,:2]).sum(1)<0)&(np.abs(normals[:,2])<.9)&(centers[:,2]>1.19)
         support=-(data['v'][inward,:,:2]*normals[inward,None,:2]).sum(-1)/np.linalg.norm(normals[inward,:2],axis=1)[:,None]
         self.assertLess(INTERIOR_RADIUS_M,float(support.min())/1000)
+
+    def test_floor_supported_block_is_valid_with_authored_rest_offset(self):
+        from success import PHYSICAL_FLOOR_M
+        for bottom in (PHYSICAL_FLOOR_M, PHYSICAL_FLOOR_M-.0005):
+            rows=[self.snapshot(bottom+.0064) for _ in range(SETTLED_TICKS)]
+            for index,row in enumerate(rows):row['sim_ns']+=round(index*1e9/30)
+            self.assertTrue(settled_containment(rows,'red_2x3_0','red')['passed'])
+        self.assertFalse(contained(self.snapshot(INTERIOR_FLOOR_M+.0064-.0001),'red_2x3_0','red')['passed'])
+        self.assertFalse(contained(self.snapshot(-.0064),'red_2x3_0','red')['passed'])
 
     def test_block_corners_not_just_center_must_fit(self):
         sample = self.snapshot(); sample['bodies']['red_2x3_0']['position'][0] = .020
@@ -114,6 +125,7 @@ class SafetyTests(unittest.TestCase):
         wait = method(path, 'PickPlaceNode', '_qs_wait_for_step')
         node = SimpleNamespace(_qs_abort_evt=threading.Event(), _qs_resume_evt=threading.Event(),
                                _append_log=lambda *args:None)
+        node._new_motion_event = threading.Event
         node._qs_resume_evt.set()
         node._qs_wait_for_step = lambda timeout_s:wait(node,timeout_s)
         for success in (True,False):

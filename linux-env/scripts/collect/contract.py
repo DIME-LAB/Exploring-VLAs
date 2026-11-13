@@ -72,6 +72,11 @@ def timing_audit(rows, fps):
         errors.append('Joint message differs from the physical snapshot')
     if any(abs(r.get('pose_stamp_ns', -1) - r['sim_ns']) > 1000 for r in rows):
         errors.append('Physical poses are not from the camera tick')
+    if any(r.get('epoch') is None or r.get('observation_epoch') != r.get('epoch') or
+           r.get('expert_epoch') != r.get('epoch') or r['sim_ns'] <= r.get('invalid_through_ns', r['sim_ns']) for r in rows):
+        errors.append('Observation/expert/application crosses a cancellation/reset generation')
+    if len({r.get('epoch') for r in rows}) != 1:
+        errors.append('Episode spans multiple motion/reset generations')
     application_latency = [r.get('application_stamp_ns', -1) - r['sim_ns'] for r in rows]
     if any(t < -10 or t > round(1e9 / fps) + 10 for t in application_latency):
         errors.append('Command application exceeds the declared one-tick contract')

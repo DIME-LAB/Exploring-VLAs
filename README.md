@@ -321,7 +321,12 @@ setpoint, independently adds seeded DART noise to the execution array, and write
 the execution targets into the existing PhysX drives while paused. It reads
 those targets back, logs the actual native simulation-clock application stamp,
 and advances exactly one frame. A ROS command/acknowledgement protocol applies
-each command once; cancellation epochs reject old queued commands. Post-step
+each command once. Physical snapshots and motion workers carry immutable
+cancellation epochs. One ownership lock covers computation, dispatch, ACK,
+recording and completion delivery; cancellation/reset waits for this work to
+retire. Reset invalidates every observation at or before its native sim stamp,
+even if a delayed message carries the new epoch. The audit requires observation,
+expert and application epochs to agree throughout an episode. Post-step
 drive-target read-back checks that the command persisted through the next frame.
 Only this instance's normal ROS follower actuation edges are disconnected during collection. Shared planning, grasp/IK maths,
 attach/detach and drop logic remain the GUI implementation. Planning/service
@@ -348,7 +353,9 @@ including the 30 Hz frame-rate clamp. Never change World timing on a live scene.
 All run/export/runtime paths resolve beneath the canonical
 `/mnt/a4500-backup/exploring-vlas/`; environment overrides cannot escape it.
 ROS logs, temp, HF/OptiX caches, portable roots and per-instance grasp traces
-are directed there. Direct Python entrypoints apply confinement before imports that
+are directed there. The indexed launcher overrides inherited
+`MCP_CLIENT_OUTPUT_DIR` with its confined instance resources directory and validates
+the resolved path before creating it. Direct Python entrypoints apply confinement before imports that
 create trace/log/cache files. Shared shaders under `~/.cache/ov` remain shared. Require
 50 GiB on the output filesystem before each attempt; below that, wait every
 60 s until 52 GiB is available. Root has a **20 GiB last-resort stop**, including
@@ -397,7 +404,13 @@ beside the articulation. Each reset clears linear/angular velocity for cups and
 blocks and verifies six measured home position samples before zeroing initial
 velocities. Raw joint velocity samples are retained; constraint impulses are not
 relabeled as zero motion. Replay restores poses exactly within
-1 μm/1e-6 quaternion tolerance; contact and planner execution need not be bit-identical.
+1 μm/1e-6 quaternion tolerance. Immediate held-clock read-back also requires all
+six arm positions within 1e-6 rad of the receipt and all six velocities within
+1e-6 rad/s of zero. The later physical settling samples retain constraint impulses.
+Before planning, target pose caches come from the joined physical reset snapshot;
+MoveIt must return matching cup/block positions and orientations, including the
+oriented cup body-center/mesh-base offset, plus measured robot state.
+Contact and planner execution need not be bit-identical.
 
 `run.json` records clock/transport settings, source hashes and held-out eval seeds
 900000–900029 (forbidden in training). Receipts retain every attempt's task, seed,
@@ -406,8 +419,14 @@ Only successful audited episodes enter the dataset. Success requires all eight
 corners of the selected block's oriented bounding box inside a conservative cup
 interior in the cup's local frame, below the rim, with low block/cup velocities
 for 15 consecutive sim ticks. The block must also have lifted at least 25 mm.
-The conservative cylinder has radius 25 mm, floor 2 mm and ceiling 94 mm above
-the cup base (mesh rim 96.52 mm). An above-rim centre-only case is rejected.
+The conservative cylinder has radius 25 mm and ceiling 94 mm above the cup
+base (mesh rim 96.52 mm). Its lower bound is 0.6 mm: the asset's 1.2 mm interior
+floor minus the block's authored 0.5 mm negative rest offset and a 0.1 mm numerical
+allowance. Floor-supported placements pass; below-floor, side-protruding and
+above-rim placements fail. Rest offsets affect resting geometry; contact offsets
+control contact generation ([NVIDIA physics documentation](https://docs.isaacsim.omniverse.nvidia.com/6.0.1/physics/simulation_fundamentals.html#contact-and-rest-offset)).
+Confirm the cooked USD collision floor and actual rest height during the smoke;
+the offline asset fixture alone does not establish that live measurement.
 
 State/action use absolute degrees in deployment's six-joint order, including
 `gripper.pos`; raw audit rows retain radians. The action is the clean corrective

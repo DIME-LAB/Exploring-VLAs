@@ -34,10 +34,9 @@ from so_arm101_control.grasp_geometry import JOINT_LIMITS
 from contract import COLORS, JOINTS, EVAL_SEEDS, corrective_action, parameters, timing_audit
 from checkpoint import progress
 from storage import CANONICAL_ROOT, RootFileGrowth, confined, prepare_environment, wait_for_storage
+from protocol import StepGeneration, CancelledGeneration
+from scene_sync import physical_pose_caches, collision_pose_errors
 from success import SETTLED_TICKS, initial_arm, settled_containment
-
-_COMMAND_EPOCH = 0
-
 
 def ns(stamp):
     return stamp.sec * 1000000000 + stamp.nanosec
@@ -54,12 +53,8 @@ def mcp(tool, params=None):
 
 
 def timeline(play):
-    global _COMMAND_EPOCH
-    result = mcp('run_python', {'code': 'import collection_runtime as c\nresult=c.runtime().' +
+    return mcp('run_python', {'code': 'import collection_runtime as c\nresult=c.runtime().' +
                               ('advance()' if play else 'cancel()')})
-    if not play:
-        _COMMAND_EPOCH = result['epoch']
-    return result
 
 
 class Sensors:
@@ -210,8 +205,10 @@ class EpisodeWriter:
 
 class Servo:
     """Execute bounded DART disturbances; label every tick with an unperturbed corrective command."""
-    def __init__(self, node):
+    def __init__(self, node, generation, step):
         self.node = node
+        self.generation = generation
+        self.step = step
         self.lock = threading.RLock()
         self.arm = node.create_publisher(JointTrajectory, '/arm_controller/joint_trajectory', 10)
         self.grip = node.create_publisher(JointTrajectory, '/gripper_controller/joint_trajectory', 10)
@@ -230,24 +227,30 @@ class Servo:
         self.rng = random.Random(params['noise_seed'])
 
     def execute(self, trajectory, done):
-        with self.lock:
-            self.plan = dict(trajectory=trajectory, done=done, start=None)
-            self.phase = getattr(self.node, '_last_motion_tag', 'home')
-        timeline(True)
+        epoch = done.motion_epoch
+        with self.generation.lock:
+            self.generation.require(epoch)
+            with self.lock:
+                self.plan = dict(trajectory=trajectory, done=done, start=None, epoch=epoch)
+                self.phase = getattr(self.node, '_last_motion_tag', 'home')
+            self.step(True)
 
     def gripper(self, position, duration, blocking):
-        with self.lock:
-            if abs(self.node._actual_positions['gripper_joint'] - position) < .0005:
-                if self.reference is None:
-                    self.reference = [self.node._actual_positions[name] for name in JOINTS]
-                self.reference[5] = position
-                self.node._last_motion_status = dict(ok=True, outcome='gripper_already_at_target')
-                return True if blocking else None
-        done = threading.Event()
-        with self.lock:
-            self.grip_plan = dict(target=position, duration=duration, done=done, start=None)
-            self.phase = 'gripper'
-        timeline(True)
+        epoch = self.node._motion_token()
+        with self.generation.lock:
+            self.generation.require(epoch)
+            with self.lock:
+                if abs(self.node._actual_positions['gripper_joint'] - position) < .0005:
+                    if self.reference is None:
+                        self.reference = [self.node._actual_positions[name] for name in JOINTS]
+                    self.reference[5] = position
+                    self.node._last_motion_status = dict(ok=True, outcome='gripper_already_at_target')
+                    return True if blocking else None
+            done = self.node._new_motion_event()
+            with self.lock:
+                self.grip_plan = dict(target=position, duration=duration, done=done, start=None, epoch=epoch)
+                self.phase = 'gripper'
+            self.step(True)
         if not blocking:
             return None
         if not done.wait(timeout=60):
@@ -308,22 +311,25 @@ class Servo:
             for i, name in enumerate(JOINTS):
                 lo, hi = JOINT_LIMITS[name]
                 executed[i] = max(lo, min(hi, executed[i]))
+            reference = list(self.reference)
             self.last_command_clock_ns = self.node.get_clock().now().nanoseconds
-            # Expert and noisy commands are independent arrays. Never derive labels from controller feedback.
-            for pub, names, values in [(self.arm, JOINTS[:5], executed[:5]), (self.grip, JOINTS[5:], executed[5:])]:
-                msg = JointTrajectory()
-                msg.joint_names = list(names)
-                offset = 0 if len(names) == 5 else 5
-                velocities = ([30 * (value - self.previous_executed[offset + i]) for i, value in enumerate(values)]
-                              if self.previous_executed is not None else [0.] * len(values))
-                msg.points = [JointTrajectoryPoint(positions=values, velocities=velocities,
-                    time_from_start=Duration(sec=0, nanosec=0))]
-                pub.publish(msg)
-            self.previous_executed = executed
             phase = self.phase
 
-        return (clean, executed, active, phase, list(self.reference), self.last_command_clock_ns,
+        return (clean, executed, active, phase, reference, self.last_command_clock_ns,
                 completed, self.plan is not None or self.grip_plan is not None)
+
+    def publish_reference(self, executed):
+        # Expert and noisy commands are independent arrays. Never derive labels from controller feedback.
+        for pub, names, values in [(self.arm, JOINTS[:5], executed[:5]), (self.grip, JOINTS[5:], executed[5:])]:
+            msg = JointTrajectory()
+            msg.joint_names = list(names)
+            offset = 0 if len(names) == 5 else 5
+            velocities = ([30 * (value - self.previous_executed[offset + i]) for i, value in enumerate(values)]
+                          if self.previous_executed is not None else [0.] * len(values))
+            msg.points = [JointTrajectoryPoint(positions=values, velocities=velocities,
+                time_from_start=Duration(sec=0, nanosec=0))]
+            pub.publish(msg)
+        self.previous_executed = executed
 
 
 class Collector:
@@ -331,8 +337,13 @@ class Collector:
         from so_arm101_control.pick_place import PickPlaceNode
         self.args = args
         self.node = PickPlaceNode(use_sim_time=True, joint_states_topic='/joint_states_measured')
+        self.generation = StepGeneration()
+        self.node._motion_context = threading.local()
+        self.node._motion_generation_provider = lambda: self.generation.epoch
         self.sensors = Sensors(self.node)
-        self.servo = Servo(self.node)
+        # Only joined, generation-validated snapshots update expert state/cache.
+        self.node.destroy_subscription(self.node.js_sub)
+        self.servo = Servo(self.node, self.generation, self.timeline)
         self.command_pub = self.node.create_publisher(String, '/collection_command', 64)
         self.node._trajectory_executor = self.servo.execute
         self.node._gripper_executor = self.servo.gripper
@@ -352,8 +363,45 @@ class Collector:
         self.capture_thread = threading.Thread(target=self.capture, daemon=True)
         self.capture_thread.start()
 
+    def motion_call(self, callback, *args):
+        # Planning may block on wall time. Its immutable token survives that
+        # wait and is inherited by the shared module's child workers/events.
+        with self.generation.lock:
+            epoch = self.generation.epoch
+            self.generation.require(epoch)
+        self.node._motion_context.epoch = epoch
+        try:
+            return callback(*args)
+        finally:
+            del self.node._motion_context.epoch
+
+    def retire_motion(self):
+        with self.servo.lock:
+            for plan in (self.servo.plan, self.servo.grip_plan):
+                if plan:
+                    plan['done'].set()
+            self.servo.plan = self.servo.grip_plan = None
+            self.servo.previous_executed = None
+            self.servo.reference = None
+        with self.sensors.condition:
+            self.sensors.pending.clear()
+            self.sensors.acks.clear()
+
+    def timeline(self, play):
+        with self.generation.lock:
+            if play:
+                self.generation.require(self.generation.epoch)
+                return timeline(True)
+            return self.generation.cancel(lambda: timeline(False), self.retire_motion)
+
+    def restore_physical(self, code):
+        # Native restore retires its epoch before setters. The same ownership
+        # lock waits for capture/ACK/recording retirement before the RPC starts.
+        return self.generation.cancel(lambda: mcp('run_python', {'code':code}), self.retire_motion)
+
     def capture(self):
         while not self.stop.is_set():
+            epoch = None
             try:
                 try:
                     stamp, entry = self.sensors.read(timeout=30)
@@ -361,82 +409,97 @@ class Collector:
                     if self.servo.plan or self.servo.grip_plan:
                         raise TimeoutError('Motion stalled: no synchronized camera/state tick within 30 wall seconds')
                     continue
-                joint, received = entry['joint']
-                mapped = dict(zip(joint.name, joint.position))
-                if not all(name in mapped for name in JOINTS):
-                    raise ValueError('Incomplete joint state')
-                state = [mapped[name] for name in JOINTS]
-                with self.node.joint_lock:
-                    self.node._actual_positions.update(zip(JOINTS, state))
-                snapshot = entry['tick'][0]
-                if (max(abs(a-b) for a,b in zip(state,snapshot['state'])) > 1e-7 or
-                    max(abs(a-b) for a,b in zip(joint.velocity,snapshot['velocity'])) > 1e-7):
-                    raise RuntimeError('Physical joint/pose feedback channels disagree')
-                clean, executed, active, phase, reference, command_clock, completed, advance = self.servo.tick(stamp, state)
-                epoch = _COMMAND_EPOCH
-                self.command_pub.publish(String(data=json.dumps(dict(epoch=epoch,
-                    observation_stamp_ns=stamp, command=executed, advance=advance))))
-                ack = self.sensors.read_ack(epoch, stamp)
-                row = dict(sim_ns=stamp, wall_ns=time.monotonic_ns(), joint_stamp_ns=ns(joint.header.stamp),
-                    joint_receive_ns=received, wrist_stamp_ns=ns(entry['wrist'][0].header.stamp),
-                    top_stamp_ns=ns(entry['top'][0].header.stamp), wrist_receive_ns=entry['wrist'][1],
-                    top_receive_ns=entry['top'][1], state=state, action=clean, executed_action=executed,
-                    expert_observation_stamp_ns=stamp, command_clock_ns=command_clock,
-                    expert_reference=reference, executing=active, phase=phase,
-                    state_source=snapshot['state_source'], velocity=list(joint.velocity),
-                    physics_state=snapshot['state'], physics_velocity=snapshot['velocity'],
-                    physics_drive_targets=snapshot['drive_targets'],
-                    pose_stamp_ns=snapshot['sim_ns'], physics_time_s=snapshot['physics_time_s'],
-                    controller_reference=self.sensors.reference,
-                    declared_application_stamp_ns=stamp, **ack)
-                selected = self.node._selected_object
-                if selected in snapshot['bodies']:
-                    body = snapshot['bodies'][selected]
-                    row['target_object_pose'] = dict(zip(('x', 'y', 'z'), body['position']))
-                    row['target_body'] = body
-                    row['target_cup'] = snapshot['bodies']['cup_' + self.servo.params['color']]
-                with self.writer_lock:
-                    if self.writer:
-                        self.writer.add(row, {key: Sensors.image(entry[key][0]).copy() for key in ('wrist', 'top')})
-                with self.tick_condition:
-                    self.last_processed_ns = stamp
-                    self.last_snapshot = snapshot
-                    self.tick_condition.notify_all()
-                if completed:
-                    self.node._last_motion_status = dict(ok=True, outcome='physical_sim_tick_converged')
-                    for event in completed:
-                        event.set()
+                with self.generation.lock:
+                    epoch = entry['tick'][0]['epoch']
+                    self.generation.require(epoch, stamp)
+                    joint, received = entry['joint']
+                    mapped = dict(zip(joint.name, joint.position))
+                    if not all(name in mapped for name in JOINTS):
+                        raise ValueError('Incomplete joint state')
+                    state = [mapped[name] for name in JOINTS]
+                    self.node._joint_states_callback(joint)
+                    self.update_pose_cache(snapshot=entry['tick'][0])
+                    snapshot = entry['tick'][0]
+                    if (max(abs(a-b) for a,b in zip(state,snapshot['state'])) > 1e-7 or
+                        max(abs(a-b) for a,b in zip(joint.velocity,snapshot['velocity'])) > 1e-7):
+                        raise RuntimeError('Physical joint/pose feedback channels disagree')
+                    for plan in (self.servo.plan, self.servo.grip_plan):
+                        if plan:
+                            self.generation.require(plan['epoch'])
+                    clean, executed, active, phase, reference, command_clock, completed, advance = self.servo.tick(stamp, state)
+                    self.generation.require(epoch, stamp)
+                    self.servo.publish_reference(executed)
+                    self.command_pub.publish(String(data=json.dumps(dict(epoch=epoch,
+                        observation_stamp_ns=stamp, command=executed, advance=advance))))
+                    ack = self.sensors.read_ack(epoch, stamp)
+                    self.generation.require(epoch, stamp)
+                    row = dict(observation_epoch=snapshot['epoch'], expert_epoch=epoch,
+                        invalid_through_ns=self.generation.floor_ns, sim_ns=stamp, wall_ns=time.monotonic_ns(), joint_stamp_ns=ns(joint.header.stamp),
+                        joint_receive_ns=received, wrist_stamp_ns=ns(entry['wrist'][0].header.stamp),
+                        top_stamp_ns=ns(entry['top'][0].header.stamp), wrist_receive_ns=entry['wrist'][1],
+                        top_receive_ns=entry['top'][1], state=state, action=clean, executed_action=executed,
+                        expert_observation_stamp_ns=stamp, command_clock_ns=command_clock,
+                        expert_reference=reference, executing=active, phase=phase,
+                        state_source=snapshot['state_source'], velocity=list(joint.velocity),
+                        physics_state=snapshot['state'], physics_velocity=snapshot['velocity'],
+                        physics_drive_targets=snapshot['drive_targets'],
+                        pose_stamp_ns=snapshot['sim_ns'], physics_time_s=snapshot['physics_time_s'],
+                        controller_reference=self.sensors.reference,
+                        declared_application_stamp_ns=stamp, **ack)
+                    selected = self.node._selected_object
+                    if selected in snapshot['bodies']:
+                        body = snapshot['bodies'][selected]
+                        row['target_object_pose'] = dict(zip(('x', 'y', 'z'), body['position']))
+                        row['target_body'] = body
+                        row['target_cup'] = snapshot['bodies']['cup_' + self.servo.params['color']]
+                    with self.writer_lock:
+                        if self.writer:
+                            self.writer.add(row, {key: Sensors.image(entry[key][0]).copy() for key in ('wrist', 'top')})
+                    with self.tick_condition:
+                        self.last_processed_ns = stamp
+                        self.last_snapshot = snapshot
+                        self.tick_condition.notify_all()
+                    if completed:
+                        self.node._last_motion_status = dict(ok=True, outcome='physical_sim_tick_converged')
+                        for event in completed:
+                            event.set()
+            except CancelledGeneration:
+                continue
             except Exception as exc:
-                message = repr(exc)
-                self.node._qs_abort_evt.set()
-                self.node._last_motion_status = dict(ok=False, outcome='capture_error', msg=message)
-                if isinstance(exc, TimeoutError):
-                    # A step deadline fails this attempt; the next seed gets a fresh motion plan.
-                    with self.servo.lock:
-                        done = [plan['done'] for plan in (self.servo.plan, self.servo.grip_plan) if plan]
-                        self.servo.plan = self.servo.grip_plan = None
-                        self.servo.reference = [self.node._actual_positions[name] for name in JOINTS]
-                    try:
-                        timeline(False)
-                    except Exception as pause_error:
-                        self.failure = repr(pause_error)
-                    for event in done:
-                        event.set()
-                else:
-                    self.failure = message
-                if getattr(self.node, '_motion_event', None):
-                    self.node._motion_event.set()
-                if self.failure:
-                    return
+                with self.generation.lock:
+                    if epoch is not None and epoch != self.generation.epoch:
+                        continue
+                    message = repr(exc)
+                    self.node._qs_abort_evt.set()
+                    self.node._last_motion_status = dict(ok=False, outcome='capture_error', msg=message)
+                    if isinstance(exc, TimeoutError):
+                        # A step deadline fails this attempt; the next seed gets a fresh motion plan.
+                        with self.servo.lock:
+                            done = [plan['done'] for plan in (self.servo.plan, self.servo.grip_plan) if plan]
+                            self.servo.plan = self.servo.grip_plan = None
+                            self.servo.reference = [self.node._actual_positions[name] for name in JOINTS]
+                        try:
+                            self.timeline(False)
+                        except Exception as pause_error:
+                            self.failure = repr(pause_error)
+                        for event in done:
+                            event.set()
+                    else:
+                        self.failure = message
+                    if getattr(self.node, '_motion_event', None):
+                        self.node._motion_event.set()
+                    if self.failure:
+                        return
 
     def advance_ticks(self, count):
         snapshots = []
         for _ in range(count):
             with self.tick_condition:
                 previous = self.last_processed_ns
-            timeline(True)
+                epoch = self.generation.epoch
+            self.timeline(True)
             with self.tick_condition:
-                if not self.tick_condition.wait_for(lambda: self.last_processed_ns > previous or self.failure, timeout=20):
+                if not self.tick_condition.wait_for(lambda: (self.last_snapshot and self.last_snapshot['epoch'] == epoch and self.last_processed_ns > previous) or self.failure, timeout=20):
                     raise TimeoutError('One-frame capture/command handshake exceeded 20 wall seconds')
                 if self.failure:
                     raise RuntimeError(self.failure)
@@ -457,14 +520,14 @@ class Collector:
         raise TimeoutError('Collection ROS graph did not become ready')
 
     def scene(self, params, baseline):
-        timeline(False)
+        self.timeline(False)
         if self.node._attached_lego_name:
             self.node._detach_lego_sync()
         mcp('run_python', {'code': 'import collection_runtime as c\nc.runtime().require_scene()\nresult=True'})
         if self.args.replay_receipt:
             replay = json.loads(self.args.replay_receipt.read_text())
-            restored = mcp('run_python', {'code': 'import collection_runtime as c\nresult=c.runtime().restore(' +
-                repr(replay['initial_physical']) + ',arm=True)'})
+            restored = self.restore_physical('import collection_runtime as c\nresult=c.runtime().restore(' +
+                repr(replay['initial_physical']) + ',arm=True)')
             self.node.objects_data = replay['initial_objects']
             self.node._drop_data = replay['initial_cups']
             self.servo.reference = list(replay['initial_expert_reference'])
@@ -491,14 +554,23 @@ class Collector:
         # Resume only to get the post-teleport poses, then freeze while scene updates/planning run.
         mcp('run_python', {'code': 'import collection_runtime as c\nresult=c.runtime().reset_velocities()'})
         self.advance_ticks(6)
-        self.scene_restore = mcp('run_python', {'code': 'import collection_runtime as c\nr=c.runtime()\ns=r.snapshot()\nresult=r.restore(s,arm=True)'})
+        self.scene_restore = self.restore_physical('import collection_runtime as c\nr=c.runtime()\ns=r.snapshot()\nresult=r.restore(s,arm=True)')
         return cups
 
+    def update_pose_cache(self, snapshot):
+        objects, cups = physical_pose_caches(snapshot)
+        self.node._physical_pose_cache = True
+        with self.node.objects_lock:
+            self.node.objects_data = objects
+        with self.node._drop_lock:
+            self.node._drop_data = cups
+
     def sync_scene(self):
+        self.update_pose_cache(self.episode_start_physical)
         self.node._remove_lego_collision_objects()
         self.node._remove_cup_collision_objects()
-        self.node._add_cup_collision_objects()
-        self.node._add_lego_collision_objects()
+        self.node._add_cup_collision_objects(cups_dict=dict(self.node._drop_data))
+        self.node._add_lego_collision_objects(legos_dict=dict(self.node.objects_data))
         # Verify the asynchronous planning-scene updates reached MoveIt before accepting the scene.
         expected = set(self.node._cup_collision_names + self.node._lego_collision_names)
         deadline = time.monotonic() + 15
@@ -511,14 +583,16 @@ class Collector:
                               response.scene.robot_state.joint_state.position)) if response else {})
             physical = self.episode_start_physical['state']
             feedback_matches = all(name in state and abs(state[name]-q) < 1e-5 for name,q in zip(JOINTS,physical))
-            if expected and expected <= actual and feedback_matches:
+            poses = (collision_pose_errors(response.scene.world.collision_objects, self.episode_start_physical)
+                     if response else dict(passed=False))
+            if expected and expected <= actual and feedback_matches and poses['passed']:
+                self.scene_pose_check = poses
                 break
             if time.monotonic() > deadline:
-                raise TimeoutError(f'Planning scene missing {expected - actual} or physical feedback differs')
+                raise TimeoutError(f'Planning scene missing {expected - actual}, physical feedback differs, or collision pose mismatch: {poses}')
             self.stop.wait(.05)
 
     def run(self):
-        global _COMMAND_EPOCH
         args = self.args
         root = confined(args.output)
         if (root / 'superseded.json').exists():
@@ -549,7 +623,7 @@ class Collector:
         disk_wait = old_summary.get('disk_wait_seconds', 0.)
         clock_config = mcp('run_python', {'code': (REPO / 'linux-env/scripts/collect/configure_clock.py').read_text() + '\nresult=configure(30)'})
         transport_config = mcp('run_python', {'code': 'import sys\nsys.path.insert(0,' + repr(str(REPO / 'linux-env/scripts/collect')) + ')\nimport collection_runtime as c\nresult=c.install()'})
-        _COMMAND_EPOCH = transport_config['epoch']
+        self.generation.install(transport_config)
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             counts = mcp('run_python', {'code': 'import collection_runtime as c\nr=c.runtime()\nresult=[r.node.count_subscribers("/joint_states_measured"),r.node.count_subscribers("/collection_tick"),r.node.count_subscribers("/collection_command_ack")]'})
@@ -561,7 +635,7 @@ class Collector:
         self.advance_ticks(1)
         self.wait_ready()
         self.node._cmd_toggle_ground_plane()
-        timeline(False)
+        self.timeline(False)
         if previous:
             baseline = previous['baseline']
             self.baseline_cup_layout = previous['baseline_cup_layout']
@@ -586,6 +660,7 @@ class Collector:
                            'linux-env/scripts/collect/storage.py',
                            'linux-env/scripts/collect/collection_runtime.py',
                            'linux-env/scripts/collect/success.py',
+                           'linux-env/scripts/collect/scene_sync.py',
                            'linux-env/scripts/collect/protocol.py',
                            'linux-env/scripts/collect/configure_clock.py',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/pick_place.py',
@@ -638,8 +713,7 @@ class Collector:
             writer = None
             try:
                 # Home with the same shared primitive used by Quickstart, with sim ticks active.
-                self.node._motion_event = threading.Event()
-                self.node._cmd_grasp_home_data()
+                self.motion_call(self.node._cmd_grasp_home_data)
                 if not self.node._motion_event.wait(timeout=90) or not self.node._last_motion_status.get('ok'):
                     raise RuntimeError('Pre-episode home failed')
                 self.servo.configure(params)
@@ -657,17 +731,19 @@ class Collector:
                 receipt['initial_cups'] = dict(self.node._drop_data)
                 receipt['initial_physical'] = self.scene_restore['snapshot']
                 receipt['episode_start_physical'] = self.episode_start_physical
+                receipt['planning_scene_pose_check'] = self.scene_pose_check
+                receipt['initial_restore_check'] = {k:v for k,v in self.scene_restore.items() if k != 'snapshot'}
                 receipt['initial_restore_error_m'] = self.scene_restore['max_position_error_m']
                 receipt['initial_expert_reference'] = list(self.servo.reference)
                 writer = EpisodeWriter(path, 30)
                 with self.writer_lock:
                     self.writer = writer
                 cycle_result = {}
-                cycle = threading.Thread(target=lambda: cycle_result.update(ok=self.node.run_cycle(params['object'])), daemon=True)
+                cycle = threading.Thread(target=lambda: cycle_result.update(ok=self.motion_call(self.node.run_cycle, params['object'])), daemon=True)
                 cycle.start(); cycle.join(timeout=args.episode_deadline)
                 if cycle.is_alive():
                     self.node._qs_abort_evt.set()
-                    timeline(False)
+                    self.timeline(False)
                     cycle.join(timeout=5)
                     if cycle.is_alive():
                         self.failure = 'Timed-out cycle did not stop; refusing overlapping episodes'
@@ -685,7 +761,7 @@ class Collector:
                 receipt['accepted'] = True
             except Exception as exc:
                 receipt['error'] = repr(exc)
-                timeline(False)
+                self.timeline(False)
             finally:
                 with self.writer_lock:
                     self.writer = None
@@ -732,7 +808,7 @@ class Collector:
     def close(self):
         self.stop.set()
         try:
-            timeline(False)
+            self.timeline(False)
             mcp('run_python', {'code': "import carb\ns=carb.settings.get_settings()\ns.set_int('/app/runLoops/main/rateLimitFrequency',10)\ns.set_bool('/app/runLoops/main/rateLimitEnabled',True)\nresult=True"})
         finally:
             self.executor.shutdown(timeout_sec=5)
@@ -741,6 +817,7 @@ class Collector:
 
     def request_stop(self):
         self.stop.set()
+        self.timeline(False)
         self.node._qs_abort_evt.set()
         self.node._last_motion_status = dict(ok=False, outcome='collection_stopped')
         with self.servo.lock:

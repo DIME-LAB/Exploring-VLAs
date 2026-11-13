@@ -127,7 +127,7 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
 - [ ] 3.1d Pilot 50 episodes, validate (load with LeRobotDataset, feature/fps match with deployment, spot-check
       videos), then full collection ~300 per colour (red/green/blue, ~900) with per-colour task strings, plus a
       data card.
-    - [ ] Pilot: 50 accepted episodes, balanced 17/17/16, validated and copied to the Mac (5-episode smoke passed).
+    - [ ] Pilot: 50 accepted episodes, balanced 17/17/16, validated and copied to the Mac (corrected 5-episode smoke required).
     - [ ] Full collection: ~900 episodes; lead schedules after pilot review.
       Searched 2026-11-13: no larger existing sim set on HF (3 accounts + global search), ASU Drive,
       dual-a4500 or rtx6000 (own folders); only teammates' machines unchecked.

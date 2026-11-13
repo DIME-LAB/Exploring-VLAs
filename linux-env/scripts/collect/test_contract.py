@@ -17,7 +17,7 @@ class ContractTests(unittest.TestCase):
                             image_receive_epoch_ns=wall, state=[i * .001] * 6,
                             action=[i * .001 + .035] * 6, executed_action=[i * .001 + .04] * 6, expert_reference=[1. + i * .001] * 6,
                             expert_observation_stamp_ns=sim, command_clock_ns=sim + 33333333))
-            out[-1].update(state_source='isaac_articulation', pose_stamp_ns=sim,
+            out[-1].update(epoch=1, observation_epoch=1, expert_epoch=1, invalid_through_ns=0, state_source='isaac_articulation', pose_stamp_ns=sim,
                            velocity=[.03] * 6,
                            physics_state=list(out[-1]['state']),physics_velocity=[.03]*6,
                            application_stamp_ns=sim, declared_application_stamp_ns=sim,
@@ -33,6 +33,11 @@ class ContractTests(unittest.TestCase):
         for row in rows:
             row['application_stamp_ns'] += 5000000000
         self.assertFalse(timing_audit(rows, 30)['passed'])
+
+    def test_reset_generation_or_same_stamp_snapshot_is_rejected(self):
+        for key, value in [('observation_epoch',2),('expert_epoch',2),('epoch',2),('invalid_through_ns',1000000000)]:
+            rows=self.rows();rows[0][key]=value
+            with self.subTest(key=key):self.assertFalse(timing_audit(rows,30)['passed'])
 
     def test_reference_feedback_is_rejected(self):
         rows = self.rows(); rows[1]['state_source'] = 'controller_reference'

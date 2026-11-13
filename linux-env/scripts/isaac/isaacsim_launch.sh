@@ -419,7 +419,13 @@ do_launch() {
         # Runtime outputs (scene_states/, videos/) go outside the source tree, not Isaac's cwd.
         default_output=/tmp/soarm101-resources
         [ -n "${INSTANCE_ROOT:-}" ] && default_output="$INSTANCE_ROOT/resources"
-        export MCP_CLIENT_OUTPUT_DIR="${MCP_CLIENT_OUTPUT_DIR:-$default_output}"
+        if [ -n "${INSTANCE_ROOT:-}" ]; then
+            # Indexed instances never inherit another session's output path.
+            export MCP_CLIENT_OUTPUT_DIR="$default_output"
+            python3 "$SCRIPT_DIR/../collect/storage.py" "$MCP_CLIENT_OUTPUT_DIR" || exit 2
+        else
+            export MCP_CLIENT_OUTPUT_DIR="${MCP_CLIENT_OUTPUT_DIR:-$default_output}"
+        fi
         mkdir -p "$MCP_CLIENT_OUTPUT_DIR"
         # The ROS 2 bridge's dlopens exhaust glibc's static-TLS surplus on top of Isaac+torch, and
         # torch needs the venv's nvJitLink resolved first. ld.so reads both before Python starts,

@@ -4,7 +4,11 @@ import math
 # A cylinder strictly within the cup STL's minimum inner radius (~25.96 mm).
 # Cup body coordinates have their origin at the base; rim height is 96.52 mm.
 INTERIOR_RADIUS_M = .025
-INTERIOR_FLOOR_M = .002
+# Asset floor is 1.2 mm; block restOffset=-0.5 mm, cup restOffset=0.
+# Allow that resting overlap plus 0.1 mm numerical/collision tolerance.
+PHYSICAL_FLOOR_M = .0012
+FLOOR_REST_TOLERANCE_M = .0006
+INTERIOR_FLOOR_M = PHYSICAL_FLOOR_M - FLOOR_REST_TOLERANCE_M
 INTERIOR_RIM_M = .094
 SETTLED_TICKS = 15
 
