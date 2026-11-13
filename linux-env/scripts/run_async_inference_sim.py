@@ -166,7 +166,7 @@ def build_parser():
     model_args.add_argument("--model", help="Shared GUI/deploy model preset.")
     model_args.add_argument(
         "--pretrained",
-        default=DEFAULTS["pretrained"],
+        default=None,
         help="HF repo id OR path to a `pretrained_model` dir.",
     )
     p.add_argument("--policy-device", default=DEFAULTS["policy_device"])
@@ -246,6 +246,8 @@ def build_parser():
 def parse_args(argv=None, parser=None):
     p = parser or build_parser()
     args = p.parse_args(argv)
+    if args.pretrained is None:
+        args.pretrained = DEFAULTS["pretrained"]
     repo = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(repo / "vla_SO-ARM101/src/so_arm101_control/so_arm101_control"))
     from model_presets import MODEL_PRESETS, resolve_model
