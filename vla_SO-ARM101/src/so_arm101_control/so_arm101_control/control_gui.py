@@ -16,6 +16,7 @@ import random
 import signal
 import subprocess
 import sys
+import shutil
 import threading
 import time
 import tkinter as tk
@@ -6092,6 +6093,14 @@ class SOArm101ControlGUI(Node):
 
     def _cmd_rec_start(self):
         """Spawn lerobot-record + mirror, then start the orchestration thread."""
+        if getattr(self, '_inf_state', {}).get('phase', 'idle') != 'idle':
+            self._append_log('Record: stop inference before recording scripted motion', 'err')
+            return
+        if shutil.which('xdotool') is None:
+            self._append_log(
+                'Record: xdotool is required for episode save/discard; '
+                'install with sudo apt install xdotool', 'err')
+            return
         with self._rec_lock:
             if self._rec_state['phase'] != 'idle':
                 self._append_log('Record: already running', 'warn')
@@ -6202,6 +6211,7 @@ class SOArm101ControlGUI(Node):
             f'--dataset.reset_time_s={REC_RESET_TIME_S}',
             f'--dataset.single_task={single_task}',
             '--dataset.push_to_hub=false',
+            '--play_sounds=false',
             '--display_data=false',
         ]
         if resume_mode:
@@ -6218,6 +6228,7 @@ class SOArm101ControlGUI(Node):
             lp = subprocess.Popen(
                 cmd, stdout=log_fd, stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
+                env={**os.environ, 'LEROBOT_REQUIRE_KEYBOARD': '1'},
                 start_new_session=True)
             self._rec_state['lerobot_proc'] = lp
             self._rec_state['lerobot_log'] = log_path
@@ -6369,10 +6380,17 @@ class SOArm101ControlGUI(Node):
         # Warm-up wait — block until lerobot logs "Recording episode 0".
         # Lerobot enters Phase A immediately on spawn; we need the buffer
         # to be live before our discard signal lands.
-        for _ in range(75):
+        for _ in range(600):
             if st['stop_evt'].is_set():
                 return
-            if st.get('lerobot_proc') and st['lerobot_proc'].poll() is None:
+            lp = st.get('lerobot_proc')
+            if lp and lp.poll() is not None:
+                self._append_log(
+                    f'Record: recorder exited during startup (rc={lp.returncode}); '
+                    f'see {st.get("lerobot_log", "")}', 'err')
+                self._cmd_rec_stop()
+                return
+            if lp:
                 log_path = st.get('lerobot_log', '')
                 if log_path and os.path.exists(log_path):
                     try:
@@ -6382,6 +6400,10 @@ class SOArm101ControlGUI(Node):
                     except Exception:
                         pass
             time.sleep(0.2)
+        else:
+            self._append_log('Record: recorder did not become ready in 120 s', 'err')
+            self._cmd_rec_stop()
+            return
 
         # Step 1: discard the just-opened Phase A immediately. Sending
         # Left makes lerobot exit Phase A early (captured ~0s of data),
@@ -6427,7 +6449,9 @@ class SOArm101ControlGUI(Node):
         # Step 5: wait for lerobot to enter the fresh Phase A. Same
         # gate the loop uses between iterations — keeps us from racing
         # the next pick-place into Phase B's tail.
-        self._rec_wait_for_new_phase_a(prev_phase_a, timeout_s=25.0)
+        if not self._rec_wait_for_new_phase_a(prev_phase_a, timeout_s=60.0):
+            self._cmd_rec_stop()
+            return
 
         with self._rec_lock:
             if st['phase'] != 'starting':
@@ -6496,6 +6520,7 @@ class SOArm101ControlGUI(Node):
             if verdict == 'PASS':
                 self._rec_lerobot_advance()
                 success_count += 1
+                st['episode'] = success_count
                 self._append_log(
                     f'Record: ✓ episode {success_count}/{n_target} saved '
                     f'(lego={current_lego}, attempt {attempt})')
@@ -6506,13 +6531,18 @@ class SOArm101ControlGUI(Node):
                     f'(verdict={verdict}, lego={current_lego}, '
                     f'attempt {attempt})')
 
+            if success_count >= n_target:
+                break
+
             # Wait for lerobot to confirm it has actually exited Phase A.
             # On PASS this means "Reset the environment" line appeared (lerobot
             # is now in its non-recording reset_time_s window — safe to
             # randomize the scene). On discard the rerecord branch in lerobot
             # skips the reset window, so we don't gate on Phase B for that.
             if verdict == 'PASS':
-                self._rec_wait_for_new_phase_b(prev_phase_b, timeout_s=10.0)
+                if not self._rec_wait_for_new_phase_b(prev_phase_b, timeout_s=10.0):
+                    self._cmd_rec_stop()
+                    return
 
             # Choose NEXT lego before prep so qs_select can target it.
             current_lego = random.choice(legos)
@@ -6528,17 +6558,20 @@ class SOArm101ControlGUI(Node):
             # an early-failing next cycle could send Left during lerobot's
             # post-Phase-B rerecord-decision window and drop the previous
             # success buffer.
-            self._rec_wait_for_new_phase_a(prev_phase_a, timeout_s=25.0)
+            if not self._rec_wait_for_new_phase_a(prev_phase_a, timeout_s=60.0):
+                self._cmd_rec_stop()
+                return
 
-        # Drain window: give lerobot time to finalize the last save
-        # AFTER Phase B before we send SIGINT. save_episode() runs after
-        # Phase B; SIGINT during it loses the episode (cf. ep10 loss in
-        # earlier run). Wait at least reset_time_s + a small buffer.
+        # The last episode has no reset window. Wait for its encoder/finalizer
+        # to exit instead of preparing an unused scene or interrupting a save.
         if success_count >= n_target and not st['stop_evt'].is_set():
-            self._append_log(
-                f'Record: target reached, draining last save '
-                f'(reset_time_s + buffer)…')
-            time.sleep(20.0)
+            self._rec_set_status(status_text='SAVING (final episode)')
+            lp = st.get('lerobot_proc')
+            if lp:
+                try:
+                    lp.wait(timeout=120.0)
+                except subprocess.TimeoutExpired:
+                    self._append_log('Record: final save did not finish in 120 s', 'err')
 
         # Clean exit
         if not st['stop_evt'].is_set():
@@ -6705,11 +6738,12 @@ class SOArm101ControlGUI(Node):
         try:
             subprocess.run(
                 ['xdotool', 'key', '--clearmodifiers', key],
-                check=False, timeout=2,
+                check=True, timeout=2,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception as exc:
             self._append_log(
                 f'Record: xdotool key {key} failed: {exc}', 'err')
+            self._cmd_rec_stop()
 
     def _rec_run_episode_with_retry(self, lego, episode_idx, n_target):
         """Run one episode for `lego`, re-randomizing on QS halt up to

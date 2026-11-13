@@ -77,6 +77,10 @@ if ! command -v colcon >/dev/null 2>&1; then
     exit 1
 fi
 echo "  ✓ colcon"
+if ! command -v xdotool >/dev/null 2>&1; then
+    echo "  WARNING: Record Sim needs xdotool for episode save/discard."
+    echo "           Install: sudo apt install xdotool"
+fi
 echo ""
 
 # ---------------------------------------------------------------------------

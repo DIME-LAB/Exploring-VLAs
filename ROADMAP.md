@@ -41,7 +41,7 @@ cadence (~14 Hz) not matching the camera-bound recording loop.
       Inference dropdown (`INF_MODEL_PRESETS`) and `deploy_sim.sh --model`; make the Inference tab use the
       Phase 1 defaults (17.4 Hz fps, rgb8 cameras, real-RTC on/off toggle); fix the Method radio SEGV and
       wire recording in async mode (both from the April 29 session's open priorities).
-- [ ] 1.12 Record Sim tab works with the Phase 1 changes (rgb8 cameras, rate limit, fork `dev`); verified by
+- [x] 1.12 Record Sim tab works with the Phase 1 changes (rgb8 cameras, rate limit, fork `dev`); verified by
       recording 2 episodes and loading them with LeRobotDataset (needed before 3.1 data collection).
 - [x] 1.13 `soarm101.new_stage` crashes Isaac 6.1 with live ROS action graphs: tear graphs/publishers down
       first or refuse with a clear error.

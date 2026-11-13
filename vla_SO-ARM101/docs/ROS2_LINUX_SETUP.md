@@ -31,6 +31,7 @@ lerobot consumer side.
 | RoboStack-Jazzy (via pixi) | Provides Python 3.12 + rclpy + ROS2 message types for lerobot | `pixi install --manifest-path linux-env/pixi.toml` (handled by `bootstrap.sh`) |
 | [Isaac Sim 6.1](https://developer.nvidia.com/isaac-sim) | Physics + USD scene + ROS2 publishers | `pip install isaacsim` into a venv ([guide](https://docs.isaacsim.omniverse.nvidia.com/latest/installation/install_python.html)). Default expected at `$HOME/env_isaacsim61/bin/isaacsim`; override via `ISAACSIM_BIN` env var. |
 | `colcon` | ROS2 workspace builder | `sudo apt install python3-colcon-common-extensions` (already pulled in by ros-humble-desktop) |
+| `xdotool` | Record Sim episode save/discard through the recorder’s X11 listener | `sudo apt install xdotool` |
 
 ## Why two Pythons (don't skip this)
 

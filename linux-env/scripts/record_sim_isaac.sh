@@ -44,6 +44,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Keep Humble's Python 3.10/type-support paths out of the pixi Jazzy recorder.
+unset PYTHONPATH AMENT_PREFIX_PATH CMAKE_PREFIX_PATH COLCON_PREFIX_PATH \
+      ROS_DISTRO ROS_VERSION ROS_PYTHON_VERSION ROSCONSOLE_FORMAT \
+      ROS_LOCALHOST_ONLY ROS_AUTOMATIC_DISCOVERY_RANGE
+if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+    LD_LIBRARY_PATH="$(printf '%s' "$LD_LIBRARY_PATH" | tr ':' '\n' \
+        | { grep -vE '/(opt/ros|ros2_ws|Desktop/ros2_ws)' || true; } | paste -sd: -)"
+    if [ -n "$LD_LIBRARY_PATH" ]; then export LD_LIBRARY_PATH; else unset LD_LIBRARY_PATH; fi
+fi
+PIXI_BIN="$(command -v pixi || true)"
+[ -n "$PIXI_BIN" ] || PIXI_BIN="$HOME/.pixi/bin/pixi"
+[ -x "$PIXI_BIN" ] || { echo "pixi not found; run linux-env/scripts/bootstrap.sh" >&2; exit 1; }
+
 # DDS config — match Mac (Cyclonedds, lo interface, multicast loopback).
 # Force-override CYCLONEDDS_URI: the system default disables multicast,
 # which prevents cross-process-tree discovery (system Humble publishers
@@ -68,6 +81,20 @@ export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
 # Patched in lerobot/common/control_utils.py (env-var honored before the
 # is_headless() check).
 
+# The GUI uses pynput's X11 listener for episode boundaries. Install its
+# declared LeRobot extra if this env was provisioned for inference only.
+if ! "$PIXI_BIN" run --manifest-path "$ENV_DIR/pixi.toml" python -c \
+    'import importlib.util, sys; sys.exit(importlib.util.find_spec("pynput") is None)'; then
+    "$PIXI_BIN" run --manifest-path "$ENV_DIR/pixi.toml" pip install 'pynput>=1.7.8,<1.9.0'
+fi
+if [ "${LEROBOT_REQUIRE_KEYBOARD:-0}" = 1 ]; then
+    case "${LEROBOT_DISABLE_KEYBOARD:-0}" in
+        1|true|True|yes) echo 'Record Sim requires keyboard events; unset LEROBOT_DISABLE_KEYBOARD' >&2; exit 1 ;;
+    esac
+    "$PIXI_BIN" run --manifest-path "$ENV_DIR/pixi.toml" python -c 'from pynput import keyboard' \
+        || { echo 'Record Sim needs a working X11 keyboard listener (DISPLAY/XAUTHORITY)' >&2; exit 1; }
+fi
+
 # Camera config — pointed at Isaac Sim's existing _sim-suffixed topics.
 # Feature keys (`wrist`, `top`) become `observation.images.{wrist,top}` in
 # the v3 dataset, matching the real parity target's schema.
@@ -75,7 +102,7 @@ export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
 # This resolution and feature-key mapping match the recorded training schema.
 DEFAULT_CAMERAS='{wrist: {type: ros2, topic: /wrist_camera_rgb_sim, encoding: rgb8, width: 640, height: 480, fps: 30}, top: {type: ros2, topic: /workspace_camera_sim, encoding: rgb8, width: 640, height: 480, fps: 30}}'
 
-cd "$ENV_DIR" && exec pixi run lerobot-record \
+cd "$ENV_DIR" && exec "$PIXI_BIN" run lerobot-record \
   --robot.type=so101_ros2 \
   --robot.robot_type=so_follower \
   --robot.use_degrees=true \
@@ -90,5 +117,6 @@ cd "$ENV_DIR" && exec pixi run lerobot-record \
   --dataset.episode_time_s=30 \
   --dataset.reset_time_s=5 \
   --dataset.push_to_hub=false \
+  --play_sounds=false \
   --display_data=true \
   "$@"
