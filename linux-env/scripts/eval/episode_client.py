@@ -72,7 +72,43 @@ def main() -> int:
                     executor_tasks=len(getattr(executor, '_tasks', [])),
                     action_clients=action_clients,
                     status_arrays={k: dict(v) for k,v in status_arrays.items()})
-    state = {"paused": True, "ep_t0": float("inf"), "chunks": 0, "first_chunk_t": None}
+    state = {"paused": True, "ep_t0": float("inf"), "chunks": 0, "first_chunk_t": None,
+             "request_events": [], "chunk_events": []}
+    request_context = {}
+
+    # Telemetry runs only in the observation/receiver workers. Dispatch is untouched.
+    original_observation = client.control_loop_observation
+    def traced_observation(*args, **kwargs):
+        request_context.clear()
+        request_context.update(trigger_wall_time=time.time(),
+                               queue_depth_at_capture_request=client.action_queue.qsize(),
+                               chunk_size=client.action_chunk_size,
+                               chunk_size_threshold=cfg.chunk_size_threshold)
+        return original_observation(*args, **kwargs)
+    client.control_loop_observation = traced_observation
+
+    if client._observation_process:
+        original_capture = client._observation_process.capture
+        def traced_capture(task):
+            try:
+                captured = original_capture(task)
+            except Exception as error:
+                state["request_events"].append(dict(request_context, error=str(error), error_wall_time=time.time()))
+                raise
+            if captured.sent and not captured.cancelled:
+                state["request_events"].append(dict(request_context,
+                    observation_timestamp=captured.timestamp, timestep=captured.timestep,
+                    capture_rpc_s=captured.capture_s, capture_return_wall_time=time.time()))
+            return captured
+        client._observation_process.capture = traced_capture
+    else:
+        original_send = client.send_observation
+        def traced_send(observation):
+            state["request_events"].append(dict(request_context,
+                observation_timestamp=observation.get_timestamp(), timestep=observation.get_timestep(),
+                rpc_start_wall_time=time.time()))
+            return original_send(observation)
+        client.send_observation = traced_send
 
     state_lock = threading.Lock()
 
@@ -91,6 +127,12 @@ def main() -> int:
             ):
                 return
             state["chunks"] += 1
+            arrival = time.time()
+            state["chunk_events"].append(dict(
+                arrival_wall_time=arrival, observation_timestamp=incoming[0].get_timestamp(),
+                first_step=incoming[0].get_timestep(), actions=len(incoming),
+                observation_to_arrival_s=arrival-incoming[0].get_timestamp(),
+                queue_depth_before_merge=client.action_queue.qsize()))
             if state["first_chunk_t"] is None:
                 state["first_chunk_t"] = time.time() - state["ep_t0"]
             orig_aggregate(incoming, aggregate_fn)
@@ -148,7 +190,8 @@ def main() -> int:
             )  # flush server obs queue + predicted timesteps
             with state_lock:
                 state.update(
-                    chunks=0, first_chunk_t=None, ep_t0=time.time(), paused=False
+                    chunks=0, first_chunk_t=None, ep_t0=time.time(), paused=False,
+                    request_events=[], chunk_events=[]
                 )
             emit("EPSTART", {"ep": ep, "t0": state["ep_t0"]})
             try:
@@ -162,7 +205,9 @@ def main() -> int:
                 emit("FATAL", {"error": str(error),
                                "metrics": getattr(client, "control_loop_stats", {}),
                                "resources_before": resources_before,
-                               "resources_after": resources()})
+                               "resources_after": resources(),
+                               "request_events": state["request_events"],
+                               "chunk_events": state["chunk_events"]})
                 raise
             metrics = client.control_loop_stats
             with state_lock:
@@ -181,6 +226,8 @@ def main() -> int:
                     **metrics,
                     "resources_before": resources_before,
                     "resources_after": resources(),
+                    "request_events": state["request_events"],
+                    "chunk_events": state["chunk_events"],
                     "chunks": state["chunks"],
                     "first_chunk_s": state["first_chunk_t"],
                     "aborted": abort.is_set(),

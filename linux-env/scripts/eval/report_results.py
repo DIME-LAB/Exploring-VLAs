@@ -45,6 +45,8 @@ def main():
     if a.complete and not complete:
         raise RuntimeError('Cannot mark report complete: evaluation matrix is incomplete')
     fields = ['condition','episode','seed','outcome','time_to_grasp_s','time_to_place_s','time_s','effective_action_fps',
+              'empty_ticks_after_startup','empty_ticks_pct','first_chunk_s','request_chunk_mean_ms','request_chunk_p95_ms',
+              'request_queue_depth_mean','chunk_size_threshold','actions_per_chunk',
               'rtc_enabled','requested_fps','sim_cap_hz','actions_sent','chunks','max_blue_lift_m','failure_note','video',
               'host_load_start','host_load_end','missed_ticks','empty_ticks_after_startup','nonmonotonic_action_steps']
     with (root/'episodes.csv').open('w') as f:
@@ -65,22 +67,23 @@ def main():
         'Scenes are paired by saved physical block/cup poses, the arm is homed before every episode, and each policy window lasts up to 45 wall seconds. '
         'The task is "Pick a blue lego and place it in blue cup"; state is the rec_222812-compatible `/joint_states` controller reference. '
         'Videos, pose traces, resolved settings and model/fork commits are retained under `raw/`; `episodes.csv` combines the per-episode measurements.', '',
-        '**Status: '+ ('complete (50 scored episodes).' if complete else 'INCOMPLETE; preparation/partial results only. NEW runs await the lead’s checkpoint-ready message.') , '',
-        '| Condition | Success | 95% Wilson interval | Grasped, not placed | No grasp | Mean effective Hz | Seeds |',
-        '|---|---:|---:|---:|---:|---:|---|']
+        '**Status: '+ ('complete (50 scored episodes).' if complete else 'INCOMPLETE; available scored conditions only. Remaining matrix conditions are pending.') , '',
+        '| Condition | Success | 95% Wilson interval | Grasped, not placed | No grasp | Mean effective Hz | Mean empty ticks % | Seeds |',
+        '|---|---:|---:|---:|---:|---:|---:|---|']
     chart = []
     for name in order:
         rows = results.get(name, [])
         if not rows:
-            lines.append(f'| {name} | pending | — | — | — | — | 900000–900009 |')
+            lines.append(f'| {name} | pending | — | — | — | — | — | 900000–900009 |')
             continue
         n = len(rows); k = sum(r['outcome']=='success' for r in rows)
         grasp = sum(r['outcome']=='grasped-not-placed' for r in rows)
         fail = sum(r['outcome']=='no-grasp' for r in rows)
         lo,hi = wilson(k,n)
         hz = statistics.mean(r['effective_action_fps'] for r in rows)
+        starvation = statistics.mean(r['empty_ticks_pct'] for r in rows)
         seeds = ', '.join(str(r['seed']) for r in rows)
-        lines.append(f'| {name} | {k}/{n} ({k/n:.0%}) | {lo:.1%}–{hi:.1%} | {grasp} | {fail} | {hz:.3f} | {seeds} |')
+        lines.append(f'| {name} | {k}/{n} ({k/n:.0%}) | {lo:.1%}–{hi:.1%} | {grasp} | {fail} | {hz:.3f} | {starvation:.2f}% | {seeds} |')
         chart.append((name,k/n,lo,hi,n))
     lines += ['', 'The OLD comparison is a **client-side baseline**: 30 fps, RTC disabled, capture in the client process, normal scheduling; '
         'versus 17.4 Hz, real RTC, isolated capture and FIFO10 dispatch. Both use the current dispatcher implementation; '
@@ -94,6 +97,14 @@ def main():
         'The controllers were restarted to clear retained action status history. Earlier per-tick-FJT runs are '
         'diagnostic only: status arrays grew to thousands of entries and dispatch degraded, including with fresh clients. '
         'The scored matrix follows a consecutive-episode streaming regression; diagnostic traces remain under `diagnostics/`.', '',
+        'Validity uses zero missed scheduling slots, no stale-camera aborts and bounded actuator-send cost (p95 below 5 ms). '
+        'The effective-Hz band used in the initial dispatcher regression was removed as a scoring validity rule: '
+        'an empty action queue is a measured outcome, not a scheduling failure. This rule applies equally to all six conditions. '
+        'Mean starvation is the mean per-episode percentage of post-startup opportunities with no queued action; '
+        'the denominator is dispatched actions plus empty and missed post-startup ticks. First-chunk latency and '
+        'per-chunk request-to-arrival latency/queue depth are retained in the CSV and each `chunks.csv`. '
+        'Queue depth is sampled when the observation worker triggers capture; end-to-end latency includes capture, transport, '
+        'server queueing and inference. It is not a GPU-only inference duration. Refill threshold remains 0.5 with 50 actions per chunk.', '',
         '## Paired comparisons', '', '| Contrast (B minus A) | Shared seeds | Success difference | B-only successes | A-only successes | Exact McNemar p |',
         '|---|---:|---:|---:|---:|---:|']
     pairs = [('old-before','old-after')]
@@ -138,7 +149,7 @@ def main():
         '## Artifacts', '',
         '- `episodes.csv`: combined raw episode table, including seed, outcome, timings, RTC, cap and failure notes.',
         '- `success-rates.png`: success fractions with 95% Wilson intervals.',
-        '- `contact-sheet.jpg`: closest/furthest-to-cup episodes per available condition; these are relative rankings, not success claims.',
+        '- `contact-sheet.jpg`: best/worst episodes by outcome, then final blue-to-cup distance; relative ranks do not imply success.',
         '- `raw/<condition>/`: every scored MP4, pose trace, per-episode result, client/server logs and run config.',
         '- `scene-bank/`: exact shared initial physical poses.', '']
     (root/'README.md').write_text('\n'.join(lines))
@@ -160,12 +171,13 @@ def main():
         tiles=[]
         font=ImageFont.truetype('/System/Library/Fonts/Menlo.ttc',14)
         for name,rows in results.items():
-            ranked = sorted(rows,key=lambda r:r.get('final',{}).get('r_xy_m',float('inf')))
-            for label,row in [('closest',ranked[0]),('furthest',ranked[-1])]:
+            outcome_rank = {'success': 0, 'grasped-not-placed': 1, 'no-grasp': 2}
+            ranked = sorted(rows,key=lambda r:(outcome_rank[r['outcome']],r.get('final',{}).get('r_xy_m',float('inf'))))
+            for label,row in [('best',ranked[0]),('worst',ranked[-1])]:
                 source=root/'raw'/name/row['episode']/'viewport.mp4'
                 if not source.exists():continue
                 frame=root/f'.frame-{name}-{label}.png'
-                t = max(0,min(row.get('time_to_grasp_s') or row['time_s']*.65,row['time_s']-1))
+                t = max(0,min((row.get('time_to_place_s') or row.get('time_to_grasp_s') or row['time_s']*.65)+.8,row['time_s']-1))
                 subprocess.run(['ffmpeg','-v','error','-y','-ss',str(t),'-i',str(source),'-frames:v','1',str(frame)],check=True)
                 im=Image.open(frame).convert('RGB');im.thumbnail((480,300))
                 tile=Image.new('RGB',(500,360),'#f3f5f7');tile.paste(im,((500-im.width)//2,0))

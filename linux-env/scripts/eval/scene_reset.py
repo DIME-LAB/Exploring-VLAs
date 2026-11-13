@@ -1,8 +1,32 @@
 """Seeded physical scene bank for paired policy evaluations (executed in Kit)."""
 from pathlib import Path
 import json
+import time
+import os
+from collections import deque
 
 _VIEWS = {}
+_FRAME_SAMPLES = deque(maxlen=20000)
+_FRAME_SUB = None
+
+
+def start_probe():
+    """Timestamp Kit updates in memory; no publisher, file I/O or scene mutation."""
+    global _FRAME_SUB
+    import omni.kit.app
+    from isaacsim.core.api import World
+    if _FRAME_SUB is None:
+        world = World.instance()
+        _FRAME_SUB = omni.kit.app.get_app().get_post_update_event_stream().create_subscription_to_pop(
+            lambda _: _FRAME_SAMPLES.append((time.time(), world.current_time)), name='eval_frame_probe')
+    _FRAME_SAMPLES.clear()
+    return dict(started_wall_time=time.time(), pid=os.getpid())
+
+
+def probe():
+    samples = list(_FRAME_SAMPLES)
+    gaps = [b[0]-a[0] for a,b in zip(samples, samples[1:])]
+    return dict(samples=samples, max_wall_gap_s=max(gaps, default=None))
 
 
 def prepare(seed, bank):

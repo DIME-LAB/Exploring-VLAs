@@ -10,6 +10,7 @@ import math
 import os
 import queue
 import signal
+import statistics
 import subprocess
 import sys
 import threading
@@ -22,8 +23,9 @@ from builtin_interfaces.msg import Duration
 from control_msgs.action import FollowJointTrajectory
 from rclpy.action import ActionClient
 from rclpy.executors import SingleThreadedExecutor
-from rclpy.qos import QoSProfile, DurabilityPolicy
-from sensor_msgs.msg import JointState
+from rclpy.qos import QoSProfile, DurabilityPolicy, qos_profile_sensor_data
+from sensor_msgs.msg import JointState, Image
+from rosgraph_msgs.msg import Clock
 from tf2_msgs.msg import TFMessage
 from trajectory_msgs.msg import JointTrajectoryPoint
 
@@ -41,6 +43,15 @@ from run_async_inference_sim import (
 ARM_JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"]
 HOME_DEG = [0.874, -14.829, 14.829, 90.0, -90.0 + math.degrees(0.0487)]
 CUP_R, CUP_H = 0.033, 0.0965  # conservative interior-centre test (outer radius ~.039m)
+
+
+def major_faults(pid):
+    if pid is None:
+        return None
+    try:
+        return int(Path(f'/proc/{pid}/stat').read_text().rsplit(')',1)[1].split()[9])
+    except (FileNotFoundError, PermissionError):
+        return None
 
 
 def mcp(tool, params=None):
@@ -104,6 +115,12 @@ class Ros:
         self.data = {"objects": {}, "drops": {}, "joints": {}}
         self.received = {k: 0.0 for k in self.data}
         self.controller_status = {}
+        self.arrivals = {k: [] for k in ("clock", "wrist", "workspace")}
+        for label, topic, msgtype in (("clock", "/clock", Clock),
+                ("wrist", "/wrist_camera_rgb_sim", Image),
+                ("workspace", "/workspace_camera_sim", Image)):
+            self.node.create_subscription(msgtype, topic,
+                lambda m, label=label: self.arrival(label, m), qos_profile_sensor_data)
         for label in ("arm", "gripper"):
             self.node.create_subscription(
                 GoalStatusArray, f"/{label}_controller/follow_joint_trajectory/_action/status",
@@ -155,6 +172,21 @@ class Ros:
     def status_snapshot(self):
         with self.lock:
             return {k: dict(v) for k,v in self.controller_status.items()}
+
+    def arrival(self, label, msg):
+        stamp = msg.clock if label == "clock" else msg.header.stamp
+        with self.lock:
+            self.arrivals[label].append((time.time(), stamp.sec+stamp.nanosec/1e9))
+
+    def reset_arrivals(self):
+        with self.lock:
+            self.arrivals = {k: [] for k in self.arrivals}
+
+    def arrival_snapshot(self):
+        with self.lock:
+            data = {k: list(v) for k,v in self.arrivals.items()}
+        return {k: dict(samples=v, max_wall_gap_s=max((b[0]-a[0] for a,b in zip(v,v[1:])),default=None))
+                for k,v in data.items()}
 
     def snapshot(self):
         with self.lock:
@@ -310,6 +342,14 @@ def save_result(out, result):
         "sim_cap_hz",
         "time_to_grasp_s",
         "time_to_place_s",
+        "empty_ticks_after_startup",
+        "empty_ticks_pct",
+        "first_chunk_s",
+        "request_chunk_mean_ms",
+        "request_chunk_p95_ms",
+        "request_queue_depth_mean",
+        "chunk_size_threshold",
+        "actions_per_chunk",
         "time_s",
         "actions_sent",
         "chunks",
@@ -325,6 +365,34 @@ def save_result(out, result):
         if new:
             writer.writeheader()
         writer.writerow(result)
+
+
+def add_telemetry(result, epdir, cfg):
+    client = result.get("client", result.get("fatal_client", {}))
+    metrics = client.get("metrics", client)
+    empty = metrics.get("empty_action_ticks_after_startup", 0)
+    opportunities = metrics.get("actions_sent", 0)+empty+metrics.get("missed_action_ticks_after_startup", 0)
+    requests = {r["observation_timestamp"]: r for r in client.get("request_events", []) if "observation_timestamp" in r}
+    chunks = []
+    for event in client.get("chunk_events", []):
+        request = requests.get(event["observation_timestamp"], {})
+        chunks.append(dict(event,
+            request_to_arrival_s=event["arrival_wall_time"]-request["trigger_wall_time"] if request else None,
+            queue_depth_at_capture_request=request.get("queue_depth_at_capture_request"),
+            trigger_wall_time=request.get("trigger_wall_time"),
+            capture_rpc_s=request.get("capture_rpc_s")))
+    latencies = sorted(1000*c["request_to_arrival_s"] for c in chunks if c["request_to_arrival_s"] is not None)
+    depths = [c["queue_depth_at_capture_request"] for c in chunks if c["queue_depth_at_capture_request"] is not None]
+    result.update(empty_ticks_after_startup=empty, empty_ticks_pct=100*empty/opportunities if opportunities else None,
+        first_chunk_s=metrics.get("first_chunk_s"),
+        request_chunk_mean_ms=statistics.mean(latencies) if latencies else None,
+        request_chunk_p95_ms=latencies[math.ceil(.95*len(latencies))-1] if latencies else None,
+        request_queue_depth_mean=statistics.mean(depths) if depths else None,
+        chunk_trace=chunks, chunk_size_threshold=cfg.chunk_size_threshold, actions_per_chunk=cfg.actions_per_chunk)
+    if chunks:
+        with (epdir / "chunks.csv").open("w") as f:
+            writer = csv.DictWriter(f, fieldnames=list(chunks[0]))
+            writer.writeheader();writer.writerows(chunks)
 
 
 def main():
@@ -469,7 +537,9 @@ def main():
                 result["controller_status_start"] = ros.status_snapshot()
                 result["randomize"] = mcp("run_python", {"code":
                     f"import sys; sys.path.insert(0, {str(Path(__file__).parent)!r}); "
-                    f"import scene_reset; result = scene_reset.prepare({args.seeds[index]}, {str(args.scene_bank)!r})"})
+                    f"import scene_reset, importlib; "
+                    "scene_reset = importlib.reload(scene_reset) if not hasattr(scene_reset, 'start_probe') else scene_reset; "
+                    f"result = scene_reset.prepare({args.seeds[index]}, {str(args.scene_bank)!r})"})
                 result["host_load_start"] = list(os.getloadavg())
                 result["gpu_start"] = subprocess.check_output([
                     "nvidia-smi", "--query-gpu=index,uuid,utilization.gpu,memory.used", "--format=csv"], text=True)
@@ -495,6 +565,9 @@ def main():
                 result["sim_cap_hz"] = result["sim_timing"]["/app/runLoops/main/rateLimitFrequency"]
                 if abs(result["sim_cap_hz"] - args.sim_rate_hz) > 1e-4 or not result["sim_timing"]["/app/runLoops/main/rateLimitEnabled"]:
                     raise RuntimeError(f"Kit rate read-back mismatch: {result['sim_timing']}")
+                result["isaac_probe_start"] = mcp("run_python", {"code":
+                    "import importlib, scene_reset; "
+                    "result = scene_reset.start_probe()"})
                 starts = {k: v[2] for k, v in objects.items() if k.startswith("blue")}
                 blue_in_cup(objects, drops)
                 mcp(
@@ -503,6 +576,8 @@ def main():
                 )
                 recording = True
                 rec_t = time.monotonic()
+                ros.reset_arrivals()
+                result["isaac_major_faults_start"] = major_faults(result["isaac_probe_start"]["pid"])
                 client.send(f"RUN {ep} {args.max_s}")
                 client.tagged("EPSTART", 15)
                 running = True
@@ -600,6 +675,12 @@ def main():
                 raise
             finally:
                 cleanup_error = None
+                result["transport_arrivals"] = ros.arrival_snapshot()
+                result["isaac_major_faults_end"] = major_faults(result.get("isaac_probe_start",{}).get("pid"))
+                try:
+                    result["isaac_frames"] = mcp("run_python", {"code": "import scene_reset; result = scene_reset.probe()"})
+                except Exception as probe_error:
+                    result["isaac_probe_error"] = str(probe_error)
                 if running:
                     try:
                         client.send("ABORT")
@@ -664,6 +745,7 @@ def main():
                         f"; cleanup {type(error).__name__}: {error}"
                     )
                 finally:
+                    add_telemetry(result, epdir, cfg)
                     (epdir / "result.json").write_text(
                         json.dumps(result, indent=2) + "\n"
                     )

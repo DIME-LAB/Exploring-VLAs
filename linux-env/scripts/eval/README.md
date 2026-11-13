@@ -44,6 +44,22 @@ blue block to sustain its lift; success also requires a sustained lift.
 Per-episode JSON additionally retains physical scene receipts, GPU snapshots,
 CPU load, all dispatch measurements and resolved sim timing settings.
 
+Request/arrival telemetry runs in observation and receiver workers, with no
+dispatch hook or per-tick I/O. Each `chunks.csv` matches observation timestamps
+to capture-request queue depth and request-to-chunk-arrival latency (capture,
+transport, server queueing and inference combined). CSV summaries include
+first-chunk delay, empty post-startup ticks/count percentage and fixed refill
+settings. Empty queues are measured outcomes; scheduling validity is evaluated
+separately from effective Hz. The scoring rule requires zero missed dispatch
+slots, no stale-camera aborts, and bounded send costs. Earlier untraced runs
+are diagnostics. The refill threshold remains 0.5 with 50 actions per chunk.
+
+The orchestration process records clock/wrist/workspace message arrival stamps.
+An in-memory Kit update probe records wall/sim time without touching extension
+files, and per-episode Isaac major-fault counts test page-in stalls. This allows
+a camera timeout to be compared against app-frame and topic gaps; the 500 ms
+camera deadline is unchanged. Samples are written at episode end.
+
 `--fresh-client-per-episode` is a diagnostic A/B option: the policy server stays
 alive while each episode gets a new client/sensor process (additional logs are
 under `client-NN/`). Episode client receipts include goal-handle/pending-future
