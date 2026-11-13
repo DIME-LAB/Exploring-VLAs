@@ -31,11 +31,11 @@ cadence (~14 Hz) not matching the camera-bound recording loop.
       prove guidance is non-zero in logs.
 - [x] 1.8 Episode harness (interim, before RunTask): home → randomize (blue visible) → start policy →
       success / timeout → stop → record viewport mp4 → score from `/objects_poses_sim`.
-- [ ] 1.9 Evaluation matrix, idle box (no prompt2assembly jobs), 10 episodes each:
-      A baseline (30 fps, rgba8 viewport cameras, no RTC) · B timing-matched (1.2–1.4) · C timing + real RTC (1.7).
-      Rate sweep for B and C: 17.4 Hz (default, from the 1.1 motion-phase clock) and 19.4 Hz (whole-run estimate),
-      because 1.1 could not prove the April rate/RTF (lead decision, 2026-11-12).
-      Report success, grasp-only, failure mode, per-episode videos.
+- [ ] 1.9 Evaluation (restructured 2026-11-13; needs 1.11–1.15 and the 3.0b checkpoint), idle box:
+      (a) old checkpoint, 5 episodes before vs after the Phase 1 fixes. It was trained from scratch (see Phase 3),
+          so this only confirms whether deployment alone moves it.
+      (b) 3.0b fine-tuned checkpoint (main subject), 10 episodes each: RTC on vs off, at 17.4 vs 19.4 Hz.
+      Report success, grasp-only, failure mode, effective action Hz, and per-episode videos.
 - [ ] 1.10 **Retraining decision** from 1.9 (see Phase 3 criteria). Record results in the coursework README.
 - [ ] 1.11 GUI + model selection: add every new checkpoint (e.g. the 3.0b `base-ft`) to control_gui's
       Inference dropdown (`INF_MODEL_PRESETS`) and `deploy_sim.sh --model`; make the Inference tab use the
@@ -48,7 +48,10 @@ cadence (~14 Hz) not matching the camera-bound recording loop.
 - [ ] 1.14 README: warn that saving files under `isaac/exts/` hot-reloads the extension in a running Isaac
       (stops publishers); edit only with the sim down. Fix `_apply_sim_rate` docstring (physics is 120 Hz;
       60 Hz is the sim-frame/clock rate).
-- **Merge gate → main:** 1.1–1.9 done, `deploy_sim.sh up` still one command, README updated.
+- [ ] 1.15 (moved from 2.5c) Decouple observation capture from action dispatch in the robot client: one thread
+      today, so a blocking camera read held the 1.8 smoke to 10–12 Hz instead of 17.4. Actions must dispatch at
+      the target rate regardless of camera reads; prove the effective action rate holds 17.4 ± 0.5 Hz under load.
+- **Merge gate → main:** 1.1–1.15 done, `deploy_sim.sh up` still one command, README updated.
 
 ## Phase 2 — Own LeRobot ROS 2 packages (architecture; review verdict: build our own from the fork's code)
 
@@ -67,8 +70,6 @@ cadence (~14 Hz) not matching the camera-bound recording loop.
       → home; Isaac panel button `soarm101.run_task`; live prompt per goal.
 - [ ] 2.5b Prompt control: change the instruction live (ROS topic + Isaac panel text box) and pick the model
       from the Isaac panel; both go through the same RunTask/goal interface.
-- [ ] 2.5c Decouple observation capture from action dispatch in the robot client (one thread today: a
-      blocking camera read held the 1.8 smoke to 10–12 Hz instead of 17.4).
 - [ ] 2.6 Unit tests with fake rclpy messages; CI.
 - [ ] 2.7 Switch Exploring-VLAs to PyPI LeRobot + our packages; drop the fork patches; archive the fork
       (never delete — it holds `f26b0a6`).
