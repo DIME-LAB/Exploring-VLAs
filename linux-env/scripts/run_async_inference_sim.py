@@ -43,23 +43,25 @@ import time
 from pathlib import Path
 
 # Sim defaults — matches record_sim_isaac.sh's topic + units contract.
+RECORDED_FPS = 19.4
+
 DEFAULTS = dict(
     server_host="127.0.0.1",
     server_port=8080,
-    fps=30,
+    fps=RECORDED_FPS,
 
     robot_type="so101_ros2",
     cameras={
         "wrist": {
             "type": "ros2",
             "topic": "/wrist_camera_rgb_sim",
-            "encoding": "rgba8",
+            "encoding": "rgb8",
             "width": 640, "height": 480, "fps": 30,
         },
         "top": {
             "type": "ros2",
             "topic": "/workspace_camera_sim",
-            "encoding": "rgba8",
+            "encoding": "rgb8",
             "width": 640, "height": 480, "fps": 30,
         },
     },
@@ -111,15 +113,17 @@ def kill_proc(proc: subprocess.Popen, name: str, grace_s: float = 5.0) -> None:
         proc.kill()
 
 
-def main() -> int:
+def parse_args(argv=None):
     p = argparse.ArgumentParser(
         description="Sim async inference launcher (so101_ros2 + ros2_control).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--server-host", default=DEFAULTS["server_host"])
     p.add_argument("--server-port", type=int, default=DEFAULTS["server_port"])
-    p.add_argument("--fps", type=int, default=DEFAULTS["fps"])
+    p.add_argument("--fps", type=float, default=DEFAULTS["fps"])
 
+    p.add_argument("--action-duration-s", type=float, default=None,
+                   help="FJT target duration; defaults to one client tick (1/fps).")
     p.add_argument("--robot-type", default=DEFAULTS["robot_type"])
     p.add_argument(
         "--cameras-json", default=json.dumps(DEFAULTS["cameras"]),
@@ -152,11 +156,7 @@ def main() -> int:
     # them at startup — see LEROBOT_RTC_* env block there).
     p.add_argument("--rtc.enabled", dest="rtc_enabled", action="store_true",
                    default=True,
-                   help="Set the RTC flag on the policy server. NOTE: currently a no-op: the fork's "
-                        "policy_server never passes prev_chunk_left_over/inference_delay "
-                        "to predict_action_chunk (see README Known issues). Default ON because "
-                        "every flow-matching policy benefits and it's "
-                        "additive with aggregate_fn=weighted_average.")
+                   help="Enable measured-delay RTC prefix guidance on the server.")
     p.add_argument("--no-rtc", dest="rtc_enabled", action="store_false",
                    help="Disable RTC (revert to aggregate-only smoothness).")
     p.add_argument("--rtc.execution-horizon", dest="rtc_execution_horizon",
@@ -178,22 +178,32 @@ def main() -> int:
                         "(SmolVLA + base VLM cold-load is ~30-60 s).")
     p.add_argument("--dry-run", action="store_true",
                    help="Print both commands and exit without launching.")
-    args = p.parse_args()
+    args = p.parse_args(argv)
 
+    if args.fps <= 0 or (args.action_duration_s is not None and args.action_duration_s <= 0):
+        p.error("fps and action-duration-s must be positive")
+    return args
+
+
+def build_commands(args, python=None):
+    python = python or sys.executable
+    action_duration = args.action_duration_s if args.action_duration_s is not None else 1 / args.fps
     server_address = f"{args.server_host}:{args.server_port}"
 
     server_cmd = [
-        sys.executable, "-u", "-m", "lerobot.async_inference.policy_server",
+        python, "-u", "-m", "lerobot.async_inference.policy_server",
         f"--host={args.server_host}",
         f"--port={args.server_port}",
         f"--fps={args.fps}",
     ]
     client_cmd = [
-        sys.executable, "-u", "-m", "lerobot.async_inference.robot_client",
+        python, "-u", "-m", "lerobot.async_inference.robot_client",
         f"--robot.type={args.robot_type}",
         # Sim-specific: actuate ON (drives ros2_control), use_degrees ON
         # (matches recorded dataset's units convention).
         "--robot.actuate=true",
+        f"--fps={args.fps}",
+        f"--robot.action_duration_s={action_duration}",
         "--robot.use_degrees=true",
         f"--robot.cameras={args.cameras_json}",
         f"--task={args.task}",
@@ -205,6 +215,25 @@ def main() -> int:
         f"--chunk_size_threshold={args.chunk_size_threshold}",
         f"--aggregate_fn_name={args.aggregate_fn}",
     ]
+
+    return server_cmd, client_cmd
+
+
+def rtc_environment(args):
+    env = os.environ.copy()
+    env.update(
+        LEROBOT_RTC_ENABLED="1" if args.rtc_enabled else "0",
+        LEROBOT_RTC_EXECUTION_HORIZON=str(args.rtc_execution_horizon),
+        LEROBOT_RTC_MAX_GUIDANCE_WEIGHT=str(args.rtc_max_guidance_weight),
+        LEROBOT_RTC_PREFIX_ATTENTION_SCHEDULE=args.rtc_schedule,
+    )
+    return env
+
+
+def main() -> int:
+    args = parse_args()
+    server_address = f"{args.server_host}:{args.server_port}"
+    server_cmd, client_cmd = build_commands(args)
 
     print("=" * 72)
     print("  LeRobot Async Inference (sim) Launcher")
@@ -236,16 +265,8 @@ def main() -> int:
 
     # Build server env: pass RTC flags through env vars so the patched
     # policy_server picks them up at startup (no upstream CLI plumbing needed).
-    server_env = os.environ.copy()
-    if args.rtc_enabled:
-        server_env["LEROBOT_RTC_ENABLED"] = "1"
-        server_env["LEROBOT_RTC_EXECUTION_HORIZON"] = str(args.rtc_execution_horizon)
-        server_env["LEROBOT_RTC_MAX_GUIDANCE_WEIGHT"] = str(args.rtc_max_guidance_weight)
-        server_env["LEROBOT_RTC_PREFIX_ATTENTION_SCHEDULE"] = args.rtc_schedule
-        print(f"[launcher] RTC flag ON (currently inactive, see README Known issues): horizon={args.rtc_execution_horizon}, "
-              f"weight={args.rtc_max_guidance_weight}, schedule={args.rtc_schedule}")
-    else:
-        print("[launcher] RTC OFF (aggregate-only smoothness)")
+    server_env = rtc_environment(args)
+    print(f"[launcher] RTC {'ON' if args.rtc_enabled else 'OFF'}")
 
     print("\n[launcher] Starting policy server...")
     server = subprocess.Popen(server_cmd, env=server_env,

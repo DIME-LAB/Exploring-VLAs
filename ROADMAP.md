@@ -15,7 +15,7 @@ cadence (~14 Hz) not matching the camera-bound recording loop.
 - [x] 1.2 Pin sim speed: Kit run-loop rate limit (`/app/runLoops/main/rateLimitEnabled`,
       `rateLimitFrequency`) set at launch after the World exists and read back; launcher flag
       `--rate-hz` (default from 1.1). Verify RTF ≈ 0.32 ± 0.02.
-- [ ] 1.3 Robot client loop at the recorded rate (fps ≈ 19, `action_duration_s` to match); confirm
+- [x] 1.3 Robot client loop at the recorded rate (fps ≈ 19, `action_duration_s` to match); confirm
       dataset `fps` vs real rate handling in async inference.
 - [ ] 1.4 Camera cadence: one frame per sim frame with sim-time stamps — wrist camera via render
       product + ROS2CameraHelper (pixel parity already measured: 49–50 dB, at renderer noise);
@@ -25,7 +25,7 @@ cadence (~14 Hz) not matching the camera-bound recording loop.
       callbacks (a broken handle once dropped RTF to 0.12).
 - [ ] 1.6 Invisible robot on cold launch (`cannot find protoPath: /__Prototype_*`): de-instance the
       robot's visual meshes at scene build; verify 3 cold launches.
-- [ ] 1.7 Real RTC: policy server tracks the leftover chunk + measured inference delay and passes
+- [x] 1.7 Real RTC: policy server tracks the leftover chunk + measured inference delay and passes
       `prev_chunk_left_over` / `inference_delay` to `predict_action_chunk` (fork, branch `dev`);
       prove guidance is non-zero in logs.
 - [ ] 1.8 Episode harness (interim, before RunTask): home → randomize (blue visible) → start policy →
