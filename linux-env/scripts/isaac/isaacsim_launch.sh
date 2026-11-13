@@ -53,6 +53,8 @@ while [ $# -gt 0 ]; do
     esac
 done
 set -- "${launch_args[@]}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 if [ -n "$INSTANCE_INDEX" ]; then
     [[ "$INSTANCE_INDEX" =~ ^[0-9]+$ ]] && [ "$INSTANCE_INDEX" -le 9 ] || {
         echo '--instance must be an integer from 0 to 9' >&2; exit 2;
@@ -62,8 +64,13 @@ if [ -n "$INSTANCE_INDEX" ]; then
     export OMNI_KIT_MCP_PORT="${OMNI_KIT_MCP_PORT:-$((8777 + 2 * INSTANCE_INDEX))}"
     export SOARM_KIT_MCP_PORT="$OMNI_KIT_MCP_PORT"
     INSTANCE_ROOT="${SOARM_INSTANCE_ROOT:-/mnt/a4500-backup/exploring-vlas/runtime/instance-$INSTANCE_INDEX}"
-    mkdir -p "$INSTANCE_ROOT"
     export ISAACSIM_LOG="${ISAACSIM_LOG:-$INSTANCE_ROOT/isaac.log}"
+    python3 "$SCRIPT_DIR/../collect/storage.py" "$INSTANCE_ROOT" "$ISAACSIM_LOG"
+    mkdir -p "$INSTANCE_ROOT"
+    export CUDA_DEVICE_ORDER=PCI_BUS_ID
+    if [ -n "${ISAACSIM_EXTRA_ARGS:-}" ]; then
+        echo 'Indexed instances use pinned settings; ISAACSIM_EXTRA_ARGS is not permitted' >&2; exit 2
+    fi
     export TMPDIR="$INSTANCE_ROOT/tmp"
     export TEMP="$TMPDIR" TMP="$TMPDIR"
     export XDG_CACHE_HOME="$INSTANCE_ROOT/cache"
@@ -72,8 +79,6 @@ if [ -n "$INSTANCE_INDEX" ]; then
     mkdir -p "$TMPDIR" "$OPTIX_CACHE_PATH" "$ROS_LOG_DIR"
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 ISAACSIM_BIN="${ISAACSIM_BIN:-$HOME/env_isaacsim61/bin/isaacsim}"
 EXT_FOLDER="$REPO_ROOT/isaac/exts"
@@ -279,7 +284,9 @@ do_launch() {
     fi
     if [ -n "${INSTANCE_ROOT:-}" ]; then
         available="$(df --output=avail -B1 / | tail -1)"
-        [ "$available" -ge 96636764160 ] || { echo 'Root disk below 90 GiB free' >&2; return 1; }
+        [ "$available" -ge 21474836480 ] || { echo 'Root disk below 20 GiB safety floor' >&2; return 1; }
+        bulk_available="$(df --output=avail -B1 "$INSTANCE_ROOT" | tail -1)"
+        [ "$bulk_available" -ge 53687091200 ] || { echo 'Output disk below 50 GiB free' >&2; return 1; }
     fi
 
     if [ ! -x "$ISAACSIM_BIN" ]; then
@@ -339,11 +346,13 @@ do_launch() {
         args+=(isaacsim.exp.full)
         export DISPLAY="${DISPLAY:-:0}"
     fi
+    physics_gpu=0
+    [ -z "${INSTANCE_ROOT:-}" ] || physics_gpu="$GPU"
     args+=(--ext-folder "$EXT_FOLDER"
            --ext-folder "$KIT_MCP_ROOT/exts"
            --enable omni.kit.mcp
            --enable "$ext"
-           --/renderer/multiGpu/enabled=false "--/renderer/activeGpu=$GPU" --/physics/cudaDevice=0
+           --/renderer/multiGpu/enabled=false "--/renderer/activeGpu=$GPU" "--/physics/cudaDevice=$physics_gpu"
            # isaacsim.exp.full turns on the async-rendering toggle (isaacsim.core.throttling); with it,
            # reset()/play() can deadlock compiling an MDL material. Ported from isaac-sim-mcp
            # 83dcf46 / e2a2247 (ur5e-dt, aic-dt launchers).

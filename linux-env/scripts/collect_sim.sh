@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Isolated headless ROS collection: collect_sim.sh up|run|export|deploy-clock|down INDEX [args...]
+# Isolated headless ROS collection: collect_sim.sh up|run|export|deploy-clock|deploy|clock-sanity|down INDEX [args...]
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-command="${1:?up|run|export|deploy-clock|down}"; shift
+command="${1:?up|run|export|deploy-clock|deploy|clock-sanity|down}"; shift
 index="${1:?instance index 0..9}"; shift
 [[ "$index" =~ ^[0-9]$ ]] || { echo 'Instance index must be 0..9' >&2; exit 2; }
 export SOARM_INSTANCE_INDEX="$index"
+export ISAACSIM_GPU="${ISAACSIM_GPU:-0}"
 export ROS_DOMAIN_ID="$((90 + index))"
 export SOARM_KIT_MCP_PORT="$((8777 + 2 * index))"
 export OMNI_KIT_MCP_PORT="$SOARM_KIT_MCP_PORT"
@@ -16,7 +17,6 @@ export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export SOARM_COLLECTION_ROOT="${SOARM_COLLECTION_ROOT:-/mnt/a4500-backup/exploring-vlas}"
 export HF_LEROBOT_HOME="${HF_LEROBOT_HOME:-$SOARM_COLLECTION_ROOT/datasets}"
 export SOARM_INSTANCE_ROOT="${SOARM_INSTANCE_ROOT:-$SOARM_COLLECTION_ROOT/runtime/instance-$index}"
-mkdir -p "$SOARM_INSTANCE_ROOT" "$HF_LEROBOT_HOME"
 export TMPDIR="$SOARM_INSTANCE_ROOT/tmp"
 export TEMP="$TMPDIR" TMP="$TMPDIR"
 export ROS_LOG_DIR="$SOARM_INSTANCE_ROOT/ros-logs"
@@ -24,6 +24,9 @@ export XDG_CACHE_HOME="$SOARM_INSTANCE_ROOT/cache"
 export HF_HOME="$XDG_CACHE_HOME/huggingface"
 export OPTIX_CACHE_PATH="$XDG_CACHE_HOME/optix"
 export PYTHONDONTWRITEBYTECODE=1
+export SOARM_GRASP_TRACE_DIR="$SOARM_INSTANCE_ROOT/grasp-traces"
+python3 "$SCRIPT_DIR/collect/storage.py" "$SOARM_COLLECTION_ROOT" "$SOARM_INSTANCE_ROOT" "$HF_LEROBOT_HOME" "$SOARM_GRASP_TRACE_DIR"
+mkdir -p "$SOARM_INSTANCE_ROOT" "$HF_LEROBOT_HOME"
 mkdir -p "$TMPDIR" "$ROS_LOG_DIR" "$HF_HOME" "$OPTIX_CACHE_PATH"
 launcher="$SCRIPT_DIR/isaac/isaacsim_launch.sh"
 case "$command" in
@@ -73,6 +76,13 @@ PYCONFIG
         export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
         exec python3 -u "$SCRIPT_DIR/collect/collect.py" --instance "$index" "$@"
         ;;
+    clock-sanity)
+        set +u
+        source /opt/ros/humble/setup.bash
+        source "$REPO_ROOT/vla_SO-ARM101/install/setup.bash"
+        set -u
+        exec python3 -u "$SCRIPT_DIR/collect/clock_sanity.py" "$@"
+        ;;
     export)
         unset PYTHONPATH AMENT_PREFIX_PATH CMAKE_PREFIX_PATH COLCON_PREFIX_PATH ROS_DISTRO ROS_VERSION ROS_PYTHON_VERSION
         unset LD_LIBRARY_PATH
@@ -80,9 +90,22 @@ PYCONFIG
         exec "$HOME/.pixi/bin/pixi" run --manifest-path "$REPO_ROOT/linux-env/pixi.toml" \
             python "$SCRIPT_DIR/collect/export.py" "$@"
         ;;
-    deploy-clock)
+    deploy-clock|deploy)
         bash "$launcher" collection-rate 30 deploy --instance "$index"
+        PYTHONPATH="$REPO_ROOT/omni-kit-mcp" python3 - "$SOARM_KIT_MCP_PORT" "$SCRIPT_DIR/collect" <<'PYDEPLOY'
+import sys
+from kit_mcp.client import call
+code = 'import sys\nsys.path.insert(0,' + repr(sys.argv[2]) + ')\nimport collection_runtime as c\nc.install("deploy")\nc.runtime().timeline.play()\nresult=True'
+print(call('run_python', {'code': code}, port=int(sys.argv[1]), timeout=30))
+PYDEPLOY
+        if [ "$command" = deploy ]; then
+            export SOARM_POLICY_GPU="$ISAACSIM_GPU"
+            exec bash "$SCRIPT_DIR/inference_async_lerobot.sh" --fps 30 \
+                --action-duration-s 0.03333333333333333 --joint-states-topic /joint_states_measured \
+                --server-port "$((18090 + index))" "$@"
+        fi
         ;;
+
     down)
         pidfile="$SOARM_INSTANCE_ROOT/control.pid"
         if [ -f "$pidfile" ]; then
@@ -93,5 +116,5 @@ PYCONFIG
         fi
         bash "$launcher" close --instance "$index"
         ;;
-    *) echo 'Expected up|run|export|deploy-clock|down' >&2; exit 2 ;;
+    *) echo 'Expected up|run|export|deploy-clock|deploy|clock-sanity|down' >&2; exit 2 ;;
 esac

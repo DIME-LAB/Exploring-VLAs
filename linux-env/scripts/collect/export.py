@@ -12,6 +12,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from contract import JOINTS, timing_audit
+from storage import confined
 
 
 def main():
@@ -23,6 +24,9 @@ def main():
     torch.set_num_threads(1)
     cv2.setNumThreads(1)
     run, report = args.run, args.report_dir
+    run, report = confined(run), confined(report)
+    if (run / 'superseded.json').exists():
+        raise ValueError('Superseded diagnostic run cannot be exported as a dataset')
     summary = json.loads((run / 'summary.json').read_text())
     if not summary.get('complete') or summary.get('end_marker') != 'COLLECTION_FINISHED':
         raise ValueError('Collection is incomplete; refusing to export a partial run')

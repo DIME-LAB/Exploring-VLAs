@@ -6,6 +6,15 @@ import shutil
 import stat
 import time
 
+CANONICAL_ROOT = Path('/mnt/a4500-backup/exploring-vlas')
+
+
+def confined(path):
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.is_relative_to(CANONICAL_ROOT.resolve()):
+        raise ValueError(f'Output must stay beneath {CANONICAL_ROOT}: {resolved}')
+    return resolved
+
 
 def wait_for_storage(bulk, stop, emit=print, usage=shutil.disk_usage):
     started = time.monotonic()
@@ -80,3 +89,9 @@ class RootFileGrowth:
         return dict(method='writable-root-file growth; shared cache upper bound; not rewrite traffic',
                     allocated_growth_bytes=sum(f['allocated_growth_bytes'] for f in files),
                     apparent_growth_bytes=sum(f['growth_bytes'] for f in files), files=files)
+
+
+if __name__ == '__main__':
+    import sys
+    for value in sys.argv[1:]:
+        confined(value)

@@ -22,6 +22,7 @@ from builtin_interfaces.msg import Duration
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image, JointState
+from std_msgs.msg import String
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 REPO = Path(__file__).resolve().parents[3]
@@ -31,7 +32,8 @@ from kit_mcp.client import call as kit_call
 from so_arm101_control.pick_place import PickPlaceNode, JOINT_LIMITS
 from contract import COLORS, JOINTS, EVAL_SEEDS, corrective_action, parameters, timing_audit
 from checkpoint import progress
-from storage import RootFileGrowth, wait_for_storage
+from storage import CANONICAL_ROOT, RootFileGrowth, confined, wait_for_storage
+from success import SETTLED_TICKS, settled_containment
 
 
 def ns(stamp):
@@ -49,8 +51,8 @@ def mcp(tool, params=None):
 
 
 def timeline(play):
-    return mcp('run_python', {'code': 'import omni.timeline\nomni.timeline.get_timeline_interface().' +
-                              ('play()' if play else 'pause()') + '\nresult=True'})
+    return mcp('run_python', {'code': 'import collection_runtime as c\nresult=c.runtime().' +
+                              ('advance()' if play else 'cancel()')})
 
 
 class Sensors:
@@ -61,15 +63,27 @@ class Sensors:
         self.last = -1
         self.failure = None
         self.duplicate_messages = collections.Counter()
+        self.reference = None
         self.subs = []
         for key, topic in [('wrist', '/wrist_camera_rgb_sim'), ('top', '/workspace_camera_sim')]:
             self.subs.append(node.create_subscription(Image, topic,
                 lambda msg, key=key: self.put(key, msg), QoSProfile(depth=64, reliability=ReliabilityPolicy.RELIABLE)))
-        self.subs.append(node.create_subscription(JointState, '/joint_states',
+        self.subs.append(node.create_subscription(JointState, '/joint_states_measured',
                                                 lambda msg: self.put('joint', msg), 100))
+        self.subs.append(node.create_subscription(String, '/collection_tick',
+                                                lambda msg: self.put('tick', msg), 64))
+        self.subs.append(node.create_subscription(JointState, '/joint_states', self.reference_received, 100))
+
+    def reference_received(self, msg):
+        self.reference = dict(stamp_ns=ns(msg.header.stamp),
+                              positions=dict(zip(msg.name, msg.position)))
 
     def put(self, key, msg):
-        raw_stamp = ns(msg.header.stamp)
+        if key == 'tick':
+            msg = json.loads(msg.data)
+            raw_stamp = msg['sim_ns']
+        else:
+            raw_stamp = ns(msg.header.stamp)
         # Native image and rclpy clocks round the same sim tick by up to a few ns.
         stamp = round(raw_stamp / 1000)
         if raw_stamp <= 0:
@@ -93,7 +107,7 @@ class Sensors:
             while True:
                 if self.failure:
                     raise RuntimeError(self.failure)
-                ready = sorted(k for k, v in self.pending.items() if len(v) == 3 and k > self.last)
+                ready = sorted(k for k, v in self.pending.items() if len(v) == 4 and k > self.last)
                 if ready:
                     stamp = ready[0]
                     entry = self.pending.pop(stamp)
@@ -280,18 +294,14 @@ class Servo:
             self.previous_executed = executed
             phase = self.phase
 
-        if completed:
-            timeline(False)  # pause BEFORE letting the planner advance to the next step
-            self.node._last_motion_status = dict(ok=True, outcome='sim_tick_converged')
-            for done in completed:
-                done.set()
-        return clean, executed, active, phase, list(self.reference), self.last_command_clock_ns
+        return (clean, executed, active, phase, list(self.reference), self.last_command_clock_ns,
+                completed, self.plan is not None or self.grip_plan is not None)
 
 
 class Collector:
     def __init__(self, args):
         self.args = args
-        self.node = PickPlaceNode(use_sim_time=True)
+        self.node = PickPlaceNode(use_sim_time=True, joint_states_topic='/joint_states_measured')
         self.sensors = Sensors(self.node)
         self.servo = Servo(self.node)
         self.node._trajectory_executor = self.servo.execute
@@ -304,6 +314,9 @@ class Collector:
         self.writer_lock = threading.Lock()
         self.stop = threading.Event()
         self.failure = None
+        self.tick_condition = threading.Condition()
+        self.last_processed_ns = 0
+        self.last_snapshot = None
         self.capture_thread = threading.Thread(target=self.capture, daemon=True)
         self.capture_thread.start()
 
@@ -321,18 +334,41 @@ class Collector:
                 if not all(name in mapped for name in JOINTS):
                     raise ValueError('Incomplete joint state')
                 state = [mapped[name] for name in JOINTS]
-                clean, executed, active, phase, reference, command_clock = self.servo.tick(stamp, state)
+                with self.node.joint_lock:
+                    self.node._actual_positions.update(zip(JOINTS, state))
+                snapshot = entry['tick'][0]
+                clean, executed, active, phase, reference, command_clock, completed, advance = self.servo.tick(stamp, state)
+                ack = mcp('run_python', {'code': 'import collection_runtime as c\nresult=c.runtime().apply(' +
+                    repr(executed) + ',' + str(stamp) + ')'})
                 row = dict(sim_ns=stamp, wall_ns=time.monotonic_ns(), joint_stamp_ns=ns(joint.header.stamp),
                     joint_receive_ns=received, wrist_stamp_ns=ns(entry['wrist'][0].header.stamp),
                     top_stamp_ns=ns(entry['top'][0].header.stamp), wrist_receive_ns=entry['wrist'][1],
                     top_receive_ns=entry['top'][1], state=state, action=clean, executed_action=executed,
                     expert_observation_stamp_ns=stamp, command_clock_ns=command_clock,
-                    expert_reference=reference, executing=active, phase=phase)
-                with self.node.objects_lock:
-                    row['target_object_pose'] = dict(self.node.objects_data.get(self.node._selected_object, {}))
+                    expert_reference=reference, executing=active, phase=phase,
+                    state_source=snapshot['state_source'], velocity=list(joint.velocity),
+                    pose_stamp_ns=snapshot['sim_ns'], physics_time_s=snapshot['physics_time_s'],
+                    controller_reference=self.sensors.reference,
+                    declared_application_stamp_ns=stamp, **ack)
+                selected = self.node._selected_object
+                if selected in snapshot['bodies']:
+                    body = snapshot['bodies'][selected]
+                    row['target_object_pose'] = dict(zip(('x', 'y', 'z'), body['position']))
+                    row['target_body'] = body
+                    row['target_cup'] = snapshot['bodies']['cup_' + self.servo.params['color']]
                 with self.writer_lock:
                     if self.writer:
                         self.writer.add(row, {key: Sensors.image(entry[key][0]).copy() for key in ('wrist', 'top')})
+                if advance:
+                    timeline(True)
+                with self.tick_condition:
+                    self.last_processed_ns = stamp
+                    self.last_snapshot = snapshot
+                    self.tick_condition.notify_all()
+                if completed:
+                    self.node._last_motion_status = dict(ok=True, outcome='physical_sim_tick_converged')
+                    for event in completed:
+                        event.set()
             except Exception as exc:
                 message = repr(exc)
                 self.node._qs_abort_evt.set()
@@ -356,6 +392,20 @@ class Collector:
                 if self.failure:
                     return
 
+    def advance_ticks(self, count):
+        snapshots = []
+        for _ in range(count):
+            with self.tick_condition:
+                previous = self.last_processed_ns
+            timeline(True)
+            with self.tick_condition:
+                if not self.tick_condition.wait_for(lambda: self.last_processed_ns > previous or self.failure, timeout=20):
+                    raise TimeoutError('One-frame capture/command handshake exceeded 20 wall seconds')
+                if self.failure:
+                    raise RuntimeError(self.failure)
+                snapshots.append(self.last_snapshot)
+        return snapshots
+
     def wait_ready(self):
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
@@ -373,6 +423,22 @@ class Collector:
         timeline(False)
         if self.node._attached_lego_name:
             self.node._detach_lego_sync()
+        mcp('run_python', {'code': 'import collection_runtime as c\nc.runtime().require_scene()\nresult=True'})
+        if self.args.replay_receipt:
+            replay = json.loads(self.args.replay_receipt.read_text())
+            restored = mcp('run_python', {'code': 'import collection_runtime as c\nresult=c.runtime().restore(' +
+                repr(replay['initial_physical']) + ',arm=True)'})
+            self.node.objects_data = replay['initial_objects']
+            self.node._drop_data = replay['initial_cups']
+            self.servo.reference = list(replay['initial_expert_reference'])
+            self.scene_restore = restored
+            cups = replay['cup_randomization']
+        else:
+            cups = self.randomize_scene(params, baseline)
+        self.sync_scene()
+        return cups
+
+    def randomize_scene(self, params, baseline):
         # Restore a common baseline so seed reproduction does not depend on the previous episode.
         code = 'from so_arm101_dt.extension import get_instance, CUP_LAYOUT\nfrom pxr import Gf\nimport random\nimport numpy as np\ni=get_instance()\n'
         code += 'CUP_LAYOUT.clear()\nCUP_LAYOUT.update(' + repr(self.baseline_cup_layout) + ')\n'
@@ -383,14 +449,12 @@ class Collector:
         cups = mcp('soarm101.randomize_cups', dict(seed=params['cup_seed'], **params['cup_sampling']))
         mcp('run_python', {'code': 'from so_arm101_dt.extension import get_instance\nimport random\nimport numpy as np\nrandom.seed(' + str(params['seed']) + ')\nnp.random.seed(' + str(params['seed'] % 2**32) + ')\nresult=get_instance()._cmd_randomize_object_poses(required_visible_color=' + repr(params['color']) + ', required_visible_count=2)'})
         # Resume only to get the post-teleport poses, then freeze while scene updates/planning run.
-        previous = self.servo.last_sim_ns
-        timeline(True)
-        deadline = time.monotonic() + 15
-        while self.servo.last_sim_ns < previous + 200000000:
-            if self.failure or time.monotonic() > deadline:
-                raise RuntimeError(self.failure or 'Post-randomize sim did not advance')
-            self.stop.wait(.02)
-        timeline(False)
+        mcp('run_python', {'code': 'import collection_runtime as c\nresult=c.runtime().reset_velocities()'})
+        self.advance_ticks(6)
+        self.scene_restore = mcp('run_python', {'code': 'import collection_runtime as c\nr=c.runtime()\ns=r.snapshot()\nresult=r.restore(s,arm=True)'})
+        return cups
+
+    def sync_scene(self):
         self.node._remove_lego_collision_objects()
         self.node._remove_cup_collision_objects()
         self.node._add_cup_collision_objects()
@@ -408,14 +472,12 @@ class Collector:
             if time.monotonic() > deadline:
                 raise TimeoutError(f'Planning scene missing {expected - actual}')
             self.stop.wait(.05)
-        return cups
 
     def run(self):
         args = self.args
-        root = args.output.resolve()
-        allowed_root = Path(os.getenv('SOARM_COLLECTION_ROOT', '/mnt/a4500-backup/exploring-vlas')).resolve()
-        if not root.is_relative_to(allowed_root):
-            raise ValueError(f'Bulk collection output must be inside {allowed_root}')
+        root = confined(args.output)
+        if (root / 'superseded.json').exists():
+            raise ValueError('Superseded diagnostic run requires a fresh output directory')
         root.mkdir(parents=True, exist_ok=args.resume)
         previous = json.loads((root / 'run.json').read_text()) if args.resume else None
         receipts = []
@@ -441,7 +503,14 @@ class Collector:
         previous_wall = old_summary.get('wall_seconds', max(0., (root / 'episodes.jsonl').stat().st_mtime - previous['started']) if previous and receipts else 0.)
         disk_wait = old_summary.get('disk_wait_seconds', 0.)
         clock_config = mcp('run_python', {'code': (REPO / 'linux-env/scripts/collect/configure_clock.py').read_text() + '\nresult=configure(30)'})
-        timeline(True)
+        transport_config = mcp('run_python', {'code': 'import sys\nsys.path.insert(0,' + repr(str(REPO / 'linux-env/scripts/collect')) + ')\nimport collection_runtime as c\nresult=c.install()'})
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            counts = mcp('run_python', {'code': 'import collection_runtime as c\nr=c.runtime()\nresult=[r.node.count_subscribers("/joint_states_measured"),r.node.count_subscribers("/collection_tick")]'})
+            if counts[0] >= 2 and counts[1] >= 1:
+                break
+            self.stop.wait(.1)
+        self.advance_ticks(1)
         self.wait_ready()
         self.node._cmd_toggle_ground_plane()
         timeline(False)
@@ -467,6 +536,8 @@ class Collector:
         tracked_sources = ['linux-env/scripts/collect/collect.py', 'linux-env/scripts/collect/contract.py',
                            'linux-env/scripts/collect/checkpoint.py',
                            'linux-env/scripts/collect/storage.py',
+                           'linux-env/scripts/collect/collection_runtime.py',
+                           'linux-env/scripts/collect/success.py',
                            'linux-env/scripts/collect/configure_clock.py',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/pick_place.py',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/grasp_geometry.py',
@@ -486,6 +557,8 @@ class Collector:
             (root / 'run.json').write_text(json.dumps(previous, indent=2))
         else:
             (root / 'run.json').write_text(json.dumps(dict(instance=args.instance, host=socket.gethostname(), gpu_index=int(os.getenv('ISAACSIM_GPU', '0')),
+            recording_version=2, transport_config=transport_config, observation_state_topic='/joint_states_measured',
+            application_contract='Held at observation tick; read-back verified PhysX targets before one-frame advance; maximum one sim tick latency',
             clock_config=clock_config, domain=90 + args.instance,
             bridge_port=8777 + 2 * args.instance, fps=30, baseline=baseline, baseline_cup_layout=self.baseline_cup_layout, eval_seeds=EVAL_SEEDS,
             **{k: v for k, v in provenance.items() if k != 'start_trial'}), indent=2))
@@ -513,6 +586,13 @@ class Collector:
                 if not self.node._motion_event.wait(timeout=90) or not self.node._last_motion_status.get('ok'):
                     raise RuntimeError('Pre-episode home failed')
                 self.servo.configure(params)
+                self.advance_ticks(6)
+                measured_home = mcp('run_python', {'code': 'import collection_runtime as c\nresult=c.runtime().snapshot()'})
+                from so_arm101_control.grasp_geometry import _grasp_home_data_target
+                if max(abs(measured_home['state'][i] - _grasp_home_data_target()[name]) for i,name in enumerate(JOINTS[:5])) > .01:
+                    raise RuntimeError('Measured physical arm did not reach the episode home pose')
+                if max(abs(v) for v in measured_home['velocity'][:5]) > .05:
+                    raise RuntimeError('Measured physical arm is not settled at episode start')
                 receipt['cup_randomization'] = self.scene(params, baseline)
                 self.node.approach_offset = params['approach_offset_m']
                 self.node._grasp_approach_height_var.set(params['approach_height_m'])
@@ -520,6 +600,9 @@ class Collector:
                 receipt['camera_duplicate_messages_before_episode'] = dict(self.sensors.duplicate_messages)
                 receipt['initial_objects'] = dict(self.node.objects_data)
                 receipt['initial_cups'] = dict(self.node._drop_data)
+                receipt['initial_physical'] = self.scene_restore['snapshot']
+                receipt['initial_restore_error_m'] = self.scene_restore['max_position_error_m']
+                receipt['initial_expert_reference'] = list(self.servo.reference)
                 writer = EpisodeWriter(path, 30)
                 with self.writer_lock:
                     self.writer = writer
@@ -535,14 +618,14 @@ class Collector:
                     raise TimeoutError('Episode wall deadline exceeded')
                 if not cycle_result.get('ok'):
                     raise RuntimeError('Scripted cycle failed: ' + repr(self.node._last_motion_status))
-                # The return-home segment gives the released block several sim seconds to settle.
-                lego = self.node.objects_data[params['object']]
-                cup_name = self.node._qs_auto_drop_for_lego(params['object'])
-                cup = self.node._drop_data[cup_name]
-                distance = math.hypot(lego['x'] - cup['x'], lego['y'] - cup['y'])
-                receipt['score'] = dict(distance_m=distance, lego=lego, cup=cup)
-                if distance > .033 or not (cup['z'] - .04825 < lego['z'] < cup['z'] + .060):
-                    raise RuntimeError('Physical success check failed')
+                # Verification ticks are a trailing audit, outside the motion dataset.
+                with self.writer_lock:
+                    self.writer = None
+                snapshots = self.advance_ticks(SETTLED_TICKS)
+                receipt['settled_physical'] = snapshots
+                receipt['score'] = settled_containment(snapshots, params['object'], params['color'])
+                if not receipt['score']['passed']:
+                    raise RuntimeError('Whole-block settled containment failed')
                 receipt['accepted'] = True
             except Exception as exc:
                 receipt['error'] = repr(exc)
@@ -555,7 +638,7 @@ class Collector:
                     receipt['timing'] = timing_audit(writer.rows, 30)
                     receipt['accepted'] = receipt['accepted'] and receipt['timing']['passed']
                     if receipt.get('score'):
-                        initial_z = receipt['initial_objects'][params['object']]['z']
+                        initial_z = receipt['initial_physical']['bodies'][params['object']]['position'][2]
                         maximum_z = max((row.get('target_object_pose', {}).get('z', initial_z) for row in writer.rows), default=initial_z)
                         receipt['score']['lift_m'] = maximum_z - initial_z
                         if maximum_z - initial_z < .025:
@@ -592,11 +675,13 @@ class Collector:
 
     def close(self):
         self.stop.set()
-        timeline(False)
-        mcp('run_python', {'code': "import carb\ns=carb.settings.get_settings()\ns.set_int('/app/runLoops/main/rateLimitFrequency',10)\ns.set_bool('/app/runLoops/main/rateLimitEnabled',True)\nresult=True"})
-        self.executor.shutdown(timeout_sec=5)
-        self.node.destroy_node()
-        rclpy.shutdown()
+        try:
+            timeline(False)
+            mcp('run_python', {'code': "import carb\ns=carb.settings.get_settings()\ns.set_int('/app/runLoops/main/rateLimitFrequency',10)\ns.set_bool('/app/runLoops/main/rateLimitEnabled',True)\nresult=True"})
+        finally:
+            self.executor.shutdown(timeout_sec=5)
+            self.node.destroy_node()
+            rclpy.shutdown()
 
 
 def main():

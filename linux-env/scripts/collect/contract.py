@@ -58,6 +58,19 @@ def timing_audit(rows, fps):
         errors.append('Recorded action differs from the clean corrective expert')
     if any(r['expert_observation_stamp_ns'] != r['sim_ns'] for r in rows):
         errors.append('Expert action is conditioned on a different observation tick')
+    if any(r.get('state_source') != 'isaac_articulation' for r in rows):
+        errors.append('Observation is not measured physical articulation feedback')
+    if any(len(r.get('velocity', [])) != 6 or not all(math.isfinite(v) for v in r.get('velocity', [])) for r in rows):
+        errors.append('Measured joint velocities are incomplete or non-finite')
+    if any(abs(r.get('pose_stamp_ns', -1) - r['sim_ns']) > 1000 for r in rows):
+        errors.append('Physical poses are not from the camera tick')
+    application_latency = [r.get('application_stamp_ns', -1) - r['sim_ns'] for r in rows]
+    if any(t < -10 or t > round(1e9 / fps) + 10 for t in application_latency):
+        errors.append('Command application exceeds the declared one-tick contract')
+    if any(abs(r.get('declared_application_stamp_ns', -1) - r['sim_ns']) > 10 for r in rows):
+        errors.append('Command was not scheduled from its observation tick')
+    if any(len(r.get('applied_command', [])) != 6 or any(abs(a-b) > 1e-6 for a,b in zip(r.get('applied_command', []),r['executed_action'])) for r in rows):
+        errors.append('Applied physical drive target differs from executed command')
     planning_idle = sum(not r.get('executing', True) for r in rows) / len(rows)
     stationary = sum(max(abs(x - y) for x, y in zip(a['state'], b['state'])) < 1e-4
                      for a, b in zip(rows, rows[1:])) / (len(rows) - 1)
@@ -76,5 +89,6 @@ def timing_audit(rows, fps):
                 real_time_factor=sum(sim) / 1e9 / sum(wall),
                 idle_frame_fraction=planning_idle, stationary_frame_fraction=stationary,
                 command_latency_sim_ms_max=max((r['command_clock_ns'] - r['sim_ns']) / 1e6 for r in rows),
+                application_latency_sim_ms_max=max(application_latency) / 1e6,
                 state_image_stamp_skew_ns_max=max(abs(r['joint_stamp_ns'] - r['sim_ns']) for r in rows),
                 noisy_steps=sum(r['action'] != r['executed_action'] for r in rows))

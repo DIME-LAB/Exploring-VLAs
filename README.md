@@ -303,121 +303,125 @@ directly (tailnet or LAN); an ssh tunnel can't carry it. One viewer at a time.
 
 ## Collecting sim data
 
-The unattended collector uses the same `PickPlaceNode` motion implementation as
-control_gui's Quickstart. `grasp_geometry.py` and the calibrated five-DOF solver
-in `compute_workspace.py` are independent of ROS and Tk. The collector imports
-no Tk, starts no display, and uses neither keyboard events nor spoken announcements.
+The unattended collector shares `PickPlaceNode` with control_gui Quickstart.
+`grasp_geometry.py` and the calibrated five-DOF solver in `compute_workspace.py`
+are pure Python/numpy, independent of ROS, MoveIt and Tk. Collection uses no
+Tk, display, keyboard hooks, spoken announcements or wall-clock lerobot-record.
 
-Collection uses **sim time throughout**: controllers, MoveIt, the expert and
-observations follow Isaac `/clock`. Physics advances at 120 Hz, app frames at
-30 simulated Hz, and both 640×480 rgb8 ROS2CameraHelper cameras tick at 30 Hz.
-The collector joins two images and a JointState with the **same sim stamp**;
-each tick supplies one dataset row. This supersedes wall-clock `lerobot-record`
-for unattended collection. The collection preset is uncapped; `deploy-clock`
-uses the identical simulation/camera configuration with a 30 Hz app ceiling
-(target RTF 1.0). Deployment policy replay must use `--fps 30
---action-duration-s 0.03333333333333333`. Measure achieved deployment RTF before
-accepting a run; a ceiling does not guarantee the machine can sustain it.
+Physics runs at 120 Hz; application frames and both 640×480 rgb8
+ROS2CameraHelper cameras tick at 30 simulated Hz. Controllers, MoveIt and the
+expert use Isaac `/clock`. **Observation state is measured PhysX articulation
+positions/velocities on `/joint_states_measured`.** `/joint_states` remains the
+mock controller reference and is logged separately. It is never the observation.
 
-Instance index N selects ROS domain `90+N`, bridge `8777+2N`, HTTP `8778+2N`,
-and separate runtime files. `ISAACSIM_GPU` selects the GPU (default 0).
-Coordinate assignments before launching on a shared box. DDS uses the
-loopback-only CycloneDDS XML; do not combine it with `ROS_LOCALHOST_ONLY=1`.
-World timing is selected before scene creation (including the 30 Hz physics
-frame-rate clamp). Never change World timing on a live articulation.
-Each instance has a portable root; shader caches under `~/.cache/ov` are shared.
-Collection writes bulk output only beneath `/mnt/a4500-backup/exploring-vlas/`.
-Before each attempt the **output filesystem** must have at least 50 GiB free;
-if it falls below that floor, collection logs a wait every 60 seconds and
-resumes above 52 GiB. Root has a last-resort 20 GiB safety stop. Per-instance
-ROS logs, temp files, HF caches, Python cache policy, portable root and OptiX
-cache configuration keep controlled writes on the output filesystem. The
-shared `~/.cache/ov` shader cache stays shared. Receipts report growth in root
-files open for writing by the instance process trees (allocated and apparent
-bytes, with shared caches identified); this measures space growth rather than
-in-place rewrite traffic. Never alter the sibling `a4500-backup-20260828` archive.
-No source under `isaac/exts/` needs modification.
+The collector holds the timeline between frames. Given the synchronized image,
+physical state and pose snapshot at tick t, it computes a clean corrective
+setpoint, independently adds seeded DART noise to the execution array, and writes
+the execution targets into the existing PhysX drives while paused. It reads
+those targets back, logs the actual native simulation-clock application stamp,
+and advances exactly one frame. Only this instance's normal ROS follower
+executor is disconnected during collection. Shared planning, grasp/IK maths,
+attach/detach and drop logic remain the GUI implementation. Planning/service
+work runs with the sim held; verification tail ticks are excluded from training.
+The audit rejects skipped/duplicate ticks, mismatched physical state/images/poses,
+noisy labels, changed applied targets, and application latency above one tick.
+A five-sim-second-late application probe must fail.
+
+`deploy-clock` restores the ROS follower, keeps physical feedback publishing,
+and caps the identical simulation/camera profile at 30 app Hz (target RTF 1.0).
+`deploy` also starts the policy launcher with **fps=30**, action duration=1/30 s
+and `--robot.joint_states_topic=/joint_states_measured`. The existing LeRobot
+robot config already supports this topic option; real hardware keeps its measured
+`/joint_states` default. A cap does not guarantee throughput: measure actual RTF
+before accepting deployment. Legacy eval defaults remain separate from this preset.
+
+Instance N selects domain `90+N`, bridge `8777+2N`, HTTP `8778+2N`, policy RPC
+`18090+N` and private runtime files. `ISAACSIM_GPU` selects renderer, physics
+CUDA and CUDA consumers (default 0); Isaac leaves CUDA_VISIBLE_DEVICES unset.
+Use only assigned resources on shared boxes. DDS uses loopback-only CycloneDDS;
+do not also set ROS_LOCALHOST_ONLY. World timing is set before scene creation,
+including the 30 Hz frame-rate clamp. Never change World timing on a live scene.
+
+All run/export/runtime paths resolve beneath the canonical
+`/mnt/a4500-backup/exploring-vlas/`; environment overrides cannot escape it.
+ROS logs, temp, HF/OptiX caches, portable roots and per-instance grasp traces
+are directed there. Shared shaders under `~/.cache/ov` remain shared. Require
+50 GiB on the output filesystem before each attempt; below that, wait every
+60 s until 52 GiB is available. Root has a **20 GiB last-resort stop**, including
+launcher startup: the earlier 90 GiB rule protected root writes, while collection
+bulk data lives on another filesystem. Never alter the sibling backup archive.
+Receipts measure growth of writable root files in this instance's process trees,
+identifying shared caches. This is space growth, not in-place rewrite traffic.
 
 ```bash
-# Assigned instance 0: GPU 0, ROS domain 90, bridge 8777, HTTP 8778.
+# Use the box/domain/GPU assigned by the lead. Instance 0 here is GPU 0/domain 90.
 ISAACSIM_GPU=0 bash linux-env/scripts/collect_sim.sh up 0
 
-# Five successful smoke episodes; then validate/export before collecting the pilot.
+bash linux-env/scripts/collect_sim.sh clock-sanity 0 \
+  --output /mnt/a4500-backup/exploring-vlas/runtime/instance-0/clock-sanity.json
+
 bash linux-env/scripts/collect_sim.sh run 0 --episodes 5 --seed 310000 \
-  --output /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1
+  --output /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-v2
 bash linux-env/scripts/collect_sim.sh export 0 \
-  /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1 \
+  /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-v2 \
   --repo-id local/soarm101_headless_smoke \
-  --report-dir /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1/report
+  --report-dir /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-v2/report
 
-# Pilot only: accepted colours rotate red/green/blue, giving 17/17/16 for 50.
+# Only after the corrected five-episode smoke passes; accepted colours rotate 17/17/16.
 bash linux-env/scripts/collect_sim.sh run 0 --episodes 50 --seed 320000 \
-  --output /mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1
+  --output /mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1-v2
 bash linux-env/scripts/collect_sim.sh export 0 \
-  /mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1 \
+  /mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1-v2 \
   --repo-id local/soarm101_headless_pilot \
-  --report-dir /mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1/report
+  --report-dir /mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1-v2/report
 
-# Same sim-time stack, paced for policy deployment (collection must be stopped).
-bash linux-env/scripts/collect_sim.sh deploy-clock 0
-# Shut down only this instance and its control stack.
+# Optional: policy deployment using the same measured state and 30 Hz preset.
+bash linux-env/scripts/collect_sim.sh deploy 0 --pretrained /path/to/model
+# Stop only this instance/control stack, after collection/deployment exits.
 bash linux-env/scripts/collect_sim.sh down 0
 ```
 
-The expert follows the collision-validated Quickstart trajectory. At each
-camera tick it recomputes a bounded corrective setpoint from measured joints
-toward that trajectory; this **clean setpoint** is the recorded action.
-Bounded seeded DART disturbances affect only the command sent to the controller,
-which is logged separately as `executed_action`. Both use absolute joint positions;
-the exported state/action use degrees in deployment's six-joint order, with the
-canonical `gripper.pos` feature name. Never run the controller-reference mirror
-in this domain: its output contains noisy execution commands and is not the label.
-The timeline pauses between motion segments, including MoveIt planning and
-attach/detach service calls, so wall-time planning delays do not create long
-stationary stretches in simulated demonstrations. The app-rate configuration stays fixed across pause/resume during an episode.
-After collection exits, idle app updates are capped at 10 Hz during export. Original command-dispatch clock
-stamps are logged separately from the observation tick used by the expert.
+`--resume` re-audits an interrupted run's receipt ledger and continues its original
+baseline, next seed and accepted-colour rotation; inconsistent ledgers and changed
+motion/timing sources are refused. `--replay-receipt /path/to/receipt.json` restores
+the recorded initial physical body poses, orientations and zero velocities,
+plus the measured arm state and clean expert reference. Missing cups cause a
+clear refusal requiring a fresh scene. Collection never adds/deletes rigid bodies
+beside the articulation. Each reset clears linear/angular velocity for cups and
+blocks and verifies the measured home pose. Replay restores poses exactly within
+1 μm/1e-6 quaternion tolerance; contact and planner execution need not be bit-identical.
 
-`run.json` fixes the baseline scene and held-out eval seeds (900000–900029).
-Every attempt has `receipt.json` with its seed, task, offsets, heights, speed,
-noise seed, cup parameters, initial poses and physical result. `frames.jsonl`
-contains original camera/joint/action sim stamps, wall receipt times, clean actions
-and executed commands. Failures retain their receipts but are excluded from the
-dataset. `--resume` re-audits an existing output ledger and continues its original baseline,
-seed sequence and accepted-colour rotation; incomplete or inconsistent ledgers
-are refused. Source hashes and resume sessions are retained in `run.json`.
-A run ends with `summary.json` and `COLLECTION_FINISHED`; check both,
-not just the process exit status. `--max-attempts` bounds retries and
-`--episode-deadline` bounds each episode in wall time. The collector refuses
-requests above 50 episodes; the lead schedules the larger run.
+`run.json` records clock/transport settings, source hashes and held-out eval seeds
+900000–900029 (forbidden in training). Receipts retain every attempt's task, seed,
+initial physical poses, cup layout, approach/speed/noise parameters and outcome.
+Only successful audited episodes enter the dataset. Success requires all eight
+corners of the selected block's oriented bounding box inside a conservative cup
+interior in the cup's local frame, below the rim, with low block/cup velocities
+for 15 consecutive sim ticks. The block must also have lifted at least 25 mm.
+The conservative cylinder has radius 25 mm, floor 2 mm and ceiling 94 mm above
+the cup base (mesh rim 96.52 mm). An above-rim centre-only case is rejected.
 
-The exporter re-audits every accepted attempt, checks exact video/row counts,
-writes through the pinned LeRobotDataset API, replaces its generated timestamp
-with the measured relative sim stamp, then loads the result with LeRobotDataset
-and reads first/last multimodal samples. It also creates a contact sheet,
-three colour sample videos, timing audits and a per-episode manifest.
-`--replay-receipt /path/to/attempt-NNNN/receipt.json` regenerates that attempt
-from its run baseline and saved parameters (one attempt, one requested success). Do not
-accept an episode whose timing audit fails or whose picked block is outside
-the matching cup's conservative interior test, or whose observed lift is less
-than 25 mm. Report yield, RTF, stationary
-frame fraction and episodes per wall-hour alongside the dataset.
+State/action use absolute degrees in deployment's six-joint order, including
+`gripper.pos`; raw audit rows retain radians. The action is the clean corrective
+expert command. Seeded disturbances affect only `executed_action`; actual PhysX
+read-back targets are logged separately. Noise uses std 0.002–0.006 rad,
+probability 0.30, clip ±0.012 rad, during the first 80% of arm trajectories;
+the final 20% is clean recovery. Diversity also covers object poses, cup line/arc
+layouts and colour order, approach offsets/heights and speed.
 
-Offline checks: `python3 -m unittest discover -s linux-env/scripts/collect -p
- 'test_*.py'`. The explicit sim-time trajectory sanity check is
-`linux-env/scripts/collect/clock_sanity.py` under system Humble with the assigned
-domain/bridge variables; it writes its own slow/fast RTF receipt. LeRobot's
-[dataset API](https://huggingface.co/docs/lerobot/lerobot-dataset-v3) documents
-schema and video storage; the installed fork is the writer API authority.
+`summary.json` must have complete=true and COLLECTION_FINISHED; exit code alone
+is insufficient. In-progress checkpoints are explicitly marked. Episode/step
+wall deadlines fail bad attempts. Failed receipts remain; failed videos are
+excluded. The exporter refuses partial/superseded runs, re-audits original ticks,
+checks exact row/video counts, writes measured relative sim timestamps through
+the pinned LeRobotDataset API, reloads the dataset, and creates a contact sheet,
+three colour sample videos and parameter/timing reports. Report accepted yield,
+RTF, idle/stationary fractions, storage growth and episodes per wall-hour. The
+collector refuses requests above 50; the lead schedules the larger run.
 
-Validation on the assigned isolated instance: the five-episode smoke loaded in
-LeRobotDataset (4,238 frames, 30 fps; red/green/blue = 2/2/1), with all timing
-and clean-expert audits passing. Five of eight attempts were accepted (62.5%).
-The shared pure geometry matches the verified GUI mathematics on 1,000 random
-cases; 15 offline tests pass. The GUI adapter also boots and serves its widget
-inventory and Quickstart services with sim time enabled in the isolated domain.
-The collection process itself needs no display.
-
-Already-reached gripper targets complete immediately. The audit separately reports
-planning/hold frames (limit 3%) and near-stationary joint steps (maximum joint
-change below 0.0001 rad; limit 5%), so a commanded hold cannot hide as motion.
+Offline validation: `python3 -m unittest discover -s linux-env/scripts/collect -p
+ 'test_*.py'`. This includes 1,000 randomized comparisons with frozen verified-GUI
+geometry, the successful fallback-warning probe, late-application and above-rim
+rejections, storage thresholds, output confinement and deployment feedback flags.
+The independent review superseded the earlier reference-state smoke/pilot;
+corrected live smoke and pilot validation are required before completion.

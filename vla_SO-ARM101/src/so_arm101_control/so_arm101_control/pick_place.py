@@ -456,7 +456,8 @@ class MotionSetting:
 class PickPlaceNode(Node):
     """Shared motion planner and cycle runner used by GUI and unattended collection."""
 
-    def __init__(self, node_name="so_arm101_pick_place", use_sim_time=None):
+    def __init__(self, node_name="so_arm101_pick_place", use_sim_time=None,
+                 joint_states_topic='/joint_states'):
         overrides = [] if use_sim_time is None else [Parameter('use_sim_time', value=use_sim_time)]
         super().__init__(node_name, parameter_overrides=overrides)
 
@@ -531,7 +532,7 @@ class PickPlaceNode(Node):
         # _sub_cb_group when a service handler explicitly .wait()s for
         # them — currently that's /objects_poses_sim + /drop_poses.
         self.js_sub = self.create_subscription(
-            JointState, '/joint_states', self._joint_states_callback, 10)
+            JointState, joint_states_topic, self._joint_states_callback, 10)
         self.objects_data = {}
         self.objects_lock = threading.Lock()
         self._last_grasped_object = None  # persists through pick→drop cycle
@@ -1190,7 +1191,9 @@ class PickPlaceNode(Node):
             self._append_log(f'Quickstart step {method_name} raised: {exc}', 'err')
             return False
 
-        if self._cmd_error:
+        # A rejected planner tier can warn before a fallback succeeds. The
+        # motion status is the verdict shared by the GUI and headless adapter.
+        if self._last_motion_status and self._last_motion_status.get('ok') is False:
             return False
         ok = self._qs_wait_for_step(timeout_s=60.0)
         if not ok and self._qs_abort_evt.is_set():

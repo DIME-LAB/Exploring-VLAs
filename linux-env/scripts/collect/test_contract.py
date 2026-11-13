@@ -17,10 +17,24 @@ class ContractTests(unittest.TestCase):
                             image_receive_epoch_ns=wall, state=[i * .001] * 6,
                             action=[i * .001 + .035] * 6, executed_action=[i * .001 + .04] * 6, expert_reference=[1. + i * .001] * 6,
                             expert_observation_stamp_ns=sim, command_clock_ns=sim + 33333333))
+            out[-1].update(state_source='isaac_articulation', pose_stamp_ns=sim,
+                           velocity=[.03] * 6,
+                           application_stamp_ns=sim, declared_application_stamp_ns=sim,
+                           applied_command=list(out[-1]['executed_action']))
         return out
 
     def test_true_clocks_pass(self):
         self.assertTrue(timing_audit(self.rows(), 30)['passed'])
+
+    def test_five_second_late_application_is_rejected(self):
+        rows = self.rows()
+        for row in rows:
+            row['application_stamp_ns'] += 5000000000
+        self.assertFalse(timing_audit(rows, 30)['passed'])
+
+    def test_reference_feedback_is_rejected(self):
+        rows = self.rows(); rows[1]['state_source'] = 'controller_reference'
+        self.assertFalse(timing_audit(rows, 30)['passed'])
 
     def test_bulk_gate_waits_for_margin_without_gating_root_at_90(self):
         free = iter([49, 51, 52]); waits = []; logs = []

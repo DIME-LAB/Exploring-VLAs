@@ -153,6 +153,7 @@ def build_parser():
         help="FJT target duration; defaults to one client tick (1/fps).",
     )
     p.add_argument("--robot-type", default=DEFAULTS["robot_type"])
+    p.add_argument("--joint-states-topic", default="/joint_states", help="Measured feedback topic; sim-time collection preset uses /joint_states_measured.")
     p.add_argument(
         "--cameras-json",
         default=json.dumps(DEFAULTS["cameras"]),
@@ -275,6 +276,7 @@ def build_commands(args, python=None):
         "-m",
         "lerobot.async_inference.robot_client",
         f"--robot.type={args.robot_type}",
+        f"--robot.joint_states_topic={args.joint_states_topic}",
         # Sim-specific: actuate ON (drives ros2_control), use_degrees ON
         # (matches recorded dataset's units convention).
         "--robot.actuate=true",
