@@ -60,8 +60,8 @@ if [ -n "$INSTANCE_INDEX" ]; then
         echo '--instance must be an integer from 0 to 9' >&2; exit 2;
     }
     export SOARM_INSTANCE_INDEX="$INSTANCE_INDEX"
-    export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-$((90 + INSTANCE_INDEX))}"
-    export OMNI_KIT_MCP_PORT="${OMNI_KIT_MCP_PORT:-$((8777 + 2 * INSTANCE_INDEX))}"
+    export ROS_DOMAIN_ID="$((90 + INSTANCE_INDEX))"
+    export OMNI_KIT_MCP_PORT="$((8777 + 2 * INSTANCE_INDEX))"
     export SOARM_KIT_MCP_PORT="$OMNI_KIT_MCP_PORT"
     INSTANCE_ROOT="${SOARM_INSTANCE_ROOT:-/mnt/a4500-backup/exploring-vlas/runtime/instance-$INSTANCE_INDEX}"
     export ISAACSIM_LOG="${ISAACSIM_LOG:-$INSTANCE_ROOT/isaac.log}"

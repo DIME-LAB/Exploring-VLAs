@@ -533,6 +533,7 @@ class PickPlaceNode(Node):
         # them — currently that's /objects_poses_sim + /drop_poses.
         self.js_sub = self.create_subscription(
             JointState, joint_states_topic, self._joint_states_callback, 10)
+        self._joint_states_topic = joint_states_topic
         self.objects_data = {}
         self.objects_lock = threading.Lock()
         self._last_grasped_object = None  # persists through pick→drop cycle
@@ -832,7 +833,7 @@ class PickPlaceNode(Node):
 
 
     def _joint_states_callback(self, msg):
-        """Update internal state and GUI sliders from joint_state_broadcaster."""
+        """Update internal state and GUI sliders from the selected feedback topic."""
         # Always track actual robot state (never blocked by _slider_driven)
         with self.joint_lock:
             for i, name in enumerate(msg.name):
@@ -857,7 +858,7 @@ class PickPlaceNode(Node):
                 self.root.after(0, self._sync_all_sliders, positions)
             self._publish_goal_state()
             self.get_logger().info(
-                f'Initial joint sync from /joint_states: '
+                f'Initial joint sync from {self._joint_states_topic}: '
                 f'{", ".join(f"{n}={v:.3f}" for n, v in positions.items())}')
             return
         if self._slider_driven:
@@ -2047,6 +2048,11 @@ class PickPlaceNode(Node):
         the block hovering offset from the gripper in RViz. Waiting for
         zero-velocity eliminates the mismatch.
         """
+        # A step-driven transport can prove that physical time is held.
+        # Waiting for new velocity samples cannot settle a paused simulation.
+        held = getattr(self, '_simulation_held', None)
+        if held and held():
+            return True
         import time
         t0 = time.time()
         settled_since = None

@@ -6,13 +6,8 @@ from pathlib import Path
 import shutil
 import subprocess
 
-import cv2
-import torch
-import numpy as np
-from PIL import Image, ImageDraw
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from contract import JOINTS, timing_audit
-from storage import confined
+from storage import confined, prepare_environment
 
 
 def main():
@@ -21,8 +16,6 @@ def main():
     p.add_argument('--repo-id', default='local/soarm101_headless_pilot')
     p.add_argument('--report-dir', type=Path, required=True)
     args = p.parse_args()
-    torch.set_num_threads(1)
-    cv2.setNumThreads(1)
     run, report = args.run, args.report_dir
     run, report = confined(run), confined(report)
     if (run / 'superseded.json').exists():
@@ -32,6 +25,14 @@ def main():
         raise ValueError('Collection is incomplete; refusing to export a partial run')
     report.mkdir(parents=True, exist_ok=True)
     config = json.loads((run / 'run.json').read_text())
+    prepare_environment(config['instance'])
+    import cv2
+    import torch
+    import numpy as np
+    from PIL import Image, ImageDraw
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    torch.set_num_threads(1)
+    cv2.setNumThreads(1)
     fps = config['fps']
     from lerobot.robots.so101_ros2.config_so101_ros2 import SO101ROS2RobotConfig
     deployment = SO101ROS2RobotConfig(use_degrees=True, robot_type='so_follower')

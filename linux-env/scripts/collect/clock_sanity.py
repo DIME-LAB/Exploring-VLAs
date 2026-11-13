@@ -15,8 +15,8 @@ REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'vla_SO-ARM101/src/so_arm101_control'))
 sys.path.insert(0, str(REPO / 'omni-kit-mcp'))
 from kit_mcp.client import call
-from so_arm101_control.pick_place import PickPlaceNode, ARM_JOINT_NAMES
-from storage import confined
+from so_arm101_control.grasp_geometry import ARM_JOINT_NAMES
+from storage import confined, prepare_environment
 
 
 def kit(code):
@@ -27,6 +27,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__); p.add_argument('--output', type=Path, required=True)
     args = p.parse_args()
     args.output = confined(args.output)
+    prepare_environment(int(os.environ.get('SOARM_INSTANCE_INDEX', '0')))
+    from so_arm101_control.pick_place import PickPlaceNode
     expected_domain = str(90 + int(os.environ.get('SOARM_INSTANCE_INDEX', '0')))
     if os.environ.get('ROS_DOMAIN_ID') != expected_domain:
         raise ValueError('Clock sanity requires this instance\'s assigned ROS domain')

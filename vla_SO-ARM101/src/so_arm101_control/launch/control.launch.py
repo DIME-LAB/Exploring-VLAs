@@ -29,11 +29,12 @@ Shutdown:
 import os
 import subprocess
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, GroupAction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch_ros.actions import Node, SetParameter
+from launch_ros.actions import Node, SetParameter, SetRemap
+from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory
 
 
@@ -61,6 +62,10 @@ def generate_launch_description():
                               description='Drive controllers, MoveIt and pose publishers from Isaac /clock'),
         DeclareLaunchArgument('controllers_config', default_value=controllers_yaml,
                               description='ros2_control controller YAML; collection supplies an isolated 120 Hz preset'),
+        DeclareLaunchArgument('feedback_joint_states_topic', default_value='/joint_states',
+                              description='Measured planning/TF feedback; collection uses /joint_states_measured'),
+        DeclareLaunchArgument('feedback_publish_rate', default_value='20.0',
+                              description='Robot TF publish ceiling; collection supplies 120 Hz'),
         SetParameter(name='use_sim_time', value=LaunchConfiguration('use_sim_time')),
         # Arguments
         DeclareLaunchArgument('real_hardware', default_value='false',
@@ -82,7 +87,9 @@ def generate_launch_description():
         Node(
             package='robot_state_publisher',
             executable='robot_state_publisher',
-            parameters=[{'robot_description': robot_description}],
+            parameters=[{'robot_description': robot_description,
+                         'publish_frequency': ParameterValue(LaunchConfiguration('feedback_publish_rate'), value_type=float)}],
+            remappings=[('/joint_states', LaunchConfiguration('feedback_joint_states_topic'))],
             output='screen',
         ),
 
@@ -120,10 +127,13 @@ def generate_launch_description():
         ),
 
         # MoveIt move_group (for IK + planning + execution)
-        IncludeLaunchDescription(
+        GroupAction([
+            SetRemap(src='/joint_states', dst=LaunchConfiguration('feedback_joint_states_topic')),
+            IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(moveit_pkg, 'launch', 'move_group.launch.py')),
-        ),
+            ),
+        ]),
 
         # MoveIt Task Constructor pick-place node (optional; requires mtc:=true)
         IncludeLaunchDescription(

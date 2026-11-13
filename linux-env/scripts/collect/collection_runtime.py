@@ -18,15 +18,20 @@ import omni.timeline
 import omni.usd
 import rclpy
 from rclpy.context import Context
+from rclpy.executors import SingleThreadedExecutor
+from rclpy.parameter import Parameter
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 from pxr import Gf, Usd, UsdGeom, UsdPhysics
 from isaacsim.core.api import World
 from isaacsim.core.prims import Articulation, RigidPrim
 from contract import JOINTS
+from protocol import CommandLedger
 
 _RUNTIME = None
 _LOADED_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+_LOADED_DEPENDENCIES = {name:hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+                        for name in ('contract.py', 'protocol.py')}
 
 
 class Runtime:
@@ -41,6 +46,8 @@ class Runtime:
         self.mode = 'collect'
         self.start_time = self.world.current_time
         self.last_snapshot = None
+        self.epoch = 0
+        self.ledger = CommandLedger()
         self.art = Articulation('/World/SO_ARM101', name='collection_measured_arm', reset_xform_properties=False)
         self.art.initialize()
         self.indices = [self.art.dof_names.index(name) for name in JOINTS]
@@ -79,9 +86,14 @@ class Runtime:
                 self.local_corners[name] = corners
         self.context = Context()
         rclpy.init(args=[], context=self.context)
-        self.node = rclpy.create_node('collection_physical_feedback', context=self.context)
+        self.node = rclpy.create_node('collection_physical_feedback', context=self.context,
+            parameter_overrides=[Parameter('use_sim_time', value=True)])
         self.joint_pub = self.node.create_publisher(JointState, '/joint_states_measured', 64)
         self.tick_pub = self.node.create_publisher(String, '/collection_tick', 64)
+        self.ack_pub = self.node.create_publisher(String, '/collection_command_ack', 64)
+        self.command_sub = self.node.create_subscription(String, '/collection_command', self.command_received, 64)
+        self.io_executor = SingleThreadedExecutor(context=self.context)
+        self.io_executor.add_node(self.node)
         self.subscription = omni.kit.app.get_app().get_post_update_event_stream().create_subscription_to_pop(
             self.after_update, name='collection_one_frame')
         self.set_mode('collect')
@@ -99,12 +111,17 @@ class Runtime:
         if self.busy:
             raise RuntimeError('Cannot change mode while a frame is running')
         self.timeline.pause()
-        source = '/Graph/ActionGraph_SO_ARM101/on_playback_tick.outputs:tick'
-        target = '/Graph/ActionGraph_SO_ARM101/articulation_controller.inputs:execIn'
+        graph = '/Graph/ActionGraph_SO_ARM101/'
+        connections = [(graph+'on_playback_tick.outputs:tick', graph+'articulation_controller.inputs:execIn')]
+        connections += [(graph+'ros2_subscribe_joint_state.outputs:'+kind+'Command',
+                         graph+'articulation_controller.inputs:'+kind+'Command')
+                        for kind in ('position','velocity','effort')]
         if mode == 'collect':
-            og.Controller.disconnect(source, target)
+            for source,target in connections:
+                og.Controller.disconnect(source, target)
         elif mode == 'deploy':
-            og.Controller.connect(source, target)
+            for source,target in connections:
+                og.Controller.connect(source, target)
         else:
             raise ValueError(mode)
         self.mode = mode
@@ -120,14 +137,20 @@ class Runtime:
         self.require_scene()
         positions = self.art.get_joint_positions()[0, self.indices]
         velocities = self.art.get_joint_velocities()[0, self.indices]
+        targets = self.art.get_applied_actions().joint_positions[0, self.indices]
+        if not all(np.all(np.isfinite(values)) for values in (positions, velocities, targets)):
+            raise RuntimeError('Non-finite physical articulation feedback')
         bodies = {}
         for name, view in self.bodies.items():
             pos, quat = view.get_world_poses()
             velocity = view.get_velocities()[0]
+            if not all(np.all(np.isfinite(value)) for value in (pos, quat, velocity)):
+                raise RuntimeError('Non-finite physical body feedback: '+name)
             bodies[name] = dict(position=list(map(float, pos[0])), orientation=list(map(float, quat[0])),
                                 velocity=list(map(float, velocity)))
         return dict(sim_ns=self.stamp(), physics_time_s=self.world.current_time,
                     state=list(map(float, positions)), velocity=list(map(float, velocities)),
+                    drive_targets=list(map(float, targets)),
                     bodies=bodies, local_corners=self.local_corners, state_source='isaac_articulation')
 
     def publish(self):
@@ -168,21 +191,44 @@ class Runtime:
     def cancel(self):
         self.timeline.pause()
         self.busy = False
-        return dict(held=True, failure=self.failure)
+        self.epoch += 1
+        self.ledger = CommandLedger()
+        return dict(held=True, failure=self.failure, epoch=self.epoch)
+
+    def command_received(self, message):
+        payload = json.loads(message.data)
+        try:
+            if payload['epoch'] != self.epoch:
+                raise ValueError('Cancelled command epoch')
+            if self.mode != 'collect':
+                raise RuntimeError('Collection command refused in deployment mode')
+            ack = self.ledger.process(payload, self.apply, self.advance)
+        except Exception as exc:
+            ack = dict(epoch=payload.get('epoch'), observation_stamp_ns=payload.get('observation_stamp_ns'), error=repr(exc))
+            if payload.get('epoch') == self.epoch:
+                self.failure = repr(exc)
+                self.timeline.pause();self.busy = False
+        self.ack_pub.publish(String(data=json.dumps(ack)))
 
     def after_update(self, event):
         try:
             if self.mode == 'collect':
-                if not self.busy or self.world.current_time <= self.start_time + 1e-8:
-                    return
-                self.timeline.pause()
-                delta = self.world.current_time - self.start_time
-                self.busy = False
-                if abs(delta - 1/30) > 1e-7:
-                    raise RuntimeError(f'One-frame step advanced {delta} sim seconds')
-                self.publish()
+                if self.busy and self.world.current_time > self.start_time + 1e-8:
+                    self.timeline.pause()
+                    delta = self.world.current_time - self.start_time
+                    self.busy = False
+                    if abs(delta - 1/30) > 1e-7:
+                        raise RuntimeError(f'One-frame step advanced {delta} sim seconds')
+                    self.publish()
+                # Drain clock/command callbacks in the same held frame. A short
+                # wall deadline lets the expert respond without another render.
+                deadline = time.monotonic() + (.005 if not self.busy else 0.)
+                self.io_executor.spin_once(timeout_sec=0.)
+                while not self.busy and time.monotonic() < deadline:
+                    self.io_executor.spin_once(timeout_sec=max(0., deadline-time.monotonic()))
             elif self.timeline.is_playing():
                 self.publish()
+                self.io_executor.spin_once(timeout_sec=0.)
         except Exception as exc:
             self.timeline.pause();self.busy = False;self.failure = repr(exc)
 
@@ -221,13 +267,21 @@ def install(mode='collect'):
     global _RUNTIME
     if hashlib.sha256(Path(__file__).read_bytes()).hexdigest() != _LOADED_SHA256:
         raise RuntimeError('Runtime source changed; relaunch this instance before collection')
+    if any(hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() != digest
+           for name,digest in _LOADED_DEPENDENCIES.items()):
+        raise RuntimeError('Runtime dependency changed; relaunch this instance before collection')
     if _RUNTIME is None:
         _RUNTIME = Runtime()
+    if _RUNTIME.failure:
+        raise RuntimeError('Fresh instance required: '+_RUNTIME.failure)
+    _RUNTIME.cancel()
     _RUNTIME.set_mode(mode)
     import torch
     import carb
     return dict(mode=mode, joint_names=_RUNTIME.art.dof_names,
+                epoch=_RUNTIME.epoch,
                 loaded_sha256=_LOADED_SHA256,
+                loaded_dependencies=_LOADED_DEPENDENCIES,
                 cuda_device=torch.cuda.current_device(), renderer_gpu=carb.settings.get_settings().get('/renderer/activeGpu'),
                 physics_gpu=carb.settings.get_settings().get('/physics/cudaDevice'),
                 measured_topic='/joint_states_measured', local_corners=_RUNTIME.local_corners)

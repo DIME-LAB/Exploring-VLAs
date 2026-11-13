@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+sys.dont_write_bytecode = True
 
 import numpy as np
 import rclpy
@@ -29,11 +30,13 @@ REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'vla_SO-ARM101/src/so_arm101_control'))
 sys.path.insert(0, str(REPO / 'omni-kit-mcp'))
 from kit_mcp.client import call as kit_call
-from so_arm101_control.pick_place import PickPlaceNode, JOINT_LIMITS
+from so_arm101_control.grasp_geometry import JOINT_LIMITS
 from contract import COLORS, JOINTS, EVAL_SEEDS, corrective_action, parameters, timing_audit
 from checkpoint import progress
-from storage import CANONICAL_ROOT, RootFileGrowth, confined, wait_for_storage
+from storage import CANONICAL_ROOT, RootFileGrowth, confined, prepare_environment, wait_for_storage
 from success import SETTLED_TICKS, initial_arm, settled_containment
+
+_COMMAND_EPOCH = 0
 
 
 def ns(stamp):
@@ -51,8 +54,12 @@ def mcp(tool, params=None):
 
 
 def timeline(play):
-    return mcp('run_python', {'code': 'import collection_runtime as c\nresult=c.runtime().' +
+    global _COMMAND_EPOCH
+    result = mcp('run_python', {'code': 'import collection_runtime as c\nresult=c.runtime().' +
                               ('advance()' if play else 'cancel()')})
+    if not play:
+        _COMMAND_EPOCH = result['epoch']
+    return result
 
 
 class Sensors:
@@ -64,6 +71,7 @@ class Sensors:
         self.failure = None
         self.duplicate_messages = collections.Counter()
         self.reference = None
+        self.acks = {}
         self.subs = []
         for key, topic in [('wrist', '/wrist_camera_rgb_sim'), ('top', '/workspace_camera_sim')]:
             self.subs.append(node.create_subscription(Image, topic,
@@ -73,6 +81,24 @@ class Sensors:
         self.subs.append(node.create_subscription(String, '/collection_tick',
                                                 lambda msg: self.put('tick', msg), 64))
         self.subs.append(node.create_subscription(JointState, '/joint_states', self.reference_received, 100))
+        self.subs.append(node.create_subscription(String, '/collection_command_ack', self.ack_received, 64))
+
+    def ack_received(self, msg):
+        ack = json.loads(msg.data)
+        with self.condition:
+            self.acks[(ack['epoch'], ack['observation_stamp_ns'])] = ack
+            if len(self.acks) > 64:
+                del self.acks[next(iter(self.acks))]
+            self.condition.notify_all()
+
+    def read_ack(self, epoch, stamp):
+        with self.condition:
+            if not self.condition.wait_for(lambda:(epoch, stamp) in self.acks, timeout=10):
+                raise TimeoutError('Physical command acknowledgement exceeded 10 wall seconds')
+            ack = self.acks.pop((epoch, stamp))
+        if 'error' in ack:
+            raise RuntimeError(ack['error'])
+        return ack
 
     def reference_received(self, msg):
         self.reference = dict(stamp_ns=ns(msg.header.stamp),
@@ -90,13 +116,15 @@ class Sensors:
             return
         with self.condition:
             if stamp <= self.last:
+                if key in ('wrist', 'top'):
+                    self.duplicate_messages[key] += 1
                 return
             entry = self.pending.setdefault(stamp, {})
             if key in entry and key != 'joint':
                 self.duplicate_messages[key] += 1
                 return
             entry[key] = (msg, time.monotonic_ns())
-            # Keep odd physics ticks too: joint_states is faster than cameras.
+            # Bound outstanding joins; paused cameras can repeat their last stamp.
             while len(self.pending) > 240:
                 self.pending.popitem(last=False)
             self.condition.notify_all()
@@ -300,10 +328,12 @@ class Servo:
 
 class Collector:
     def __init__(self, args):
+        from so_arm101_control.pick_place import PickPlaceNode
         self.args = args
         self.node = PickPlaceNode(use_sim_time=True, joint_states_topic='/joint_states_measured')
         self.sensors = Sensors(self.node)
         self.servo = Servo(self.node)
+        self.command_pub = self.node.create_publisher(String, '/collection_command', 64)
         self.node._trajectory_executor = self.servo.execute
         self.node._gripper_executor = self.servo.gripper
         self.executor = MultiThreadedExecutor(num_threads=4)
@@ -317,6 +347,8 @@ class Collector:
         self.tick_condition = threading.Condition()
         self.last_processed_ns = 0
         self.last_snapshot = None
+        self.node._simulation_held = lambda: mcp('run_python', {'code':
+            'import collection_runtime as c\nr=c.runtime()\nresult=not r.busy and not r.timeline.is_playing()'})
         self.capture_thread = threading.Thread(target=self.capture, daemon=True)
         self.capture_thread.start()
 
@@ -337,9 +369,14 @@ class Collector:
                 with self.node.joint_lock:
                     self.node._actual_positions.update(zip(JOINTS, state))
                 snapshot = entry['tick'][0]
+                if (max(abs(a-b) for a,b in zip(state,snapshot['state'])) > 1e-7 or
+                    max(abs(a-b) for a,b in zip(joint.velocity,snapshot['velocity'])) > 1e-7):
+                    raise RuntimeError('Physical joint/pose feedback channels disagree')
                 clean, executed, active, phase, reference, command_clock, completed, advance = self.servo.tick(stamp, state)
-                ack = mcp('run_python', {'code': 'import collection_runtime as c\nresult=c.runtime().apply(' +
-                    repr(executed) + ',' + str(stamp) + ')'})
+                epoch = _COMMAND_EPOCH
+                self.command_pub.publish(String(data=json.dumps(dict(epoch=epoch,
+                    observation_stamp_ns=stamp, command=executed, advance=advance))))
+                ack = self.sensors.read_ack(epoch, stamp)
                 row = dict(sim_ns=stamp, wall_ns=time.monotonic_ns(), joint_stamp_ns=ns(joint.header.stamp),
                     joint_receive_ns=received, wrist_stamp_ns=ns(entry['wrist'][0].header.stamp),
                     top_stamp_ns=ns(entry['top'][0].header.stamp), wrist_receive_ns=entry['wrist'][1],
@@ -347,6 +384,8 @@ class Collector:
                     expert_observation_stamp_ns=stamp, command_clock_ns=command_clock,
                     expert_reference=reference, executing=active, phase=phase,
                     state_source=snapshot['state_source'], velocity=list(joint.velocity),
+                    physics_state=snapshot['state'], physics_velocity=snapshot['velocity'],
+                    physics_drive_targets=snapshot['drive_targets'],
                     pose_stamp_ns=snapshot['sim_ns'], physics_time_s=snapshot['physics_time_s'],
                     controller_reference=self.sensors.reference,
                     declared_application_stamp_ns=stamp, **ack)
@@ -359,8 +398,6 @@ class Collector:
                 with self.writer_lock:
                     if self.writer:
                         self.writer.add(row, {key: Sensors.image(entry[key][0]).copy() for key in ('wrist', 'top')})
-                if advance:
-                    timeline(True)
                 with self.tick_condition:
                     self.last_processed_ns = stamp
                     self.last_snapshot = snapshot
@@ -411,7 +448,7 @@ class Collector:
         while time.monotonic() < deadline:
             if self.failure:
                 raise RuntimeError(self.failure)
-            if self.node.objects_data and len(self.node._drop_data) == 3 and self.servo.last_sim_ns:
+            if self.node.objects_data and len(self.node._drop_data) == 3 and self.servo.last_sim_ns and self.sensors.reference:
                 for client in (self.node.plan_client, self.node.validity_client, self.node._apply_scene_client):
                     if not client.wait_for_service(timeout_sec=5):
                         raise RuntimeError('MoveIt service unavailable')
@@ -435,6 +472,9 @@ class Collector:
             cups = replay['cup_randomization']
         else:
             cups = self.randomize_scene(params, baseline)
+        # Apply the same unrecorded reset barrier for normal collection/replay.
+        # It gives physical joint/pose streams and TF fresh clocked samples.
+        self.episode_start_physical = self.advance_ticks(2)[-1]
         self.sync_scene()
         return cups
 
@@ -464,16 +504,21 @@ class Collector:
         deadline = time.monotonic() + 15
         from moveit_msgs.srv import GetPlanningScene
         while True:
-            req = GetPlanningScene.Request(); req.components.components = 16
+            req = GetPlanningScene.Request(); req.components.components = 16 | 2
             response = self.node._wait_future(self.node._get_scene_client.call_async(req), timeout_sec=3)
             actual = {c.id for c in response.scene.world.collision_objects} if response else set()
-            if expected and expected <= actual:
+            state = (dict(zip(response.scene.robot_state.joint_state.name,
+                              response.scene.robot_state.joint_state.position)) if response else {})
+            physical = self.episode_start_physical['state']
+            feedback_matches = all(name in state and abs(state[name]-q) < 1e-5 for name,q in zip(JOINTS,physical))
+            if expected and expected <= actual and feedback_matches:
                 break
             if time.monotonic() > deadline:
-                raise TimeoutError(f'Planning scene missing {expected - actual}')
+                raise TimeoutError(f'Planning scene missing {expected - actual} or physical feedback differs')
             self.stop.wait(.05)
 
     def run(self):
+        global _COMMAND_EPOCH
         args = self.args
         root = confined(args.output)
         if (root / 'superseded.json').exists():
@@ -504,12 +549,15 @@ class Collector:
         disk_wait = old_summary.get('disk_wait_seconds', 0.)
         clock_config = mcp('run_python', {'code': (REPO / 'linux-env/scripts/collect/configure_clock.py').read_text() + '\nresult=configure(30)'})
         transport_config = mcp('run_python', {'code': 'import sys\nsys.path.insert(0,' + repr(str(REPO / 'linux-env/scripts/collect')) + ')\nimport collection_runtime as c\nresult=c.install()'})
+        _COMMAND_EPOCH = transport_config['epoch']
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
-            counts = mcp('run_python', {'code': 'import collection_runtime as c\nr=c.runtime()\nresult=[r.node.count_subscribers("/joint_states_measured"),r.node.count_subscribers("/collection_tick")]'})
-            if counts[0] >= 2 and counts[1] >= 1:
+            counts = mcp('run_python', {'code': 'import collection_runtime as c\nr=c.runtime()\nresult=[r.node.count_subscribers("/joint_states_measured"),r.node.count_subscribers("/collection_tick"),r.node.count_subscribers("/collection_command_ack")]'})
+            if counts[0] >= 2 and counts[1] >= 1 and counts[2] >= 1 and self.command_pub.get_subscription_count() >= 1:
                 break
             self.stop.wait(.1)
+        else:
+            raise TimeoutError('Physical command/feedback ROS graph was not discovered')
         self.advance_ticks(1)
         self.wait_ready()
         self.node._cmd_toggle_ground_plane()
@@ -538,6 +586,7 @@ class Collector:
                            'linux-env/scripts/collect/storage.py',
                            'linux-env/scripts/collect/collection_runtime.py',
                            'linux-env/scripts/collect/success.py',
+                           'linux-env/scripts/collect/protocol.py',
                            'linux-env/scripts/collect/configure_clock.py',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/pick_place.py',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/grasp_geometry.py',
@@ -545,6 +594,14 @@ class Collector:
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/ik_calibration.yaml',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/workspace_bounds.yaml']
         source_hashes = {name: hashlib.sha256((REPO / name).read_bytes()).hexdigest() for name in tracked_sources}
+        if transport_config['loaded_sha256'] != source_hashes['linux-env/scripts/collect/collection_runtime.py']:
+            raise RuntimeError('Kit loaded a different collection runtime')
+        if any(source_hashes['linux-env/scripts/collect/'+name] != digest
+               for name,digest in transport_config['loaded_dependencies'].items()):
+            raise RuntimeError('Kit loaded different transport dependencies')
+        if any(transport_config[name] != int(os.getenv('ISAACSIM_GPU','0'))
+               for name in ('renderer_gpu','physics_gpu','cuda_device')):
+            raise RuntimeError('Renderer/physics/CUDA instance GPU assignment differs')
         provenance = dict(start_trial=attempted, started=time.time(), source_sha256=source_hashes,
             git_commit=subprocess.check_output(['git', '-C', str(REPO), 'rev-parse', 'HEAD'], text=True).strip())
         if previous:
@@ -599,6 +656,7 @@ class Collector:
                 receipt['initial_objects'] = dict(self.node.objects_data)
                 receipt['initial_cups'] = dict(self.node._drop_data)
                 receipt['initial_physical'] = self.scene_restore['snapshot']
+                receipt['episode_start_physical'] = self.episode_start_physical
                 receipt['initial_restore_error_m'] = self.scene_restore['max_position_error_m']
                 receipt['initial_expert_reference'] = list(self.servo.reference)
                 writer = EpisodeWriter(path, 30)
@@ -681,6 +739,17 @@ class Collector:
             self.node.destroy_node()
             rclpy.shutdown()
 
+    def request_stop(self):
+        self.stop.set()
+        self.node._qs_abort_evt.set()
+        self.node._last_motion_status = dict(ok=False, outcome='collection_stopped')
+        with self.servo.lock:
+            for plan in (self.servo.plan, self.servo.grip_plan):
+                if plan:
+                    plan['done'].set()
+        if getattr(self.node, '_motion_event', None):
+            self.node._motion_event.set()
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -701,11 +770,13 @@ def main():
         parser.error('This collector is limited to the validated 50-episode pilot')
     if os.environ.get('ROS_DOMAIN_ID') != str(90 + args.instance):
         parser.error('ROS_DOMAIN_ID does not match the assigned instance')
+    confined(args.output)
+    prepare_environment(args.instance)
     os.environ['SOARM_KIT_MCP_PORT'] = str(8777 + 2 * args.instance)
     rclpy.init()
     collector = Collector(args)
-    signal.signal(signal.SIGINT, lambda *_: collector.stop.set())
-    signal.signal(signal.SIGTERM, lambda *_: collector.stop.set())
+    signal.signal(signal.SIGINT, lambda *_: collector.request_stop())
+    signal.signal(signal.SIGTERM, lambda *_: collector.request_stop())
     try:
         collector.run()
     finally:

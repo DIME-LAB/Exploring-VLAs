@@ -63,9 +63,10 @@ config = yaml.safe_load(source.read_text())
 config['controller_manager']['ros__parameters']['update_rate'] = 120
 Path(sys.argv[2]).write_text(yaml.safe_dump(config))
 PYCONFIG
-        setsid ros2 launch so_arm101_control control.launch.py gui:=false rviz:=false use_sim:=true use_sim_time:=true controllers_config:="$SOARM_INSTANCE_ROOT/controllers.yaml" \
+        setsid ros2 launch so_arm101_control control.launch.py gui:=false rviz:=false use_sim:=true use_sim_time:=true feedback_joint_states_topic:=/joint_states_measured feedback_publish_rate:=120.0 controllers_config:="$SOARM_INSTANCE_ROOT/controllers.yaml" \
             > "$SOARM_INSTANCE_ROOT/control.log" 2>&1 < /dev/null &
         echo "$!" > "$pidfile"
+        python3 "$SCRIPT_DIR/collect/wait_control.py"
         echo "Instance $index ready: domain=$ROS_DOMAIN_ID bridge=$SOARM_KIT_MCP_PORT"
         ;;
     run)
@@ -100,6 +101,7 @@ print(call('run_python', {'code': code}, port=int(sys.argv[1]), timeout=30))
 PYDEPLOY
         if [ "$command" = deploy ]; then
             export SOARM_POLICY_GPU="$ISAACSIM_GPU"
+            unset CUDA_VISIBLE_DEVICES
             exec bash "$SCRIPT_DIR/inference_async_lerobot.sh" --fps 30 \
                 --action-duration-s 0.03333333333333333 --joint-states-topic /joint_states_measured \
                 --server-port "$((18090 + index))" "$@"

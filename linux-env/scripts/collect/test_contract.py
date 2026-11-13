@@ -19,8 +19,10 @@ class ContractTests(unittest.TestCase):
                             expert_observation_stamp_ns=sim, command_clock_ns=sim + 33333333))
             out[-1].update(state_source='isaac_articulation', pose_stamp_ns=sim,
                            velocity=[.03] * 6,
+                           physics_state=list(out[-1]['state']),physics_velocity=[.03]*6,
                            application_stamp_ns=sim, declared_application_stamp_ns=sim,
                            applied_command=list(out[-1]['executed_action']))
+            out[-1]['physics_drive_targets']=list(out[-2]['applied_command'] if i else out[-1]['applied_command'])
         return out
 
     def test_true_clocks_pass(self):
@@ -35,6 +37,14 @@ class ContractTests(unittest.TestCase):
     def test_reference_feedback_is_rejected(self):
         rows = self.rows(); rows[1]['state_source'] = 'controller_reference'
         self.assertFalse(timing_audit(rows, 30)['passed'])
+
+    def test_feedback_must_equal_the_independent_physical_snapshot(self):
+        rows=self.rows();rows[5]['state'][0]+=.01
+        self.assertFalse(timing_audit(rows,30)['passed'])
+
+    def test_drive_overwrite_before_the_next_frame_is_rejected(self):
+        rows=self.rows();rows[5]['physics_drive_targets'][0]+=.01
+        self.assertFalse(timing_audit(rows,30)['passed'])
 
     def test_bulk_gate_waits_for_margin_without_gating_root_at_90(self):
         free = iter([49, 51, 52]); waits = []; logs = []

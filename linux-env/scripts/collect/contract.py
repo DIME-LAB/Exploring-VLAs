@@ -30,7 +30,7 @@ def parameters(seed, color, split='train'):
                                   angle_max_deg=-70., gap_min=.005, gap_max=.025))
 
 
-def corrective_action(state, reference, max_step=.035, gain=.8):
+def corrective_action(state, reference, max_step=.035, gain=1.):
     """Absolute expert setpoint, recomputed from the perturbed measured state."""
     return [q + max(-max_step, min(max_step, gain * (r - q)))
             for q, r in zip(state, reference)]
@@ -43,9 +43,13 @@ def timing_audit(rows, fps):
     if len(rows) < fps * 2:
         return dict(passed=False, errors=['Fewer than two seconds of frames'], frames=len(rows))
     wall = [(b['wall_ns'] - a['wall_ns']) / 1e9 for a, b in zip(rows, rows[1:])]
+    received = [max(r['wrist_receive_ns'],r['top_receive_ns']) for r in rows]
+    camera_wall = [(b-a)/1e9 for a,b in zip(received,received[1:])]
     sim = [b['sim_ns'] - a['sim_ns'] for a, b in zip(rows, rows[1:])]
     if any(t <= 0 for t in wall):
         errors.append('Non-monotonic wall clock')
+    if any(t <= 0 for t in camera_wall):
+        errors.append('Non-monotonic image receipt wall clock')
     if any(abs(t - round(1e9 / fps)) > 10 for t in sim):
         errors.append('Repeated or skipped sim camera frame')
     if any(abs(r['wrist_stamp_ns'] - r['top_stamp_ns']) > 1000 or r['sim_ns'] <= 0 for r in rows):
@@ -62,6 +66,10 @@ def timing_audit(rows, fps):
         errors.append('Observation is not measured physical articulation feedback')
     if any(len(r.get('velocity', [])) != 6 or not all(math.isfinite(v) for v in r.get('velocity', [])) for r in rows):
         errors.append('Measured joint velocities are incomplete or non-finite')
+    if any(len(r.get('physics_state', [])) != 6 or
+           any(not math.isfinite(v) for v in r.get('physics_state', [])) or
+           any(abs(a-b) > 1e-7 for a,b in zip(r['state'],r.get('physics_state', []))) for r in rows):
+        errors.append('Joint message differs from the physical snapshot')
     if any(abs(r.get('pose_stamp_ns', -1) - r['sim_ns']) > 1000 for r in rows):
         errors.append('Physical poses are not from the camera tick')
     application_latency = [r.get('application_stamp_ns', -1) - r['sim_ns'] for r in rows]
@@ -71,6 +79,10 @@ def timing_audit(rows, fps):
         errors.append('Command was not scheduled from its observation tick')
     if any(len(r.get('applied_command', [])) != 6 or any(abs(a-b) > 1e-6 for a,b in zip(r.get('applied_command', []),r['executed_action'])) for r in rows):
         errors.append('Applied physical drive target differs from executed command')
+    if any(len(r.get('physics_drive_targets', [])) != 6 for r in rows):
+        errors.append('Post-step physical drive targets are missing')
+    elif any(any(abs(x-y) > 1e-6 for x,y in zip(a['applied_command'],b['physics_drive_targets'])) for a,b in zip(rows,rows[1:])):
+        errors.append('Applied targets did not persist through the next physical frame')
     planning_idle = sum(not r.get('executing', True) for r in rows) / len(rows)
     stationary = sum(max(abs(x - y) for x, y in zip(a['state'], b['state'])) < 1e-4
                      for a, b in zip(rows, rows[1:])) / (len(rows) - 1)
@@ -84,6 +96,7 @@ def timing_audit(rows, fps):
         errors.append('Non-finite joint data')
     return dict(passed=not errors, errors=errors, frames=len(rows), fps=fps,
                 measured_wall_hz=hz, wall_gap_p95_ms=p95 * 1000,
+                camera_receipt_wall_hz=(len(rows)-1)/sum(camera_wall) if sum(camera_wall)>0 else 0.,
                 wall_gap_max_ms=max(wall) * 1000,
                 sim_hz=1e9 * (len(rows) - 1) / sum(sim) if sum(sim) > 0 else 0,
                 real_time_factor=sum(sim) / 1e9 / sum(wall),

@@ -16,6 +16,26 @@ def confined(path):
     return resolved
 
 
+def prepare_environment(instance):
+    """Apply confinement before imports that create ROS/trace/temp/cache files."""
+    import sys
+    for name in ('SOARM_COLLECTION_ROOT', 'HF_LEROBOT_HOME', 'SOARM_INSTANCE_ROOT'):
+        if os.environ.get(name):
+            confined(os.environ[name])
+    runtime = confined(os.environ.get('SOARM_INSTANCE_ROOT', CANONICAL_ROOT / f'runtime/instance-{instance}'))
+    paths = dict(SOARM_INSTANCE_ROOT=runtime, SOARM_GRASP_TRACE_DIR=runtime/'grasp-traces',
+        TMPDIR=runtime/'tmp', TEMP=runtime/'tmp', TMP=runtime/'tmp',
+        ROS_LOG_DIR=runtime/'ros-logs', XDG_CACHE_HOME=runtime/'cache',
+        HF_HOME=runtime/'cache/huggingface', OPTIX_CACHE_PATH=runtime/'cache/optix',
+        HF_LEROBOT_HOME=confined(os.environ.get('HF_LEROBOT_HOME', CANONICAL_ROOT/'datasets')))
+    for name, path in paths.items():
+        path.mkdir(parents=True, exist_ok=True)
+        os.environ[name] = str(path)
+    os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
+    sys.dont_write_bytecode = True
+    return runtime
+
+
 def wait_for_storage(bulk, stop, emit=print, usage=shutil.disk_usage):
     started = time.monotonic()
     waiting = False

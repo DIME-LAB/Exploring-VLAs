@@ -313,14 +313,17 @@ ROS2CameraHelper cameras tick at 30 simulated Hz. Controllers, MoveIt and the
 expert use Isaac `/clock`. **Observation state is measured PhysX articulation
 positions/velocities on `/joint_states_measured`.** `/joint_states` remains the
 mock controller reference and is logged separately. It is never the observation.
+MoveIt and robot TF also subscribe to physical feedback in the collection preset.
 
 The collector holds the timeline between frames. Given the synchronized image,
 physical state and pose snapshot at tick t, it computes a clean corrective
 setpoint, independently adds seeded DART noise to the execution array, and writes
 the execution targets into the existing PhysX drives while paused. It reads
 those targets back, logs the actual native simulation-clock application stamp,
-and advances exactly one frame. Only this instance's normal ROS follower
-executor is disconnected during collection. Shared planning, grasp/IK maths,
+and advances exactly one frame. A ROS command/acknowledgement protocol applies
+each command once; cancellation epochs reject old queued commands. Post-step
+drive-target read-back checks that the command persisted through the next frame.
+Only this instance's normal ROS follower actuation edges are disconnected during collection. Shared planning, grasp/IK maths,
 attach/detach and drop logic remain the GUI implementation. Planning/service
 work runs with the sim held; verification tail ticks are excluded from training.
 The audit rejects skipped/duplicate ticks, mismatched physical state/images/poses,
@@ -345,7 +348,8 @@ including the 30 Hz frame-rate clamp. Never change World timing on a live scene.
 All run/export/runtime paths resolve beneath the canonical
 `/mnt/a4500-backup/exploring-vlas/`; environment overrides cannot escape it.
 ROS logs, temp, HF/OptiX caches, portable roots and per-instance grasp traces
-are directed there. Shared shaders under `~/.cache/ov` remain shared. Require
+are directed there. Direct Python entrypoints apply confinement before imports that
+create trace/log/cache files. Shared shaders under `~/.cache/ov` remain shared. Require
 50 GiB on the output filesystem before each attempt; below that, wait every
 60 s until 52 GiB is available. Root has a **20 GiB last-resort stop**, including
 launcher startup: the earlier 90 GiB rule protected root writes, while collection
@@ -361,11 +365,11 @@ bash linux-env/scripts/collect_sim.sh clock-sanity 0 \
   --output /mnt/a4500-backup/exploring-vlas/runtime/instance-0/clock-sanity.json
 
 bash linux-env/scripts/collect_sim.sh run 0 --episodes 5 --seed 310000 \
-  --output /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-v2
+  --output /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-physical-v3
 bash linux-env/scripts/collect_sim.sh export 0 \
-  /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-v2 \
+  /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-physical-v3 \
   --repo-id local/soarm101_headless_smoke \
-  --report-dir /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-v2/report
+  --report-dir /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-physical-v3/report
 
 # Only after the corrected five-episode smoke passes; accepted colours rotate 17/17/16.
 bash linux-env/scripts/collect_sim.sh run 0 --episodes 50 --seed 320000 \
@@ -385,10 +389,14 @@ bash linux-env/scripts/collect_sim.sh down 0
 baseline, next seed and accepted-colour rotation; inconsistent ledgers and changed
 motion/timing sources are refused. `--replay-receipt /path/to/receipt.json` restores
 the recorded initial physical body poses, orientations and zero velocities,
-plus the measured arm state and clean expert reference. Missing cups cause a
+plus the measured arm state and clean expert reference. Normal collection and
+replay both advance two unrecorded reset ticks to refresh measured state and TF;
+receipts retain the reset state and the state at the start of execution. Missing cups cause a
 clear refusal requiring a fresh scene. Collection never adds/deletes rigid bodies
 beside the articulation. Each reset clears linear/angular velocity for cups and
-blocks and verifies the measured home pose. Replay restores poses exactly within
+blocks and verifies six measured home position samples before zeroing initial
+velocities. Raw joint velocity samples are retained; constraint impulses are not
+relabeled as zero motion. Replay restores poses exactly within
 1 μm/1e-6 quaternion tolerance; contact and planner execution need not be bit-identical.
 
 `run.json` records clock/transport settings, source hashes and held-out eval seeds
@@ -423,5 +431,6 @@ Offline validation: `python3 -m unittest discover -s linux-env/scripts/collect -
  'test_*.py'`. This includes 1,000 randomized comparisons with frozen verified-GUI
 geometry, the successful fallback-warning probe, late-application and above-rim
 rejections, storage thresholds, output confinement and deployment feedback flags.
-The independent review superseded the earlier reference-state smoke/pilot;
-corrected live smoke and pilot validation are required before completion.
+Always validate the completed five-episode smoke before starting the pilot;
+check physical feedback, application acknowledgements, containment and dataset
+read-back, rather than relying on a scripted completion message.
