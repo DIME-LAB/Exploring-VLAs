@@ -157,6 +157,10 @@ Record Sim and Inference tabs, `vla_SO-ARM101/scripts/sim_reset.sh`, and the
 display must be usable; if it isn't, `up` stops with that message rather than
 starting the window somewhere you can't see.
 
+Saving any file under `isaac/exts/` hot-reloads the extension in a running
+Isaac Sim and stops its publishers. Edit there with Isaac closed, then relaunch
+with `isaacsim_launch.sh close` and `deploy_sim.sh up` (add your stream/GUI flags).
+
 ## Stopping
 
 `deploy_sim.sh down` stops the policy, then the control stack, then Isaac,

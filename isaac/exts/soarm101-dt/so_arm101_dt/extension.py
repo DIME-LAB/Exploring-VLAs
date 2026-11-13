@@ -1520,7 +1520,7 @@ class DigitalTwin(omni.ext.IExt):
         return self._objects_config.get("skip_patterns", [])
 
     def _apply_sim_rate(self, hz=None):
-        """Apply Kit wall pacing after World initialization; physics stays at 60 Hz."""
+        """Apply Kit wall pacing after World initialization; physics stays at 120 Hz, sim frames/clock at 60 Hz."""
         if World.instance() is None:
             raise RuntimeError("Create the World before applying sim pacing")
         settings = carb.settings.get_settings()

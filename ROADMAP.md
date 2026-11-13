@@ -45,7 +45,7 @@ cadence (~14 Hz) not matching the camera-bound recording loop.
       recording 2 episodes and loading them with LeRobotDataset (needed before 3.1 data collection).
 - [ ] 1.13 `soarm101.new_stage` crashes Isaac 6.1 with live ROS action graphs: tear graphs/publishers down
       first or refuse with a clear error.
-- [ ] 1.14 README: warn that saving files under `isaac/exts/` hot-reloads the extension in a running Isaac
+- [x] 1.14 README: warn that saving files under `isaac/exts/` hot-reloads the extension in a running Isaac
       (stops publishers); edit only with the sim down. Fix `_apply_sim_rate` docstring (physics is 120 Hz;
       60 Hz is the sim-frame/clock rate).
 - [ ] 1.15 (moved from 2.5c) Decouple observation capture from action dispatch in the robot client: one thread
