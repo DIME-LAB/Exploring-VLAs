@@ -24,6 +24,7 @@ import weakref
 from so_arm101_control.scene_transactions import SceneMutationClient, SceneMutationIncomplete
 from so_arm101_control.motion_operation import MotionOperation
 from so_arm101_control.motion_wait import MotionBudget, MotionWaitTimeout
+from so_arm101_control.ros_callbacks import safe_callback
 from pathlib import Path
 
 from so_arm101_control.grasp_trace import tracer
@@ -615,7 +616,10 @@ class PickPlaceNode(Node):
                 ApplyPlanningScene, '/apply_planning_scene',
                 callback_group=self._service_cb_group)
             self._apply_scene_client = SceneMutationClient(self._apply_scene_client,
-                                                       self._motion_guard, self._scene_unresolved)
+                self._motion_guard, self._scene_unresolved,
+                collector=lambda:(getattr(self, '_scene_failure_handler', None) is not None or
+                                  getattr(self, '_motion_effect_guard', None) is not None),
+                warn=self._gui_scene_warning)
             self._get_scene_client = self.create_client(
                 GetPlanningSceneSrv, '/get_planning_scene',
                 callback_group=self._service_cb_group)
@@ -698,6 +702,36 @@ class PickPlaceNode(Node):
             time.sleep(0.01)          # 10 ms poll
         return future.result()        # None if timed-out / not done
 
+    def _ros_callback(self, callback, service=False):
+        return safe_callback(callback, self._callback_error, service=service) if callback is not None else None
+
+    def _callback_error(self, callback, exc):
+        record = dict(callback=callback, error=repr(exc))
+        errors = getattr(self, '_ros_callback_errors', [])
+        self._ros_callback_errors = (errors+[record])[-32:]
+        try:
+            self.get_logger().error('ROS callback failed: '+repr(record))
+        except Exception:
+            pass
+        hook = getattr(self, '_callback_failure_handler', None)
+        if hook is not None:
+            hook(callback, exc)
+
+    def _gui_scene_warning(self, message):
+        try:
+            self.get_logger().warning(message)
+        except Exception:
+            pass
+
+    def create_subscription(self, msg_type, topic, callback, qos_profile, *args, **kwargs):
+        return super().create_subscription(msg_type, topic, self._ros_callback(callback), qos_profile, *args, **kwargs)
+
+    def create_timer(self, timer_period_sec, callback, *args, **kwargs):
+        return super().create_timer(timer_period_sec, self._ros_callback(callback), *args, **kwargs)
+
+    def create_service(self, srv_type, srv_name, callback, *args, **kwargs):
+        return super().create_service(srv_type, srv_name, self._ros_callback(callback, service=True), *args, **kwargs)
+
 
     def _send_arm_goal(self, positions, duration_s=0.5, blocking=False):
         """Send arm joint positions via FollowJointTrajectory action.
@@ -738,7 +772,7 @@ class PickPlaceNode(Node):
         future = self.arm_action_client.send_goal_async(goal)
 
         if not blocking:
-            future.add_done_callback(self._arm_goal_response)
+            future.add_done_callback(self._ros_callback(self._arm_goal_response))
             return None
 
         # Blocking path: wait for goal acceptance, then for result
@@ -808,7 +842,7 @@ class PickPlaceNode(Node):
         future = self.gripper_action_client.send_goal_async(goal)
 
         if not blocking:
-            future.add_done_callback(self._gripper_goal_response)
+            future.add_done_callback(self._ros_callback(self._gripper_goal_response))
             return None
 
         timeout = duration_s + 10.0
@@ -1194,7 +1228,7 @@ class PickPlaceNode(Node):
                 self._last_motion_tag = method_name[5:]
 
         handler = getattr(self, method_name, None)
-        if handler is None:
+        if handler is None and getattr(self, '_motion_effect_guard', None) is None:
             self._append_log(f'Quickstart: no such handler {method_name}', 'err')
             return False
         try:
@@ -3104,10 +3138,10 @@ class PickPlaceNode(Node):
                 with self._arm_goal_lock:
                     self._arm_goal_handle = gh
                 rf = gh.get_result_async()
-                rf.add_done_callback(_on_result)
+                rf.add_done_callback(self._ros_callback(_on_result))
 
         sf = self.arm_action_client.send_goal_async(goal)
-        sf.add_done_callback(_on_accept)
+        sf.add_done_callback(self._ros_callback(_on_accept))
 
 
     def _cmd_drop_point(self):
@@ -3742,15 +3776,20 @@ class PickPlaceNode(Node):
 
 
     def _scene_unresolved(self, exc):
-        self._scene_terminal_error = str(exc)
         handler = getattr(self, '_scene_failure_handler', None)
+        if handler is None:
+            self._gui_scene_warning('GUI scene update incomplete: '+str(exc))
+            return
+        self._scene_terminal_error = str(exc)
         if handler is not None:
             handler(exc)
         raise SceneMutationIncomplete(str(exc))
 
     @contextmanager
     def _motion_guard(self, operation=None):
-        if getattr(self,'_scene_terminal_error',None):
+        if getattr(self,'_scene_terminal_error',None) and (
+                getattr(self, '_scene_failure_handler', None) is not None or
+                getattr(self, '_motion_effect_guard', None) is not None):
             raise SceneMutationIncomplete(self._scene_terminal_error)
         epoch = self._motion_token() if operation is None else operation.epoch
         guard = getattr(self, '_motion_effect_guard', None)
@@ -3884,6 +3923,11 @@ class PickPlaceNode(Node):
         return threading.Thread(target=run, **kwargs)
 
     def _dispatch_scene_update(self, callback):
+        if (getattr(self, '_scene_failure_handler', None) is None and
+                getattr(self, '_motion_effect_guard', None) is None):
+            # One GUI worker orders whole read/modify/write operations; its
+            # client also orders RPCs and retains delayed remote completions.
+            return self._apply_scene_client.submit_gui_update(callback)
         def apply():
             with self._motion_guard():
                 callback()

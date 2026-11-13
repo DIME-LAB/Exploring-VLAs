@@ -1536,7 +1536,7 @@ class SOArm101ControlGUI(PickPlaceNode):
         request.motion_plan_request = mpr
 
         future = self.plan_client.call_async(request)
-        future.add_done_callback(self._plan_and_execute_callback)
+        future.add_done_callback(self._ros_callback(self._plan_and_execute_callback))
 
     def _plan_and_execute_callback(self, future):
         """Handle planning result — display trajectory in RViz, then execute."""
@@ -1622,7 +1622,7 @@ class SOArm101ControlGUI(PickPlaceNode):
         goal = FollowJointTrajectory.Goal()
         goal.trajectory = robot_trajectory.joint_trajectory
         send_future = self.arm_action_client.send_goal_async(goal)
-        send_future.add_done_callback(self._execute_response)
+        send_future.add_done_callback(self._ros_callback(self._execute_response))
 
         # Send gripper to its goal position too (only from GUI button path)
         if getattr(self, '_execute_jaw_target', None) is not None:
@@ -1653,7 +1653,7 @@ class SOArm101ControlGUI(PickPlaceNode):
             return
         self._set_status('Executing trajectory...')
         result_future = goal_handle.get_result_async()
-        result_future.add_done_callback(self._execute_result)
+        result_future.add_done_callback(self._ros_callback(self._execute_result))
 
     def _execute_result(self, future):
         """Handle trajectory execution result."""

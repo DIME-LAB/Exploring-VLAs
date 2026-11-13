@@ -395,6 +395,29 @@ writes `first-reset-scene.json` in the run directory, including the native ACM,
 world/attached IDs, occupancy size and geometry checks. Accepted receipts retain
 the same cleanup and verification results. Include this file in the smoke report;
 CPU serialization tests do not establish the live MoveIt round trip.
+
+The terminal scene-request policy belongs to the collector adapter. The GUI
+instead queues complete scene updates in order, including their read/modify/write
+steps, and serializes their mutation RPCs. A late GUI service response suspends
+later scene updates until completion and logs a warning; it does not poison the
+GUI or its executor. Subscription, timer, service and action-result callbacks
+contain exceptions at their ROS boundary. The GUI logs/degrades, while collector
+callbacks retain an explicit abort hook and strict scene/generation barriers.
+
+An offline ROS regression boots the actual GUI node against a delayed fake
+MoveIt service and a display-free UI adapter. It proves overlapping startup
+requests serialize and that injected joint-state/timer/service guard errors do
+not kill the executor. It launches no Isaac instance:
+
+```bash
+source /opt/ros/humble/setup.bash
+source vla_SO-ARM101/install/setup.bash
+export ROS_DOMAIN_ID=90 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export CYCLONEDDS_URI="file://$PWD/linux-env/cyclonedds.xml"
+unset ROS_LOCALHOST_ONLY
+PYTHONDONTWRITEBYTECODE=1 python3 -B linux-env/scripts/collect/gui_scene_regression.py \
+  --output /mnt/a4500-backup/exploring-vlas/runtime/instance-0/gui-async-scene-regression.json
+```
 Pose-cache subscribers recheck bypass under the map lock;
 controller-reference diagnostics carry source time/epoch validity and are never
 used as expert labels. Post-step

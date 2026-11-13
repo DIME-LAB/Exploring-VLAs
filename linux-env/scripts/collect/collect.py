@@ -408,7 +408,6 @@ class Collector:
         self.executor = MultiThreadedExecutor(num_threads=4)
         self.executor.add_node(self.node)
         self.ros_thread = threading.Thread(target=self.executor.spin, daemon=True)
-        self.ros_thread.start()
         self.writer = None
         self.writer_lock = threading.Lock()
         self.stop = threading.Event()
@@ -429,6 +428,10 @@ class Collector:
             'import collection_runtime as c\nr=c.runtime()\nresult=not r.busy and not r.timeline.is_playing()'})
         self.scene_reset = SceneReconciler(self.node, ros_messages(),
             (REPO/'vla_SO-ARM101/src/so_arm101_moveit_config/config/so_arm101.srdf').read_text())
+        self.node._callback_failure_handler = lambda name, exc:self.abort_stalled_owner(
+            OwnershipStalled('ROS callback '+name+': '+repr(exc)), 'ROS callback')
+        # Install terminal hooks and their locks before any executor callback.
+        self.ros_thread.start()
         self.capture_thread = threading.Thread(target=self.capture, daemon=True)
         self.capture_thread.start()
 
@@ -820,6 +823,7 @@ class Collector:
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/motion_operation.py',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/motion_wait.py',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/scene_transactions.py',
+                           'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/ros_callbacks.py',
                            'vla_SO-ARM101/src/so_arm101_moveit_config/config/so_arm101.srdf',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/compute_workspace.py',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/ik_calibration.yaml',
