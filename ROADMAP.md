@@ -31,11 +31,14 @@ cadence (~14 Hz) not matching the camera-bound recording loop.
       prove guidance is non-zero in logs.
 - [x] 1.8 Episode harness (interim, before RunTask): home → randomize (blue visible) → start policy →
       success / timeout → stop → record viewport mp4 → score from `/objects_poses_sim`.
-- [ ] 1.9 Evaluation (restructured 2026-11-13; needs 1.11–1.15 and the 3.0b checkpoint), idle box:
-      (a) old checkpoint, 5 episodes before vs after the Phase 1 fixes. It was trained from scratch (see Phase 3),
-          so this only confirms whether deployment alone moves it.
-      (b) 3.0b fine-tuned checkpoint (main subject), 10 episodes each: RTC on vs off, at 17.4 vs 19.4 Hz.
-      Report success, grasp-only, failure mode, effective action Hz, and per-episode videos.
+- [x] 1.9 Evaluation (2026-11-13), paired scenes with shared-box load disclosed:
+      (a) OLD client-side baseline, 5 at 30 fps/RTC off vs 5 at 17.4 Hz/RTC on: 0/5 success in both.
+          Sim-side fixes and streaming trajectory dispatch stay in both; this is not a rollback of all Phase 1.
+      (b) `base-ft` recipe, 10 each RTC on/off at matched sim/client caps 17.4/19.4 Hz: 0/10 in all four.
+      All 50 traced episodes: no sustained object lift, zero scheduling misses/stale-camera aborts; 50 MP4s verified.
+      Wilson 95% upper bounds: 43.4% (n=5), 27.8% (n=10); all paired success differences are zero, not equivalence proof.
+      Queue starvation, request/chunk latency, host load, FK-proxy failure characterization and home-camera parity
+      are in Mac `coursework-eee598/roadmap-2026-11/phase1/1.9-eval/`. Live static regions are modestly brighter.
 - [ ] 1.10 **Retraining decision** from 1.9 (see Phase 3 criteria). Record results in the coursework README.
 - [x] 1.11 GUI + model selection: add every new checkpoint (e.g. the 3.0b `base-ft`) to control_gui's
       Inference dropdown (`INF_MODEL_PRESETS`) and `deploy_sim.sh --model`; make the Inference tab use the

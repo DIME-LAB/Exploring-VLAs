@@ -81,6 +81,23 @@ The report generator needs matplotlib, Pillow and ffmpeg. It writes the combined
 CSV, Wilson-interval chart, paired differences/exact McNemar probabilities,
 video contact sheet and README. `--complete` refuses a partial 50-episode matrix.
 
+For post-hoc approach/closure/lift characterization, first run
+`python3 linux-env/scripts/eval/characterize_failures.py /path/to/report --fk-module
+vla_SO-ARM101/src/so_arm101_control/so_arm101_control/compute_workspace.py`.
+This reuses production URDF FK on recorded controller-reference states; it does
+not recover historical measured TCP poses. Sidecars and `failure-characterization.csv`
+retain closest blue-centre distance, closing motion, minimum opening/position,
+and sustained lifts of any colour. The report merges these fields into its CSV.
+The linear jaw-gap estimate snapshots the production coefficients 0.019 m and
+0.0749 m/rad; it does not establish finger contact or a completed grasp.
+
+The completed 1.9 run has 50 fully traced episodes: OLD 0/5 before and 0/5 after;
+NEW 0/10 in each of four RTC/rate conditions. All scored episodes have zero
+scheduling misses and no stale-camera abort. Success intervals remain wide.
+The Mac report includes all 50 verified videos, paired timing/starvation metrics,
+four-frame NEW sequences and rec_222812-vs-live home-camera comparisons under
+`coursework-eee598/roadmap-2026-11/phase1/1.9-eval/`.
+
 `results.csv` and `results.jsonl` contain episode ID, outcome, elapsed policy wall time, dispatched actions, received chunks, measured effective action fps, maximum blue lift, failure note and video path. `effective_action_fps` measures the first-to-last dispatch interval, excluding initial chunk wait. Each `epNN/` contains `viewport.mp4`, pose samples and a detailed result JSON. `server.log`/`client.log` record inference and reset behavior. `run_config.json` captures resolved settings, GPU UUID and repository/fork commits; each episode also reports nonmonotonic action-index count. The viewport bridge encodes at nominal 30 fps; the harness rescales MP4 packet timestamps to measured recording wall time, so slow simulator rendering does not speed up playback.
 
 Success requires a blue lego centre inside `drop_1` continuously for two wall seconds and still inside when the client acknowledges its stop. The check transforms `/objects_poses_sim` coordinates into the cup-local frame from `/drop_poses`, including cup orientation. It uses a conservative interior radius of 0.033 m (measured outer radius ≈0.039 m) and height 0.0965 m with floor/rim clearance. This is a geometric centre test, not a contact or full-object containment sensor. `grasped-not-placed` means a blue lego centre rose ≥0.024 m from its randomized initial height for at least 0.5 s, without a final success; it is a sustained-lift proxy for grasping. `no-grasp` means neither condition occurred. Missing/stale pose streams or unavailable actions fail visibly; they never become success. Timeout/failure notes distinguish the cause.
