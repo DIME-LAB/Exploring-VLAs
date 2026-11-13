@@ -90,9 +90,18 @@ is therefore a genuinely different run, not a reproduction.
 - [x] 3.0 Audit every coursework checkpoint's `train_config.json` (pretrained_path, load_vlm_weights, steps,
       dataset) AND compare weights (per-tensor cosine/rel-L2 vs smolvla_base and SmolVLM2) to decide from-scratch
       vs fine-tuned; record the verdict in the coursework README.
-- [ ] 3.0b Fine-tune from `lerobot/smolvla_base` (`--policy.path=lerobot/smolvla_base`) on the existing
-      `soarm101_blue_lego_pick_v1` data first (cheapest test of the from-scratch hypothesis), then evaluate
-      with the Phase 1 harness.
+- [x] 3.0b Fine-tune from `lerobot/smolvla_base` (`--policy.path=lerobot/smolvla_base`) on the existing
+      `soarm101_blue_lego_pick_v1` data: 20k steps, batch 64, seed 42, default fine-tuning recipe, fork 71676438.
+      Both gates passed: 200-step loss 0.402 to 0.090 plus a saved checkpoint, then actual PolicyServer load on
+      dual-a4500 GPU 1. Final checkpoint also passes clean 71676438 and deployment 4fa9eac7: finite 50x6 actions,
+      exact seeded repeat, and a response to blanking either camera. All 500 base tensors matched at runtime
+      dtype before training. Wall time 4h10m28s; final batch loss 0.016593, last-100 mean 0.013720;
+      throughput 85.28 samples/s, peak Torch allocated 14.40 GiB. 5k/10k/15k/20k inference artifacts archived
+      under `/mnt/a4500-backup/exploring-vlas/checkpoints/smolvla-base-ft-rec222812-20k-s42-20261113/`;
+      final loadable directory `~/w_ckpt/smolvla-base-ft-rec222812-20k-s42-20261113/`. Only the latest optimizer
+      state remains on rtx6000. Cameras stay top/wrist with rename_map={}; the shared base-ft preset entry is
+      supplied in the Mac deliverable README for the lead's integration worker. Phase 1 harness comparison
+      remains under 1.9. Evidence: `coursework-eee598/roadmap-2026-11/phase3/3.0-3.0b-finetune/`.
 
 Decide by: grasp success after Phase 1 (if still ≲ 20%, the model is the bottleneck) and whether
 colour/instruction following is required (single task string → language cannot be learned).
@@ -100,7 +109,8 @@ Data inventory (2026-11-13, HF + local disks): SIM = only 100 episodes (`soarm10
 blue task); REAL = 440 blue (`arjunsinghyadav2/blue_sort_black_bg_colored_cups_v1_440ep`) + ~300 multi-colour
 (`arjunsinghyadav2/lego_sort_300ep_03042026`). `anirudhrani/{0real_100sim,25real_75sim,75real_25sim,50real_50sim}` look
 mislabeled (0real_100sim has the real-only set's exact 162,221 frames). No ~1000-episode sim set found; ask Ven/Arjun.
-3.0b deliberately stays on the same 100 sim episodes so only the initialization changes.
+3.0b holds the same 100 sim episodes fixed; its requested fine-tuning recipe also changes steps, batch size,
+LR and trainable layers. The harness comparison evaluates the combined recipe, rather than isolating initialization.
 
 - [x] 3.1a Headless collection architecture (prompt2assembly-style): launcher mode with NO window and NO stream;
       extract control_gui's scripted pick-and-place (Quickstart sequence) into a GUI-free collector module/ROS node
