@@ -118,6 +118,16 @@ deploy_sim.sh up --task "Pick a red lego and place it in red cup"
 | `mix-25s75r` | `anirudhrani/smolvla_sim_100ep_25S_75R_fft__10ksteps_h200` | 25% sim / 75% real |
 | `mix-50s50r` | `anirudhrani/smolvla_blue_sort_50sim_50real_10k` | 50 sim + 50 real |
 
+`deploy_sim.sh models` lists the complete preset menu. It and the GUI read
+`MODEL_PRESETS` in
+[`model_presets.py`](vla_SO-ARM101/src/so_arm101_control/so_arm101_control/model_presets.py).
+Add a local checkpoint with one row, for example
+`"base-ft": ("~/w_ckpt/<run-name>/pretrained_model", "", "{}"),`;
+the path must contain the model’s `config.json`. Restart the GUI after adding
+presets. Inference defaults to 17.4 client FPS, rgb8 cameras and real RTC;
+its Method radio selects Custom or Async, and the RTC checkbox controls Async.
+Both methods can record a dataset; Stop saves the live episode before recovery.
+
 To switch models without restarting Isaac: `deploy_sim.sh down --policy`, then
 `deploy_sim.sh up --model <other>`. The same presets are in `control_gui`'s
 Inference tab; if you'd rather start inference from there, bring the stack up

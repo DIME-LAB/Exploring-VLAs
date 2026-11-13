@@ -37,7 +37,7 @@ cadence (~14 Hz) not matching the camera-bound recording loop.
       (b) 3.0b fine-tuned checkpoint (main subject), 10 episodes each: RTC on vs off, at 17.4 vs 19.4 Hz.
       Report success, grasp-only, failure mode, effective action Hz, and per-episode videos.
 - [ ] 1.10 **Retraining decision** from 1.9 (see Phase 3 criteria). Record results in the coursework README.
-- [ ] 1.11 GUI + model selection: add every new checkpoint (e.g. the 3.0b `base-ft`) to control_gui's
+- [x] 1.11 GUI + model selection: add every new checkpoint (e.g. the 3.0b `base-ft`) to control_gui's
       Inference dropdown (`INF_MODEL_PRESETS`) and `deploy_sim.sh --model`; make the Inference tab use the
       Phase 1 defaults (17.4 Hz fps, rgb8 cameras, real-RTC on/off toggle); fix the Method radio SEGV and
       wire recording in async mode (both from the April 29 session's open priorities).

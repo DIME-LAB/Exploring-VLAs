@@ -24,11 +24,8 @@
 #           desktop, or DISPLAY/XAUTHORITY you set); otherwise `up` stops with
 #           that message. No virtual-display fallback.
 #
-# Model presets (or pass any Hugging Face repo id / local pretrained_model dir):
-#   sim          anirudhrani/smolvla_sim_100ep_fft__10ksteps_h200   (default)
-#   mix-75s25r   anirudhrani/smolvla_sim_100ep_75S_25R_fft__10ksteps_h200
-#   mix-25s75r   anirudhrani/smolvla_sim_100ep_25S_75R_fft__10ksteps_h200
-#   mix-50s50r   anirudhrani/smolvla_blue_sort_50sim_50real_10k
+# Model presets are shared with the GUI in so_arm101_control/model_presets.py.
+# Run `deploy_sim.sh models` to list them; --model also accepts an HF id or path.
 #
 # Env: SOARM_KIT_MCP_PORT (bridge, default 8767) · SOARM_POLICY_GPU (default 1) ·
 #      LOG_DIR (default /tmp) · ISAACSIM_BIN / ISAACSIM_LOG (see isaacsim_launch.sh)
@@ -55,15 +52,7 @@ DEFAULT_TASK="Pick a blue lego and place it in blue cup"
 mkdir -p "$STATE_DIR"
 
 resolve_model() {
-    case "$1" in
-        ""|sim)     echo "anirudhrani/smolvla_sim_100ep_fft__10ksteps_h200" ;;
-        mix-75s25r) echo "anirudhrani/smolvla_sim_100ep_75S_25R_fft__10ksteps_h200" ;;
-        mix-25s75r) echo "anirudhrani/smolvla_sim_100ep_25S_75R_fft__10ksteps_h200" ;;
-        mix-50s50r) echo "anirudhrani/smolvla_blue_sort_50sim_50real_10k" ;;
-        */*)        echo "$1" ;;   # HF repo id (owner/name) or a local path
-        *) echo "Unknown model preset '$1' (presets: sim, mix-75s25r, mix-25s75r, mix-50s50r; or an HF repo id)" >&2
-           return 1 ;;
-    esac
+    python3 "$REPO_ROOT/vla_SO-ARM101/src/so_arm101_control/so_arm101_control/model_presets.py" "$1"
 }
 
 policy_pgid() {
@@ -72,7 +61,11 @@ policy_pgid() {
     [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null && echo "$pgid"
 }
 
-usage() { sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() {
+    sed -n '2,/^set -e/{ /^#/s/^# \{0,1\}//p; }' "$0"
+    echo 'Presets:'
+    python3 "$REPO_ROOT/vla_SO-ARM101/src/so_arm101_control/so_arm101_control/model_presets.py" --list
+}
 
 # ---------------------------------------------------------------------------
 cmd_up() {
@@ -268,6 +261,7 @@ case "${1:-}" in
     up)     shift; cmd_up "$@" ;;
     down)   shift; cmd_down "$@" ;;
     status) cmd_status ;;
+    models) python3 "$REPO_ROOT/vla_SO-ARM101/src/so_arm101_control/so_arm101_control/model_presets.py" --list ;;
     -h|--help|help|"") usage ;;
     *) echo "Unknown command: $1" >&2; usage >&2; exit 2 ;;
 esac

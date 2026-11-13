@@ -311,45 +311,16 @@ INF_ASYNC_SCRIPT = os.path.join(_REPO_ROOT, "linux-env/scripts/inference_async_l
 #                path that ships for real-hardware deploy → easier transition.
 INF_METHOD_LABELS = {
     "custom":    "Custom (chunk replan @ 1 Hz)",
-    "async_rtc": "Async (lerobot canonical; RTC flag inactive)",
+    "async_rtc": "Async (LeRobot + real RTC)",
 }
 
-# Preset model dropdown — keys feed the combobox; values are
-# (model_path, default_checkpoint, default_rename_map_json).
-# The two real-world checkpoints are useful for plumbing smoke tests
-# (verifying the loop closes end-to-end). The "Sim FT (custom)" entry is the
-# slot for the sim-trained model that's currently in flight — pick it and
-# fill in the custom path/checkpoint fields.
-INF_MODEL_PRESETS = {
-    # First entry is the default (Tk picks first as initial Combobox value).
-    # Sim FT is the model we expect to actually perform the task — listed
-    # first so a fresh GUI session lands on it without manual selection.
-    "Sim FT (full, blue_sort 100ep)":
-        ("anirudhrani/smolvla_sim_100ep_fft__10ksteps_h200", "", "{}"),
-    # Sim/real mixes (fraction of sim vs real episodes in the fine-tune set).
-    "Mixed FT (75% sim / 25% real)":
-        ("anirudhrani/smolvla_sim_100ep_75S_25R_fft__10ksteps_h200", "", "{}"),
-    "Mixed FT (25% sim / 75% real)":
-        ("anirudhrani/smolvla_sim_100ep_25S_75R_fft__10ksteps_h200", "", "{}"),
-    "Mixed FT (50 sim + 50 real, blue_sort)":
-        ("anirudhrani/smolvla_blue_sort_50sim_50real_10k", "", "{}"),
-    "Full FT (real-world, smoke)":
-        ("anirudhrani/smolvla_blue_sort_ven_50k", "050000", "{}"),
-    "LoRA (real-world, smoke)":
-        ("anirudhrani/smolvla_blue_sort_v2_lora", "050000",
-         '{"wrist": "camera1", "top": "camera2"}'),
-    "Custom":
-        ("", "", "{}"),
-}
+# Shared with deploy_sim.sh; each preset is one (path, checkpoint, rename map) row.
+from so_arm101_control.model_presets import MODEL_PRESETS
+INF_MODEL_PRESETS = {**MODEL_PRESETS, "Custom": ("", "", "{}")}
 INF_DEFAULT_TASK = "Pick a blue lego and place it in blue cup"
-# Match NVIDIA so101-ros2 reference + record_sim_isaac.sh's dataset.fps=30.
-# Rationale (see smolvla_inference.py argparse help): publish=30 mirrors
-# training-time trajectory cadence so joint deltas execute at the real-time
-# speed the model expects; inference=1.0 lets the publisher consume ~60% of
-# each 50-action chunk before replanning, which captures the descend+close
-# portion of a typical pick trajectory (lower inference_rate trims that off).
+# Client action replay matches the Phase 1 wall cadence; cameras publish rgb8.
 INF_DEFAULT_INFERENCE_RATE = 1.0
-INF_DEFAULT_PUBLISH_RATE = 30.0
+INF_DEFAULT_PUBLISH_RATE = 17.4
 
 
 def _load_cup_mesh():
@@ -967,7 +938,7 @@ class SOArm101ControlGUI(Node):
     # ------------------------------------------------------------------
 
     def _widget_registry_add(self, label, wtype, widget, var,
-                             tab, section, writable):
+                             tab, section, writable, choices=()):
         """Insert a widget into the registry. Duplicate labels are tolerated
         at insertion time; _finalize_widget_registry resolves collisions with
         @tab suffixes after all builders have run."""
@@ -979,6 +950,7 @@ class SOArm101ControlGUI(Node):
             'section': section,
             'label': label,
             'writable': writable,
+            'choices': tuple(choices),
         }
         with self._widget_registry_lock:
             if label in self._widget_registry and tab:
@@ -1416,6 +1388,8 @@ class SOArm101ControlGUI(Node):
                 text = widget.get(idx) if idx >= 0 else ''
                 items = [widget.get(i) for i in range(count)]
                 return text, f'index={idx}, count={count}, items=[{"|".join(items)}]'
+            if wtype == 'Radiobutton':
+                return str(var.get()), 'values=[' + '|'.join(entry['choices']) + ']'
             if wtype == 'Combobox':
                 val = var.get() if var is not None else widget.get()
                 values = list(widget.cget('values') or ())
@@ -1711,6 +1685,14 @@ class SOArm101ControlGUI(Node):
                     widget.select(tabs.index(raw))
                     outcome['ok'] = True
                     outcome['msg'] = f'switched to tab {raw}'
+                    return
+                if wtype == 'Radiobutton':
+                    if raw not in entry['choices']:
+                        outcome['msg'] = f"{raw!r} not in radio values {entry['choices']}"
+                        return
+                    var.set(raw)
+                    outcome['ok'] = True
+                    outcome['msg'] = f'wrote {raw!r} to {wid}'
                     return
                 if wtype == 'Combobox':
                     values = list(widget.cget('values') or ())
@@ -6646,8 +6628,7 @@ class SOArm101ControlGUI(Node):
             time.sleep(0.2)
         self._append_log(
             f'Record: WARN — timeout waiting for new Phase B '
-            f'(prev={prev_count}, cur={self._rec_count_phase_b_starts()}); '
-            f'proceeding to scene reset anyway',
+            f'(prev={prev_count}, cur={self._rec_count_phase_b_starts()})',
             'warn')
         return False
 
@@ -6929,6 +6910,9 @@ class SOArm101ControlGUI(Node):
         if not hasattr(self, '_inf_method_var'):
             self._inf_method_var = tk.StringVar(value='async_rtc')
 
+        if not hasattr(self, '_inf_rtc_var'):
+            self._inf_rtc_var = tk.BooleanVar(value=True)
+
         # Apply current preset to the path/checkpoint/rename fields on first
         # build (and on every preset change).
         self._inf_apply_preset()
@@ -6984,23 +6968,21 @@ class SOArm101ControlGUI(Node):
             self._inf_rename_var, tab='Inference', section='Model',
             writable=True)
 
-        # ===== Section: Method =====
-        # NOTE: Temporarily commented out — investigating SEGV during tab
-        # build. Method var still defaults to 'async_rtc' via lazy init,
-        # so _inf_build_cmd's branching still works; users just can't
-        # toggle to 'custom' from the GUI right now (use the CLI for that).
-        # method = ttk.LabelFrame(frame, text='Method')
-        # method.pack(fill=tk.X, padx=10, pady=4)
-        # for key, label in INF_METHOD_LABELS.items():
-        #     rb = tk.Radiobutton(
-        #         method, text=label, variable=self._inf_method_var, value=key,
-        #         anchor=tk.W,
-        #     )
-        #     rb.pack(anchor=tk.W, padx=8, pady=1)
-        # self._widget_registry_add(
-        #     'Inference method', 'Radiobutton', method,
-        #     self._inf_method_var, tab='Inference', section='Method',
-        #     writable=True)
+        # Register a real radio widget and its finite choices, never its LabelFrame.
+        method = ttk.LabelFrame(frame, text='Method')
+        method.pack(fill=tk.X, padx=10, pady=4)
+        for key, label in INF_METHOD_LABELS.items():
+            rb = ttk.Radiobutton(
+                method, text=label, variable=self._inf_method_var, value=key)
+            rb.pack(anchor=tk.W, padx=8, pady=1)
+        self._widget_registry_add(
+            'Inference method', 'Radiobutton', rb,
+            self._inf_method_var, tab='Inference', section='Method',
+            writable=True, choices=INF_METHOD_LABELS)
+        self._register_check(
+            method, label='Real RTC (async method)', tab='Inference',
+            section='Method', variable=self._inf_rtc_var,
+        ).pack(anchor=tk.W, padx=8, pady=2)
 
         # ===== Section: Task =====
         task = ttk.LabelFrame(frame, text='Task')
@@ -7024,11 +7006,11 @@ class SOArm101ControlGUI(Node):
             textvariable=self._inf_inf_rate_var,
             from_=0.5, to=10.0, increment=0.5, width=6,
         ).pack(side=tk.LEFT, padx=(0, 12))
-        tk.Label(rate_row, text='Publish (Hz):').pack(side=tk.LEFT, padx=(0, 4))
+        tk.Label(rate_row, text='Client FPS:').pack(side=tk.LEFT, padx=(0, 4))
         self._register_spinbox(
             rate_row, label='Publish rate', tab='Inference', section='Rates',
             textvariable=self._inf_pub_rate_var,
-            from_=5.0, to=50.0, increment=5.0, width=6,
+            from_=5.0, to=50.0, increment=0.1, width=6,
         ).pack(side=tk.LEFT)
 
         # ===== Section: Control =====
@@ -7105,11 +7087,8 @@ class SOArm101ControlGUI(Node):
         Custom preset leaves them blank for the user to fill."""
         preset = self._inf_preset_var.get()
         path, ckpt, rename = INF_MODEL_PRESETS.get(preset, ('', '', '{}'))
-        # Only overwrite non-empty preset values so editing then re-selecting
-        # the same preset doesn't clobber user input.
-        if path:
-            self._inf_model_path_var.set(path)
-        if ckpt:
+        if preset != 'Custom':
+            self._inf_model_path_var.set(os.path.expanduser(path))
             self._inf_checkpoint_var.set(ckpt)
         # Rename map is always overwritten — it's tightly coupled to the
         # checkpoint's training-time camera-key convention.
@@ -7143,7 +7122,7 @@ class SOArm101ControlGUI(Node):
         not supported by lerobot's async inference loader, so we resolve
         them locally here when needed).
         """
-        path = self._inf_model_path_var.get().strip()
+        path = os.path.expanduser(self._inf_model_path_var.get().strip())
         if not path:
             return None, False, 'Model path is empty — fill it in.'
         task = self._inf_task_var.get().strip()
@@ -7165,6 +7144,8 @@ class SOArm101ControlGUI(Node):
                 'bash', INF_ASYNC_SCRIPT,
                 f'--pretrained={full_path}',
                 f'--task={task}',
+                f'--fps={float(self._inf_pub_rate_var.get())}',
+                '--rtc.enabled' if self._inf_rtc_var.get() else '--no-rtc',
             ]
             if dry_run:
                 cmd.append('--dry-run')
@@ -7218,6 +7199,13 @@ class SOArm101ControlGUI(Node):
             self._inf_set_status(status_text='IDLE')
             return
 
+        if getattr(self, '_rec_state', {}).get('phase', 'idle') != 'idle':
+            self._append_log('Inference: stop Record Sim before starting inference', 'err')
+            with self._inf_lock:
+                self._inf_state['phase'] = 'idle'
+            self._inf_set_status(status_text='IDLE')
+            return
+
         # ----- If recording is requested, spin up mirror + lerobot-record
         # BEFORE the inference subprocess so the recorder's 2 s action-
         # warmup sees /joint_commands_lerobot publishing. Mirrors the
@@ -7227,24 +7215,17 @@ class SOArm101ControlGUI(Node):
             record_on = bool(self._inf_record_var.get())
         except Exception:
             record_on = False
-        # Async-RTC path uses lerobot.async_inference.robot_client which
-        # drives the arm via SO101ROS2Robot.send_action (with actuate=true).
-        # The mirror + separate lerobot-record processes would conflict —
-        # mirror writes /joint_commands_lerobot which the recorder needs,
-        # but the recorder's `robot.get_observation()` call would race the
-        # async client's own observation polling. Skip recording in async
-        # mode for now and surface a log warning.
-        method = self._inf_method_var.get() if hasattr(self, '_inf_method_var') else 'custom'
-        if record_on and method == 'async_rtc':
-            self._append_log(
-                'Inference: Record this run is not yet supported with '
-                'Async method — skipping recording subprocesses. '
-                'Use Custom method to record, or read about the canonical '
-                'lerobot-record + policy mode for the async case.', 'warn')
-            record_on = False
+        # The recorder has its own ROS subscriptions in a separate process and
+        # actuate=false. Only inference sends goals; the mirror reads JTC references.
         rec_repo_id = ''
         rec_ds_path = ''
         if record_on:
+            if shutil.which('xdotool') is None:
+                self._append_log('Inference: recording needs sudo apt install xdotool', 'err')
+                with self._inf_lock:
+                    self._inf_state['phase'] = 'idle'
+                self._inf_set_status(status_text='IDLE')
+                return
             rec_repo_id = self._inf_record_repo_id()
             rec_ds_path = os.path.join(
                 REC_DATASET_ROOT, rec_repo_id.split('/', 1)[-1])
@@ -7283,10 +7264,8 @@ class SOArm101ControlGUI(Node):
                     return
 
             # Spawn lerobot-record. Single long episode — user closes via
-            # Stop (which SIGINTs the recorder, finalizing the dataset
-            # cleanly). num_episodes=1 + episode_time_s=600 gives a 10-min
-            # ceiling; SIGINT before that produces a partial episode that
-            # still finalizes correctly per lerobot-record's signal handler.
+            # Stop sends Right so save_episode runs before finalization.
+            # num_episodes=1 + episode_time_s=600 gives a 10-minute ceiling.
             single_task = self._inf_task_var.get().strip() or 'inference rollout'
             rec_log = (
                 f"/tmp/inf_rec_{datetime.datetime.now():%H%M%S}.log"
@@ -7294,17 +7273,20 @@ class SOArm101ControlGUI(Node):
             rec_cmd = [
                 'bash', REC_LEROBOT_SCRIPT,
                 f'--dataset.repo_id={rec_repo_id}',
+                '--robot.actuate=false',
                 '--dataset.num_episodes=1',
                 '--dataset.episode_time_s=600',
                 '--dataset.reset_time_s=0',
                 f'--dataset.single_task={single_task}',
                 '--dataset.push_to_hub=false',
+                '--play_sounds=false',
                 '--display_data=false',
             ]
             try:
                 rec_log_fd = open(rec_log, 'w')
                 lerobot_proc = subprocess.Popen(
                     rec_cmd, stdout=rec_log_fd, stderr=subprocess.STDOUT,
+                    env={**os.environ, 'LEROBOT_REQUIRE_KEYBOARD': '1'},
                     stdin=subprocess.DEVNULL, start_new_session=True)
             except Exception as e:
                 self._append_log(
@@ -7362,37 +7344,43 @@ class SOArm101ControlGUI(Node):
         threading.Thread(target=self._inf_watch_proc, daemon=True).start()
 
     def _inf_kill_recorders(self):
-        """SIGINT lerobot-record + mirror in the order that finalizes the
-        dataset cleanly. Order: lerobot-record FIRST (it needs to fsync
-        meta/info.json + close the parquet writer), then mirror. Each
-        wait has a generous timeout — lerobot's finalize can take 5-10 s
-        for video encoding.
+        """Save the live episode, wait for encoding, then stop the passive mirror.
 
-        Safe to call when neither proc exists; this is the recovery path
-        for spawn failures and the normal teardown path on Stop."""
+        Safe when neither process exists; used on Stop and spawn failure.
+        """
         with self._inf_lock:
             lp = self._inf_state.get('lerobot_proc')
             mp = self._inf_state.get('mirror_proc')
 
         if lp is not None and lp.poll() is None:
             try:
-                os.killpg(os.getpgid(lp.pid), signal.SIGINT)
-                self._append_log(
-                    'Inference: SIGINT → lerobot-record (finalizing dataset…)')
-            except Exception as e:
-                self._append_log(
-                    f'Inference: lerobot-record SIGINT failed: {e}', 'warn')
-            try:
-                lp.wait(timeout=20.0)
-                self._append_log('Inference: lerobot-record exited')
-            except subprocess.TimeoutExpired:
-                self._append_log(
-                    'Inference: lerobot-record did not finalize in 20 s; '
-                    'sending SIGTERM', 'warn')
+                # SIGINT only finalizes already-saved episodes. Right ends the
+                # live buffer through lerobot's normal save_episode path.
+                subprocess.run(['xdotool', 'key', '--clearmodifiers', 'Right'],
+                               check=True, timeout=2,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self._append_log('Inference: saving recorded episode…')
+                lp.wait(timeout=120.0)
+            except (subprocess.SubprocessError, OSError) as exc:
+                self._append_log(f'Inference: recorder save failed: {exc}', 'err')
                 try:
-                    lp.terminate()
-                except Exception:
-                    pass
+                    os.killpg(os.getpgid(lp.pid), signal.SIGINT)
+                    lp.wait(timeout=10.0)
+                except (OSError, subprocess.TimeoutExpired):
+                    if lp.poll() is None:
+                        os.killpg(os.getpgid(lp.pid), signal.SIGTERM)
+        if lp is not None:
+            info_path = os.path.join(self._inf_state.get('dataset_dir', ''), 'meta', 'info.json')
+            try:
+                with open(info_path) as f:
+                    info = json.load(f)
+                if int(info.get('total_episodes', 0)) < 1:
+                    raise ValueError('no episode saved')
+                self._append_log(f'Inference: saved {info["total_frames"]} frames to '
+                                 f'{self._inf_state["dataset_dir"]}')
+            except (OSError, ValueError, KeyError) as exc:
+                self._append_log(f'Inference: recorded dataset incomplete: {exc}; '
+                                 f'see {self._inf_state.get("lerobot_log", "")}', 'err')
 
         if mp is not None and mp.poll() is None:
             try:
@@ -7422,8 +7410,7 @@ class SOArm101ControlGUI(Node):
             rc = -1
         with self._inf_lock:
             if self._inf_state.get('phase') in ('running', 'stopping'):
-                self._inf_state['phase'] = 'idle'
-                self._inf_state['proc'] = None
+                self._inf_state['phase'] = 'stopping'
         # Surface non-zero exits since the subprocess is the source of truth
         # for inference health (model load failures, OOM, etc. show up here).
         if rc != 0:
@@ -7437,6 +7424,9 @@ class SOArm101ControlGUI(Node):
         # Done BEFORE grasp_home so the dataset captures the final inference
         # state, not the recovery motion (which would pollute the episode).
         self._inf_kill_recorders()
+        with self._inf_lock:
+            self._inf_state['phase'] = 'idle'
+            self._inf_state['proc'] = None
 
         # Optional: drive arm back to calibrated data-collection home so the
         # next run starts from a known pose. _cmd_grasp_home_data is a Tk-
@@ -7507,7 +7497,7 @@ class SOArm101ControlGUI(Node):
             self._append_log(f'Inference: {err}', 'err')
             return
         log_path = f'/tmp/inf_dryrun_{datetime.datetime.now():%H%M%S}.log'
-        self._append_log(f'Inference DRY-RUN → {log_path}')
+        self._append_log(f'Inference DRY-RUN → {log_path}\n  cmd = {" ".join(cmd)}')
         try:
             log_fd = open(log_path, 'w')
             subprocess.Popen(
