@@ -116,6 +116,12 @@ mislabeled (0real_100sim has the real-only set's exact 162,221 frames). No ~1000
       videos), then full collection ~300 per colour (red/green/blue, ~900) with per-colour task strings, plus a
       data card. Searched 2026-11-13: no larger existing sim set on HF (3 accounts + global search), ASU Drive,
       dual-a4500 or rtx6000 (own folders); only teammates' machines unchecked.
+- [ ] 3.1f In-process ("battery"-style) collector, if the 3.1d pilot's throughput is too low for ~900+ episodes:
+      standalone headless Isaac process, sim stepped only on demand, in-process IK/planning (Lula/RMPflow with cup
+      obstacles), cameras via render products/annotators, LeRobotDataset frames per sim tick, several processes per
+      GPU (template: prompt2assembly Type-1 headless batteries, via plan47). Reuses the 3.1 episode spec. Validated
+      against the ROS pilot on the same seeds: success rate, state/action semantics (joint-position targets as
+      deployment sends them) and trajectory statistics. ROS 2 + MoveIt stays the deployment/eval/real-robot stack.
 - [ ] 3.1e Training throughput before the large run (rtx6000, RTX 6000 Ada 48 GB): the 3.0b run is GPU-bound at
       1.33 steps/s with batch 64, fp32 expert (`use_amp=False`), frozen vision encoder, 16/48 GB used. Benchmark
       bf16 AMP, larger batch with scaled LR, and `torch.compile` on 500-step runs; pick the fastest config that
