@@ -94,8 +94,16 @@ is therefore a genuinely different run, not a reproduction.
 
 Decide by: grasp success after Phase 1 (if still ≲ 20%, the model is the bottleneck) and whether
 colour/instruction following is required (single task string → language cannot be learned).
-- [ ] 3.1 Collect language-contrastive sim data (red/green/blue tasks in the same scenes) with the
-      scripted IK path, recorded at a pinned, documented rate.
+Data inventory (2026-11-13, HF + local disks): SIM = only 100 episodes (`soarm101_blue_lego_pick_v1` = `rec_222812`,
+blue task); REAL = 440 blue (`arjunsinghyadav2/blue_sort_black_bg_colored_cups_v1_440ep`) + ~300 multi-colour
+(`arjunsinghyadav2/lego_sort_300ep_03042026`). `anirudhrani/{0real_100sim,25real_75sim,75real_25sim,50real_50sim}` look
+mislabeled (0real_100sim has the real-only set's exact 162,221 frames). No ~1000-episode sim set found; ask Ven/Arjun.
+3.0b deliberately stays on the same 100 sim episodes so only the initialization changes.
+
+- [ ] 3.1 Generate language-contrastive sim data with the automated scripted IK path (control_gui Quickstart via
+      Record Sim, after 1.12): target ~300 episodes per colour (red/green/blue, ~900 total), same scenes,
+      recorded at the pinned 17.4 Hz rate with the 1.4 camera path, task string per colour. Verify a sample
+      loads and matches deployment features before the full collection.
 - [ ] 3.2 Fine-tune (more steps/episodes than 10k/100), sim/real mix per the coursework findings.
 - [ ] 3.3 Re-run the Phase 1 evaluation matrix.
 
