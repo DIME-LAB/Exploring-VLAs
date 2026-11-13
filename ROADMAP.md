@@ -103,10 +103,12 @@ mislabeled (0real_100sim has the real-only set's exact 162,221 frames). No ~1000
 - [ ] 3.1a Headless collection architecture (prompt2assembly-style): launcher mode with NO window and NO stream;
       extract control_gui's scripted pick-and-place (Quickstart sequence) into a GUI-free collector module/ROS node
       that control_gui also calls (no Tk, no virtual display needed for collection).
-- [ ] 3.1b One rate everywhere: sim rate cap = lerobot-record fps = dataset `fps` metadata = deployment fps.
-      Prefer 30 Hz (matches the real datasets for sim+real co-training) if headless Isaac holds it with margin on
-      a quiet box; else 20 Hz. Verify recorded frame timing against wall clock and sim clock (no synthetic
-      timestamps), and that cameras deliver exactly one frame per step.
+- [ ] 3.1b Clock design (decided 2026-11-13): SIM TIME everywhere for collection (ros2_control, MoveIt, the
+      scripted module and the collector `use_sim_time`, on Isaac /clock); frames written on sim ticks via the
+      LeRobotDataset API (exactly one frame per 1/30 s sim time, dataset fps = 30 = real), not wall-clock
+      lerobot-record. The rate cap becomes a speed knob only: collection uncapped (faster than real time);
+      deployment/eval the same stack capped at 1.0x real time so wall-clock clients (policy, real robot) match.
+      Presets `collect` and `deploy`; timing audit proves one frame per tick with state/image/action from one tick.
 - [ ] 3.1c Diversity and recovery: randomize lego poses (as now) AND cup layout, approach offsets/heights and
       speed; DART-style noise injection (perturb executed motion, record the planner's corrective command as the
       action label) so the policy learns recovery; balanced colours; hold out a fixed eval seed set.
