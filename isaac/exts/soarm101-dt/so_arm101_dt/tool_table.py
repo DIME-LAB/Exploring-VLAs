@@ -169,7 +169,7 @@ MCP_TOOL_REGISTRY = {
         "parameters": {}
     },
     "new_stage": {
-        "description": "Clear the entire USD stage and free accumulated memory. Tears down all USD prims, Hydra render state, and PhysX allocations. Scene will be empty afterwards — call quick_start to rebuild.",
+        "description": "Create an empty stage only when no simulation resources own it. Refuses with live World/graphs/publishers/recorders (Isaac 6.1 teardown crash); close Isaac and deploy again to rebuild safely.",
         "parameters": {}
     },
     "start_viewport_publisher": {

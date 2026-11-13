@@ -1763,6 +1763,19 @@ class DigitalTwin(omni.ext.IExt):
         Use await app.next_update_async() after steps that add/modify prims or action graphs,
         so the Omniverse update loop applies changes before the next step runs.
         """
+        stage = omni.usd.get_context().get_stage()
+        required = ("/World/SO_ARM101", "/World/workspace_camera",
+                    "/Graph/ActionGraph_SO_ARM101", "/Graph/ActionGraph_WristCamera",
+                    "/Graph/ActionGraph_WorkspaceCamera")
+        # A completed setup owns live graphs and an ArticulationView. Re-adding
+        # that view fails on its unique scene name; keep the existing scene.
+        if (stage and World.instance() is not None
+                and getattr(self, "_quick_start_stage", None) == stage.GetRootLayer().identifier
+                and all(stage.GetPrimAtPath(path).IsValid() for path in required)):
+            self._timeline.play()
+            self._apply_sim_rate()
+            print("=== Quick Start: scene already configured ===")
+            return
         print("=== Quick Start ===")
         app = omni.kit.app.get_app()
 
@@ -1932,6 +1945,7 @@ class DigitalTwin(omni.ext.IExt):
         self._suppress_camera_mesh_decorations()
 
         self._apply_sim_rate()
+        self._quick_start_stage = omni.usd.get_context().get_stage().GetRootLayer().identifier
         print("=== Quick Start Complete ===")
 
     def _suppress_camera_mesh_decorations(self):
@@ -7087,11 +7101,29 @@ class DigitalTwin(omni.ext.IExt):
     # --- Phase 13: ports from ur5e-dt ---
 
     async def _cmd_new_stage(self) -> Dict[str, Any]:
-        """Clear the USD stage and await a few app frames so Hydra/PhysX tear down cleanly.
+        """Refuse stage replacement while simulation resources own the stage.
 
-        Awaits frames instead of calling app.update(): a synchronous pump from inside a
-        handler running on Kit's loop re-enters that loop."""
+        Isaac 6.1 can crash during live ROS graph teardown. A launcher restart
+        owns the full publisher/graph/World teardown and is the supported reset.
+        """
         try:
+            import omni.usd
+            import omni.timeline
+            stage = omni.usd.get_context().get_stage()
+            graphs = [str(prim.GetPath()) for prim in stage.Traverse()
+                      if prim.GetTypeName() == "OmniGraph"] if stage else []
+            if (World.instance() is not None or graphs
+                    or omni.timeline.get_timeline_interface().is_playing()
+                    or _recording_mgr.is_recording()
+                    or _viewport_pub.get_status() or _replicator_pub.get_status()):
+                return {
+                    "status": "error",
+                    "message": "new_stage refused: simulation resources still own the stage "
+                               "(World, graphs, publishers or recording). Stop recording, then run "
+                               "isaacsim_launch.sh close and deploy_sim.sh up --stream --gui "
+                               "--no-policy to rebuild safely.",
+                    "graphs": graphs,
+                }
             # Stop our viewport publishers before tearing down the stage they reference
             try:
                 _viewport_pub.stop_all()

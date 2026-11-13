@@ -43,7 +43,7 @@ cadence (~14 Hz) not matching the camera-bound recording loop.
       wire recording in async mode (both from the April 29 session's open priorities).
 - [ ] 1.12 Record Sim tab works with the Phase 1 changes (rgb8 cameras, rate limit, fork `dev`); verified by
       recording 2 episodes and loading them with LeRobotDataset (needed before 3.1 data collection).
-- [ ] 1.13 `soarm101.new_stage` crashes Isaac 6.1 with live ROS action graphs: tear graphs/publishers down
+- [x] 1.13 `soarm101.new_stage` crashes Isaac 6.1 with live ROS action graphs: tear graphs/publishers down
       first or refuse with a clear error.
 - [x] 1.14 README: warn that saving files under `isaac/exts/` hot-reloads the extension in a running Isaac
       (stops publishers); edit only with the sim down. Fix `_apply_sim_rate` docstring (physics is 120 Hz;
