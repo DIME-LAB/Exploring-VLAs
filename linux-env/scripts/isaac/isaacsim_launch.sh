@@ -64,6 +64,12 @@ if [ -n "$INSTANCE_INDEX" ]; then
     INSTANCE_ROOT="${SOARM_INSTANCE_ROOT:-/mnt/a4500-backup/exploring-vlas/runtime/instance-$INSTANCE_INDEX}"
     mkdir -p "$INSTANCE_ROOT"
     export ISAACSIM_LOG="${ISAACSIM_LOG:-$INSTANCE_ROOT/isaac.log}"
+    export TMPDIR="$INSTANCE_ROOT/tmp"
+    export TEMP="$TMPDIR" TMP="$TMPDIR"
+    export XDG_CACHE_HOME="$INSTANCE_ROOT/cache"
+    export OPTIX_CACHE_PATH="$XDG_CACHE_HOME/optix"
+    export ROS_LOG_DIR="$INSTANCE_ROOT/ros-logs"
+    mkdir -p "$TMPDIR" "$OPTIX_CACHE_PATH" "$ROS_LOG_DIR"
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

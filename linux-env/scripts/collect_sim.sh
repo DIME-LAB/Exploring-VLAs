@@ -17,6 +17,14 @@ export SOARM_COLLECTION_ROOT="${SOARM_COLLECTION_ROOT:-/mnt/a4500-backup/explori
 export HF_LEROBOT_HOME="${HF_LEROBOT_HOME:-$SOARM_COLLECTION_ROOT/datasets}"
 export SOARM_INSTANCE_ROOT="${SOARM_INSTANCE_ROOT:-$SOARM_COLLECTION_ROOT/runtime/instance-$index}"
 mkdir -p "$SOARM_INSTANCE_ROOT" "$HF_LEROBOT_HOME"
+export TMPDIR="$SOARM_INSTANCE_ROOT/tmp"
+export TEMP="$TMPDIR" TMP="$TMPDIR"
+export ROS_LOG_DIR="$SOARM_INSTANCE_ROOT/ros-logs"
+export XDG_CACHE_HOME="$SOARM_INSTANCE_ROOT/cache"
+export HF_HOME="$XDG_CACHE_HOME/huggingface"
+export OPTIX_CACHE_PATH="$XDG_CACHE_HOME/optix"
+export PYTHONDONTWRITEBYTECODE=1
+mkdir -p "$TMPDIR" "$ROS_LOG_DIR" "$HF_HOME" "$OPTIX_CACHE_PATH"
 launcher="$SCRIPT_DIR/isaac/isaacsim_launch.sh"
 case "$command" in
     up)

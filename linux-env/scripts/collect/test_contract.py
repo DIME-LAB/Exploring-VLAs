@@ -1,5 +1,7 @@
 import unittest
+from types import SimpleNamespace
 from checkpoint import progress
+from storage import wait_for_storage
 from contract import EVAL_SEEDS, corrective_action, parameters, timing_audit
 
 
@@ -19,6 +21,18 @@ class ContractTests(unittest.TestCase):
 
     def test_true_clocks_pass(self):
         self.assertTrue(timing_audit(self.rows(), 30)['passed'])
+
+    def test_bulk_gate_waits_for_margin_without_gating_root_at_90(self):
+        free = iter([49, 51, 52]); waits = []; logs = []
+        usage = lambda path: SimpleNamespace(free=(80 if path == '/' else next(free)) * 1024**3)
+        stop = SimpleNamespace(wait=lambda seconds: waits.append(seconds) or False)
+        wait_for_storage('/bulk', stop, emit=logs.append, usage=usage)
+        self.assertEqual(waits, [60, 60])
+        self.assertEqual(len(logs), 2)
+
+    def test_near_full_root_still_stops(self):
+        with self.assertRaisesRegex(RuntimeError, '20 GiB'):
+            wait_for_storage('/bulk', None, usage=lambda path: SimpleNamespace(free=19 * 1024**3))
 
     def test_resume_ledger_preserves_seed_and_colour(self):
         receipts = []

@@ -31,6 +31,7 @@ from kit_mcp.client import call as kit_call
 from so_arm101_control.pick_place import PickPlaceNode, JOINT_LIMITS
 from contract import COLORS, JOINTS, EVAL_SEEDS, corrective_action, parameters, timing_audit
 from checkpoint import progress
+from storage import RootFileGrowth, wait_for_storage
 
 
 def ns(stamp):
@@ -465,6 +466,7 @@ class Collector:
             self.baseline_cup_layout = initial['cup_layout']
         tracked_sources = ['linux-env/scripts/collect/collect.py', 'linux-env/scripts/collect/contract.py',
                            'linux-env/scripts/collect/checkpoint.py',
+                           'linux-env/scripts/collect/storage.py',
                            'linux-env/scripts/collect/configure_clock.py',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/pick_place.py',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/grasp_geometry.py',
@@ -488,22 +490,13 @@ class Collector:
             bridge_port=8777 + 2 * args.instance, fps=30, baseline=baseline, baseline_cup_layout=self.baseline_cup_layout, eval_seeds=EVAL_SEEDS,
             **{k: v for k, v in provenance.items() if k != 'start_trial'}), indent=2))
         start = time.monotonic()
-        waiting_for_disk = args.resume
         for trial in range(attempted, args.max_attempts):
             if accepted >= args.episodes:
                 break
             if self.stop.is_set() or self.failure:
                 raise RuntimeError(self.failure or 'Collection interrupted')
-            if waiting_for_disk or __import__('shutil').disk_usage('/').free < 90 * 1024**3:
-                wait_start = time.monotonic()
-                while __import__('shutil').disk_usage('/').free < 92 * 1024**3:
-                    print(json.dumps(dict(event='disk_wait', free_gib=__import__('shutil').disk_usage('/').free / 1024**3,
-                        resume_gib=92, accepted=accepted)), flush=True)
-                    if self.stop.wait(60):
-                        raise RuntimeError('Collection interrupted during disk wait')
-                disk_wait += time.monotonic() - wait_start
-                waiting_for_disk = False
-                print(json.dumps(dict(event='disk_resumed', disk_wait_seconds=disk_wait)), flush=True)
+            disk_wait += wait_for_storage(root, self.stop, emit=lambda value: print(value, flush=True))
+            root_growth = RootFileGrowth(Path(os.environ['SOARM_INSTANCE_ROOT']))
             attempted += 1
             color = COLORS[accepted % 3]
             params = (json.loads(args.replay_receipt.read_text())['params'] if args.replay_receipt
@@ -569,6 +562,7 @@ class Collector:
                             receipt['accepted'] = False
                             receipt['error'] = 'Object did not lift at least 25 mm before placement'
                 receipt['camera_duplicate_messages'] = {key: value - duplicate_start.get(key, 0) for key, value in self.sensors.duplicate_messages.items()}
+                receipt['root_file_growth'] = root_growth.finish()
                 path.mkdir(parents=True, exist_ok=True)
                 (path / 'receipt.json').write_text(json.dumps(receipt, indent=2))
                 with (root / 'episodes.jsonl').open('a') as log:

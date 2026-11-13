@@ -326,10 +326,17 @@ loopback-only CycloneDDS XML; do not combine it with `ROS_LOCALHOST_ONLY=1`.
 World timing is selected before scene creation (including the 30 Hz physics
 frame-rate clamp). Never change World timing on a live articulation.
 Each instance has a portable root; shader caches under `~/.cache/ov` are shared.
-Collection writes only beneath `/mnt/a4500-backup/exploring-vlas/` and refuses
-to start another attempt if `/` has less than 90 GiB free. It logs a wait every
-60 seconds and resumes above 92 GiB; it never cleans other workspaces. Never alter the sibling
-`a4500-backup-20260828` archive. No source under `isaac/exts/` needs modification.
+Collection writes bulk output only beneath `/mnt/a4500-backup/exploring-vlas/`.
+Before each attempt the **output filesystem** must have at least 50 GiB free;
+if it falls below that floor, collection logs a wait every 60 seconds and
+resumes above 52 GiB. Root has a last-resort 20 GiB safety stop. Per-instance
+ROS logs, temp files, HF caches, Python cache policy, portable root and OptiX
+cache configuration keep controlled writes on the output filesystem. The
+shared `~/.cache/ov` shader cache stays shared. Receipts report growth in root
+files open for writing by the instance process trees (allocated and apparent
+bytes, with shared caches identified); this measures space growth rather than
+in-place rewrite traffic. Never alter the sibling `a4500-backup-20260828` archive.
+No source under `isaac/exts/` needs modification.
 
 ```bash
 # Assigned instance 0: GPU 0, ROS domain 90, bridge 8777, HTTP 8778.
@@ -407,7 +414,7 @@ Validation on the assigned isolated instance: the five-episode smoke loaded in
 LeRobotDataset (4,238 frames, 30 fps; red/green/blue = 2/2/1), with all timing
 and clean-expert audits passing. Five of eight attempts were accepted (62.5%).
 The shared pure geometry matches the verified GUI mathematics on 1,000 random
-cases; 13 offline tests pass. The GUI adapter also boots and serves its widget
+cases; 15 offline tests pass. The GUI adapter also boots and serves its widget
 inventory and Quickstart services with sim time enabled in the isolated domain.
 The collection process itself needs no display.
 
