@@ -224,16 +224,19 @@ class Servo:
         self.last_command_clock_ns = 0
 
     def configure(self, params):
-        self.params = params
-        self.rng = random.Random(params['noise_seed'])
+        with self.generation.own('episode parameters'):
+            self.params = dict(params)
+            self.rng = random.Random(params['noise_seed'])
 
-    def execute(self, trajectory, done):
+    def execute(self, trajectory, done, operation=None):
         epoch = done.motion_epoch
+        if operation is not None and (operation.event is not done or operation.epoch != epoch):
+            raise ValueError('Planner result/event origin mismatch')
         with self.generation.own('collector motion'):
             self.generation.require(epoch)
             with self.lock:
                 self.plan = dict(trajectory=trajectory, done=done, start=None, epoch=epoch)
-                self.phase = getattr(self.node, '_last_motion_tag', 'home')
+                self.phase = operation.tag if operation is not None else getattr(done,'motion_tag','home')
             self.step(True)
 
     def gripper(self, position, duration, blocking):
@@ -361,6 +364,9 @@ class Collector:
         self.writer_lock = threading.Lock()
         self.stop = threading.Event()
         self.failure = None
+        self.stalled_abort_lock = threading.Lock()
+        self.stalled_abort_started = False
+        self.generation.on_stall = self.abort_stalled_owner
         self.tick_condition = threading.Condition()
         self.last_processed_ns = 0
         self.last_snapshot = None
@@ -371,21 +377,29 @@ class Collector:
 
     @contextmanager
     def motion_effect(self, epoch):
-        with self.generation.own('scene/bookkeeping/status'):
-            self.generation.require(epoch)
-            yield
+        try:
+            with self.generation.own('scene/bookkeeping/status'):
+                self.generation.require(epoch)
+                yield
+        except OwnershipStalled as exc:
+            self.abort_stalled_owner(exc, 'scene/bookkeeping/status')
+            raise
 
-    def motion_call(self, callback, *args):
-        # Planning may block on wall time. Its immutable token survives that
-        # wait and is inherited by the shared module's child workers/events.
-        with self.generation.own('collector motion'):
-            epoch = self.generation.epoch
+    def motion_call(self, callback, *args, epoch=Ellipsis):
+        with self.generation.own('motion request'):
+            if self.stop.is_set():
+                raise CancelledGeneration('Collector is stopping')
+            epoch = self.generation.epoch if epoch is Ellipsis else epoch
             self.generation.require(epoch)
-        self.node._motion_context.epoch = epoch
+        context = self.node._motion_context
+        saved = {key:getattr(context,key) for key in ('epoch','event') if hasattr(context,key)}
+        context.epoch = epoch
         try:
             return callback(*args)
         finally:
-            del self.node._motion_context.epoch
+            for key in ('epoch','event'):
+                if key in saved:setattr(context,key,saved[key])
+                elif hasattr(context,key):delattr(context,key)
 
     def retire_motion(self):
         with self.servo.lock:
@@ -400,17 +414,30 @@ class Collector:
             self.sensors.pending.clear()
             self.sensors.acks.clear()
 
+    def abort_stalled_owner(self, exc, requester):
+        self.stop.set()
+        self.node._qs_abort_evt.set()
+        with self.stalled_abort_lock:
+            if self.stalled_abort_started:
+                return
+            self.stalled_abort_started = True
+            self.failure = str(exc)
+        # No generation lock: its owner may be stuck in publication forever.
+        # Native cancellation only pauses and invalidates queued commands.
+        try:
+            timeline(False)
+        except Exception as pause_error:
+            self.failure += '; emergency pause failed: '+repr(pause_error)
+        finally:
+            print(json.dumps(dict(event='stalled_generation_owner', requester=requester,
+                error=self.failure, action='abort; no reset or next episode permitted')), flush=True)
+
     def cancel_owner(self, native_cancel):
         try:
-            return self.generation.cancel(native_cancel, self.retire_motion,
-                                          emergency_cancel=lambda: timeline(False))
+            return self.generation.cancel(native_cancel, self.retire_motion)
         except OwnershipStalled as exc:
-            self.failure = str(exc)
-            self.stop.set()
-            self.node._qs_abort_evt.set()
-            print(json.dumps(dict(event='stalled_generation_owner', error=self.failure,
-                                  action='abort; no reset or next episode permitted')), flush=True)
-            raise
+            self.abort_stalled_owner(exc, 'cancel/reset')
+            raise OwnershipStalled(self.failure) from exc
 
     def timeline(self, play):
         if not play:
@@ -490,15 +517,13 @@ class Collector:
                             self.node._set_motion_status(dict(ok=True, outcome='physical_sim_tick_converged', epoch=epoch), event)
                             event.set()
             except OwnershipStalled as exc:
-                self.failure = str(exc)
-                self.stop.set()
+                self.abort_stalled_owner(exc, 'capture/dispatch')
                 return
             except CancelledGeneration:
                 continue
             except Exception as exc:
                 if self.generation.stalled:
-                    self.failure = self.generation.stalled
-                    self.stop.set()
+                    self.abort_stalled_owner(OwnershipStalled(self.generation.stalled), 'capture/dispatch')
                     return
                 with self.generation.own('collector motion'):
                     if epoch is not None and epoch != self.generation.epoch:
@@ -563,9 +588,9 @@ class Collector:
             replay = json.loads(self.args.replay_receipt.read_text())
             restored = self.restore_physical('import collection_runtime as c\nresult=c.runtime().restore(' +
                 repr(replay['initial_physical']) + ',arm=True)')
-            self.node.objects_data = replay['initial_objects']
-            self.node._drop_data = replay['initial_cups']
-            self.servo.reference = list(replay['initial_expert_reference'])
+            with self.generation.own('replay initial conditions'):
+                self.update_pose_cache(restored['snapshot'])
+                self.servo.reference = list(replay['initial_expert_reference'])
             self.scene_restore = restored
             cups = replay['cup_randomization']
         else:
@@ -700,6 +725,7 @@ class Collector:
                            'linux-env/scripts/collect/configure_clock.py',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/pick_place.py',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/grasp_geometry.py',
+                           'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/motion_operation.py',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/compute_workspace.py',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/ik_calibration.yaml',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/workspace_bounds.yaml']
@@ -748,8 +774,7 @@ class Collector:
             writer = None
             try:
                 # Home with the same shared primitive used by Quickstart, with sim ticks active.
-                self.motion_call(self.node._cmd_grasp_home_data)
-                home = self.node._motion_event
+                home = self.motion_call(self.node._cmd_grasp_home_data)
                 finished = home.wait(timeout=90)
                 with self.generation.own('home wait continuation'):
                     self.generation.require(home.motion_epoch)
@@ -778,7 +803,11 @@ class Collector:
                 with self.writer_lock:
                     self.writer = writer
                 cycle_result = {}
-                cycle = threading.Thread(target=lambda: cycle_result.update(ok=self.motion_call(self.node.run_cycle, params['object'])), daemon=True)
+                with self.generation.own('cycle request'):
+                    cycle_epoch = self.generation.epoch
+                def run_cycle(object_name=params['object'], epoch=cycle_epoch):
+                    cycle_result.update(ok=self.motion_call(self.node.run_cycle, object_name, epoch=epoch))
+                cycle = threading.Thread(target=run_cycle, daemon=True)
                 cycle.start(); cycle.join(timeout=args.episode_deadline)
                 if cycle.is_alive():
                     self.node._qs_abort_evt.set()

@@ -21,6 +21,7 @@ import shutil
 import threading
 import time
 import weakref
+from so_arm101_control.motion_operation import MotionOperation
 from pathlib import Path
 
 from so_arm101_control.grasp_trace import tracer
@@ -881,37 +882,39 @@ class PickPlaceNode(Node):
 
         On first call, cycles through gripper→arm to clear startup markers.
         """
-        if not hasattr(self, '_planning_group_pub'):
-            return
-        from std_msgs.msg import String
-        # First call: cycle gripper→arm to clear green startup markers
-        if not hasattr(self, '_planning_group_initialized'):
-            self._planning_group_initialized = True
+        with self._motion_guard():
+            if not hasattr(self, '_planning_group_pub'):
+                return
+            from std_msgs.msg import String
+            # First call: cycle gripper→arm to clear green startup markers
+            if not hasattr(self, '_planning_group_initialized'):
+                self._planning_group_initialized = True
+                msg = String()
+                msg.data = 'gripper'
+                self._planning_group_pub.publish(msg)
+            if hasattr(self, '_active_planning_group') and self._active_planning_group == group_name:
+                return
+            self._active_planning_group = group_name
             msg = String()
-            msg.data = 'gripper'
+            msg.data = group_name
             self._planning_group_pub.publish(msg)
-        if hasattr(self, '_active_planning_group') and self._active_planning_group == group_name:
-            return
-        self._active_planning_group = group_name
-        msg = String()
-        msg.data = group_name
-        self._planning_group_pub.publish(msg)
-        # Republish goal state after RViz processes the group switch
-        if getattr(self, '_gui_ready', False):
-            self.root.after(150, self._publish_goal_state)
+            # Republish goal state after RViz processes the group switch
+            if getattr(self, '_gui_ready', False):
+                self.root.after(150, self._publish_goal_state)
 
 
     def _publish_goal_state(self):
         """Publish current slider positions (arm + gripper) as goal state to RViz."""
-        if not MOVEIT_AVAILABLE or not hasattr(self, '_goal_state_pub'):
-            return
-        goal_state = RobotState()
-        goal_state.is_diff = True  # Required by MotionPlanning plugin
-        goal_state.joint_state.name = list(ALL_JOINT_NAMES)
-        with self.joint_lock:
-            goal_state.joint_state.position = [
-                self.joint_positions[n] for n in ALL_JOINT_NAMES]
-        self._goal_state_pub.publish(goal_state)
+        with self._motion_guard():
+            if not MOVEIT_AVAILABLE or not hasattr(self, '_goal_state_pub'):
+                return
+            goal_state = RobotState()
+            goal_state.is_diff = True  # Required by MotionPlanning plugin
+            goal_state.joint_state.name = list(ALL_JOINT_NAMES)
+            with self.joint_lock:
+                goal_state.joint_state.position = [
+                    self.joint_positions[n] for n in ALL_JOINT_NAMES]
+            self._goal_state_pub.publish(goal_state)
 
 
     def _plan_collision_free_execute(self, x, y, z, grip_angle,
@@ -954,7 +957,7 @@ class PickPlaceNode(Node):
             self._set_motion_status({
                 'ok': False, 'outcome': 'ik_no_solution',
                 'msg': (f'geometric IK returned no solutions for '
-                        f'({x:.3f}, {y:.3f}, {z:.3f})')})
+                        f'({x:.3f}, {y:.3f}, {z:.3f})')}, event=on_complete)
             if on_complete:
                 on_complete.set()
             return
@@ -973,7 +976,7 @@ class PickPlaceNode(Node):
             self._append_log('IK: all solutions collide', 'warn')
             self._set_motion_status({
                 'ok': False, 'outcome': 'ik_all_collide',
-                'msg': 'all geometric IK solutions collided with scene'})
+                'msg': 'all geometric IK solutions collided with scene'}, event=on_complete)
             if on_complete:
                 on_complete.set()
             return
@@ -997,7 +1000,7 @@ class PickPlaceNode(Node):
                 self._set_motion_status({
                     'ok': False, 'outcome': 'ik_pan_lock_collide',
                     'msg': (f'pan-locked IK solution at '
-                            f'{math.degrees(lock_pan):.1f}\u00b0 collides')})
+                            f'{math.degrees(lock_pan):.1f}\u00b0 collides')}, event=on_complete)
                 if on_complete:
                     on_complete.set()
                 return
@@ -1099,7 +1102,7 @@ class PickPlaceNode(Node):
         requires that verdict and validates its generation after waits. GUI
         action callbacks without an adapter retain their display-status fallback.
         """
-        evt = getattr(self, '_motion_event', None)
+        evt = self._current_motion_event()
         if evt is None:
             return True  # nothing to wait on
         deadline = time.time() + timeout_s
@@ -1170,12 +1173,13 @@ class PickPlaceNode(Node):
         # not a per-call local). _make_trigger_callback at line ~845
         # does the same clear on the ROS-service entry path; QS calls
         # handlers directly, so we need to clear here too.
-        self._motion_event = self._new_motion_event()
+        self._begin_motion(self._new_motion_event())
         self._set_motion_status(None)
         self._cmd_error = None
         # Tag the next trajectory dump with this step's cmd name.
         if method_name.startswith('_cmd_'):
-            self._last_motion_tag = method_name[5:]
+            with self._motion_guard():
+                self._last_motion_tag = method_name[5:]
 
         handler = getattr(self, method_name, None)
         if handler is None:
@@ -1190,7 +1194,7 @@ class PickPlaceNode(Node):
 
         # A rejected planner tier can warn before a fallback succeeds. The
         # motion status is the verdict shared by the GUI and headless adapter.
-        status = self._motion_verdict(self._motion_event)
+        status = self._motion_verdict(self._current_motion_event())
         if status and status.get('ok') is False:
             return False
         ok = self._qs_wait_for_step(timeout_s=60.0)
@@ -1292,63 +1296,61 @@ class PickPlaceNode(Node):
         return bool(res.valid), list(res.contacts)
 
 
-    def _ik_apply_and_act(self, target, mode):
-        """Apply IK solution to sliders/goal state and optionally execute."""
+    def _ik_apply_and_act(self, target, mode, *, operation=None, descent=None):
+        """Commit UI state briefly, then plan using immutable operation inputs.
+
+        Approach/descent continuations carry their targets and events directly;
+        no operation can read another worker's mutable target/event slots.
+        """
+        if operation is None:
+            operation = self._operation(target, duration_s=2.)
+        self._require_operation(operation)
+        if mode == 'grasp_approach' and descent is None:
+            raise ValueError('A grasp approach requires its operation-owned descent')
+        if descent is not None:
+            self._require_operation(descent)
+            if descent.epoch != operation.epoch:
+                raise ValueError('Approach/descent origins differ')
+
         def _apply():
-            self._slider_driven = True
-            self._select_planning_group('arm')
-            with self.joint_lock:
-                for name in ARM_JOINT_NAMES:
-                    if name in target:
-                        self.joint_positions[name] = target[name]
-            for name in ARM_JOINT_NAMES:
-                if name in target and name in self.sliders:
-                    self.sliders[name].set(target[name])
-                    self.slider_labels[name].config(text=f'{target[name]:.3f}')
-            self._publish_goal_state()
-            self._ik_planned_target = dict(target)
-            self._ik_valid = True
+            with self._motion_guard(operation):
+                joints = operation.joints()
+                self._slider_driven = True
+                self._select_planning_group('arm')
+                with self.joint_lock:
+                    self.joint_positions.update(joints)
+                for name, value in joints.items():
+                    if name in self.sliders:
+                        self.sliders[name].set(value)
+                        self.slider_labels[name].config(text=f'{value:.3f}')
+                self._publish_goal_state()
+                self._ik_planned_target = dict(joints)
+                self._ik_valid = True
+            # Planning/validation may take many wall seconds. Only the UI
+            # mutation above and final command commit own the generation.
             if mode == 'set_joints':
                 self._cmd_set_joints()
             elif mode == 'plan_execute':
                 self._cmd_plan_execute()
             elif mode == 'grasp_approach':
-                # Route through the unified motion primitive so the approach
-                # path is collision-checked against the scene (catches fingers
-                # clipping ground/cups on low/edge blocks).
-                duration = getattr(self, '_grasp_arm_duration', 2.0)
-                final_joints = getattr(self, '_grasp_final_joints', None)
-                approach_done = self._new_motion_event()
-
                 def _wait_then_descend():
-                    finished = approach_done.wait(timeout=60.0)
-                    self._require_motion_generation()
-                    status = self._motion_verdict(approach_done)
-                    if status is None and getattr(self, '_motion_effect_guard', None):
+                    finished = operation.event.wait(timeout=60.)
+                    self._require_operation(operation)
+                    self._require_operation(descent)
+                    verdict = self._motion_verdict(operation.event)
+                    if not finished or not verdict or not verdict.get('ok'):
+                        with self._motion_guard(descent):
+                            self._set_motion_status(dict(ok=False, outcome='approach_failed'), descent.event)
+                            descent.event.set()
                         return
-                    if not finished or (status and not status.get('ok')):
-                        if self._grasp_motion_event:
-                            self._grasp_motion_event.set()
-                        return
-                    if final_joints is not None:
-                        self._append_log('Approach complete, descending to grasp')
-                        self._ik_apply_and_act(final_joints, 'grasp_execute')
-                    else:
-                        evt = getattr(self, '_grasp_motion_event', None)
-                        if evt:
-                            evt.set()
-
+                    self._append_log('Approach complete, descending to grasp')
+                    self._ik_apply_and_act(descent.joints(), 'grasp_execute', operation=descent)
                 self._motion_thread(target=_wait_then_descend, daemon=True).start()
-                self._joint_space_collision_free_execute(
-                    target, on_complete_event=approach_done,
-                    duration_s=duration)
+                self._joint_space_collision_free_execute(operation.joints(), operation.event,
+                    duration_s=operation.duration_s, operation=operation)
             elif mode == 'grasp_execute':
-                duration = getattr(self, '_grasp_arm_duration', 2.0)
-                evt = getattr(self, '_grasp_motion_event', None) \
-                    or self._new_motion_event()
-                self._joint_space_collision_free_execute(
-                    target, on_complete_event=evt, duration_s=duration)
-
+                self._joint_space_collision_free_execute(operation.joints(), operation.event,
+                    duration_s=operation.duration_s, operation=operation)
         self._dispatch_motion(_apply)
 
 
@@ -1410,7 +1412,7 @@ class PickPlaceNode(Node):
                 self._lego_sync_last_t = now
                 # Mode B suspect: lego re-add mid-cycle can invalidate an
                 # OMPL plan made against the pre-resync scene.
-                tracer.event('objects_callback_readd_scheduled',
+                self._trace('event', 'objects_callback_readd_scheduled',
                              attached=self._attached_lego_name)
                 if getattr(self, '_gui_ready', False):
                     self.root.after(0, self._add_lego_collision_objects)
@@ -2271,7 +2273,7 @@ class PickPlaceNode(Node):
 
                 if name_id in self._lego_collision_names:
                     self._lego_collision_names.remove(name_id)
-                tracer.event('attach_applied',
+                self._trace('event', 'attach_applied',
                              obj_name=obj_name,
                              block_in_tcp=(ax, ay, az),
                              block_in_tcp_quat=(aqx, aqy, aqz, aqw),
@@ -2353,7 +2355,7 @@ class PickPlaceNode(Node):
             self._attached_lego_name = None
             self._attached_lego_tcp_offset = None
             self._cycle_detach_seen = True
-            tracer.event('release_applied', obj_name=name)
+            self._trace('event', 'release_applied', obj_name=name)
             self._append_log(f'Detached {obj_id}')
             return True
 
@@ -2373,9 +2375,9 @@ class PickPlaceNode(Node):
         from so_arm101_control.compute_workspace import WRIST_ROLL_URDF_PITCH
         target['wrist_roll'] = -math.pi / 2 + WRIST_ROLL_URDF_PITCH
         self._append_log(f'Grasp Home: wrist_flex=90° wrist_roll={math.degrees(target["wrist_roll"]):.1f}°')
-        tracer.event('grasp_home_start', target=dict(target))
+        self._trace('event', 'grasp_home_start', target=dict(target))
         evt = self._new_motion_event()
-        self._motion_event = evt
+        self._begin_motion(evt)
         # Emit grasp_home_done when motion settles. Close the trace cycle
         # iff a detach was seen in this cycle — that signals this is the
         # post-drop return-to-home, the final leg of the pick-place.
@@ -2384,9 +2386,9 @@ class PickPlaceNode(Node):
         def _emit_home_done():
             evt.wait(timeout=30.0)
             with self._motion_guard():
-                tracer.event('grasp_home_done')
-                if getattr(self, '_cycle_detach_seen', False) and tracer.is_active():
-                    tracer.close_cycle('completed')
+                self._trace('event', 'grasp_home_done')
+                if getattr(self, '_cycle_detach_seen', False) and self._trace('is_active'):
+                    self._trace('close_cycle', 'completed')
                     self._cycle_detach_seen = False
         self._motion_thread(target=_emit_home_done, daemon=True).start()
         # Speed override: if home_velocity_scale param > 0, temporarily
@@ -2394,22 +2396,15 @@ class PickPlaceNode(Node):
         # Lets the speed-vs-lag experiment sweep grasp_home speed live
         # via `ros2 param set` without affecting other motions.
         hvs = float(self.get_parameter('home_velocity_scale').value)
-        saved_vs = None
-        if hvs > 0.0 and hasattr(self, 'velocity_scale_var'):
-            saved_vs = self.velocity_scale_var.get()
-            self.velocity_scale_var.set(hvs)
-            self._append_log(f'  velocity_scale override: {hvs:.2f} (was {saved_vs:.2f})')
-
-        # grasp_home: deterministic-only (tier1 linear + tier2 retract-pan-settle).
-        # OMPL fallback disabled — RRTConnect's RNG variance has produced cup-
-        # clipping trajectories from far-pan start poses. If both tiers fail,
-        # surface loudly rather than roll the dice.
+        # Snapshot the home override in this request, never in shared settings.
+        operation = self._operation(target, evt, duration_s=3.)
+        if hvs > 0.:
+            operation = operation.with_planning(velocity_scale=hvs)
         self._joint_space_collision_free_execute(
             target, on_complete_event=evt, duration_s=3.0,
-            allow_ompl_fallback=False)
+            allow_ompl_fallback=False, operation=operation)
 
-        if saved_vs is not None:
-            self.velocity_scale_var.set(saved_vs)
+        return evt
 
 
     def _cmd_grasp_home_data(self):
@@ -2433,29 +2428,27 @@ class PickPlaceNode(Node):
             f'elbow={math.degrees(target["elbow_flex"]):+.2f}° '
             f'wrist_flex={math.degrees(target["wrist_flex"]):.1f}° '
             f'wrist_roll={math.degrees(target["wrist_roll"]):.1f}°')
-        tracer.event('grasp_home_start', target=dict(target),
+        self._trace('event', 'grasp_home_start', target=dict(target),
                      calibration='data')
         evt = self._new_motion_event()
-        self._motion_event = evt
+        self._begin_motion(evt)
         def _emit_home_done():
             evt.wait(timeout=30.0)
             with self._motion_guard():
-                tracer.event('grasp_home_done')
-                if getattr(self, '_cycle_detach_seen', False) and tracer.is_active():
-                    tracer.close_cycle('completed')
+                self._trace('event', 'grasp_home_done')
+                if getattr(self, '_cycle_detach_seen', False) and self._trace('is_active'):
+                    self._trace('close_cycle', 'completed')
                     self._cycle_detach_seen = False
         self._motion_thread(target=_emit_home_done, daemon=True).start()
         hvs = float(self.get_parameter('home_velocity_scale').value)
-        saved_vs = None
-        if hvs > 0.0 and hasattr(self, 'velocity_scale_var'):
-            saved_vs = self.velocity_scale_var.get()
-            self.velocity_scale_var.set(hvs)
-            self._append_log(f'  velocity_scale override: {hvs:.2f} (was {saved_vs:.2f})')
+        # Snapshot the home override in this request, never in shared settings.
+        operation = self._operation(target, evt, duration_s=3.)
+        if hvs > 0.:
+            operation = operation.with_planning(velocity_scale=hvs)
         self._joint_space_collision_free_execute(
             target, on_complete_event=evt, duration_s=3.0,
-            allow_ompl_fallback=False)
-        if saved_vs is not None:
-            self.velocity_scale_var.set(saved_vs)
+            allow_ompl_fallback=False, operation=operation)
+        return evt
 
 
     _NEUTRAL_NON_PAN_JOINTS = {
@@ -2468,7 +2461,7 @@ class PickPlaceNode(Node):
 
     def _joint_space_collision_free_execute(self, target, on_complete_event,
                                              duration_s=3.0, waypoints=50,
-                                             allow_ompl_fallback=True):
+                                             allow_ompl_fallback=True, operation=None):
         """Tiered deterministic planner with opt-in OMPL fallback.
 
         Tier 1: linear joint-space interp, per-waypoint validity check.
@@ -2490,30 +2483,26 @@ class PickPlaceNode(Node):
         Both tiers share _check_state_valid_with_contacts with the Mode B
         OMPL post-check, so there is no planner-vs-check coherence gap.
         """
-        # Every motion = arm-group plan. Switch the RViz panel so the Goal
-        # State ghost highlights the right group (gripper_command set it to
-        # 'gripper' — without this, grasp_home and drops keep no ghost).
-        duration_s = duration_s / getattr(self, 'speed_scale', 1.0)
-        self._select_planning_group('arm')
-        # Snapshot current (physics) positions before advancing
-        # self.joint_positions to the target — tier1/tier2 interpolate from
-        # the physical start, not from the freshly-overwritten slider target.
-        with self.joint_lock:
-            current = {n: self._actual_positions.get(
-                n, self.joint_positions.get(n, 0.0))
-                       for n in ARM_JOINT_NAMES}
-            for n in ARM_JOINT_NAMES:
-                if n in target:
-                    self.joint_positions[n] = target[n]
-        # Sync sliders so RViz's interactive markers land on the goal.
-        for n in ARM_JOINT_NAMES:
-            if n in target and n in self.sliders:
-                self.sliders[n].set(target[n])
-                if n in self.slider_labels:
-                    self.slider_labels[n].config(text=f'{target[n]:.3f}')
-        self._publish_goal_state()
-
-        target_full = {n: target.get(n, current[n]) for n in ARM_JOINT_NAMES}
+        if operation is None:
+            operation = self._operation(target, on_complete_event, duration_s=duration_s)
+        self._require_operation(operation)
+        target = operation.joints()
+        on_complete_event = operation.event
+        duration_s = operation.duration_s / operation.speed_scale
+        with self._motion_guard(operation):
+            self._select_planning_group('arm')
+            with self.joint_lock:
+                current = {n:self._actual_positions.get(n, self.joint_positions.get(n,0.))
+                           for n in ARM_JOINT_NAMES}
+                self.joint_positions.update(target)
+            for n,value in target.items():
+                if n in self.sliders:
+                    self.sliders[n].set(value)
+                    if n in self.slider_labels:
+                        self.slider_labels[n].config(text=f'{value:.3f}')
+            self._publish_goal_state()
+        target_full = {n:target.get(n,current[n]) for n in ARM_JOINT_NAMES}
+        operation = operation.retarget(target_full)
 
         # Already-at-target short-circuit (0.5° tol on every joint).
         ALREADY_AT_TARGET_TOL = math.radians(0.5)
@@ -2522,13 +2511,13 @@ class PickPlaceNode(Node):
             self._append_log(
                 f'  already at target (max Δ={math.degrees(max_delta):.2f}° '
                 f'< 0.5°) — no motion dispatched')
-            tracer.event('tier1_noop',
+            self._trace('event', 'tier1_noop',
                          max_delta_deg=math.degrees(max_delta),
                          target=dict(target_full), current=dict(current))
             self._set_motion_status({
                 'ok': True, 'outcome': 'already_at_target',
                 'msg': (f'already at target '
-                        f'(max Δ={math.degrees(max_delta):.2f}°)')})
+                        f'(max Δ={math.degrees(max_delta):.2f}°)')}, event=on_complete_event)
             on_complete_event.set()
             return True
 
@@ -2536,42 +2525,42 @@ class PickPlaceNode(Node):
         traj = self._plan_linear_joint_path(
             current, target_full, duration_s, n_samples=waypoints)
         if traj is not None:
-            tracer.event('planner_used', which='linear',
+            self._trace('event', 'planner_used', which='linear',
                          n_wps=len(traj.points))
             self._append_log(
                 f'  tier1 linear: {len(traj.points)} wps clean, executing')
-            self._execute_full_trajectory(traj, on_complete_event)
+            self._execute_full_trajectory(traj, on_complete_event, operation=operation)
             return True
 
         # Tier 2: retract-pan-settle decomposition.
         traj2 = self._plan_retract_pan_settle(
             current, target_full, duration_s, n_samples=waypoints)
         if traj2 is not None:
-            tracer.event('planner_used', which='retract_pan_settle',
+            self._trace('event', 'planner_used', which='retract_pan_settle',
                          n_wps=len(traj2.points))
             self._append_log(
                 f'  tier2 retract-pan-settle: {len(traj2.points)} wps clean, '
                 f'executing')
-            self._execute_full_trajectory(traj2, on_complete_event)
+            self._execute_full_trajectory(traj2, on_complete_event, operation=operation)
             return True
 
         # Fallback: OMPL (opt-in).
         if not allow_ompl_fallback:
-            tracer.event('planner_used', which='none')
+            self._trace('event', 'planner_used', which='none')
             self._append_log(
                 '  REFUSED: tier1 + tier2 both collided; OMPL fallback '
                 'disabled (deterministic-only mode)', 'err')
             self._set_motion_status({
                 'ok': False, 'outcome': 'tiered_planner_exhausted',
                 'msg': ('tier1 linear and tier2 retract-pan-settle both '
-                        'collided; OMPL fallback disabled')})
+                        'collided; OMPL fallback disabled')}, event=on_complete_event)
             on_complete_event.set()
             return False
 
-        tracer.event('planner_used', which='ompl_fallback')
+        self._trace('event', 'planner_used', which='ompl_fallback')
         self._append_log(
             '  tier1 + tier2 both collided; falling back to OMPL')
-        return self._ompl_plan_validate_execute(target_full, on_complete_event)
+        return self._ompl_plan_validate_execute(target_full, on_complete_event, operation=operation)
 
 
     def _plan_linear_joint_path(self, current, target_full, duration_s,
@@ -2685,7 +2674,7 @@ class PickPlaceNode(Node):
         return concat
 
 
-    def _ompl_plan_validate_execute(self, target, on_complete_event):
+    def _ompl_plan_validate_execute(self, target, on_complete_event, operation=None):
         """OMPL path planning + waypoint validation. One shot, no retries.
 
         Previously this method retried up to 10× with small goal perturbations,
@@ -2699,12 +2688,17 @@ class PickPlaceNode(Node):
         and surface the diagnostic loudly. Returns True iff a valid plan was
         scheduled for execution.
         """
+        if operation is None:
+            operation = self._operation(target, on_complete_event)
+        self._require_operation(operation)
+        target = operation.joints()
+        on_complete_event = operation.event
         if not MOVEIT_AVAILABLE or self.plan_client is None \
                 or not self.plan_client.service_is_ready():
             self._append_log('OMPL: service not available', 'warn')
             self._set_motion_status({
                 'ok': False, 'outcome': 'ompl_service_unavailable',
-                'msg': 'OMPL plan service not available'})
+                'msg': 'OMPL plan service not available'}, event=on_complete_event)
             on_complete_event.set()
             return False
 
@@ -2713,25 +2707,24 @@ class PickPlaceNode(Node):
                 n, self.joint_positions.get(n, 0.0))
                        for n in ALL_JOINT_NAMES}
 
-        tracer.snapshot_scene('before_ompl_plan', self)
-        traj = self._ompl_plan_sync(current, target, tolerance=0.01)
+        self._trace('snapshot_scene', 'before_ompl_plan', self)
+        traj, ec_info = self._ompl_plan_sync(current, target, tolerance=0.01, operation=operation)
 
         if traj is None or not traj.joint_trajectory.points:
-            ec_info = getattr(self, '_last_ompl_error', None)
-            tracer.snapshot_scene('after_ompl_returns_modeA', self)
-            tracer.event('ompl_attempt', attempt=0, perturb='none',
+            self._trace('snapshot_scene', 'after_ompl_returns_modeA', self)
+            self._trace('event', 'ompl_attempt', attempt=0, perturb='none',
                          mode='A', ec_info=repr(ec_info))
-            tracer.event('ompl_exhausted', n_attempts=1, mode='A',
+            self._trace('event', 'ompl_exhausted', n_attempts=1, mode='A',
                          ec_info=repr(ec_info))
             self._append_log(
                 f'  OMPL Mode A: planner returned no plan ({ec_info})', 'warn')
             self._set_motion_status({
                 'ok': False, 'outcome': 'ompl_mode_a',
-                'msg': f'OMPL Mode A: no plan ({ec_info})'})
+                'msg': f'OMPL Mode A: no plan ({ec_info})'}, event=on_complete_event)
             on_complete_event.set()
             return False
 
-        tracer.snapshot_scene('after_ompl_returns', self)
+        self._trace('snapshot_scene', 'after_ompl_returns', self)
         chk = self._trajectory_first_invalid_with_contacts(
             traj.joint_trajectory)
         if not chk.ok:
@@ -2740,8 +2733,8 @@ class PickPlaceNode(Node):
                 for c in chk.contacts[:5]) or 'no contact info'
             where = (f'wp[{chk.bad_wp}]' if chk.bad_subidx is None
                      else f'wp[{chk.bad_wp}→{chk.bad_wp + 1}] sub-t={chk.sub_t:.2f}')
-            tracer.snapshot_scene('after_waypoint_check_modeB', self)
-            tracer.event('ompl_attempt', attempt=0, perturb='none',
+            self._trace('snapshot_scene', 'after_waypoint_check_modeB', self)
+            self._trace('event', 'ompl_attempt', attempt=0, perturb='none',
                          mode='B',
                          bad_wp=chk.bad_wp, bad_subidx=chk.bad_subidx,
                          sub_t=chk.sub_t,
@@ -2751,7 +2744,7 @@ class PickPlaceNode(Node):
                              'b': c.contact_body_2,
                              'depth_mm': c.depth * 1000,
                          } for c in chk.contacts[:10]])
-            tracer.event('ompl_exhausted', n_attempts=1, mode='B',
+            self._trace('event', 'ompl_exhausted', n_attempts=1, mode='B',
                          bad_wp=chk.bad_wp,
                          n_wps=chk.n_wps)
             self._append_log(
@@ -2762,11 +2755,11 @@ class PickPlaceNode(Node):
                 'ok': False, 'outcome': 'ompl_mode_b',
                 'msg': (f'post-check rejected {where}: {contact_summary}'),
                 'bad_wp': chk.bad_wp, 'bad_subidx': chk.bad_subidx,
-                'sub_t': chk.sub_t})
+                'sub_t': chk.sub_t}, event=on_complete_event)
             on_complete_event.set()
             return False
 
-        tracer.event('ompl_validated', attempt=0, perturb='none',
+        self._trace('event', 'ompl_validated', attempt=0, perturb='none',
                      n_wps=chk.n_wps, n_sub=chk.n_sub)
         # Honest log: we checked every waypoint AND N intermediate states
         # per segment. "Validated" here means collision-free at discrete
@@ -2776,12 +2769,12 @@ class PickPlaceNode(Node):
             f'  OMPL post-check: {chk.n_wps} wps + {chk.n_sub} sub-states '
             f'clear ({TRAJ_SUBSEGMENT_SAMPLES}/seg)')
         self._execute_full_trajectory(
-            traj.joint_trajectory, on_complete_event)
+            traj.joint_trajectory, on_complete_event, operation=operation)
         return True
 
 
-    def _ompl_plan_sync(self, start_joint_dict, target_joint_dict, tolerance=0.01):
-        """Blocking OMPL plan call. Returns RobotTrajectory or None.
+    def _ompl_plan_sync(self, start_joint_dict, target_joint_dict, tolerance=0.01, operation=None):
+        """Blocking OMPL plan call. Returns (RobotTrajectory, error detail).
 
         tolerance: joint goal tolerance (rad). Default 0.01 matches the
         _cmd_plan_execute interface.
@@ -2790,16 +2783,17 @@ class PickPlaceNode(Node):
         mpr = MotionPlanRequest()
         mpr.group_name = 'arm'
         mpr.pipeline_id = 'ompl'
-        attempts_var = getattr(self, '_planning_attempts_var', None)
-        mpr.num_planning_attempts = attempts_var.get() if attempts_var else 50
+        if operation is None:
+            operation = self._operation(target_joint_dict)
+        self._require_operation(operation)
+        mpr.num_planning_attempts = operation.planning_attempts
         # 10s (was 5s). Phase 9 data: tier1 check sometimes rejects the
         # linear-interp path at a 0.03mm cup-rim clip, and the 5s OMPL
         # budget was not always enough for RRTConnect to find an alternative.
         # One-shot plan → 10s keeps worst-case latency ≤10s (vs the old
         # retry loop's 50s) while drastically reducing sampling variance.
         mpr.allowed_planning_time = 10.0
-        vel_scale = self.velocity_scale_var.get() \
-            if hasattr(self, 'velocity_scale_var') else 0.5
+        vel_scale = operation.velocity_scale
         mpr.max_velocity_scaling_factor = vel_scale
         mpr.max_acceleration_scaling_factor = vel_scale
 
@@ -2824,15 +2818,12 @@ class PickPlaceNode(Node):
         future = self.plan_client.call_async(req)
         self._wait_future(future, timeout_sec=10.0)
         if future.result() is None:
-            self._last_ompl_error = ('no_response', None)
-            return None
+            return None, ('no_response', None)
         r = future.result()
         ec = r.motion_plan_response.error_code.val
         if ec != 1:
-            self._last_ompl_error = (f'ec={ec}', r.motion_plan_response.planning_time)
-            return None
-        self._last_ompl_error = None
-        return r.motion_plan_response.trajectory
+            return None, (f'ec={ec}', r.motion_plan_response.planning_time)
+        return r.motion_plan_response.trajectory, None
 
 
     def _trajectory_first_invalid_with_contacts(self, joint_trajectory,
@@ -2924,16 +2915,22 @@ class PickPlaceNode(Node):
                                 n_sub=total_sub)
 
 
-    def _execute_full_trajectory(self, joint_trajectory, on_complete_event):
+    def _execute_full_trajectory(self, joint_trajectory, on_complete_event, operation=None):
         """Send a pre-validated multi-waypoint JointTrajectory to arm_controller.
 
         Sets on_complete_event when controller reports goal result (or on any
         failure/timeout).
         """
+        if operation is None:
+            duration = max(.001, joint_trajectory.points[-1].time_from_start.sec +
+                           joint_trajectory.points[-1].time_from_start.nanosec/1e9)
+            operation = self._operation(dict(zip(joint_trajectory.joint_names,
+                joint_trajectory.points[-1].positions)), on_complete_event, duration_s=duration)
+        self._require_operation(operation)
         if getattr(self, '_trajectory_executor', None) is not None:
-            return self._trajectory_executor(joint_trajectory, on_complete_event)
+            return self._trajectory_executor(joint_trajectory, operation.event, operation=operation)
         n_wps = len(joint_trajectory.points) if joint_trajectory.points else 0
-        tracer.event('execute_start', n_wps=n_wps, source='full_trajectory')
+        self._trace('event', 'execute_start', n_wps=n_wps, source='full_trajectory')
         # DIAG: dump every executed trajectory to disk for post-hoc replay.
         # Writes to both /tmp/arm_traj/{timestamp}.json (history, never
         # overwritten) and /tmp/last_arm_trajectory.json (convenience pointer
@@ -2972,19 +2969,20 @@ class PickPlaceNode(Node):
                     'attached_lego_name': self._attached_lego_name,
                     'drop_data': _drops,
                     'actual_joints': _joints,
-                    'motion_tag': getattr(self, '_last_motion_tag', 'motion'),
+                    'motion_tag': operation.tag,
                 },
             }
             _hist_dir = '/tmp/arm_traj'
             _os.makedirs(_hist_dir, exist_ok=True)
             _stamp = _dt.now().strftime('%Y%m%dT%H%M%S_%f')[:-3]
-            _tag = getattr(self, '_last_motion_tag', 'motion')
+            _tag = operation.tag
             _hist_path = _os.path.join(_hist_dir, f'{_stamp}_{_tag}.json')
             with open(_hist_path, 'w') as _f:
                 _json.dump(_dump, _f, default=str)
             with open('/tmp/last_arm_trajectory.json', 'w') as _f:
                 _json.dump(_dump, _f, default=str)
-            self._last_trajectory_path = _hist_path
+            with self._motion_guard(operation):
+                self._last_trajectory_path = _hist_path
             # One compact line to rosout so post-run grep can locate this
             # trajectory instantly by tag + timestamp.
             try:
@@ -2999,10 +2997,10 @@ class PickPlaceNode(Node):
         if not self.arm_action_client.server_is_ready():
             self._append_log(
                 'arm_controller action server not ready', 'warn')
-            tracer.event('execute_done', outcome='action_server_not_ready')
+            self._trace('event', 'execute_done', outcome='action_server_not_ready')
             self._set_motion_status({
                 'ok': False, 'outcome': 'action_server_not_ready',
-                'msg': 'arm_controller action server not ready'})
+                'msg': 'arm_controller action server not ready'}, event=on_complete_event)
             on_complete_event.set()
             return
 
@@ -3031,50 +3029,52 @@ class PickPlaceNode(Node):
         goal.trajectory = joint_trajectory
 
         def _on_result(result_future):
-            try:
-                res = result_future.result()
-                ec = getattr(getattr(res, 'result', None), 'error_code', None)
-                tracer.event('execute_done',
-                             outcome='completed',
-                             error_code=(ec if ec is not None else None))
-                # FollowJointTrajectory.Result.SUCCESSFUL = 0
-                ok = (ec is None) or (ec == 0)
-                self._set_motion_status({
-                    'ok': ok,
-                    'outcome': 'completed' if ok else 'trajectory_error',
-                    'msg': (f'trajectory complete ({n_wps} wps)' if ok
-                            else f'trajectory error_code={ec}'),
-                    'error_code': ec})
-            except Exception as e:
-                tracer.event('execute_done', outcome='result_exception',
-                             error=repr(e))
-                self._set_motion_status({
-                    'ok': False, 'outcome': 'result_exception',
-                    'msg': f'result callback exception: {e!r}'})
-            on_complete_event.set()
+            with self._motion_guard(operation):
+                try:
+                    res = result_future.result()
+                    ec = getattr(getattr(res, 'result', None), 'error_code', None)
+                    self._trace('event', 'execute_done',
+                                 outcome='completed',
+                                 error_code=(ec if ec is not None else None))
+                    # FollowJointTrajectory.Result.SUCCESSFUL = 0
+                    ok = (ec is None) or (ec == 0)
+                    self._set_motion_status({
+                        'ok': ok,
+                        'outcome': 'completed' if ok else 'trajectory_error',
+                        'msg': (f'trajectory complete ({n_wps} wps)' if ok
+                                else f'trajectory error_code={ec}'),
+                        'error_code': ec}, event=on_complete_event)
+                except Exception as e:
+                    self._trace('event', 'execute_done', outcome='result_exception',
+                                 error=repr(e))
+                    self._set_motion_status({
+                        'ok': False, 'outcome': 'result_exception',
+                        'msg': f'result callback exception: {e!r}'}, event=on_complete_event)
+                on_complete_event.set()
 
         def _on_accept(send_future):
-            try:
-                gh = send_future.result()
-            except Exception as e:
-                tracer.event('execute_done', outcome='send_exception',
-                             error=repr(e))
-                self._set_motion_status({
-                    'ok': False, 'outcome': 'send_exception',
-                    'msg': f'action send_goal exception: {e!r}'})
-                on_complete_event.set()
-                return
-            if not gh.accepted:
-                tracer.event('execute_done', outcome='goal_rejected')
-                self._set_motion_status({
-                    'ok': False, 'outcome': 'goal_rejected',
-                    'msg': 'arm action server rejected the goal'})
-                on_complete_event.set()
-                return
-            with self._arm_goal_lock:
-                self._arm_goal_handle = gh
-            rf = gh.get_result_async()
-            rf.add_done_callback(_on_result)
+            with self._motion_guard(operation):
+                try:
+                    gh = send_future.result()
+                except Exception as e:
+                    self._trace('event', 'execute_done', outcome='send_exception',
+                                 error=repr(e))
+                    self._set_motion_status({
+                        'ok': False, 'outcome': 'send_exception',
+                        'msg': f'action send_goal exception: {e!r}'}, event=on_complete_event)
+                    on_complete_event.set()
+                    return
+                if not gh.accepted:
+                    self._trace('event', 'execute_done', outcome='goal_rejected')
+                    self._set_motion_status({
+                        'ok': False, 'outcome': 'goal_rejected',
+                        'msg': 'arm action server rejected the goal'}, event=on_complete_event)
+                    on_complete_event.set()
+                    return
+                with self._arm_goal_lock:
+                    self._arm_goal_handle = gh
+                rf = gh.get_result_async()
+                rf.add_done_callback(_on_result)
 
         sf = self.arm_action_client.send_goal_async(goal)
         sf.add_done_callback(_on_accept)
@@ -3098,7 +3098,7 @@ class PickPlaceNode(Node):
         name, x, y, z = result
 
         evt = self._new_motion_event()
-        self._motion_event = evt
+        self._begin_motion(evt)
 
 
         from so_arm101_control.compute_workspace import X_PAN
@@ -3162,7 +3162,7 @@ class PickPlaceNode(Node):
         name, x, y, z = result
 
         evt = self._new_motion_event()
-        self._motion_event = evt
+        self._begin_motion(evt)
         self._set_motion_status(None)
 
         # Drop target for the BLOCK CENTER at (cup_rim_height + hover).
@@ -3214,17 +3214,17 @@ class PickPlaceNode(Node):
         target_y = gap_y + dy
         target_z = gap_z  # Z unchanged — gap axis is horizontal
 
-        tracer.event('drop_sweep_start',
+        self._trace('event', 'drop_sweep_start',
                      drop_name=name,
                      gap_target=(gap_x, gap_y, gap_z),
                      tcp_target=(target_x, target_y, target_z),
                      jaw_gap_mm=jaw_gap * 1000,
                      gripper_joint=gj)
-        tracer.snapshot_scene('drop_sweep_start', self)
+        self._trace('snapshot_scene', 'drop_sweep_start', self)
         def _close_on_drop_done():
             evt.wait(timeout=30.0)
             with self._motion_guard():
-                tracer.event('drop_sweep_done')
+                self._trace('event', 'drop_sweep_done')
         self._motion_thread(target=_close_on_drop_done, daemon=True).start()
         self._append_log(
             f'Drop Sweep: gap=({gap_x:.3f},{gap_y:.3f},{gap_z:.3f})m '
@@ -3270,14 +3270,14 @@ class PickPlaceNode(Node):
         caused deterministic Mode A failures (ec=-2) on the return leg.
         """
         last = getattr(self, '_last_grasped_object', None)
-        tracer.event('drop_release_start', last_grasped=last)
+        self._trace('event', 'drop_release_start', last_grasped=last)
         self._select_grasp_object(last)
         self._cmd_gripper_open_for_object()
         # Wait for the gripper-open motion to complete. _cmd_gripper_open_for_object
         # assigned a fresh Event to self._motion_event — capture it before waiting
         # so a later trigger-service callback that clears the attribute can't
         # swap it out from under us.
-        evt = getattr(self, '_motion_event', None)
+        evt = self._current_motion_event()
         if evt is not None:
             if not evt.wait(timeout=10.0):
                 raise TimeoutError('Gripper release timed out')
@@ -3344,11 +3344,11 @@ class PickPlaceNode(Node):
         # Update slider/UI on tkinter thread, send goal on background thread
         self._gripper_command(open_angle, execute=False, duration_s=duration)
         evt = self._new_motion_event()
-        self._motion_event = evt
+        self._begin_motion(evt)
         def _send():
             ok = self._send_gripper_goal(open_angle, duration_s=duration, blocking=True)
             with self._motion_guard():
-                self._set_motion_status({'ok': bool(ok), 'outcome': 'gripper_open'})
+                self._set_motion_status({'ok': bool(ok), 'outcome': 'gripper_open'}, event=evt)
                 evt.set()
                 self._select_planning_group('arm')
         self._motion_thread(target=_send, daemon=True).start()
@@ -3369,7 +3369,7 @@ class PickPlaceNode(Node):
         self._append_log(f'Grasp Close: {math.degrees(close_angle):.1f}° for {obj_name}')
         self._gripper_command(close_angle, execute=False, duration_s=duration)
         evt = self._new_motion_event()
-        self._motion_event = evt
+        self._begin_motion(evt)
         def _send():
             ok = self._send_gripper_goal(close_angle, duration_s=duration, blocking=True)
             # Phase 9: attach to tcp_link after physical closure succeeds
@@ -3380,7 +3380,7 @@ class PickPlaceNode(Node):
                     except Exception as exc:
                         ok = False
                         self._append_log(f'Attach step errored: {exc}', 'warn')
-                self._set_motion_status({'ok': bool(ok), 'outcome': 'gripper_close_attach'})
+                self._set_motion_status({'ok': bool(ok), 'outcome': 'gripper_close_attach'}, event=evt)
                 evt.set()
         self._motion_thread(target=_send, daemon=True).start()
 
@@ -3390,13 +3390,14 @@ class PickPlaceNode(Node):
         if not obj_name:
             raise ValueError('No object selected')
         # Remember the grasped object so drop_release can open for it later
-        self._last_grasped_object = obj_name
+        with self._motion_guard():
+            self._last_grasped_object = obj_name
         # Forensic trace: open a new cycle scoped grasp_move -> grasp_home.
         # If a prior cycle is still open, it's force-closed with outcome='abandoned'.
         with self.joint_lock:
             _entry_joints = {n: self._actual_positions.get(
                 n, self.joint_positions.get(n, 0.0)) for n in ARM_JOINT_NAMES}
-        tracer.open_cycle(
+        self._trace('open_cycle',
             obj_name=obj_name,
             grasp_topic=self._grasp_topic_var.get().strip(),
             cross=bool(self._grasp_cross_var.get()),
@@ -3404,8 +3405,9 @@ class PickPlaceNode(Node):
         )
         # Reset detach-seen flag for the new cycle. Cycle closes on the
         # first grasp_home_done AFTER detach (post-drop return).
-        self._cycle_detach_seen = False
-        tracer.snapshot_scene('grasp_move_start', self)
+        with self._motion_guard():
+            self._cycle_detach_seen = False
+        self._trace('snapshot_scene', 'grasp_move_start', self)
         # Phase 9: remove the target-being-grasped from the world collision
         # scene so MoveIt's FC-1 reachability check doesn't flag 'gripper vs
         # target-lego' as a collision (the gripper is SUPPOSED to touch it).
@@ -3416,7 +3418,7 @@ class PickPlaceNode(Node):
         self._ensure_lego_state()
         self._remove_single_lego_from_world(obj_name)
         with self.objects_lock:
-            pos = self.objects_data.get(obj_name)
+            pos = dict(self.objects_data[obj_name]) if obj_name in self.objects_data else None
         if pos is None:
             self._append_log(f'Object "{obj_name}" not found', 'warn')
             return
@@ -3451,7 +3453,7 @@ class PickPlaceNode(Node):
             f'({tx:.3f}, {ty:.3f}, {target_z:.3f})'
             f'{" [cross]" if cross else ""}')
 
-        self._grasp_arm_duration = self._grasp_arm_duration_var.get()
+        duration = self._grasp_arm_duration_var.get()
         # Compute top-down grasp orientation (pitch=90°, yaw aligned to object)
         gqx, gqy, gqz, gqw = self._grasp_orientation(
             tx, ty, obj_qz, obj_qw)
@@ -3460,13 +3462,14 @@ class PickPlaceNode(Node):
 
         # Create motion event BEFORE spawning thread so trigger callback can see it
         evt = self._new_motion_event()
-        self._motion_event = evt
+        self._begin_motion(evt)
 
+        operation = self._operation({}, evt, duration_s=duration)
+        ground_z = self._ground_z_var.get() if hasattr(self, '_ground_z_var') else None
+        poses_to_check = tuple(tuple(p) for p in geometry['poses'])
         # Pre-validate ALL stages before moving the arm
         def _prevalidate_and_execute():
-            ground_z = self._ground_z_var.get() if hasattr(self, '_ground_z_var') else None
-
-            poses_to_check = geometry['poses']
+            self._require_operation(operation)
 
             # Workspace bbox check first — fast reject for clearly-out-of-reach.
             gate_a_results = []
@@ -3482,23 +3485,23 @@ class PickPlaceNode(Node):
                         f'({px:.3f}, {py:.3f}, {pz:.3f})', 'warn')
                     # Phase 9: grasp failed — restore lego to world scene
                     self._add_lego_collision_objects()
-                    tracer.event('gate_a_done', per_stage=gate_a_results)
-                    tracer.close_cycle('grasp_unreachable_workspace',
+                    self._trace('event', 'gate_a_done', per_stage=gate_a_results)
+                    self._trace('close_cycle', 'grasp_unreachable_workspace',
                                        stage=stage, reason=reason,
                                        target=(px, py, pz))
                     self._set_motion_status({
                         'ok': False, 'outcome': 'grasp_unreachable_workspace',
                         'msg': (f'Gate A reject @ {stage} '
-                                f'({px:.3f}, {py:.3f}, {pz:.3f}): {reason}')})
+                                f'({px:.3f}, {py:.3f}, {pz:.3f}): {reason}')}, event=evt)
                     evt.set()
                     return
-            tracer.event('gate_a_done', per_stage=gate_a_results)
+            self._trace('event', 'gate_a_done', per_stage=gate_a_results)
 
             # Find a yaw where geometric_ik returns solutions for BOTH stages.
             # Using a single yaw across stages avoids mid-grasp wrist twists.
             yaw_used, stage_sols, dbg_lines = find_reachable_grasp_yaw(
                 poses_to_check, obj_yaw)
-            tracer.event('gate_b_done',
+            self._trace('event', 'gate_b_done',
                          yaw_requested=obj_yaw,
                          yaw_used=yaw_used,
                          stage_sols={k: [dict(s) for s in v]
@@ -3511,12 +3514,12 @@ class PickPlaceNode(Node):
                 for line in dbg_lines:
                     self._append_log(line, 'warn')
                 self._add_lego_collision_objects()
-                tracer.close_cycle('grasp_unreachable_ik',
+                self._trace('close_cycle', 'grasp_unreachable_ik',
                                    dbg_lines=list(dbg_lines or []))
                 self._set_motion_status({
                     'ok': False, 'outcome': 'grasp_unreachable_ik',
                     'msg': (f'Gate B reject: no geometric IK at any yaw for '
-                            f'stages {[s[0] for s in poses_to_check]}')})
+                            f'stages {[s[0] for s in poses_to_check]}')}, event=evt)
                 evt.set()
                 return
             if yaw_used != obj_yaw:
@@ -3552,43 +3555,40 @@ class PickPlaceNode(Node):
                         f'Grasp unreachable ({stage}): all solutions collide '
                         f'({px:.3f}, {py:.3f}, {pz:.3f})', 'warn')
                     self._add_lego_collision_objects()
-                    tracer.event('gate_c_done',
+                    self._trace('event', 'gate_c_done',
                                  attempts=gate_c_attempts,
                                  validated={k: dict(v) for k, v in validated.items()})
-                    tracer.close_cycle('gate_c_all_collide',
+                    self._trace('close_cycle', 'gate_c_all_collide',
                                        stage=stage, target=(px, py, pz))
                     self._set_motion_status({
                         'ok': False, 'outcome': 'gate_c_all_collide',
                         'msg': (f'Gate C reject @ {stage} '
                                 f'({px:.3f}, {py:.3f}, {pz:.3f}): '
-                                f'all IK solutions collide')})
+                                f'all IK solutions collide')}, event=evt)
                     evt.set()
                     return
-            tracer.event('gate_c_done',
+            self._trace('event', 'gate_c_done',
                          attempts=gate_c_attempts,
                          validated={k: dict(v) for k, v in validated.items()})
 
-            # All stages validated — execute
-            duration = self._grasp_arm_duration
+            # Publish only immutable operation-owned results after planning.
+            self._require_operation(operation)
             if approach_h > 0 and 'approach' in validated and 'final' in validated:
-                self._append_log(f'  Both stages validated, executing approach')
-                self._grasp_final_joints = validated['final']
-                self._grasp_motion_event = evt
-                def _apply_approach():
-                    self._ik_apply_and_act(validated['approach'], 'grasp_approach')
-                self._dispatch_motion(_apply_approach)
+                final = operation.retarget(validated['final'])
+                approach = operation.retarget(validated['approach'],
+                    self._new_motion_event(origin=operation.epoch))
+                self._ik_apply_and_act(approach.joints(), 'grasp_approach',
+                                       operation=approach, descent=final)
             elif 'final' in validated:
-                self._grasp_motion_event = evt
-                def _apply_final():
-                    self._ik_apply_and_act(validated['final'], 'grasp_execute')
-                self._dispatch_motion(_apply_final)
+                final = operation.retarget(validated['final'])
+                self._ik_apply_and_act(final.joints(), 'grasp_execute', operation=final)
             else:
                 # Validated dict has no 'final' stage — this shouldn't happen
                 # if gate C passed, but guard anyway.
                 self._set_motion_status({
                     'ok': False, 'outcome': 'no_final_stage',
                     'msg': ('Gate C passed but no final-stage solution '
-                            'recorded — logic bug')})
+                            'recorded — logic bug')}, event=evt)
                 evt.set()  # nothing to execute
 
         self._motion_thread(target=_prevalidate_and_execute, daemon=True).start()
@@ -3596,16 +3596,17 @@ class PickPlaceNode(Node):
 
     def _gripper_command(self, jaw_target, execute=False, duration_s=1.0):
         """Set gripper goal. If execute=True, also send to controller."""
-        self._slider_driven = True
-        self._select_planning_group('gripper')
-        with self.joint_lock:
-            self.joint_positions['gripper_joint'] = jaw_target
-        if 'gripper_joint' in self.sliders:
-            self.sliders['gripper_joint'].set(jaw_target)
-            self.slider_labels['gripper_joint'].config(text=f'{jaw_target:.3f}')
-        if hasattr(self, '_ik_jaw_label'):
-            self._ik_jaw_label.config(text=f'{jaw_target:.3f}')
-        self._publish_goal_state()
+        with self._motion_guard():
+            self._slider_driven = True
+            self._select_planning_group('gripper')
+            with self.joint_lock:
+                self.joint_positions['gripper_joint'] = jaw_target
+            if 'gripper_joint' in self.sliders:
+                self.sliders['gripper_joint'].set(jaw_target)
+                self.slider_labels['gripper_joint'].config(text=f'{jaw_target:.3f}')
+            if hasattr(self, '_ik_jaw_label'):
+                self._ik_jaw_label.config(text=f'{jaw_target:.3f}')
+            self._publish_goal_state()
         if execute:
             self._send_gripper_goal(jaw_target, duration_s=duration_s)
 
@@ -3705,13 +3706,46 @@ class PickPlaceNode(Node):
 
 
     @contextmanager
-    def _motion_guard(self):
+    def _motion_guard(self, operation=None):
+        epoch = self._motion_token() if operation is None else operation.epoch
         guard = getattr(self, '_motion_effect_guard', None)
         if guard is None:
             yield
         else:
-            with guard(self._motion_token()):
+            with guard(epoch):
+                if epoch != self._motion_token():
+                    raise ValueError('Motion operation and worker have different origins')
                 yield
+
+    def _trace(self, method, *args, **kwargs):
+        with self._motion_guard():
+            return getattr(tracer, method)(*args, **kwargs)
+
+    def _operation(self, target, event=None, duration_s=3.):
+        event = event if event is not None else self._new_motion_event()
+        return MotionOperation.create(self._motion_token(), target, event, duration_s,
+                                      getattr(self,'speed_scale',1.), getattr(event,'motion_tag','motion'),
+                                      self.velocity_scale_var.get(), self._planning_attempts_var.get())
+
+    def _require_operation(self, operation):
+        if operation.event.motion_epoch != operation.epoch:
+            raise ValueError('Motion target/event origin mismatch')
+        with self._motion_guard(operation):
+            pass
+
+    def _begin_motion(self, event):
+        with self._motion_guard():
+            if event.motion_epoch != self._motion_token():
+                raise ValueError("Cannot publish another generation's motion event")
+            self._motion_context.event = event
+            self._motion_event = event  # UI/service inventory only, never continuation input.
+        return event
+
+    def _current_motion_event(self):
+        event = getattr(self._motion_context, 'event', None)
+        if event is None and not getattr(self,'_motion_effect_guard',None):
+            return getattr(self,'_motion_event',None)
+        return event
 
     def _require_motion_generation(self):
         with self._motion_guard():
@@ -3719,6 +3753,8 @@ class PickPlaceNode(Node):
 
     def _motion_verdict(self, event):
         with self._motion_guard():
+            if event is not None and getattr(self,'_motion_effect_guard',None) and event.motion_epoch != self._motion_token():
+                raise ValueError('Verdict event and worker origins differ')
             verdict = getattr(event, 'verdict', None)
             if verdict is None and not getattr(self, '_motion_effect_guard', None):
                 return getattr(self, '_last_motion_status', None)
@@ -3726,10 +3762,12 @@ class PickPlaceNode(Node):
 
     def _set_motion_status(self, status, event=None):
         with self._motion_guard():
-            self._last_motion_status = status
-            event = event if event is not None else getattr(self, '_motion_event', None)
+            event = event if event is not None else self._current_motion_event()
             if event is not None:
+                if getattr(self,'_motion_effect_guard',None) and event.motion_epoch != self._motion_token():
+                    raise ValueError('Status event and worker origins differ')
                 event.verdict = dict(status) if status is not None else None
+            self._last_motion_status = status
 
     def _motion_token(self):
         context = getattr(self, '_motion_context', None)
@@ -3738,19 +3776,20 @@ class PickPlaceNode(Node):
         provider = getattr(self, '_motion_generation_provider', None)
         return provider() if provider else None
 
-    def _new_motion_event(self):
+    def _new_motion_event(self, origin=Ellipsis):
         event = threading.Event()
-        event.motion_epoch = self._motion_token()
+        event.motion_epoch = self._motion_token() if origin is Ellipsis else origin
+        event.motion_tag = getattr(self,'_last_motion_tag','motion')
         event.verdict = None
         return event
 
     def _motion_thread(self, target, **kwargs):
         # Capture before starting the worker, never after its planning/waits.
         epoch = self._motion_token()
+        event = self._current_motion_event()
         def run():
-            if not hasattr(self, '_motion_context'):
-                self._motion_context = threading.local()
             self._motion_context.epoch = epoch
+            self._motion_context.event = event
             try:
                 target()
             except Exception:
@@ -3771,8 +3810,9 @@ class PickPlaceNode(Node):
             apply()
 
     def _dispatch_motion(self, callback):
-        with self._motion_guard():
-            callback()
+        # The callback owns only its short state/dispatch commits. Planning
+        # and validation inside it must run without generation ownership.
+        callback()
 
     def _prepare_cycle(self):
         self._cycle_ok = False
@@ -3796,15 +3836,18 @@ class PickPlaceNode(Node):
         return self._get_selected_object_name()
 
     def _select_grasp_object(self, name):
-        self._selected_object = name
+        with self._motion_guard():
+            self._selected_object = name
 
     def _qs_sync_grasp_listbox(self, name):
-        self._selected_object = name
-        return name in self.objects_data
+        with self._motion_guard():
+            self._selected_object = name
+            return name in self.objects_data
 
     def _qs_sync_drop_listbox(self, name):
-        self._selected_drop = name
-        return name in self._drop_data
+        with self._motion_guard():
+            self._selected_drop = name
+            return name in self._drop_data
 
     def _get_selected_drop_pose(self):
         with self._drop_lock:

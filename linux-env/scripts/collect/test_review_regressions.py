@@ -51,6 +51,7 @@ class ReviewRegressions(unittest.TestCase):
         Runtime, _ = load_class('collection_runtime.py','Runtime')
         c=object.__new__(Collector);r=object.__new__(Runtime);v=object.__new__(Servo)
         c.generation=StepGeneration();c.generation.install(dict(epoch=1,invalid_through_ns=0))
+        c.stalled_abort_lock=threading.Lock();c.stalled_abort_started=False
         c.stop=threading.Event();c.failure=None;c.writer=None;c.writer_lock=threading.Lock()
         c.tick_condition=threading.Condition();c.last_processed_ns=0;c.last_snapshot=None
         c.node=NS(_qs_abort_evt=threading.Event(),_selected_object=None,
@@ -89,6 +90,7 @@ class ReviewRegressions(unittest.TestCase):
         c.sensors=NS(read=read,read_ack=lambda epoch,stamp:acks[(epoch,stamp)],reference=None,
             condition=threading.Condition(),pending={},acks=acks)
         c.command_pub=NS(publish=r.command_received)
+        c.generation.on_stall=c.abort_stalled_owner
         return c,r,entry
 
     def test_uncancelled_capture_applies_and_records_matching_generation(self):
@@ -152,6 +154,7 @@ class ReviewRegressions(unittest.TestCase):
         gate=StepGeneration();gate.install(dict(epoch=1,invalid_through_ns=0))
         node=NS(_motion_context=threading.local(),_motion_generation_provider=lambda:gate.epoch)
         node._motion_token=lambda:token(node)
+        node._current_motion_event=lambda:None
         result=[];thread=worker(node,target=lambda:result.append(new(node)))
         gate.install(dict(epoch=2,invalid_through_ns=100))
         thread.start();thread.join(2)

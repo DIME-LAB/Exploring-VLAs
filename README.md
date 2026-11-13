@@ -332,7 +332,15 @@ owner emits a diagnostic and aborts the run; an emergency native cancellation
 invalidates queued commands without running reset setters. Its RPC is separately
 bounded at 30 wall seconds. A poisoned run cannot install another generation. Reset invalidates every observation at or before its native sim stamp,
 even if a delayed message carries the new epoch. The audit requires observation,
-expert and application epochs to agree throughout an episode. Post-step
+expert and application epochs to agree throughout an episode. Approach/descent targets,
+completion identity, timing, tag and planner settings live in a frozen
+`MotionOperation` passed directly between continuations. Worker thread context
+carries its event; the UI's current-event slot is not a continuation input.
+Planning/validation runs outside generation ownership. Only short state/command
+commits and scene mutations acquire the guard, then validate the original request.
+Capture, scene and cancellation timeouts share the setter-free emergency abort
+and structured diagnostic. See [operation ownership](docs/notes/collection-operation-ownership.md)
+for the shared-state sweep and concurrency contract. Post-step
 drive-target read-back checks that the command persisted through the next frame.
 Only this instance's normal ROS follower actuation edges are disconnected during collection. Shared planning, grasp/IK maths,
 attach/detach and drop logic remain the GUI implementation. Planning/service

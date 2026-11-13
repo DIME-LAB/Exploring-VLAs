@@ -24,7 +24,7 @@ class WorkerRetirementTests(unittest.TestCase):
         c.node._motion_generation_provider=lambda:c.generation.epoch
         c.node._motion_effect_guard=c.motion_effect
         for name in ('_motion_guard','_require_motion_generation','_set_motion_status','_motion_token',
-                     '_new_motion_event','_motion_thread','_cmd_gripper_close_for_object'):
+                     '_new_motion_event','_motion_thread','_begin_motion','_current_motion_event','_cmd_gripper_close_for_object'):
             setattr(c.node,name,MethodType(method(SHARED,'PickPlaceNode',name),c.node))
         c.node._get_selected_object_name=lambda:'red_2x3_0'
         c.node._lookup_bbox=lambda name:dict(sx=.031,sy=.0206,sz=.0128)

@@ -24,12 +24,15 @@ class StepGeneration:
         self.floor_ns = -1
         self.retirement_timeout = 15.
         self.stalled = None
+        self.on_stall = None
 
     @contextmanager
     def own(self, label='motion'):
         if not self.lock.acquire(timeout=self.retirement_timeout):
             self.stalled = f'Stalled generation owner during {label}: {self.lock!r}; retirement exceeded {self.retirement_timeout}s; abort required'
             self.epoch = None
+            if self.on_stall is not None:
+                self.on_stall(OwnershipStalled(self.stalled), label)
             raise OwnershipStalled(self.stalled)
         try:
             if self.stalled:
@@ -47,25 +50,15 @@ class StepGeneration:
         if self.epoch is None or epoch != self.epoch or (stamp is not None and stamp <= self.floor_ns):
             raise CancelledGeneration('Cancelled motion/observation generation')
 
-    def cancel(self, native_cancel, retire, emergency_cancel=None):
-        try:
-            with self.own('cancel/reset'):
-                # Retire even if the native RPC fails: no new command may escape.
-                self.epoch = None
-                retire()
-                result = native_cancel()
-                self.install(result)
-                return result
-        except OwnershipStalled as exc:
-            # The publisher may never return. Invalidate the native epoch too,
-            # so a late send cannot execute after the emergency pause. Never
-            # install a new usable generation or proceed with a reset.
+    def cancel(self, native_cancel, retire):
+        with self.own('cancel/reset'):
+            # Failure leaves the local generation unusable. The collector's
+            # common terminal handler owns setter-free emergency cancellation.
             self.epoch = None
-            try:
-                (emergency_cancel or native_cancel)()
-            except Exception as pause_error:
-                raise OwnershipStalled(f'{exc}; emergency pause failed: {pause_error!r}') from exc
-            raise
+            retire()
+            result = native_cancel()
+            self.install(result)
+            return result
 
 
 class CommandLedger:

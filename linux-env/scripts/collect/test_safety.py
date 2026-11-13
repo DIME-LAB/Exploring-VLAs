@@ -1,4 +1,5 @@
 import ast
+import sys
 from contextlib import contextmanager
 import copy
 import math
@@ -15,13 +16,15 @@ from success import (contained, initial_arm, settled_containment, SETTLED_TICKS,
                      INTERIOR_FLOOR_M, INTERIOR_RIM_M, INTERIOR_RADIUS_M)
 
 ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0,str(ROOT/'vla_SO-ARM101/src/so_arm101_control'))
+from so_arm101_control.motion_operation import MotionOperation
 
 
 def method(path, cls, name):
     tree = ast.parse(path.read_text())
     owner = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls)
     node = next(n for n in owner.body if isinstance(n, ast.FunctionDef) and n.name == name)
-    scope = dict(contextmanager=contextmanager, math=math, threading=threading, time=time, np=np, json=json,
+    scope = dict(MotionOperation=MotionOperation, contextmanager=contextmanager, math=math, threading=threading, time=time, np=np, json=json,
                  String=lambda data:SimpleNamespace(data=data))
     exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), 'exec'), scope)
     return scope[name]
@@ -127,6 +130,10 @@ class SafetyTests(unittest.TestCase):
         node = SimpleNamespace(_qs_abort_evt=threading.Event(), _qs_resume_evt=threading.Event(),
                                _append_log=lambda *args:None)
         node._new_motion_event = threading.Event
+        node._begin_motion = lambda event:setattr(node,'_motion_event',event)
+        node._current_motion_event = lambda:node._motion_event
+        from contextlib import nullcontext
+        node._motion_guard = nullcontext
         node._require_motion_generation = lambda:None
         node._set_motion_status = lambda status:setattr(node,'_last_motion_status',status)
         node._motion_verdict = lambda event:getattr(node,'_last_motion_status',None)
