@@ -191,7 +191,9 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       ~0.3-0.8 s with min-jerk/cosine ramps, or a low-pass/OU process), per-joint amplitude ~0.26-1 deg, no gripper
       noise during grasp/release; the clean expert correction stays the recorded action. Bar: jerk/acceleration of
       executed targets vs current noise vs none, exact label recomputation, unchanged yield, side-by-side video.
-      Then targeted review + 5-episode smoke before the full run.
+      Offline implementation: seeded minimum-jerk segments, shared-path retiming and ACK-owned target limits;
+      CPU derivative/label checks and retained-trace benchmark pass. Targeted review, live yield/video and
+      5-episode smoke remain required before the full run.
 - [ ] 3.1i Re-grasp recovery episodes (decided 2026-11-13), aimed at the 1.9 failure (closes 26-38 mm off the lego):
       a fixed share (~15-20%) of full-run episodes where the expert's FIRST grasp is deliberately offset 2-4 cm via
       injected perturbation (so the miss is never a recorded action), the miss is detected (gripper closes past the
@@ -199,6 +201,8 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       Recorded actions during the miss are the expert's clean corrections, as with DART; label the episode
       (`recovery: regrasp`) in the dataset. Success gate unchanged (final placement). Bar: offline tests, a smoke with
       only re-grasp episodes (videos checked by eye), yield, and the share/offset distribution in the data card.
+      Offline implementation: 18% accepted-slot quota, dual clean/executed shared-IK paths, measured empty-lift
+      detection, reopen/scene refresh and recovery metadata/export checks. Review and all-regrasp smoke pending.
       Later option: policy-in-the-loop interventions (DAgger/HIL-style), with the scripted expert taking over when
       the trained policy misses.
 - [ ] 3.2 Fine-tune (more steps/episodes than 10k/100), sim/real mix per the coursework findings.

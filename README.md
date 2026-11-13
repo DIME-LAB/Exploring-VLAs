@@ -447,6 +447,37 @@ derivatives (0.001 tolerance for float32 read-back). `action` remains exactly
 reproduced with `dart_benchmark.py --input <retained-run> --output <confined-dir>`;
 its retimed fixed-observation replay is not a physical yield or throughput test.
 
+Re-grasp recovery occupies 18% of **accepted slots**, evenly spread through
+colour rotation (9/50; 162/900, or 54 per colour). Retrying a rejected slot keeps
+its recovery type and colour but logs a new seed. `--regrasp-only` makes every
+slot a recovery for the dedicated smoke. A seeded 2–4 cm displacement affects
+only the executed first approach/descent. Both clean and displaced paths use the
+shared calibrated IK and waypoint collision checks. Their time laws share a
+common duration; the clean teacher reference stays independent of execution.
+The final target limiter also bounds this deliberate displacement. The first
+close has no synthetic MoveIt attachment. After a 3 cm verification lift,
+measured same-epoch snapshots must show no lego moving more than 3 mm and the
+jaw reaching its close command within 0.008 rad. This is an object-motion miss
+check, not a claim about an analytical empty-jaw width. An accidentally held
+object is released and the episode rejected.
+
+The arm then reopens, refreshes the full planning scene from measured poses and
+runs the shared Quickstart corrective pick/drop. The final containment/lift gate
+is unchanged. Before any reset arm motion, the collector opens the gripper,
+detaches through the strict scene path and reconciles from a fresh physical tick.
+Recovery holds belong to the command's immutable epoch and install only after
+its physical ACK. Collector collision-query unavailability, timeout or missing
+response poisons collection; it cannot become a planner quality refusal.
+
+Frames and receipts carry `recovery: regrasp`; exported datasets retain full
+per-episode recovery/seed evidence in `meta/collection_episodes.json` without
+changing deployment features. Acceptance and export both recheck the measured
+miss and completed reopen/scene-refresh evidence. Export reports the achieved
+share/offset distribution and prefers recovery episodes for sample videos.
+Smooth DART and re-grasp are implemented offline; their physical yield and
+side-by-side/recovery videos require targeted review and a newly authorized
+smoke before a fresh pilot. The stopped pilot-v2 ledger remains diagnostic.
+
 The CPU GUI parity tests pin 14 scene/wait/dispatch methods to the live-verified
 `6e439ed` implementation and compare service sequences for normal and delayed
 responses. An offline ROS regression boots the actual GUI node against concurrent,
@@ -543,26 +574,27 @@ Receipts measure growth of writable root files in this instance's process trees,
 identifying shared caches. This is space growth, not in-place rewrite traffic.
 
 ```bash
+# Live commands require the lead's explicit smoke/pilot window.
 # Use the box/domain/GPU assigned by the lead. Instance 0 here is GPU 0/domain 90.
 ISAACSIM_GPU=0 bash linux-env/scripts/collect_sim.sh up 0
 
 bash linux-env/scripts/collect_sim.sh clock-sanity 0 \
   --output /mnt/a4500-backup/exploring-vlas/runtime/instance-0/clock-sanity.json
 
-bash linux-env/scripts/collect_sim.sh run 0 --episodes 5 --seed 310000 --diagnostic \
-  --output /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-physical-v6
+bash linux-env/scripts/collect_sim.sh run 0 --episodes 5 --seed 330000 --diagnostic --regrasp-only \
+  --output /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-smooth-regrasp-v1
 bash linux-env/scripts/collect_sim.sh export 0 \
-  /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-physical-v6 \
+  /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-smooth-regrasp-v1 \
   --repo-id local/soarm101_headless_smoke \
-  --report-dir /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-physical-v6/report
+  --report-dir /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-smooth-regrasp-v1/report
 
 # Only after the corrected five-episode smoke passes; accepted colours rotate 17/17/16.
 bash linux-env/scripts/collect_sim.sh run 0 --episodes 50 --seed 320000 \
-  --output /mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1-v2
+  --output /mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1-v3
 bash linux-env/scripts/collect_sim.sh export 0 \
-  /mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1-v2 \
+  /mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1-v3 \
   --repo-id local/soarm101_headless_pilot \
-  --report-dir /mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1-v2/report
+  --report-dir /mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1-v3/report
 
 # Optional: policy deployment using the same measured state and 30 Hz preset.
 bash linux-env/scripts/collect_sim.sh deploy 0 --pretrained /path/to/model

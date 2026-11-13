@@ -2,6 +2,8 @@
 """ROS sim-tick collector. Run with system Humble Python; export with pixi separately."""
 import argparse
 from contextlib import contextmanager
+from dataclasses import replace
+import copy
 import hashlib
 import collections
 import json
@@ -42,6 +44,8 @@ from scene_reconcile import SceneReconciler, ros_messages
 from success import SETTLED_TICKS, initial_arm, settled_containment
 from cup_profile import PROFILE
 from diagnostics import final_stills
+from query_service import StrictQueryClient
+from recovery import REGRASP_POLICY, regrasp_slot, recovery_geometry, detect_miss
 from dart import DEFAULT_NOISE, SmoothDart, TargetLimiter, ExpertSchedule
 from episode_policy import (POLICY, QualityReject, ConvergenceFailure, WorkerRegistry,
                             PLANNER_REJECTIONS, FailureStreak, disposition)
@@ -255,6 +259,7 @@ class Servo:
         self.noise_specs = []
         self.noise_index = 0
         self.limiter = None
+        self.executed_hold = None
         self.last_command_clock_ns = 0
         self.planned_sim_seconds = 0.
         self.planned_operations = 0
@@ -269,12 +274,13 @@ class Servo:
             self.rng = random.Random(params['noise_seed'])
             self.noise_specs = []
             self.noise_index = 0
+            self.executed_hold = None
 
     def noise_program(self, duration, tag):
         config=self.params.get('dart',DEFAULT_NOISE)
         index=getattr(self,'noise_index',0);self.noise_index=index+1
         program=SmoothDart(duration,self.params['noise_seed']+104729*index,config,
-                           enabled=tag not in ('grasp_home','grasp_home_data','home'))
+                           enabled=tag not in ('grasp_home','grasp_home_data','home') and not tag.startswith('regrasp_miss'))
         if not hasattr(self,'noise_specs'):self.noise_specs=[]
         self.noise_specs.append(dict(index=index,phase=tag,**program.spec))
         return program
@@ -282,8 +288,9 @@ class Servo:
     def commit_command(self, candidate, epoch, stamp):
         self.generation.require(epoch,stamp)
         self.limiter.commit(candidate,epoch,stamp)
+        self.executed_hold = (epoch,candidate.held_reference) if candidate.held_reference is not None else None
 
-    def execute(self, trajectory, done, operation=None):
+    def execute(self, trajectory, done, operation=None, executed_trajectory=None, hold_executed=False):
         epoch = done.motion_epoch
         if operation is not None and (operation.event is not done or operation.epoch != epoch):
             raise ValueError('Planner result/event origin mismatch')
@@ -291,20 +298,24 @@ class Servo:
             self.generation.require(epoch)
             config=dict(self.params.get('dart',DEFAULT_NOISE))
         schedule=ExpertSchedule(trajectory,config)
+        executed_schedule=ExpertSchedule(executed_trajectory,config) if executed_trajectory is not None else schedule
         with self.generation.own('collector motion'):
             self.generation.require(epoch)
             with self.lock:
-                duration=schedule.duration
+                duration=max(schedule.duration,executed_schedule.duration)
                 self.node._plan_motion_wait(done, duration)
                 self.planned_sim_seconds += duration
                 self.planned_operations += 1
-                self.plan = dict(trajectory=trajectory,schedule=schedule,done=done,start=None,epoch=epoch)
+                self.plan = dict(trajectory=trajectory,schedule=schedule,executed_schedule=executed_schedule,
+                    duration=duration,hold_executed=hold_executed,done=done,start=None,epoch=epoch)
+                self.executed_hold=None
                 self.phase = operation.tag if operation is not None else getattr(done,'motion_tag','home')
                 self.plan['noise']=self.noise_program(duration,self.phase)
                 self.noise_specs[-1]['expert_schedule']=schedule.spec
+                self.noise_specs[-1]['executed_schedule']=executed_schedule.spec
             self.step(True)
 
-    def gripper(self, position, duration, blocking):
+    def gripper(self, position, duration, blocking, phase='gripper'):
         epoch = self.node._motion_token()
         with self.generation.own('collector motion'):
             self.generation.require(epoch)
@@ -321,7 +332,7 @@ class Servo:
                 self.planned_sim_seconds += duration
                 self.planned_operations += 1
                 self.grip_plan = dict(target=position, duration=duration, done=done, start=None, epoch=epoch)
-                self.phase = 'gripper'
+                self.phase = phase
             self.step(True)
         if not blocking:
             return None
@@ -359,17 +370,25 @@ class Servo:
             self.generation.require(self.reference_epoch)
             active=self.plan is not None or self.grip_plan is not None
             noise=[0.]*6;arm_ready=False;arm_elapsed=arm_duration=0.
+            hold=getattr(self,'executed_hold',None)
+            if hold is not None and hold[0]!=self.generation.epoch:
+                raise RuntimeError('Executed hold belongs to a retired epoch')
+            execution_reference=list(hold[1])+[self.reference[5]] if hold is not None else list(self.reference)
+            next_hold=hold[1] if hold is not None else None
             if self.plan:
                 plan=self.plan
                 if plan['start'] is None:plan['start']=stamp
                 arm_elapsed=(stamp-plan['start'])/1e9
                 if 'schedule' not in plan:plan['schedule']=ExpertSchedule(plan['trajectory'],self.params.get('dart',DEFAULT_NOISE))
-                arm_duration=plan['schedule'].duration
-                positions=plan['schedule'].sample(arm_elapsed+1/30)
+                executed_schedule=plan.get('executed_schedule',plan['schedule'])
+                arm_duration=plan.get('duration',plan['schedule'].duration)
+                positions=plan['schedule'].sample((arm_elapsed+1/30)*plan['schedule'].duration/arm_duration)
+                execution_positions=executed_schedule.sample((arm_elapsed+1/30)*executed_schedule.duration/arm_duration)
                 for name,value in zip(plan['trajectory'].joint_names,positions):self.reference[JOINTS.index(name)]=value
+                execution_reference=list(execution_positions)+[self.reference[5]]
                 if 'noise' not in plan:plan['noise']=self.noise_program(arm_duration,self.phase)
                 noise=plan['noise'].sample(arm_elapsed+1/30)
-                arm_ready=(arm_elapsed>arm_duration and max(abs(a-b) for a,b in zip(state[:5],self.reference[:5]))<.008)
+                arm_ready=(arm_elapsed>arm_duration and max(abs(a-b) for a,b in zip(state[:5],execution_reference[:5]))<.008)
             if self.grip_plan:
                 grip=self.grip_plan
                 if grip['start'] is None:grip['start']=stamp;grip['initial']=state[5]
@@ -382,22 +401,27 @@ class Servo:
                     raise ConvergenceFailure('gripper_nonconvergence',epoch=grip['epoch'],stamp_ns=stamp,
                         phase=self.phase,duration=grip['duration'],elapsed=elapsed,margin=margin,state=state,reference=self.reference)
             clean=corrective_action(state,self.reference)
+            execution_reference[5]=self.reference[5]
+            desired=corrective_action(state,execution_reference)
+            noise=[n+e-c for n,e,c in zip(noise,desired,clean)]
             if getattr(self,'limiter',None) is None:
                 config=self.params.get('dart',DEFAULT_NOISE)
                 self.limiter=TargetLimiter([JOINT_LIMITS[n] for n in JOINTS[:5]],
                     config['arm_velocity_rad_s'],config['arm_acceleration_rad_s2'])
             candidate=self.limiter.propose(clean,noise,drive_targets if drive_targets is not None else state,
                                            self.generation.epoch,stamp)
-            command_settled=(max(abs(a-b) for a,b in zip(candidate.positions[:5],clean[:5]))<.008 and
+            command_settled=(max(abs(a-b) for a,b in zip(candidate.positions[:5],desired[:5]))<.008 and
                              max(abs(v) for v in candidate.velocities)<.02)
             if self.plan:
                 if arm_ready and command_settled:
+                    next_hold=tuple(execution_reference[:5]) if self.plan.get('hold_executed') else None
                     completed.append(self.plan['done']);self.plan=None
                 elif arm_elapsed>arm_duration+margin:
                     if not command_settled:
                         raise RuntimeError('Executed target limiter did not settle before the motion deadline')
                     raise ConvergenceFailure('arm_nonconvergence',epoch=self.plan['epoch'],stamp_ns=stamp,
-                        phase=self.phase,duration=arm_duration,elapsed=arm_elapsed,margin=margin,state=state,reference=self.reference)
+                        phase=self.phase,duration=arm_duration,elapsed=arm_elapsed,margin=margin,state=state,reference=execution_reference)
+            candidate=replace(candidate,held_reference=next_hold)
             executed=list(candidate.positions)
             lo,hi=JOINT_LIMITS['gripper_joint'];executed[5]=max(lo,min(hi,executed[5]))
             reference=list(self.reference)
@@ -430,6 +454,8 @@ class Collector:
         self.generation = StepGeneration()
         self.node = PickPlaceNode(use_sim_time=True, joint_states_topic='/joint_states_measured',
             execution=SceneExecution('collector', self.motion_effect, self.scene_incomplete, self.callback_failure))
+        self.node.validity_client=StrictQueryClient(self.node.validity_client,'MoveIt state validity',
+            on_failure=lambda exc:self.abort_stalled_owner(exc,'MoveIt validity query'))
         self.node._motion_context = threading.local()
         self.node._motion_generation_provider = lambda: self.generation.epoch
         self.sensors = Sensors(self.node, self.generation)
@@ -517,7 +543,9 @@ class Collector:
             self.servo.previous_executed = None
             self.servo.reference = None
             self.servo.reference_epoch = None
-            if hold is None:self.servo.limiter = None
+            if hold is None:
+                self.servo.limiter = None
+                self.servo.executed_hold = None
         with self.sensors.condition:
             self.sensors.pending.clear()
             self.sensors.acks.clear()
@@ -568,6 +596,9 @@ class Collector:
             with self.generation.own('cancel/hold handover'):
                 epoch = self.generation.epoch
                 handover = []
+                executed_hold=getattr(self.servo,'executed_hold',None)
+                if executed_hold is not None and executed_hold[0]!=epoch:
+                    raise RuntimeError('Cannot hand over a stale executed hold')
                 result = self.generation.cancel(native_cancel,
                     lambda:handover.append(self.retire_motion(epoch)))
                 # Only an idle clean reference crosses this barrier. Active
@@ -576,6 +607,7 @@ class Collector:
                     if handover[0] is not None:
                         self.servo.reference = list(handover[0])
                         self.servo.reference_epoch = result['epoch']
+                        self.servo.executed_hold=(result['epoch'],executed_hold[1]) if executed_hold is not None else None
                         if getattr(self.servo,'limiter',None) is not None:
                             self.servo.limiter.handover(result['epoch'])
                 return result
@@ -600,7 +632,7 @@ class Collector:
         plan = self.servo.plan or self.servo.grip_plan
         duration = (ns(plan['trajectory'].points[-1].time_from_start)/1e9
                     if plan and 'trajectory' in plan else plan.get('duration') if plan else None)
-        if plan and 'schedule' in plan:duration=plan['schedule'].duration
+        if plan and 'schedule' in plan:duration=plan.get('duration',plan['schedule'].duration)
         record = dict(epoch=epoch, sim_ns=getattr(self.servo, 'last_sim_ns', None),
             wall_ns=time.monotonic_ns(), phase=getattr(self.servo, 'phase', None),
             exception_type=type(exc).__name__, error=repr(exc),
@@ -684,6 +716,7 @@ class Collector:
                         expert_reference=reference, executing=active, phase=phase,
                         planned_noise_offset=list(candidate.noise_offset), command_filter_delta=list(candidate.filter_delta),
                         command_velocity=list(candidate.velocities),
+                        recovery=self.servo.params.get('recovery','none'),
                         state_source=snapshot['state_source'], velocity=list(joint.velocity),
                         physics_state=snapshot['state'], physics_velocity=snapshot['velocity'],
                         physics_drive_targets=snapshot['drive_targets'],
@@ -767,6 +800,97 @@ class Collector:
                     raise RuntimeError(self.failure)
                 snapshots.append(self.last_snapshot)
         return snapshots
+
+    def held_snapshot(self, epoch):
+        with self.tick_condition:
+            snapshot=copy.deepcopy(self.last_snapshot)
+        if snapshot is None:raise RuntimeError('No measured snapshot for recovery')
+        self.generation.require(epoch,snapshot['sim_ns'])
+        if snapshot['epoch']!=epoch:raise RuntimeError('Recovery snapshot belongs to another epoch')
+        return snapshot
+
+    def reset_release(self, object_name):
+        # Release a failed physical grasp before planning any reset arm motion.
+        self.node._select_grasp_object(object_name)
+        opening,_=self.node._gripper_angle_for_object(object_name)
+        if not self.servo.gripper(opening,1.5,True,phase='reset_open'):
+            raise RuntimeError('Reset gripper did not open')
+        self.node._detach_lego_sync()
+        snapshot=self.advance_ticks(1)[0]
+        self.sync_scene(snapshot=snapshot)
+
+    def regrasp_prefix(self, params, epoch, result):
+        """Execute the miss while labels follow the separate true-target plan."""
+        self.generation.require(epoch)
+        before=self.held_snapshot(epoch)
+        name=params['object'];bbox=self.node._lookup_bbox(name)
+        if not bbox:raise ValueError('Re-grasp target has no dimensions')
+        with self.node.objects_lock:pose=dict(self.node.objects_data[name])
+        geometry=recovery_geometry(pose,bbox,params['regrasp'],
+            current_wrist_roll=before['state'][4],tcp_clearance=self.node._tcp_clearance_var.get()/1000,
+            approach_height=params['approach_height_m'],approach_offset=params['approach_offset_m'])
+        report=dict(epoch=epoch,kind='regrasp',miss_confirmed=False,geometry=geometry,steps=[])
+        result['recovery_report']=report
+        if geometry['yaw'] is None:raise QualityReject('planner_reject',dict(stage='regrasp_ik',geometry=geometry))
+        # The same target-removal barrier and shared collision validator used
+        # by Quickstart; both clean and executed paths are checked separately.
+        self.node._remove_single_lego_from_world(name)
+        selected={}
+        for stage,solutions in geometry['solutions'].items():
+            for target in solutions:
+                self.generation.require(epoch)
+                valid,contacts=self.node._check_state_valid_with_contacts(target)
+                if valid:selected[stage]=dict(target);break
+            if stage not in selected:
+                raise QualityReject('planner_reject',dict(stage=stage,reason='all regrasp IK candidates collide'))
+        duration=2.5
+        def tag(value):
+            with self.node._motion_guard():self.node._last_motion_tag=value
+        def arm(stage,clean_key,executed_key):
+            self.generation.require(epoch)
+            snapshot=self.held_snapshot(epoch)
+            current=dict(zip(JOINTS[:5],snapshot['state'][:5]))
+            clean_target=dict(selected[clean_key]);executed_target=dict(selected[executed_key])
+            clean_path=self.node._plan_linear_joint_path(current,clean_target,duration/params['speed_scale'])
+            executed_path=self.node._plan_linear_joint_path(current,executed_target,duration/params['speed_scale'])
+            self.generation.require(epoch)
+            if clean_path is None or executed_path is None:
+                raise QualityReject('planner_reject',dict(stage=stage,reason='regrasp path collision'))
+            tag(stage)
+            event=self.node._new_motion_event();self.node._begin_motion(event)
+            operation=self.node._operation(clean_target,event,duration_s=duration)
+            self.servo.execute(clean_path,event,operation=operation,executed_trajectory=executed_path,hold_executed=True)
+            if not self.node._wait_motion_event(event,60.) or not event.verdict or not event.verdict.get('ok'):
+                raise RuntimeError('Recovery arm execution failed')
+            self.generation.require(epoch)
+            report['steps'].append(dict(stage=stage,clean_target=clean_target,executed_target=executed_target,
+                start_sim_ns=snapshot['sim_ns'],end_sim_ns=self.held_snapshot(epoch)['sim_ns']))
+        opening,closing=self.node._gripper_angle_for_object(name)
+        def grip(stage,target):
+            tag(stage)
+            if not self.servo.gripper(target,3.,True,phase=stage):raise RuntimeError('Recovery gripper execution failed')
+            self.generation.require(epoch)
+            report['steps'].append(dict(stage=stage,target=target,sim_ns=self.held_snapshot(epoch)['sim_ns']))
+        grip('regrasp_miss_open',opening)
+        arm('regrasp_miss_approach','true_approach','miss_approach')
+        arm('regrasp_miss_descent','true_final','miss_final')
+        grip('regrasp_miss_close',closing) # Deliberately no MoveIt attach on this first attempt.
+        arm('regrasp_miss_lift','true_final','miss_lift')
+        after=self.held_snapshot(epoch)
+        detection=detect_miss(before,after,name,closing)
+        report['detection']=detection
+        report['measured_before']=before
+        report['measured_after_lift']=after
+        # Even an accidentally successful first grasp is released before the
+        # quality refusal; it must not leave a held block for the next reset.
+        grip('regrasp_reopen',opening)
+        report['miss_confirmed']=detection['confirmed']
+        if not detection['confirmed']:
+            raise QualityReject('regrasp_miss_not_confirmed',detection)
+        current=self.held_snapshot(epoch)
+        self.sync_scene(snapshot=current)
+        report['scene_after_reopen']=self.scene_pose_check
+        report['corrective_attempt']='shared Quickstart cycle from fresh measured poses'
 
     def request_home(self):
         with self.node._motion_guard():
@@ -860,8 +984,9 @@ class Collector:
             self.node.objects_data = objects
             self.node._drop_data = cups
 
-    def sync_scene(self):
-        self.update_pose_cache(self.episode_start_physical)
+    def sync_scene(self,snapshot=None):
+        snapshot=self.episode_start_physical if snapshot is None else snapshot
+        self.update_pose_cache(snapshot)
         cleared = self.scene_reset.clear()
         self.node._cmd_toggle_ground_plane()
         self.node._add_cup_collision_objects(cups_dict=dict(self.node._drop_data))
@@ -871,7 +996,7 @@ class Collector:
             self.scene_reset.set_policy(world_ids)
         deadline = time.monotonic() + 15
         while True:
-            check = self.scene_reset.verify(self.episode_start_physical, JOINTS)
+            check = self.scene_reset.verify(snapshot, JOINTS)
             if check['passed']:
                 self.scene_pose_check = dict(check, cleared=cleared)
                 return
@@ -911,7 +1036,9 @@ class Collector:
         streak = FailureStreak(receipts)
         if streak.stopped:
             raise RuntimeError('Previous receipt ledger requires a stop; review before a new run')
-        attempted, accepted = progress(receipts, args.seed)
+        if previous and previous.get('regrasp_only',False)!=args.regrasp_only:
+            raise ValueError('Resume recovery mode differs')
+        attempted, accepted = progress(receipts,args.seed,args.regrasp_only)
         if accepted > args.episodes:
             raise ValueError('Requested target is smaller than the accepted checkpoint')
         old_summary = json.loads((root / 'summary.json').read_text()) if (root / 'summary.json').exists() else {}
@@ -969,6 +1096,8 @@ class Collector:
                            'linux-env/scripts/collect/checkpoint.py',
                            'linux-env/scripts/collect/episode_policy.py',
                            'linux-env/scripts/collect/dart.py',
+                           'linux-env/scripts/collect/recovery.py',
+                           'linux-env/scripts/collect/query_service.py',
                            'vla_SO-ARM101/src/so_arm101_moveit_config/config/joint_limits.yaml',
                            'linux-env/scripts/collect/storage.py',
                            'linux-env/scripts/collect/collection_runtime.py',
@@ -1016,7 +1145,7 @@ class Collector:
             (root / 'run.json').write_text(json.dumps(dict(instance=args.instance, host=socket.gethostname(), gpu_index=int(os.getenv('ISAACSIM_GPU', '0')),
             recording_version=2, transport_config=transport_config, observation_state_topic='/joint_states_measured',
             diagnostic=args.diagnostic, success_profile=PROFILE,
-            motion_wait_policy=wait_policy, quality_policy=POLICY,
+            motion_wait_policy=wait_policy, quality_policy=POLICY,regrasp_policy=REGRASP_POLICY,regrasp_only=args.regrasp_only,
             application_contract='Held at observation tick; read-back verified PhysX targets before one-frame advance; maximum one sim tick latency',
             clock_config=clock_config, domain=90 + args.instance,
             bridge_port=8777 + 2 * args.instance, fps=30, baseline=baseline, baseline_cup_layout=self.baseline_cup_layout, eval_seeds=EVAL_SEEDS,
@@ -1032,7 +1161,7 @@ class Collector:
             attempted += 1
             color = COLORS[accepted % 3]
             params = (json.loads(args.replay_receipt.read_text())['params'] if args.replay_receipt
-                      else parameters(args.seed + trial, color))
+                      else parameters(args.seed+trial,color,regrasp=args.regrasp_only or regrasp_slot(accepted)))
             params['trial'] = trial
             path = root / f'attempt-{trial:04d}'
             receipt = dict(params=params, accepted=False)
@@ -1047,6 +1176,7 @@ class Collector:
                 with self.generation.own('attempt start'):
                     self.node._qs_abort_evt.clear()
                     motion_epochs.add(self.generation.epoch)
+                self.motion_call(self.reset_release,params['object'])
                 # Home with the same shared primitive used by Quickstart, with sim ticks active.
                 home = self.motion_call(self.request_home)
                 motion_epochs.add(home.motion_epoch)
@@ -1099,13 +1229,15 @@ class Collector:
                 def run_cycle(object_name=params['object'], epoch=cycle_epoch):
                     try:
                         def run_and_verdict():
+                            if params.get('recovery')=='regrasp':
+                                self.regrasp_prefix(params,epoch,cycle_result)
                             ok=self.node.run_cycle(object_name)
                             event=self.node._current_motion_event()
                             return dict(ok=ok, verdict=self.node._motion_verdict(event),
                                         verdict_epoch=event.motion_epoch if event is not None else None)
                         cycle_result.update(self.motion_call(run_and_verdict, epoch=epoch))
                     except Exception as worker_error:
-                        cycle_result.update(ok=False, worker_error=repr(worker_error))
+                        cycle_result.update(ok=False,worker_error=repr(worker_error),exception=worker_error)
                 cycle = threading.Thread(target=run_cycle, daemon=True)
                 receipt_cycle = cycle
                 budget_start = self.servo.execution_budget()
@@ -1128,6 +1260,7 @@ class Collector:
                             if cycle.is_alive():
                                 self.failure = 'Cancelled cycle did not stop; refusing overlapping episodes'
                 if not cycle_result.get('ok'):
+                    if cycle_result.get('exception') is not None:raise cycle_result['exception']
                     verdict=cycle_result.get('verdict') or {}
                     if cycle_result.get('verdict_epoch')==cycle_epoch and verdict.get('outcome') in PLANNER_REJECTIONS:
                         raise QualityReject('planner_reject',verdict)
@@ -1190,6 +1323,8 @@ class Collector:
                             receipt['quality_reject'] = dict(kind='insufficient_lift',evidence=dict(lift_m=maximum_z-initial_z))
                 receipt['capture_failures'] = list(self.capture_failures[failure_log_start:])
                 receipt['noise_operations'] = list(self.servo.noise_specs)
+                if cycle_result.get('recovery_report'):
+                    receipt['recovery_report']=cycle_result['recovery_report']
                 if cycle_result.get('worker_error'):
                     receipt['cycle_worker_error'] = cycle_result['worker_error']
                 receipt['camera_duplicate_messages'] = {key: value - duplicate_start.get(key, 0) for key, value in self.sensors.duplicate_messages.items()}
@@ -1267,6 +1402,7 @@ def main():
                         help='Conservative RTF floor used only for motion wall watchdogs')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--resume', action='store_true', help='Re-audit and continue this output ledger')
+    parser.add_argument('--regrasp-only',action='store_true',help='Use re-grasp recovery in every accepted slot for its smoke')
     parser.add_argument('--diagnostic', action='store_true', help='Keep failed videos and save final recorded-frame stills')
     args = parser.parse_args()
     if not math.isfinite(args.wait_rtf_floor) or args.wait_rtf_floor <= 0:

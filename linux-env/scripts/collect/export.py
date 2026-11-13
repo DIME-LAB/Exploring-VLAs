@@ -7,6 +7,7 @@ import shutil
 import subprocess
 
 from contract import JOINTS, timing_audit
+from recovery import receipt_error, recovery_summary
 from storage import confined, prepare_environment
 
 
@@ -50,6 +51,8 @@ def main():
         receipt = json.loads((path / 'receipt.json').read_text())
         if not receipt['accepted']:
             continue
+        recovery_error=receipt_error(receipt)
+        if recovery_error:raise ValueError(f'{path}: {recovery_error}')
         rows = [json.loads(line) for line in (path / 'frames.jsonl').read_text().splitlines()]
         audit = timing_audit(rows, fps)
         if not audit['passed']:
@@ -82,6 +85,8 @@ def main():
         manifest.append(dict(episode_index=len(manifest), **receipt))
         accepted_paths.append(path)
     dataset.finalize()
+    recovery=recovery_summary(manifest)
+    (dataset_root/'meta/collection_episodes.json').write_text(json.dumps(manifest,indent=2))
     loaded = LeRobotDataset(args.repo_id, root=dataset_root, video_backend='pyav', tolerance_s=.001)
     assert loaded.fps == 30 and loaded.num_episodes == len(manifest)
     assert loaded.features['action']['names'] == names
@@ -95,7 +100,7 @@ def main():
         sheet.paste(thumb, ((index % 5) * 256, (index // 5) * 192))
     sheet.save(report / 'contact-sheet.jpg')
     colors = set()
-    for path, ep in zip(accepted_paths, manifest):
+    for path, ep in sorted(zip(accepted_paths, manifest),key=lambda pair:pair[1]['params'].get('recovery')!='regrasp'):
         color = ep['params']['color']
         if color in colors:
             continue
@@ -103,7 +108,7 @@ def main():
         subprocess.run(['ffmpeg', '-v', 'error', '-y', '-i', str(path / 'top.mp4'), '-i', str(path / 'wrist.mp4'),
             '-filter_complex', '[0:v][1:v]hstack=inputs=2', '-c:v', 'libx264', '-threads', '2', '-crf', '20',
             str(report / f'sample-{color}.mp4')], check=True)
-    validation = dict(loaded=True, fps=loaded.fps, episodes=loaded.num_episodes,
+    validation = dict(recovery=recovery,loaded=True, fps=loaded.fps, episodes=loaded.num_episodes,
                      frames=len(loaded), features=loaded.features, timing_passed=all(a['passed'] for a in audits),
                      color_counts={color: sum(e['params']['color'] == color for e in manifest) for color in ('red', 'green', 'blue')})
     (report / 'validation.json').write_text(json.dumps(validation, indent=2))

@@ -3,13 +3,14 @@ import math
 import threading
 import time
 from protocol import CancelledGeneration
+from recovery import receipt_error
 
 POLICY = dict(version=1, consecutive_same_reason_limit=3,
               convergence_tolerance_rad=.008, home_tolerance_rad=.01,
               home_spread_rad=.002, home_settle_sim_seconds=5.)
 QUALITY_KINDS = frozenset(('arm_nonconvergence', 'gripper_nonconvergence', 'home_unstable',
                           'planner_reject', 'containment', 'insufficient_lift',
-                          'stationary', 'short_duration'))
+                          'stationary', 'short_duration','regrasp_miss_not_confirmed'))
 PLANNER_REJECTIONS = frozenset(('grasp_unreachable_workspace','grasp_unreachable_ik',
                                 'gate_c_all_collide','tiered_planner_exhausted','ompl_mode_b'))
 
@@ -106,6 +107,8 @@ def disposition(receipt, fatal=None):
                     record['epoch']==physical['epoch'] and
                     record.get('validated_sim_tick') is True):
                 return dict(kind='quality_reject',reason=physical['kind'])
+    if receipt.get('accepted') and receipt_error(receipt):
+        return dict(kind='terminal',reason='missing_regrasp_evidence',error=receipt_error(receipt))
     if receipt.get('accepted') and timing and timing.get('passed'):
         return dict(kind='accepted',reason='success')
     if receipt.get('script_completed') and receipt.get('score',{}).get('passed') and timing:

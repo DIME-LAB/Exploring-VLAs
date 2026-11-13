@@ -71,6 +71,7 @@ class TargetCandidate:
     noise_offset: tuple
     filter_delta: tuple
     desired_positions: tuple
+    held_reference: tuple = None
 
 
 class TargetLimiter:
@@ -129,7 +130,7 @@ class TargetLimiter:
     def handover(self, epoch):
         if self.state is not None:
             s=self.state
-            self.state=TargetCandidate(epoch,s.stamp_ns,s.positions,s.velocities,s.noise_offset,s.filter_delta,s.desired_positions)
+            self.state=TargetCandidate(epoch,s.stamp_ns,s.positions,s.velocities,s.noise_offset,s.filter_delta,s.desired_positions,s.held_reference)
 
 
 class ExpertSchedule:

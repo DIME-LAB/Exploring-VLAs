@@ -2,6 +2,7 @@
 import math
 import random
 from dart import DEFAULT_NOISE
+from recovery import recovery_parameters
 
 COLORS = ('red', 'green', 'blue')
 JOINTS = ('shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll', 'gripper_joint')
@@ -10,7 +11,7 @@ EVAL_SEEDS = tuple(range(900000, 900030))
 
 
 
-def parameters(seed, color, split='train'):
+def parameters(seed, color, split='train', regrasp=False):
     if split not in ('train', 'eval'):
         raise ValueError('Split must be train or eval')
     if split == 'eval' and seed not in EVAL_SEEDS:
@@ -26,6 +27,7 @@ def parameters(seed, color, split='train'):
                 approach_offset_m=[rng.uniform(-.004, .004), rng.uniform(-.004, .004)],
                 speed_scale=rng.uniform(.85, 1.15), noise_std_rad=rng.uniform(.002, .006),
                 noise_probability=.30, noise_seed=seed ^ 0xDA47, dart=dict(DEFAULT_NOISE),
+                recovery='regrasp' if regrasp else 'none', regrasp=recovery_parameters(seed,regrasp),
                 cup_seed=seed ^ 0xC0FFEE,
                 cup_sampling=dict(radius_min=.20, radius_max=.27, angle_min_deg=-110.,
                                   angle_max_deg=-70., gap_min=.005, gap_max=.025))
