@@ -114,6 +114,10 @@ mislabeled (0real_100sim has the real-only set's exact 162,221 frames). No ~1000
       videos), then full collection ~300 per colour (red/green/blue, ~900) with per-colour task strings, plus a
       data card. Searched 2026-11-13: no larger existing sim set on HF (3 accounts + global search), ASU Drive,
       dual-a4500 or rtx6000 (own folders); only teammates' machines unchecked.
+- [ ] 3.1e Training throughput before the large run (rtx6000, RTX 6000 Ada 48 GB): the 3.0b run is GPU-bound at
+      1.33 steps/s with batch 64, fp32 expert (`use_amp=False`), frozen vision encoder, 16/48 GB used. Benchmark
+      bf16 AMP, larger batch with scaled LR, and `torch.compile` on 500-step runs; pick the fastest config that
+      matches the fp32 loss curve; size steps by passes over the data (~600k frames for ~900 episodes).
 - [ ] 3.2 Fine-tune (more steps/episodes than 10k/100), sim/real mix per the coursework findings.
 - [ ] 3.3 Re-run the Phase 1 evaluation matrix.
 
