@@ -27,10 +27,15 @@ class FakeMoveIt(Node):
         with self.lock:
             self.active+=1;self.max_active=max(self.active,self.max_active);first=not self.calls
         if first:self.first_gate.wait(timeout=5)
-        time.sleep(.15) # Real async server work on another executor thread.
+        time.sleep(5.2 if first else .05) # First ground ADD exceeds its actual 5 s client wait.
         with self.lock:
             scene=request.scene
             self.calls.append(dict(world=[o.id for o in scene.world.collision_objects],acm=bool(scene.allowed_collision_matrix.entry_names)))
+            world={o.id:o for o in self.scene.world.collision_objects}
+            for o in scene.world.collision_objects:
+                if o.operation==o.REMOVE:world.pop(o.id,None)
+                else:world[o.id]=copy.deepcopy(o)
+            self.scene.world.collision_objects=list(world.values())
             if scene.allowed_collision_matrix.entry_names:self.scene.allowed_collision_matrix=copy.deepcopy(scene.allowed_collision_matrix)
             self.active-=1
         response.success=True;return response
@@ -51,6 +56,10 @@ def main():
     from so_arm101_control.control_gui import SOArm101ControlGUI
     from so_arm101_control.scene_transactions import SceneMutationIncomplete
     server=FakeMoveIt();gui=SOArm101ControlGUI();client=Node('gui_scene_regression_client')
+    for name in ('execution','_motion_effect_guard','_scene_failure_handler','_callback_failure_handler'):
+        try:setattr(gui,name,None)
+        except AttributeError:pass
+        else:raise AssertionError('Construction policy is mutable: '+name)
     # Boot the actual GUI node/registrations with a display-free UI adapter.
     gui._gui_ready=True;gui.root=NS(after=lambda *a:None)
     gui._append_log=lambda text,level='info':gui.get_logger().info(text)
@@ -70,11 +79,17 @@ def main():
         gui._cmd_toggle_ground_plane();gui._add_cup_collision_objects()
         wait_for(lambda:server.active==1)
         assert len(gui._apply_scene_client.gui.jobs)>=1
+        helper_done=threading.Event()
+        helper=threading.Thread(target=lambda:(gui._acm_allow_ground_rest(['lego_red_2x3_0']),helper_done.set()))
+        helper.start()
         server.first_gate.set()
-        wait_for(lambda:len(server.calls)>=4 and not gui._apply_scene_client.gui.has_work())
+        wait_for(lambda:len(server.calls)>=5 and not gui._apply_scene_client.gui.has_work())
+        helper.join(timeout=2);assert helper_done.is_set()
+        assert not gui._apply_scene_client.gui.needs_resync and gui._gui_scene_repair_receipt
         assert server.max_active==1 and not gui._apply_scene_client.failure
         assert not getattr(gui,'_scene_terminal_error',None)
         assert 'ground_plane' in server.scene.allowed_collision_matrix.entry_names
+        assert 'lego_red_2x3_0' in server.scene.allowed_collision_matrix.entry_names
         assert sum(n.startswith('cup_') for n in server.scene.allowed_collision_matrix.entry_names)==3
         before=heartbeat[0]
         def bad_goal():raise SceneMutationIncomplete('joint callback guard regression')
@@ -92,7 +107,8 @@ def main():
         future=good.call_async(Trigger.Request());wait_for(future.done);assert future.result().success
         wait_for(lambda:heartbeat[0]>before+2)
         assert thread.is_alive() and not failure and not getattr(gui,'_scene_terminal_error',None)
-        receipt.update(passed=True,overlapping_startup_requests=2,caller_overlap_observed=True,raw_apply_max_concurrency=server.max_active,completed_apply_calls=server.calls,
+        receipt.update(passed=True,first_apply_delay_seconds=5.2,authoritative_repair=gui._gui_scene_repair_receipt,
+          direct_attach_style_acm_permission_preserved=True,explicit_mode=gui.execution.mode,overlapping_startup_requests=2,caller_overlap_observed=True,raw_apply_max_concurrency=server.max_active,completed_apply_calls=server.calls,
           callback_errors=gui._ros_callback_errors,executor_alive=thread.is_alive(),heartbeat=heartbeat[0],query_service_alive=True,
           scene_terminal_error=getattr(gui,'_scene_terminal_error',None),strict_client_failure=gui._apply_scene_client.failure)
     finally:

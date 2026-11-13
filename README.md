@@ -396,18 +396,29 @@ world/attached IDs, occupancy size and geometry checks. Accepted receipts retain
 the same cleanup and verification results. Include this file in the smoke report;
 CPU serialization tests do not establish the live MoveIt round trip.
 
-The terminal scene-request policy belongs to the collector adapter. The GUI
-instead queues complete scene updates in order, including their read/modify/write
-steps, and serializes their mutation RPCs. A late GUI service response suspends
-later scene updates until completion and logs a warning; it does not poison the
-GUI or its executor. Subscription, timer, service and action-result callbacks
-contain exceptions at their ROS boundary. The GUI logs/degrades, while collector
-callbacks retain an explicit abort hook and strict scene/generation barriers.
+Scene policy is immutable and validated at node construction: collection requires
+its effect, scene-failure and callback-failure hooks together. The GUI uses one
+scene worker for each complete world/ACM transaction, attach, detach and attached
+pose refresh; nested helpers execute on that same worker. Grasp validation waits
+for target removal to complete, and Gate C traces retain the actual contact pairs.
+
+A GUI response exceeding its ordinary wait marks the scene for resync and keeps
+ownership for up to 30 more wall seconds. A response in that grace period resumes
+the remaining transaction steps. If it remains unanswered, later transactions
+are refused until outstanding responses complete and a full MoveIt query repairs
+and verifies ground-rest permissions and attachment/world bookkeeping. The GUI
+logs this degraded state without poisoning its executor. Collector scene failures
+stay terminal. Every collector callback abort first invalidates the local motion
+generation, then pauses the native instance; existing workers cannot submit new
+effects. Subscription, timer, service and action-result callbacks contain their
+exceptions at the ROS boundary.
 
 An offline ROS regression boots the actual GUI node against a delayed fake
-MoveIt service and a display-free UI adapter. It proves overlapping startup
-requests serialize and that injected joint-state/timer/service guard errors do
-not kill the executor. It launches no Isaac instance:
+MoveIt service and a display-free UI adapter. Its first ground ADD takes 5.2 s,
+exceeding the real 5 s client wait. It verifies the remaining ACM work and
+subsequent authoritative resync, overlapping cup/direct attach-style ACM updates,
+and continued executor/service liveness after injected callback errors. It
+launches no Isaac instance:
 
 ```bash
 source /opt/ros/humble/setup.bash

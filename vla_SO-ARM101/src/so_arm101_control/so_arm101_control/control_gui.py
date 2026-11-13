@@ -4,6 +4,8 @@ import tkinter as tk
 from tkinter import ttk
 from so_arm101_control.pick_place import *
 
+from so_arm101_control.scene_transactions import scene_transaction
+
 class SOArm101ControlGUI(PickPlaceNode):
     """ROS2 node with embedded Tkinter GUI for SO-ARM101 control."""
 
@@ -6869,6 +6871,7 @@ class SOArm101ControlGUI(PickPlaceNode):
     # gripper-vs-held-block allow semantics.
     # ------------------------------------------------------------------
 
+    @scene_transaction
     def _refresh_attached_pose(self):
         """Re-snapshot the attached lego's tcp_link-local offset from Isaac's
         current /objects_poses_sim reading. The attached body is rigid once
@@ -6987,36 +6990,44 @@ class SOArm101ControlGUI(PickPlaceNode):
         Useful after a crashed cycle left a stale AttachedCollisionObject.
         """
         self._ensure_lego_state()
-        self._attached_lego_name = None
-        self._attached_lego_tcp_offset = None
         if not MOVEIT_AVAILABLE or not hasattr(self, '_apply_scene_client'):
             return
 
         def _apply():
-            if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
+            if not self._wait_scene_service(self._apply_scene_client, timeout_sec=5.0):
                 return
-            # Best-effort: REMOVE every (color × size) lego as attached.
-            colors = ('red', 'green', 'blue')
-            sizes = ('2x2', '2x3', '2x4')
+            get_req = GetPlanningSceneSrv.Request()
+            get_req.components.components = 4  # ROBOT_STATE_ATTACHED_OBJECTS
+            native = self._wait_future(self._get_scene_client.call_async(get_req), timeout_sec=5.)
+            if native is None:
+                raise RuntimeError('Cannot query MoveIt attachments for manual detach')
+            names = [a.object.id for a in native.scene.robot_state.attached_collision_objects
+                     if a.object.id.startswith('lego_')]
             scene = PlanningSceneMsg()
             scene.is_diff = True
-            for c in colors:
-                for s in sizes:
-                    aco = AttachedCollisionObject()
-                    aco.link_name = 'tcp_link'
-                    aco.object.id = f'lego_{c}_{s}'
-                    aco.object.operation = CollisionObject.REMOVE
-                    scene.robot_state.attached_collision_objects.append(aco)
             scene.robot_state.is_diff = True
-            req = ApplyPlanningScene.Request()
-            req.scene = scene
-            future = self._apply_scene_client.call_async(req)
-            self._wait_future(future, timeout_sec=5.0)
+            for name in names:
+                aco = AttachedCollisionObject()
+                aco.link_name = 'tcp_link'
+                aco.object.id = name
+                aco.object.operation = CollisionObject.REMOVE
+                scene.robot_state.attached_collision_objects.append(aco)
+                rm = CollisionObject()
+                rm.id = name
+                rm.operation = CollisionObject.REMOVE
+                scene.world.collision_objects.append(rm)
+            if names:
+                req = ApplyPlanningScene.Request()
+                req.scene = scene
+                self._wait_future(self._apply_scene_client.call_async(req), timeout_sec=5.)
+            observed = self._wait_future(self._get_scene_client.call_async(get_req), timeout_sec=5.)
+            if observed is None or any(a.object.id.startswith('lego_') for a in observed.scene.robot_state.attached_collision_objects):
+                raise RuntimeError('MoveIt still reports a lego attachment after manual detach')
             self._attached_lego_name = None
             self._attached_lego_tcp_offset = None
             self._append_log('Detached all legos (force cleanup)')
 
-        threading.Thread(target=_apply, daemon=True).start()
+        self._dispatch_scene_update(_apply)
         # Repopulate world legos shortly after
         self.root.after(300, self._add_lego_collision_objects)
 

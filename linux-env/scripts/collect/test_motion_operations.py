@@ -79,7 +79,7 @@ class MotionOperationTests(unittest.TestCase):
             if node._motion_token()==1:
                 old_check.set();self.assertTrue(release_old.wait(3))
             return True
-        node._check_state_valid=valid
+        node._check_state_valid_with_contacts=lambda target:(valid(target),[])
         def plan(target,event,**kwargs):
             operation=kwargs['operation'];node._require_operation(operation)
             if not approaches:

@@ -19,14 +19,14 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0,str(ROOT/'vla_SO-ARM101/src/so_arm101_control'))
 from so_arm101_control.motion_operation import MotionOperation
 from so_arm101_control.motion_wait import MotionBudget, MotionWaitTimeout
-from so_arm101_control.scene_transactions import SceneMutationIncomplete
+from so_arm101_control.scene_transactions import SceneMutationIncomplete, scene_transaction, GuiSceneNeedsResync
 
 
 def method(path, cls, name):
     tree = ast.parse(path.read_text())
     owner = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls)
     node = next(n for n in owner.body if isinstance(n, ast.FunctionDef) and n.name == name)
-    scope = dict(MotionBudget=MotionBudget, MotionWaitTimeout=MotionWaitTimeout, SceneMutationIncomplete=SceneMutationIncomplete, MotionOperation=MotionOperation, contextmanager=contextmanager, math=math, threading=threading, time=time, np=np, json=json,
+    scope = dict(scene_transaction=scene_transaction, GuiSceneNeedsResync=GuiSceneNeedsResync, MotionBudget=MotionBudget, MotionWaitTimeout=MotionWaitTimeout, SceneMutationIncomplete=SceneMutationIncomplete, MotionOperation=MotionOperation, contextmanager=contextmanager, math=math, threading=threading, time=time, np=np, json=json,
                  String=lambda data:SimpleNamespace(data=data))
     exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), 'exec'), scope)
     return scope[name]

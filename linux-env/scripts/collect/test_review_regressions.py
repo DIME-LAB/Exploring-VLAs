@@ -55,7 +55,7 @@ class ReviewRegressions(unittest.TestCase):
         c.stalled_abort_lock=threading.Lock();c.stalled_abort_started=False
         c.stop=threading.Event();c.failure=None;c.writer=None;c.writer_lock=threading.Lock()
         c.tick_condition=threading.Condition();c.last_processed_ns=0;c.last_snapshot=None
-        c.node=NS(_qs_abort_evt=threading.Event(),_selected_object=None,
+        c.node=NS(execution=NS(collector=True),_qs_abort_evt=threading.Event(),_selected_object=None,
             _actual_positions=dict(zip(JOINTS,[0]*6)),_joint_states_callback=lambda msg:None)
         def status(value,event=None):
             c.node._last_motion_status=value

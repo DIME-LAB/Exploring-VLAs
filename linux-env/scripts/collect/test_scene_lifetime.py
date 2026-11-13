@@ -1,5 +1,6 @@
 """Scene-request completion, authoritative reset and diagnostic regressions."""
 import copy
+import inspect
 from bisect import bisect_left
 import errno
 import io
@@ -168,15 +169,15 @@ class SceneLifetimeTests(unittest.TestCase):
         for name in ('_ensure_lego_state','_attach_lego_to_gripper','_detach_lego_sync','_pose7_to_mat','_mat_to_pose7',
                      '_dispatch_scene_update','_remove_single_lego_from_world','_remove_lego_collision_objects',
                      '_remove_cup_collision_objects','_add_cup_collision_objects','_add_lego_collision_objects',
-                     '_build_cup_geometry','_acm_allow_ground_rest','_cmd_toggle_ground_plane','_scene_unresolved'):
-            fn=method(SHARED,'PickPlaceNode',name);fn=getattr(fn,'__func__',fn);fn.__globals__.update(globals_)
+                     '_build_cup_geometry','_wait_scene_service','_acm_allow_ground_rest','_cmd_toggle_ground_plane','_scene_unresolved'):
+            fn=method(SHARED,'PickPlaceNode',name);fn=getattr(fn,'__func__',fn);inspect.unwrap(fn).__globals__.update(globals_)
             setattr(n,name,fn if name in ('_pose7_to_mat','_mat_to_pose7') else MethodType(fn,n))
         raw=NS(call_async=server.apply,wait_for_service=lambda **kw:True)
         n._apply_scene_client=SceneMutationClient(raw,n._motion_guard,n._scene_unresolved)
         n._get_scene_client=NS(call_async=server.query,wait_for_service=lambda **kw:True)
         waiter=method(SHARED,'PickPlaceNode','_wait_future');waiter=getattr(waiter,'__func__',waiter);clock=[0.]
         waiter.__globals__['time']=NS(monotonic=lambda:clock[0],sleep=lambda dt:clock.__setitem__(0,clock[0]+dt))
-        n._wait_future=waiter
+        n._wait_future=MethodType(waiter,n)
         c.update_pose_cache=MethodType(c.__class__.update_pose_cache,c)
         c.update_pose_cache.__func__.__globals__['physical_pose_caches']=__import__('scene_sync').physical_pose_caches
         c.scene_reset=SceneReconciler(n,MESSAGES,SRDF)

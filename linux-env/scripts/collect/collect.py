@@ -387,15 +387,15 @@ class Servo:
 class Collector:
     def __init__(self, args):
         from so_arm101_control.pick_place import PickPlaceNode
+        from so_arm101_control.scene_transactions import SceneExecution
         self.args = args
         self.scene_marker = SceneSafetyMarker(os.environ['SOARM_INSTANCE_ROOT'])
         self.scene_marker.require_fresh_stack()
-        self.node = PickPlaceNode(use_sim_time=True, joint_states_topic='/joint_states_measured')
         self.generation = StepGeneration()
+        self.node = PickPlaceNode(use_sim_time=True, joint_states_topic='/joint_states_measured',
+            execution=SceneExecution('collector', self.motion_effect, self.scene_incomplete, self.callback_failure))
         self.node._motion_context = threading.local()
         self.node._motion_generation_provider = lambda: self.generation.epoch
-        self.node._motion_effect_guard = self.motion_effect
-        self.node._scene_failure_handler = self.scene_incomplete
         self.sensors = Sensors(self.node, self.generation)
         # Only joined, generation-validated snapshots update expert state/cache.
         self.node.destroy_subscription(self.node.js_sub)
@@ -428,8 +428,6 @@ class Collector:
             'import collection_runtime as c\nr=c.runtime()\nresult=not r.busy and not r.timeline.is_playing()'})
         self.scene_reset = SceneReconciler(self.node, ros_messages(),
             (REPO/'vla_SO-ARM101/src/so_arm101_moveit_config/config/so_arm101.srdf').read_text())
-        self.node._callback_failure_handler = lambda name, exc:self.abort_stalled_owner(
-            OwnershipStalled('ROS callback '+name+': '+repr(exc)), 'ROS callback')
         # Install terminal hooks and their locks before any executor callback.
         self.ros_thread.start()
         self.capture_thread = threading.Thread(target=self.capture, daemon=True)
@@ -496,7 +494,12 @@ class Collector:
             self.scene_incomplete(exc, source='Kit')
             raise
 
+    def callback_failure(self, name, exc):
+        self.abort_stalled_owner(OwnershipStalled('ROS callback '+name+': '+repr(exc)), 'ROS callback')
+
     def abort_stalled_owner(self, exc, requester):
+        # Invalidate every existing worker before any emergency RPC or wait.
+        self.generation.poison(exc)
         self.stop.set()
         self.node._qs_abort_evt.set()
         with self.stalled_abort_lock:

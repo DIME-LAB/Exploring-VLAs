@@ -21,7 +21,8 @@ import shutil
 import threading
 import time
 import weakref
-from so_arm101_control.scene_transactions import SceneMutationClient, SceneMutationIncomplete
+from so_arm101_control.scene_transactions import (SceneMutationClient, SceneMutationIncomplete,
+    SceneExecution, GuiSceneNeedsResync, scene_transaction)
 from so_arm101_control.motion_operation import MotionOperation
 from so_arm101_control.motion_wait import MotionBudget, MotionWaitTimeout
 from so_arm101_control.ros_callbacks import safe_callback
@@ -462,7 +463,10 @@ class PickPlaceNode(Node):
     """Shared motion planner and cycle runner used by GUI and unattended collection."""
 
     def __init__(self, node_name="so_arm101_pick_place", use_sim_time=None,
-                 joint_states_topic='/joint_states'):
+                 joint_states_topic='/joint_states', execution=SceneExecution()):
+        if not isinstance(execution, SceneExecution):
+            raise TypeError('execution must be a validated SceneExecution')
+        self._execution = execution
         overrides = [] if use_sim_time is None else [Parameter('use_sim_time', value=use_sim_time)]
         super().__init__(node_name, parameter_overrides=overrides)
 
@@ -617,9 +621,8 @@ class PickPlaceNode(Node):
                 callback_group=self._service_cb_group)
             self._apply_scene_client = SceneMutationClient(self._apply_scene_client,
                 self._motion_guard, self._scene_unresolved,
-                collector=lambda:(getattr(self, '_scene_failure_handler', None) is not None or
-                                  getattr(self, '_motion_effect_guard', None) is not None),
-                warn=self._gui_scene_warning)
+                collector=self.execution.collector, warn=self._gui_scene_warning,
+                repair=self._repair_gui_scene)
             self._get_scene_client = self.create_client(
                 GetPlanningSceneSrv, '/get_planning_scene',
                 callback_group=self._service_cb_group)
@@ -689,14 +692,32 @@ class PickPlaceNode(Node):
                 TFMessage, '/drop_poses', self._drop_callback, 10,
                 callback_group=self._sub_cb_group)
 
-    @staticmethod
-    def _wait_future(future, timeout_sec=2.0):
+    @property
+    def execution(self):
+        return self._execution
+
+    @property
+    def _motion_effect_guard(self):
+        return self.execution.effect
+
+    @property
+    def _scene_failure_handler(self):
+        return self.execution.scene_failure
+
+    @property
+    def _callback_failure_handler(self):
+        return self.execution.callback_failure
+
+    def _wait_future(self, future, timeout_sec=2.0):
         """Wait for a ROS2 future to complete by polling. Thread-safe.
 
         Unlike rclpy.spin_until_future_complete, this does NOT create a
         temporary executor and does NOT spin the node.  The main-thread
         executor (rclpy.spin) processes callbacks; we just poll.
         """
+        client = getattr(self, '_apply_scene_client', None)
+        if client is not None and not client.collector and client.gui.owns_current():
+            return client.gui.wait(future, timeout_sec)
         end = time.monotonic() + timeout_sec
         while not future.done() and time.monotonic() < end:
             time.sleep(0.01)          # 10 ms poll
@@ -1570,6 +1591,15 @@ class PickPlaceNode(Node):
                 }
 
 
+    def _wait_scene_service(self, client, timeout_sec):
+        if client.wait_for_service(timeout_sec=timeout_sec):
+            return True
+        if not self.execution.collector:
+            self._apply_scene_client.gui.needs_resync = True
+            raise GuiSceneNeedsResync('GUI scene service unavailable; authoritative resync required')
+        return False
+
+    @scene_transaction
     def _acm_allow_ground_rest(self, obj_ids):
         """Update the ACM so each object id in obj_ids is allowed to touch
         `ground_plane`. Physically legitimate: legos and cups REST on the
@@ -1591,9 +1621,9 @@ class PickPlaceNode(Node):
                 return
             if not obj_ids:
                 return
-            if not self._get_scene_client.wait_for_service(timeout_sec=3.0):
+            if not self._wait_scene_service(self._get_scene_client, timeout_sec=3.0):
                 return
-            if not self._apply_scene_client.wait_for_service(timeout_sec=3.0):
+            if not self._wait_scene_service(self._apply_scene_client, timeout_sec=3.0):
                 return
 
             get_req = GetPlanningSceneSrv.Request()
@@ -1605,10 +1635,12 @@ class PickPlaceNode(Node):
             acm = future.result().scene.allowed_collision_matrix
 
             if 'ground_plane' not in acm.entry_names:
-                # ground_plane row doesn't exist yet — _cmd_toggle_ground_plane
-                # installs it on startup; if it hasn't run we can't wire anything
-                # up yet. Caller will get another chance on the next add.
-                return
+                for entry in acm.entry_values:
+                    entry.enabled.append(False)
+                row = AllowedCollisionEntry()
+                row.enabled = [False]*(len(acm.entry_names)+1)
+                acm.entry_names.append('ground_plane')
+                acm.entry_values.append(row)
             gp_idx = acm.entry_names.index('ground_plane')
 
             changed = False
@@ -1679,7 +1711,7 @@ class PickPlaceNode(Node):
         mesh_ok = geometry_kind == 'mesh'
 
         def _apply():
-            if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
+            if not self._wait_scene_service(self._apply_scene_client, timeout_sec=5.0):
                 self._append_log('apply_planning_scene not available for cups', 'warn')
                 return
             scene = PlanningSceneMsg()
@@ -1755,7 +1787,7 @@ class PickPlaceNode(Node):
             return
 
         def _apply():
-            if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
+            if not self._wait_scene_service(self._apply_scene_client, timeout_sec=5.0):
                 return
             scene = PlanningSceneMsg()
             scene.is_diff = True
@@ -1851,7 +1883,7 @@ class PickPlaceNode(Node):
             return
 
         def _apply():
-            if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
+            if not self._wait_scene_service(self._apply_scene_client, timeout_sec=5.0):
                 self._append_log('apply_planning_scene not available for legos', 'warn')
                 return
             if legos_dict is not None:
@@ -2019,7 +2051,7 @@ class PickPlaceNode(Node):
         name_id = f'lego_{obj_name}'
 
         def _apply():
-            if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
+            if not self._wait_scene_service(self._apply_scene_client, timeout_sec=5.0):
                 return
             scene = PlanningSceneMsg()
             scene.is_diff = True
@@ -2035,7 +2067,7 @@ class PickPlaceNode(Node):
             if name_id in self._lego_collision_names:
                 self._lego_collision_names.remove(name_id)
 
-        self._dispatch_scene_update(_apply)
+        return self._dispatch_scene_update(_apply, wait=True)
 
 
     def _remove_lego_collision_objects(self):
@@ -2057,12 +2089,12 @@ class PickPlaceNode(Node):
             return
 
         def _apply():
-            if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
+            if not self._wait_scene_service(self._apply_scene_client, timeout_sec=5.0):
                 return
             # Discover orphan lego_* ids in the live scene.
             scene_lego_ids = set()
             if hasattr(self, '_get_scene_client') and \
-                    self._get_scene_client.wait_for_service(timeout_sec=2.0):
+                    self._wait_scene_service(self._get_scene_client, timeout_sec=2.0):
                 get_req = GetPlanningSceneSrv.Request()
                 get_req.components.components = 8  # WORLD_OBJECT_NAMES
                 fut = self._get_scene_client.call_async(get_req)
@@ -2144,6 +2176,7 @@ class PickPlaceNode(Node):
         return False
 
 
+    @scene_transaction
     def _attach_lego_to_gripper(self, obj_name):
         """On successful grasp close, convert world CO → AttachedCollisionObject.
 
@@ -2240,9 +2273,9 @@ class PickPlaceNode(Node):
                 return True
 
             def _apply():
-                if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
+                if not self._wait_scene_service(self._apply_scene_client, timeout_sec=5.0):
                     self._append_log('apply_planning_scene not available for attach', 'warn')
-                    return
+                    return False
                 # Two-phase apply — Humble quirk: any REMOVE of a non-existent id
                 # in the diff returns success=False for the ENTIRE call, even if
                 # every ADD succeeded. _remove_single_lego_from_world ran on a
@@ -2278,7 +2311,7 @@ class PickPlaceNode(Node):
                     self._append_log(
                         f'Attach failed: no geometry for {obj_name} '
                         f'(no mesh, no bbox catalog entry)', 'warn')
-                    return
+                    return False
                 add_scene = PlanningSceneMsg()
                 add_scene.is_diff = True
                 add_scene.robot_state.is_diff = True
@@ -2318,7 +2351,7 @@ class PickPlaceNode(Node):
                 if not _apply_scene(add_scene, 'attach_lego'):
                     self._attached_lego_name = prev_attached
                     self._attached_lego_tcp_offset = prev_offset
-                    return
+                    return False
                 self._append_log(
                     f'Attach OK: {obj_name} → tcp_link at '
                     f'({ax*1000:+.1f}, {ay*1000:+.1f}, {az*1000:+.1f}) mm '
@@ -2348,6 +2381,8 @@ class PickPlaceNode(Node):
                     f'({bbox["sx"]*1000:.0f}×{bbox["sy"]*1000:.0f}×{bbox["sz"]*1000:.0f}mm) '
                     f'offset=({ax*1000:+.1f},{ay*1000:+.1f},{az*1000:+.1f})mm')
 
+                return True
+
             # SYNCHRONOUS: attach MUST complete before the caller signals its
             # motion-done event. Previously this dispatched _apply on a daemon
             # thread and returned immediately, so _cmd_gripper_close_for_object
@@ -2359,10 +2394,10 @@ class PickPlaceNode(Node):
             # Running _apply inline makes the attach a synchronous barrier.
             # Callers are already on a background thread (_send in
             # _cmd_gripper_close_for_object), so there's no Tk deadlock risk.
-            _apply()
-            return True
+            return bool(_apply())
 
 
+    @scene_transaction
     def _detach_lego_sync(self):
         """Blocking release of the currently-held lego.
 
@@ -2378,7 +2413,7 @@ class PickPlaceNode(Node):
                 return False
             if not MOVEIT_AVAILABLE or not hasattr(self, '_apply_scene_client'):
                 return False
-            if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
+            if not self._wait_scene_service(self._apply_scene_client, timeout_sec=5.0):
                 self._append_log('apply_planning_scene not available for detach', 'warn')
                 return False
             obj_id = f'lego_{name}'
@@ -3606,10 +3641,12 @@ class PickPlaceNode(Node):
                 found = False
                 for i, sol in enumerate(stage_sols[stage]):
                     config = 'elbow-up' if i == 0 else 'elbow-down'
-                    valid = self._check_state_valid(sol)
+                    valid, contacts = self._check_state_valid_with_contacts(sol)
+                    contact_rows = [dict(a=c.contact_body_1, b=c.contact_body_2,
+                                         depth_mm=c.depth*1000.) for c in contacts]
                     gate_c_attempts.append({
                         'stage': stage, 'config': config,
-                        'sol': dict(sol), 'valid': bool(valid),
+                        'sol': dict(sol), 'valid': bool(valid), 'contacts': contact_rows,
                     })
                     if valid:
                         validated[stage] = sol
@@ -3619,7 +3656,7 @@ class PickPlaceNode(Node):
                         found = True
                         break
                     self._append_log(
-                        f'  {stage}: {config} collides', 'warn')
+                        f'  {stage}: {config} collides: {contact_rows}', 'warn')
                 if not found:
                     self._append_log(
                         f'Grasp unreachable ({stage}): all solutions collide '
@@ -3688,7 +3725,7 @@ class PickPlaceNode(Node):
             return
 
         def _apply():
-            if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
+            if not self._wait_scene_service(self._apply_scene_client, timeout_sec=5.0):
                 self._append_log('apply_planning_scene service not available', 'warn')
                 return
 
@@ -3731,53 +3768,70 @@ class PickPlaceNode(Node):
 
             # Step 2: Allow base <-> ground_plane collision in the ACM
             # (base sits on the ground — contact is expected)
-            if not self._get_scene_client.wait_for_service(timeout_sec=5.0):
+            if not self._wait_scene_service(self._get_scene_client, timeout_sec=5.0):
                 self._append_log(f'Ground plane added at z={z:.3f} (ACM not updated)', 'warn')
                 return
 
-            get_req = GetPlanningSceneSrv.Request()
-            get_req.components.components = 128  # ALLOWED_COLLISION_MATRIX
-            future = self._get_scene_client.call_async(get_req)
-            self._wait_future(future, timeout_sec=5.0)
-            if future.result() is None:
-                self._append_log(f'Ground plane added at z={z:.3f} (ACM not updated)', 'warn')
-                return
-
-            acm = future.result().scene.allowed_collision_matrix
-            gp_name = 'ground_plane'
-            if gp_name not in acm.entry_names:
-                # Add new column (False) to every existing row
-                for entry in acm.entry_values:
-                    entry.enabled.append(False)
-                # Add new row for ground_plane
-                gp_row = AllowedCollisionEntry()
-                gp_row.enabled = [False] * len(acm.entry_names) + [True]  # self=True
-                # Allow contact with base
-                if 'base' in acm.entry_names:
-                    base_idx = acm.entry_names.index('base')
-                    gp_row.enabled[base_idx] = True
-                    acm.entry_values[base_idx].enabled[-1] = True
-                acm.entry_names.append(gp_name)
-                acm.entry_values.append(gp_row)
-
-            acm_scene = PlanningSceneMsg()
-            acm_scene.is_diff = True
-            acm_scene.allowed_collision_matrix = acm
-            req2 = ApplyPlanningScene.Request()
-            req2.scene = acm_scene
-            future2 = self._apply_scene_client.call_async(req2)
-            self._wait_future(future2, timeout_sec=5.0)
-            if future2.result() is not None and future2.result().success:
-                self._append_log(f'Ground plane added at z={z:.3f}')
-            else:
-                self._append_log(f'Ground plane added at z={z:.3f} (ACM update failed)', 'warn')
+            self._acm_allow_ground_rest(['base'])
+            self._append_log(f'Ground plane added at z={z:.3f}')
 
         self._dispatch_scene_update(_apply)
 
 
+    def _repair_gui_scene(self):
+        """Repair a late GUI transaction from MoveIt's authoritative state.
+
+        Restore table-rest permissions without replacing unrelated ACM pairs.
+        Reconcile attachment/world bookkeeping from the scene, never from a
+        request that may have timed out. Unrecognized attachments require the
+        user to rescan/clear the scene; they are never silently discarded.
+        """
+        if self.execution.collector:
+            raise RuntimeError('Collector uses its strict reset reconciler')
+        queue = self._apply_scene_client.gui
+        queue._require_owner()
+        self._wait_scene_service(self._get_scene_client, timeout_sec=5.)
+        req = GetPlanningSceneSrv.Request()
+        req.components.components = 1023
+        before = self._wait_future(self._get_scene_client.call_async(req), timeout_sec=5.)
+        world = before.scene.world.collision_objects
+        attached = before.scene.robot_state.attached_collision_objects
+        if len(attached) > 1 or any(not a.object.id.startswith('lego_') or a.link_name != 'tcp_link' for a in attached):
+            raise GuiSceneNeedsResync('Unrecognized MoveIt attachments; clear attachments and refresh the GUI scene')
+        ids = [o.id for o in world]
+        resting = ['base']+[i for i in ids if i.startswith(('cup_', 'lego_'))]+[a.object.id for a in attached]
+        if 'ground_plane' in ids:
+            self._acm_allow_ground_rest(resting)
+        observed = self._wait_future(self._get_scene_client.call_async(req), timeout_sec=5.)
+        if 'ground_plane' in ids:
+            acm = observed.scene.allowed_collision_matrix
+            for name in resting:
+                if name not in acm.entry_names or 'ground_plane' not in acm.entry_names:
+                    raise GuiSceneNeedsResync('GUI table contact policy repair missing '+name)
+                i, j = acm.entry_names.index(name), acm.entry_names.index('ground_plane')
+                if not (acm.entry_values[i].enabled[j] and acm.entry_values[j].enabled[i]):
+                    raise GuiSceneNeedsResync('GUI table contact policy repair failed for '+name)
+        after_ids = sorted(o.id for o in observed.scene.world.collision_objects)
+        after_attached = observed.scene.robot_state.attached_collision_objects
+        if after_ids != sorted(ids) or [a.object.id for a in after_attached] != [a.object.id for a in attached]:
+            raise GuiSceneNeedsResync('GUI scene changed during repair; refresh required')
+        self._lego_collision_names = [i for i in ids if i.startswith('lego_')]
+        self._cup_collision_names = [i for i in ids if i.startswith('cup_')]
+        self._attached_lego_name = attached[0].object.id[5:] if attached else None
+        self._attached_lego_tcp_offset = None
+        if attached:
+            obj = attached[0].object
+            poses = list(obj.mesh_poses)+list(obj.primitive_poses)
+            if not poses:
+                raise GuiSceneNeedsResync('Attached lego has no pose; refresh the GUI scene')
+            p = poses[0].position
+            self._attached_lego_tcp_offset = (p.x, p.y, p.z)
+        self._gui_scene_repair_receipt = dict(world=after_ids, attached=[a.object.id for a in after_attached],
+                                             ground_pairs=resting if 'ground_plane' in ids else [])
+
     def _scene_unresolved(self, exc):
         handler = getattr(self, '_scene_failure_handler', None)
-        if handler is None:
+        if not self.execution.collector:
             self._gui_scene_warning('GUI scene update incomplete: '+str(exc))
             return
         self._scene_terminal_error = str(exc)
@@ -3787,9 +3841,7 @@ class PickPlaceNode(Node):
 
     @contextmanager
     def _motion_guard(self, operation=None):
-        if getattr(self,'_scene_terminal_error',None) and (
-                getattr(self, '_scene_failure_handler', None) is not None or
-                getattr(self, '_motion_effect_guard', None) is not None):
+        if getattr(self,'_scene_terminal_error',None) and self.execution.collector:
             raise SceneMutationIncomplete(self._scene_terminal_error)
         epoch = self._motion_token() if operation is None else operation.epoch
         guard = getattr(self, '_motion_effect_guard', None)
@@ -3922,19 +3974,17 @@ class PickPlaceNode(Node):
                 # or mutate the scene after its generation was invalidated.
         return threading.Thread(target=run, **kwargs)
 
-    def _dispatch_scene_update(self, callback):
-        if (getattr(self, '_scene_failure_handler', None) is None and
-                getattr(self, '_motion_effect_guard', None) is None):
-            # One GUI worker orders whole read/modify/write operations; its
-            # client also orders RPCs and retains delayed remote completions.
-            return self._apply_scene_client.submit_gui_update(callback)
+    def _dispatch_scene_update(self, callback, wait=False):
+        if not self.execution.collector:
+            queue = self._apply_scene_client.gui
+            return queue.invoke(callback) if wait else queue.submit_update(callback)
         def apply():
             with self._motion_guard():
-                callback()
-        if self._gui_ready:
+                return callback()
+        if self._gui_ready and not wait:
             self._motion_thread(target=apply, daemon=True).start()
         else:
-            apply()
+            return apply()
 
     def _dispatch_motion(self, callback):
         # The callback owns only its short state/dispatch commits. Planning
