@@ -62,6 +62,18 @@ cadence (~14 Hz) not matching the camera-bound recording loop.
 
 ## Phase 3 — Retraining (only if 1.10 says so)
 
+Finding (2026-11-13): the deployed checkpoint `anirudhrani/smolvla_sim_100ep_fft__10ksteps_h200` records
+`policy.pretrained_path=None` and `load_vlm_weights=False` in its `train_config.json`. In this lerobot version that
+builds the VLM with `from_config()` (random init; `smolvla/smolvlm_with_expert.py:88`), i.e. the whole model was
+trained from scratch on 100 episodes / 10k steps. The 75S/25R mix shows the same. Likely the main reason it
+rarely grasps.
+
+- [ ] 3.0 Audit every coursework checkpoint's `train_config.json` (pretrained_path, load_vlm_weights, steps,
+      dataset) and record it in the coursework README; confirm from a training log if one exists.
+- [ ] 3.0b Fine-tune from `lerobot/smolvla_base` (`--policy.path=lerobot/smolvla_base`) on the existing
+      `soarm101_blue_lego_pick_v1` data first (cheapest test of the from-scratch hypothesis), then evaluate
+      with the Phase 1 harness.
+
 Decide by: grasp success after Phase 1 (if still ≲ 20%, the model is the bottleneck) and whether
 colour/instruction following is required (single task string → language cannot be learned).
 - [ ] 3.1 Collect language-contrastive sim data (red/green/blue tasks in the same scenes) with the
