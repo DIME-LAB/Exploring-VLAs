@@ -278,6 +278,7 @@ def save_result(out, result):
         "time_s",
         "actions_sent",
         "chunks",
+        "effective_action_fps",
         "max_blue_lift_m",
         "failure_note",
         "video",
@@ -300,6 +301,7 @@ def main():
     p.add_argument("--success-hold-s", type=float, default=2)
     args = parse_args(parser=p)
     cfg = args
+    args.out = args.out.expanduser().resolve()
     if args.episodes < 1 or args.max_s <= 0:
         raise ValueError("Positive episodes/max-s required")
     if args.out.exists() and (args.out / "results.csv").exists():
@@ -497,6 +499,7 @@ def main():
                     time_s=done["duration_s"],
                     actions_sent=done["actions_sent"],
                     chunks=done["chunks"],
+                    effective_action_fps=done["effective_action_fps"],
                     max_blue_lift_m=max_lift,
                     final=detail,
                     client=done,
