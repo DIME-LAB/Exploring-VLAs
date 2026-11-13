@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lerobot_ros2_task"
+version = "0.1.0"
+description = "ROS 2 RunTask action node for LeRobot policy episodes"
+requires-python = ">=3.12"
+dependencies = ["lerobot>=0.4", "lerobot_robot_ros2_joint>=0.1.0", "lerobot_camera_ros2>=0.1.0"]
+license = {file = "LICENSE"}
+readme = "README.md"
+
+[project.scripts]
+lerobot-ros2-run-task = "lerobot_ros2_task.node:main"
+lerobot-ros2-task-client = "lerobot_ros2_task.client:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

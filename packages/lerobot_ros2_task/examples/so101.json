@@ -1,0 +1,11 @@
+{
+  "type": "so101_ros2_joint",
+  "joint_states_topic": "/joint_states",
+  "robot_type": "so_follower",
+  "state_max_age_ms": 500,
+  "actuate": true,
+  "cameras": {
+    "top": {"type": "ros2_image", "topic": "/workspace_camera_sim", "width": 640, "height": 480, "fps": 30, "encoding": "rgb8"},
+    "wrist": {"type": "ros2_image", "topic": "/wrist_camera_rgb_sim", "width": 640, "height": 480, "fps": 30, "encoding": "rgb8"}
+  }
+}

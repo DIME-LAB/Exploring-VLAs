@@ -14,7 +14,7 @@ class JointCache:
         self.condition = threading.Condition()
         self.values = {}
         self.arrivals = {}
-        self.error = None
+        self._last_error_log = -math.inf
 
     def update(self, msg):
         try:
@@ -37,24 +37,21 @@ class JointCache:
                 now = time.monotonic()
                 self.values.update(incoming)
                 self.arrivals.update(dict.fromkeys(incoming, now))
-                self.error = None
                 self.condition.notify_all()
         except (ValueError, TypeError) as exc:
-            logging.getLogger(__name__).warning("Joint message ignored: %s", exc)
+            now = time.monotonic()
+            if now - self._last_error_log >= 5:
+                logging.getLogger(__name__).warning("Joint message ignored: %s", exc)
+                self._last_error_log = now
 
     def wait(self, timeout):
         with self.condition:
-            ready = self.condition.wait_for(
-                lambda: self.error is not None or all(name in self.values for name in self.names), timeout)
-            if self.error is not None:
-                raise ValueError("Invalid joint message") from self.error
+            ready = self.condition.wait_for(lambda: all(name in self.values for name in self.names), timeout)
             if not ready:
                 raise TimeoutError("Waiting for all configured joints timed out")
 
     def snapshot(self, max_age_ms=None):
         with self.condition:
-            if self.error is not None:
-                raise ValueError("Invalid joint message") from self.error
             missing = set(self.names) - self.values.keys()
             if missing:
                 raise KeyError(f"Missing joints: {sorted(missing)}")

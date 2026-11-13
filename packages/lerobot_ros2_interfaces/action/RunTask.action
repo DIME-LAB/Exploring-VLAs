@@ -1,0 +1,13 @@
+string instruction
+float64 max_duration
+string model
+bool update_instruction
+---
+bool success
+string outcome
+string message
+---
+string phase
+string instruction
+string model
+float64 elapsed
