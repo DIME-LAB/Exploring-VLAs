@@ -85,7 +85,7 @@ SmolVLM2 ≈ 0 in every group (vision, text, connector, action expert); all 500 
 report's "fine-tune the SmolVLA base model" does not hold for these checkpoints. 3.0b (fine-tune FROM smolvla_base)
 is therefore a genuinely different run, not a reproduction.
 
-- [ ] 3.0 Audit every coursework checkpoint's `train_config.json` (pretrained_path, load_vlm_weights, steps,
+- [x] 3.0 Audit every coursework checkpoint's `train_config.json` (pretrained_path, load_vlm_weights, steps,
       dataset) AND compare weights (per-tensor cosine/rel-L2 vs smolvla_base and SmolVLM2) to decide from-scratch
       vs fine-tuned; record the verdict in the coursework README.
 - [ ] 3.0b Fine-tune from `lerobot/smolvla_base` (`--policy.path=lerobot/smolvla_base`) on the existing
