@@ -149,6 +149,12 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       videos), then full collection ~300 per colour (red/green/blue, ~900) with per-colour task strings, plus a
       data card.
     - [ ] Pilot: 50 accepted episodes, balanced 17/17/16, validated and copied to the Mac (corrected 5-episode smoke required).
+      Smoke validated 2026-11-13 at a8fc78b: 5 accepted / 7 attempts (71.43%), 3,508 frames at 30 simulated Hz;
+      LeRobotDataset load and full state/action/timestamp read-back pass. Six native reset receipts, camera-phase,
+      stale-epoch and late-application checks pass; 528 noisy execution steps retain clean expert labels.
+      Collection 34.57 accepted episodes/hour; uncapped FJT RTF 0.716, so real-time deployment remains unproven.
+      Own instance down (35 tracked processes gone). Pilot awaits explicit lead GO.
+      Mac: coursework-eee598/roadmap-2026-11/phase3/3.1-collection/smoke-a8fc78b/.
     - [ ] Full collection: ~900 episodes; lead schedules after pilot review.
       Searched 2026-11-13: no larger existing sim set on HF (3 accounts + global search), ASU Drive,
       dual-a4500 or rtx6000 (own folders); only teammates' machines unchecked.
