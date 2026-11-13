@@ -10,9 +10,9 @@ Why: three deployment-side mismatches plausibly explain the missed grasps — ac
 fast (client 30 fps vs the ~19.4 Hz the data was recorded at), RTC never actually applied, and camera
 cadence (~14 Hz) not matching the camera-bound recording loop.
 
-- [ ] 1.1 Confirm the recording rate of `rec_222812` from the data itself (count duplicate consecutive
+- [x] 1.1 Confirm the recording rate of `rec_222812` from the data itself (count duplicate consecutive
       frames in the dataset videos) — settles 19.4 Hz vs ~0.4× RTF ambiguity.
-      Audit (100 episodes, all frames): wall estimate 19.35 Hz (OLS 95% CI 16.67–23.06); calibrated final-home motion 17.43 Hz; exact decoded repeats wrist 24.00%, top 29.87%; historical sim RTF remains unresolved (conditional 0.323× vs 0.419×), so 1.1 stays open. Mac evidence: `coursework-eee598/roadmap-2026-11/phase1/1.1-recording-rate/`.
+      Audit (100 episodes, all frames): wall estimate 19.35 Hz (OLS 95% CI 16.67–23.06); calibrated final-home motion 17.43 Hz; exact decoded repeats wrist 24.00%, top 29.87%; historical sim RTF remains unresolved (conditional 0.323× vs 0.419×). Closed 2026-11-13: the operational question is answered (1.9 shows 17.4 vs 19.4 Hz make no difference, 0/10 each), and Phase 3 replaces this data with correctly timed collection, so the historical RTF is moot. Mac evidence: `coursework-eee598/roadmap-2026-11/phase1/1.1-recording-rate/`.
 - [x] 1.2 Pin sim speed: Kit run-loop rate limit (`/app/runLoops/main/rateLimitEnabled`,
       `rateLimitFrequency`) set at launch after the World exists and read back; launcher flag
       `--rate-hz` (default from 1.1). Verify RTF ≈ 0.29 ± 0.02 (17.4 Hz default from 1.1; report load/headroom misses).
@@ -39,7 +39,15 @@ cadence (~14 Hz) not matching the camera-bound recording loop.
       Wilson 95% upper bounds: 43.4% (n=5), 27.8% (n=10); all paired success differences are zero, not equivalence proof.
       Queue starvation, request/chunk latency, host load, FK-proxy failure characterization and home-camera parity
       are in Mac `coursework-eee598/roadmap-2026-11/phase1/1.9-eval/`. Live static regions are modestly brighter.
-- [ ] 1.10 **Retraining decision** from 1.9 (see Phase 3 criteria). Record results in the coursework README.
+- [x] 1.10 **Retraining decision** from 1.9 (see Phase 3 criteria). Record results in the coursework README.
+      Decision 2026-11-13: RETRAIN on new Phase 3 data (3.1d collection -> 3.2). Evidence: deployment ruled out
+      (1.9: timing, RTC, 17.4/19.4 all 0/10 with clean dispatch); input contract identical training vs live
+      (state, both images, tokens, norm stats bit-exact); lighting ruled out (1.10a inverse-gain A/B 0/10, mean
+      closest distance +11.7 mm, i.e. not closer); the model fits its demos on average (full-chunk arm L1 1.07 deg
+      vs 4.5 hold) but has 30 mm P95 TCP tail error even open-loop, and closed-loop misses by 26-38 mm.
+      Data limits to fix: 100 episodes, mislabelled timing (19.4 Hz as 30), mock-reference state, no DART
+      recovery data, image augmentation off. 3.2 must enable brightness/contrast augmentation.
+      Evidence: Mac `coursework-eee598/roadmap-2026-11/phase1/1.10-decision/` (incl. `lighting-ab/`).
 - [x] 1.11 GUI + model selection: add every new checkpoint (e.g. the 3.0b `base-ft`) to control_gui's
       Inference dropdown (`INF_MODEL_PRESETS`) and `deploy_sim.sh --model`; make the Inference tab use the
       Phase 1 defaults (17.4 Hz fps, rgb8 cameras, real-RTC on/off toggle); fix the Method radio SEGV and
