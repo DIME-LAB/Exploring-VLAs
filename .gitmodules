@@ -1,7 +1,7 @@
 [submodule "lerobot"]
 	path = lerobot
 	url = https://github.com/inbarajaldrin/lerobot.git
-	branch = ros2_camera
+	branch = dev
 [submodule "omni-kit-mcp"]
 	path = omni-kit-mcp
 	url = https://github.com/inbarajaldrin/omni-kit-mcp.git

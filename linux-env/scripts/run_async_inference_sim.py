@@ -30,6 +30,7 @@ Usage:
 
 Press Ctrl+C to stop. Both subprocesses get SIGTERM and a 5 s grace period.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -43,44 +44,44 @@ import time
 from pathlib import Path
 
 # Sim defaults — matches record_sim_isaac.sh's topic + units contract.
-RECORDED_FPS = 19.4
+RECORDED_FPS = 17.4
 
-DEFAULTS = dict(
-    server_host="127.0.0.1",
-    server_port=8080,
-    fps=RECORDED_FPS,
-
-    robot_type="so101_ros2",
-    cameras={
+DEFAULTS = {
+    "server_host": "127.0.0.1",
+    "server_port": 8080,
+    "fps": RECORDED_FPS,
+    "robot_type": "so101_ros2",
+    "cameras": {
         "wrist": {
             "type": "ros2",
             "topic": "/wrist_camera_rgb_sim",
             "encoding": "rgb8",
-            "width": 640, "height": 480, "fps": 30,
+            "width": 640,
+            "height": 480,
+            "fps": 30,
         },
         "top": {
             "type": "ros2",
             "topic": "/workspace_camera_sim",
             "encoding": "rgb8",
-            "width": 640, "height": 480, "fps": 30,
+            "width": 640,
+            "height": 480,
+            "fps": 30,
         },
     },
-
-    policy_type="smolvla",
-    pretrained="anirudhrani/smolvla_sim_100ep_fft__10ksteps_h200",
-    policy_device="cuda",
-
-    task="Pick a blue lego and place it in blue cup",
-
+    "policy_type": "smolvla",
+    "pretrained": "anirudhrani/smolvla_sim_100ep_fft__10ksteps_h200",
+    "policy_device": "cuda",
+    "task": "Pick a blue lego and place it in blue cup",
     # RTC params — same as the real-hardware reference. chunk_size_threshold
     # at 0.5 means request the next chunk once 50% of the executing one has
     # been consumed; aggregate_fn_name=weighted_average blends the new
     # chunk's leading actions with the executing chunk's tail for smoother
     # transitions (no hard-switch jitter).
-    actions_per_chunk=50,
-    chunk_size_threshold=0.5,
-    aggregate_fn_name="weighted_average",
-)
+    "actions_per_chunk": 50,
+    "chunk_size_threshold": 0.5,
+    "aggregate_fn_name": "weighted_average",
+}
 
 
 def wait_for_port(host: str, port: int, timeout_s: float) -> bool:
@@ -113,7 +114,7 @@ def kill_proc(proc: subprocess.Popen, name: str, grace_s: float = 5.0) -> None:
         proc.kill()
 
 
-def parse_args(argv=None):
+def build_parser():
     p = argparse.ArgumentParser(
         description="Sim async inference launcher (so101_ros2 + ros2_control).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -122,27 +123,35 @@ def parse_args(argv=None):
     p.add_argument("--server-port", type=int, default=DEFAULTS["server_port"])
     p.add_argument("--fps", type=float, default=DEFAULTS["fps"])
 
-    p.add_argument("--action-duration-s", type=float, default=None,
-                   help="FJT target duration; defaults to one client tick (1/fps).")
+    p.add_argument(
+        "--action-duration-s",
+        type=float,
+        default=None,
+        help="FJT target duration; defaults to one client tick (1/fps).",
+    )
     p.add_argument("--robot-type", default=DEFAULTS["robot_type"])
     p.add_argument(
-        "--cameras-json", default=json.dumps(DEFAULTS["cameras"]),
+        "--cameras-json",
+        default=json.dumps(DEFAULTS["cameras"]),
         help="Cameras dict as JSON. Default points at Isaac Sim's "
-             "/wrist_camera_rgb_sim and /workspace_camera_sim topics.",
+        "/wrist_camera_rgb_sim and /workspace_camera_sim topics.",
     )
 
     p.add_argument("--policy-type", default=DEFAULTS["policy_type"])
     p.add_argument(
-        "--pretrained", default=DEFAULTS["pretrained"],
+        "--pretrained",
+        default=DEFAULTS["pretrained"],
         help="HF repo id OR path to a `pretrained_model` dir.",
     )
     p.add_argument("--policy-device", default=DEFAULTS["policy_device"])
 
     p.add_argument("--task", default=DEFAULTS["task"])
-    p.add_argument("--actions-per-chunk", type=int,
-                   default=DEFAULTS["actions_per_chunk"])
-    p.add_argument("--chunk-size-threshold", type=float,
-                   default=DEFAULTS["chunk_size_threshold"])
+    p.add_argument(
+        "--actions-per-chunk", type=int, default=DEFAULTS["actions_per_chunk"]
+    )
+    p.add_argument(
+        "--chunk-size-threshold", type=float, default=DEFAULTS["chunk_size_threshold"]
+    )
     p.add_argument("--aggregate-fn", default=DEFAULTS["aggregate_fn_name"])
 
     # ---- Real-Time Chunking (RTC) — server-side smoothness ----------------
@@ -154,50 +163,92 @@ def parse_args(argv=None):
     # Threaded into the policy_server subprocess via env vars (the upstream
     # server CLI doesn't expose RTC flags; our policy_server.py patch reads
     # them at startup — see LEROBOT_RTC_* env block there).
-    p.add_argument("--rtc.enabled", dest="rtc_enabled", action="store_true",
-                   default=True,
-                   help="Enable measured-delay RTC prefix guidance on the server.")
-    p.add_argument("--no-rtc", dest="rtc_enabled", action="store_false",
-                   help="Disable RTC (revert to aggregate-only smoothness).")
-    p.add_argument("--rtc.execution-horizon", dest="rtc_execution_horizon",
-                   type=int, default=10,
-                   help="How many timesteps from prev chunk to maintain "
-                        "consistency with. Higher = smoother but less reactive.")
-    p.add_argument("--rtc.max-guidance-weight", dest="rtc_max_guidance_weight",
-                   type=float, default=10.0,
-                   help="Strength of consistency enforcement during denoising. "
-                        "10.0 is optimal for 10-step flow matching (SmolVLA).")
-    p.add_argument("--rtc.schedule", dest="rtc_schedule",
-                   default="EXP", choices=["LINEAR", "EXP", "ONES", "ZEROS"],
-                   help="prefix_attention_schedule: how guidance weight decays "
-                        "across the overlap region. EXP is the docs-recommended "
-                        "default.")
+    p.add_argument(
+        "--rtc.enabled",
+        dest="rtc_enabled",
+        action="store_true",
+        default=True,
+        help="Enable measured-delay RTC prefix guidance on the server.",
+    )
+    p.add_argument(
+        "--no-rtc",
+        dest="rtc_enabled",
+        action="store_false",
+        help="Disable RTC (revert to aggregate-only smoothness).",
+    )
+    p.add_argument(
+        "--rtc.execution-horizon",
+        dest="rtc_execution_horizon",
+        type=int,
+        default=10,
+        help="How many timesteps from prev chunk to maintain "
+        "consistency with. Higher = smoother but less reactive.",
+    )
+    p.add_argument(
+        "--rtc.max-guidance-weight",
+        dest="rtc_max_guidance_weight",
+        type=float,
+        default=10.0,
+        help="Strength of consistency enforcement during denoising. "
+        "10.0 is optimal for 10-step flow matching (SmolVLA).",
+    )
+    p.add_argument(
+        "--rtc.schedule",
+        dest="rtc_schedule",
+        default="EXP",
+        choices=["LINEAR", "EXP", "ONES", "ZEROS"],
+        help="prefix_attention_schedule: how guidance weight decays "
+        "across the overlap region. EXP is the docs-recommended "
+        "default.",
+    )
 
-    p.add_argument("--server-startup-timeout", type=float, default=120.0,
-                   help="Seconds to wait for server to start listening "
-                        "(SmolVLA + base VLM cold-load is ~30-60 s).")
-    p.add_argument("--dry-run", action="store_true",
-                   help="Print both commands and exit without launching.")
+    p.add_argument(
+        "--server-startup-timeout",
+        type=float,
+        default=120.0,
+        help="Seconds to wait for server to start listening "
+        "(SmolVLA + base VLM cold-load is ~30-60 s).",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print both commands and exit without launching.",
+    )
+    return p
+
+
+def parse_args(argv=None, parser=None):
+    p = parser or build_parser()
     args = p.parse_args(argv)
 
-    if args.fps <= 0 or (args.action_duration_s is not None and args.action_duration_s <= 0):
+    if args.fps <= 0 or (
+        args.action_duration_s is not None and args.action_duration_s <= 0
+    ):
         p.error("fps and action-duration-s must be positive")
     return args
 
 
 def build_commands(args, python=None):
     python = python or sys.executable
-    action_duration = args.action_duration_s if args.action_duration_s is not None else 1 / args.fps
+    action_duration = (
+        args.action_duration_s if args.action_duration_s is not None else 1 / args.fps
+    )
     server_address = f"{args.server_host}:{args.server_port}"
 
     server_cmd = [
-        python, "-u", "-m", "lerobot.async_inference.policy_server",
+        python,
+        "-u",
+        "-m",
+        "lerobot.async_inference.policy_server",
         f"--host={args.server_host}",
         f"--port={args.server_port}",
         f"--fps={args.fps}",
     ]
     client_cmd = [
-        python, "-u", "-m", "lerobot.async_inference.robot_client",
+        python,
+        "-u",
+        "-m",
+        "lerobot.async_inference.robot_client",
         f"--robot.type={args.robot_type}",
         # Sim-specific: actuate ON (drives ros2_control), use_degrees ON
         # (matches recorded dataset's units convention).
@@ -244,8 +295,10 @@ def main() -> int:
     print(f"  Robot      : {args.robot_type}  actuate=true  use_degrees=true")
     print(f"  Cameras    : keys={list(json.loads(args.cameras_json).keys())}")
     print(f"  Task       : {args.task}")
-    print(f"  RTC        : actions_per_chunk={args.actions_per_chunk}  "
-          f"threshold={args.chunk_size_threshold}  agg={args.aggregate_fn}")
+    print(
+        f"  RTC        : actions_per_chunk={args.actions_per_chunk}  "
+        f"threshold={args.chunk_size_threshold}  agg={args.aggregate_fn}"
+    )
     print("=" * 72)
 
     if args.dry_run:
@@ -269,16 +322,23 @@ def main() -> int:
     print(f"[launcher] RTC {'ON' if args.rtc_enabled else 'OFF'}")
 
     print("\n[launcher] Starting policy server...")
-    server = subprocess.Popen(server_cmd, env=server_env,
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    server = subprocess.Popen(
+        server_cmd, env=server_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+    )
     server_thread = threading.Thread(
-        target=stream_output, args=("SERVER", server), daemon=True,
+        target=stream_output,
+        args=("SERVER", server),
+        daemon=True,
     )
     server_thread.start()
 
-    print(f"[launcher] Waiting up to {args.server_startup_timeout:.0f}s for "
-          f"{server_address} to listen...")
-    if not wait_for_port(args.server_host, args.server_port, args.server_startup_timeout):
+    print(
+        f"[launcher] Waiting up to {args.server_startup_timeout:.0f}s for "
+        f"{server_address} to listen..."
+    )
+    if not wait_for_port(
+        args.server_host, args.server_port, args.server_startup_timeout
+    ):
         print("[launcher] Server did not become ready in time.")
         kill_proc(server, "server")
         server_thread.join(timeout=2)
@@ -286,9 +346,13 @@ def main() -> int:
     print("[launcher] Server is up.\n")
 
     print("[launcher] Starting robot client...")
-    client = subprocess.Popen(client_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    client = subprocess.Popen(
+        client_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+    )
     client_thread = threading.Thread(
-        target=stream_output, args=("CLIENT", client), daemon=True,
+        target=stream_output,
+        args=("CLIENT", client),
+        daemon=True,
     )
     client_thread.start()
 
