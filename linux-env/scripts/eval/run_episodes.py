@@ -238,6 +238,7 @@ class Client:
             start_new_session=True,
         )
         self.lines = queue.Queue()
+        self.fatal = None
         threading.Thread(target=self.read, daemon=True).start()
 
     def read(self):
@@ -256,7 +257,10 @@ class Client:
         while True:
             line = self.lines.get(timeout=max(0, deadline - time.monotonic()))
             if line.startswith("FATAL"):
-                raise RuntimeError(line)
+                self.fatal = json.loads(line[len("FATAL"):])
+                self.log.write(line)
+                self.log.flush()
+                raise RuntimeError(self.fatal.get("error", str(self.fatal)))
             if line.startswith(tag + " "):
                 return json.loads(line[len(tag) :])
             self.log.write(line)
@@ -424,7 +428,7 @@ def main():
             epdir.mkdir()
             result = {
                 "episode": ep,
-                "outcome": "no-grasp",
+                "outcome": "error",
                 "condition": args.condition,
                 "seed": args.seeds[index],
                 "rtc_enabled": cfg.rtc_enabled,
@@ -567,7 +571,10 @@ def main():
                     else "timeout; no sustained blue lift",
                 )
             except Exception as error:
+                result["outcome"] = "error"
                 result["failure_note"] = f"{type(error).__name__}: {error}"
+                if client.fatal:
+                    result["fatal_client"] = client.fatal
                 raise
             finally:
                 cleanup_error = None

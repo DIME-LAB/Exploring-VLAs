@@ -147,12 +147,19 @@ def main() -> int:
                     chunks=0, first_chunk_t=None, ep_t0=time.time(), paused=False
                 )
             emit("EPSTART", {"ep": ep, "t0": state["ep_t0"]})
-            client.control_loop(
-                task=cfg.task,
-                stop_event=abort,
-                max_duration_s=max_s,
-                max_actions=max_actions,
-            )
+            try:
+                client.control_loop(
+                    task=cfg.task,
+                    stop_event=abort,
+                    max_duration_s=max_s,
+                    max_actions=max_actions,
+                )
+            except Exception as error:
+                emit("FATAL", {"error": str(error),
+                               "metrics": getattr(client, "control_loop_stats", {}),
+                               "resources_before": resources_before,
+                               "resources_after": resources()})
+                raise
             metrics = client.control_loop_stats
             with state_lock:
                 state["paused"] = True
