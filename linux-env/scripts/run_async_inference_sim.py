@@ -162,8 +162,9 @@ def build_parser():
     )
 
     p.add_argument("--policy-type", default=DEFAULTS["policy_type"])
-    p.add_argument("--model", help="Shared GUI/deploy model preset; cannot combine with --pretrained.")
-    p.add_argument(
+    model_args = p.add_mutually_exclusive_group()
+    model_args.add_argument("--model", help="Shared GUI/deploy model preset.")
+    model_args.add_argument(
         "--pretrained",
         default=DEFAULTS["pretrained"],
         help="HF repo id OR path to a `pretrained_model` dir.",
@@ -250,8 +251,6 @@ def parse_args(argv=None, parser=None):
     from model_presets import MODEL_PRESETS, resolve_model
 
     if args.model:
-        if args.pretrained != DEFAULTS["pretrained"]:
-            p.error("Choose --model or --pretrained")
         try:
             args.pretrained = resolve_model(args.model)
         except ValueError as exc:
