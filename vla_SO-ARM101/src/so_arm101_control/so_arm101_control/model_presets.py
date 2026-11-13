@@ -7,6 +7,7 @@ import os
 import sys
 
 MODEL_PRESETS = {
+    "base-ft": ("/home/aaugus11/w_ckpt/smolvla-base-ft-rec222812-20k-s42-20261113", "", "{}"),
     "sim": ("anirudhrani/smolvla_sim_100ep_fft__10ksteps_h200", "", "{}"),
     "mix-75s25r": ("anirudhrani/smolvla_sim_100ep_75S_25R_fft__10ksteps_h200", "", "{}"),
     "mix-25s75r": ("anirudhrani/smolvla_sim_100ep_25S_75R_fft__10ksteps_h200", "", "{}"),
