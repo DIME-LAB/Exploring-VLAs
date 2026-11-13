@@ -48,3 +48,17 @@ Pitfalls (handbook plan-anything/handbook/isaacsim-operating-handbook.md)
       vla_SO-ARM101/src/so_arm101_description (NVIDIA's documented standalone route; handles the 5-DOF chain;
       plan47's recommendation).
   Keep the gripper semantics the same as the ROS controller so collected data matches deployment.
+
+## Our own Lula/RMPflow references (found 2026-11-13; all READ-ONLY)
+Decision: 3.1f reuses OUR control_gui IK (pure-Python module from 3.1a) first. These are references if a
+planner description or in-Isaac controller is needed. Use `/robodocs:robodocs` (nvidia) for current 6.1 Lula/cuRobo docs.
+- Lula robot description template (UR5e+RG2): dual ~/Documents/robo-manipulate/assets/robots/ur5e_rg2/planner/lula/ur5e_rg2_robot_description.yaml
+  (cuRobo variant: .../planner/curobo/ur5e_rg2.yml)
+- RMPflow config (Franka): ~/Documents/robo-manipulate/hardware/franka_reference/rmpflow/robot_descriptor.yaml
+- Collision-sphere generation/qualification tool: /mnt/a4500-backup/a4500-backup-20260828/Desktop/robo-manipulate/scripts/qualify_planner_spheres.py
+- In-Isaac IK control extension (Lula): /mnt/a4500-backup/a4500-backup-20260828/Documents/vlm_isaac_sim/isaac_exts/inv-kin-ctrl/
+  (also .../Projects/Isaac Sim Extensions/inv-kin-ctrl)
+- Franka twin driven by RMPflow in Isaac: /mnt/a4500-backup/a4500-backup-20260828/Documents/vlm_isaac_sim/isaac_exts/franka-dt/franka_dt_python/scenario.py
+- UR5/UR5e/Franka Cartesian control (Isaac 4.5 era): backup Desktop/UR5/UR5/exts/ur5.setup.control,
+  Desktop/isaac_sim_4.5_exts/Extension1/ur5e_gripper_control_python, Desktop/omniverse_Library_10thoc2025/Python files/{Franka,UR5}/*_move_cartesian.py
+- NVIDIA example copy: ~/Documents/isaac-sim-mcp/exts/ur5e-dt/examples/ur10_suction_pick_place.py
