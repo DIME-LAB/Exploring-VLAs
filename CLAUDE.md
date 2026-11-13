@@ -150,7 +150,7 @@ For real-hardware data collection see [`LEROBOT_ROS2_MAC_SETUP.md`](vla_SO-ARM10
 - **Trust the planning dir.** `.planning/STATE.md` reflects current truth; if something contradicts it, suspect drift and ask.
 - **Match commit style** — the existing `feat(scope):`, `fix(scope):`, `docs(scope):`, `chore:` convention with multi-paragraph bodies covering motivation + implementation + verification.
 
-Sim pacing: the launcher's `DEFAULT_SIM_RATE_HZ` is the single default cadence.
+Sim pacing: the launcher's `DEFAULT_SIM_RATE_HZ` is the single default cadence (17.4 Hz, from ROADMAP 1.1).
 `deploy_sim.sh up --rate-hz HZ` applies Kit pacing after World initialization
 and prints the readback; `0` is unthrottled. At 60 Hz physics, RTF = Hz/60 only
 when the box has enough CPU headroom. Do not change physics dt to tune wall pacing.
@@ -161,3 +161,8 @@ objects. Preserve `World` / `base` and the `drop_1/2/3` frame names. Strip scale
 with `Gf.Transform(matrix).GetRotation()` when extracting mesh orientations.
 The log UI uses a bounded 500-row model; do not rebuild 500 labels per line.
 Physics callback diagnostics are limited to one per source every five seconds.
+
+Kit 110.3 requires `/app/runLoops/main/syncToPresent=false` for the main-loop
+rate limiter to take effect. The launcher sets it per launch and on `rate` calls.
+Keep physics at 60 Hz. The default 17.4 Hz ceiling targets RTF 0.29; overrides
+19.4 and 0 select the alternate timing sweep and unthrottled profiling.

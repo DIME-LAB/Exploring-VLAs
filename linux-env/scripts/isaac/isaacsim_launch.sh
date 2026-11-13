@@ -54,7 +54,7 @@ TOOLS_MODULE="soarm101_tools"
 CYCLONEDDS_XML="$REPO_ROOT/linux-env/cyclonedds.xml"
 GPU="${ISAACSIM_GPU:-0}"
 # Default recording cadence; update this one value when dataset timing changes.
-DEFAULT_SIM_RATE_HZ=19.4
+DEFAULT_SIM_RATE_HZ=17.4
 RATE_HZ="${SOARM_SIM_RATE_HZ:-$DEFAULT_SIM_RATE_HZ}"
 MCP_PORT="${OMNI_KIT_MCP_PORT:-${SOARM_KIT_MCP_PORT:-8767}}"
 STREAM_SIGNAL_PORT=49100
@@ -224,7 +224,7 @@ do_rate() {
     local params
     params="$(python3 - "$RATE_HZ" <<'PY'
 import json, sys
-print(json.dumps({"code": "from so_arm101_dt.extension import get_instance\nresult=get_instance()._apply_sim_rate(" + repr(float(sys.argv[1])) + ")"}))
+print(json.dumps({"code": "from so_arm101_dt.extension import get_instance\nimport carb\ns=carb.settings.get_settings()\ns.set_bool('/app/runLoops/main/syncToPresent',False)\ns.set_bool('/app/runLoops/main/rateLimitUseBusyLoop',False)\nresult=get_instance()._apply_sim_rate(" + repr(float(sys.argv[1])) + ")"}))
 PY
 )"
     client run_python "$params" --timeout 30
@@ -306,6 +306,10 @@ do_launch() {
            # reset()/play() can deadlock compiling an MDL material. Ported from isaac-sim-mcp
            # 83dcf46 / e2a2247 (ur5e-dt, aic-dt launchers).
            --/exts/isaacsim.core.throttling/enable_async=false
+           # syncToPresent bypasses the main loop limiter in Kit 110.3.
+           --/app/runLoopsGlobal/syncToPresent=false
+           --/app/runLoops/main/syncToPresent=false
+           --/app/runLoops/main/rateLimitUseBusyLoop=false
            # Never save this session's /persistent settings into the shared install's config.
            --/app/settings/persistent=false
            "--/soarm101/rateHz=$RATE_HZ")

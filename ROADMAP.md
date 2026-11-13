@@ -15,7 +15,7 @@ cadence (~14 Hz) not matching the camera-bound recording loop.
       Audit (100 episodes, all frames): wall estimate 19.35 Hz (OLS 95% CI 16.67–23.06); calibrated final-home motion 17.43 Hz; exact decoded repeats wrist 24.00%, top 29.87%; historical sim RTF remains unresolved (conditional 0.323× vs 0.419×), so 1.1 stays open. Mac evidence: `coursework-eee598/roadmap-2026-11/phase1/1.1-recording-rate/`.
 - [x] 1.2 Pin sim speed: Kit run-loop rate limit (`/app/runLoops/main/rateLimitEnabled`,
       `rateLimitFrequency`) set at launch after the World exists and read back; launcher flag
-      `--rate-hz` (default from 1.1). Verify RTF ≈ 0.32 ± 0.02.
+      `--rate-hz` (default from 1.1). Verify RTF ≈ 0.29 ± 0.02 (17.4 Hz default from 1.1; report load/headroom misses).
 - [x] 1.3 Robot client loop at the recorded rate (fps ≈ 19, `action_duration_s` to match); confirm
       dataset `fps` vs real rate handling in async inference.
 - [ ] 1.4 Camera cadence: one frame per sim frame with sim-time stamps — wrist camera via render

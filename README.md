@@ -156,13 +156,16 @@ yourself is left alone). `down --policy` stops just the policy.
   Unthrottled loaded-box measurements: 57.14 → 50.21 ms/frame and RTF
   0.2917 → 0.3319; PoseTree warnings 87.5/s → 0. Shared host load varied
   (17.5 → 12.8), so this is an observed improvement, not an isolated CPU benchmark.
-- **Sim pacing is a ceiling under shared CPU load.** `up --rate-hz 19.4` (default)
-  sets and reads back Kit's main run-loop limiter after the World exists;
-  physics remains 60 Hz, so the target RTF is 19.4/60 = 0.3233. `--rate-hz 0`
-  disables pacing for profiling. An idempotent `up` applies the requested rate
-  to the live scene too. A 65.10 s loaded-box run measured RTF 0.3039
-  (18.23 frames/s, 54.84 ms/frame; load 28.18). The limiter cannot recover CPU
-  time lost to other jobs; inspect measured RTF before interpreting a rollout.
+- **Sim pacing is a ceiling under shared CPU load.** `up --rate-hz 17.4` (default
+  from the recording-rate analysis) sets and reads back Kit's main run-loop
+  limiter after the World exists. Physics remains 60 Hz: target RTF = 0.2900.
+  `--rate-hz 19.4` supports the timing sweep; `--rate-hz 0` is unthrottled.
+  The launcher disables `syncToPresent`, which otherwise bypasses the main-loop
+  limiter. A 65.09 s loaded-box run measured RTF 0.2799, 16.79 Hz and
+  59.55 ms/frame (load 23.51); 10 s windows ranged 0.2684–0.2852, so one
+  window missed the ±0.02 band. The limiter cannot recover time lost to
+  CPU contention. An idempotent `up` reapplies the requested ceiling.
+
 - **RTC (real-time chunking) is not actually applied.** `LEROBOT_RTC_ENABLED=1` logs
   "RTC enabled", but the fork's `policy_server.py` calls `predict_action_chunk(observation)`
   without `prev_chunk_left_over` / `inference_delay`, so RTC returns the unguided output
