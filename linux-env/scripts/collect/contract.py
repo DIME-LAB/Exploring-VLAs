@@ -1,6 +1,7 @@
 """Deterministic collection parameters and timing acceptance rules (no ROS imports)."""
 import math
 import random
+from dart import DEFAULT_NOISE
 
 COLORS = ('red', 'green', 'blue')
 JOINTS = ('shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll', 'gripper_joint')
@@ -24,7 +25,7 @@ def parameters(seed, color, split='train'):
                 approach_height_m=rng.uniform(.010, .030),
                 approach_offset_m=[rng.uniform(-.004, .004), rng.uniform(-.004, .004)],
                 speed_scale=rng.uniform(.85, 1.15), noise_std_rad=rng.uniform(.002, .006),
-                noise_probability=.30, noise_seed=seed ^ 0xDA47,
+                noise_probability=.30, noise_seed=seed ^ 0xDA47, dart=dict(DEFAULT_NOISE),
                 cup_seed=seed ^ 0xC0FFEE,
                 cup_sampling=dict(radius_min=.20, radius_max=.27, angle_min_deg=-110.,
                                   angle_max_deg=-70., gap_min=.005, gap_max=.025))
@@ -94,6 +95,24 @@ def timing_audit(rows, fps):
         errors.append('Post-step physical drive targets are missing')
     elif any(any(abs(x-y) > 1e-6 for x,y in zip(a['applied_command'],b['physics_drive_targets'])) for a,b in zip(rows,rows[1:])):
         errors.append('Applied targets did not persist through the next physical frame')
+    if any('planned_noise_offset' in row for row in rows):
+        complete=all(len(row.get('planned_noise_offset',[]))==6 and
+                     len(row.get('command_filter_delta',[]))==6 and len(row.get('command_velocity',[]))==5 and
+                     all(math.isfinite(v) for key in ('planned_noise_offset','command_filter_delta','command_velocity') for v in row[key]) for row in rows)
+        if not complete:
+            errors.append('Bounded command provenance is incomplete')
+        else:
+            if any(row['planned_noise_offset'][5]!=0. or abs(row['executed_action'][5]-row['action'][5])>1e-9 for row in rows):
+                errors.append('Gripper command was perturbed')
+            if any(abs(e-a-n-d)>1e-9 for row in rows for e,a,n,d in zip(row['executed_action'],row['action'],row['planned_noise_offset'],row['command_filter_delta'])):
+                errors.append('Executed perturbation differs from its recorded components')
+            previous=[rows[0]['physics_drive_targets']]+[row['executed_action'] for row in rows[:-1]]
+            velocities=[[(row['executed_action'][j]-prior[j])*fps for j in range(5)] for prior,row in zip(previous,rows)]
+            acceleration=[[(b[j]-a[j])*fps for j in range(5)] for a,b in zip(velocities,velocities[1:])]
+            if any(abs(v)>10.001 for velocity in velocities for v in velocity) or any(abs(v)>2.001 for a in acceleration for v in a):
+                errors.append('Executed arm targets exceed deployment derivative bounds')
+            if any(abs(a-b)>1e-4 for row,velocity in zip(rows,velocities) for a,b in zip(row['command_velocity'],velocity)):
+                errors.append('Executed target velocity differs from command provenance')
     planning_idle = sum(not r.get('executing', True) for r in rows) / len(rows)
     stationary = sum(max(abs(x - y) for x, y in zip(a['state'], b['state'])) < 1e-4
                      for a, b in zip(rows, rows[1:])) / max(1, len(rows) - 1)

@@ -5,6 +5,7 @@ from types import SimpleNamespace as NS
 from episode_policy import (ConvergenceFailure, QualityReject, WorkerRegistry, FailureStreak, disposition, POLICY)
 from protocol import CancelledGeneration, StepGeneration
 from contract import JOINTS,timing_audit
+from dart import TargetLimiter
 import test_review_regressions as probes
 from so_arm101_control.grasp_geometry import _grasp_home_data_target
 import test_motion_operations as motions
@@ -42,10 +43,10 @@ class HomeHoldTests(unittest.TestCase):
         v.rng=NS(random=lambda:0.,gauss=lambda *a:.005)
         v.phase='grasp_home_data'
         clean,executed,*_=v.tick(10**9,[0.]*6)
-        self.assertEqual(clean,executed)
-        v.phase='grasp_move'
+        self.assertEqual(v.plan['noise'].sample(.5),[0.]*6)
+        v.phase='grasp_move';v.plan.pop('noise');v.params['dart']=dict(v.params['dart'],on_probability=1.)
         clean,executed,*_=v.tick(10**9,[0.]*6)
-        self.assertNotEqual(clean,executed);self.assertEqual(clean[5],executed[5])
+        self.assertNotEqual(v.plan['noise'].sample(.5),[0.]*6);self.assertEqual(clean[5],executed[5])
 
     def test_nominal_home_hold_overrides_a_nearby_previous_target(self):
         c,r,_=probes.ReviewRegressions().collector();c.servo.plan=None
@@ -89,6 +90,9 @@ class QualityPolicyTests(unittest.TestCase):
         v.plan=dict(epoch=fixture['epoch'],start=fixture['operation_start_sim_ns'],done=threading.Event(),
                     trajectory=NS(joint_names=JOINTS[:5],points=[point]))
         v.phase=fixture['phase']
+        v.limiter=TargetLimiter([(-3.,3.)]*5)
+        prior=v.limiter.propose(fixture['reference'],[0.]*6,fixture['reference'],fixture['epoch'],fixture['last_recorded_sim_ns'])
+        v.limiter.commit(prior,fixture['epoch'],fixture['last_recorded_sim_ns'])
         with self.assertRaises(ConvergenceFailure) as failed:v.tick(fixture['failure_sim_ns'],fixture['state'])
         evidence=failed.exception.evidence
         self.assertEqual(evidence['kind'],'arm_nonconvergence')

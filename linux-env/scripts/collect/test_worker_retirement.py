@@ -70,7 +70,13 @@ class WorkerRetirementTests(unittest.TestCase):
     def capture(self,c,r,entry,epoch,stamp,closed,home=False):
         positions=[.1 if home else 0.]*5+[.1 if closed else 0.]
         entry['joint'][0].position=positions
+        if home:
+            # This fixture teleports to a completed home; keep its physical
+            # drive target coherent with that already-completed motion.
+            r.art.get_applied_actions().joint_positions[:]=[positions]
+            c.servo.limiter=None
         native=entry['tick'][0];native.update(epoch=epoch,sim_ns=stamp,state=list(positions))
+        if home:native['drive_targets']=list(positions)
         entry['joint'][0].header.stamp.sec,entry['joint'][0].header.stamp.nanosec=divmod(stamp,10**9)
         r.stamp=lambda:stamp
         c.node._actual_positions.update(zip(probes.JOINTS,positions))

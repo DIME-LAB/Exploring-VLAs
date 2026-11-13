@@ -101,6 +101,18 @@ class ContractTests(unittest.TestCase):
         rows = self.rows(); rows[20]['action'] = list(rows[20]['executed_action'])
         self.assertFalse(timing_audit(rows, 30)['passed'])
 
+    def test_bounded_command_metadata_rejects_a_target_acceleration_violation(self):
+        rows=self.rows()
+        for i,row in enumerate(rows):
+            row['executed_action']=list(row['action'])
+            row['applied_command']=list(row['action'])
+            row['physics_drive_targets']=list(rows[i-1]['applied_command'] if i else row['applied_command'])
+            row.update(planned_noise_offset=[0.]*6,command_filter_delta=[0.]*6,
+                       command_velocity=[.03 if i else 0.]*5)
+        self.assertTrue(timing_audit(rows,30)['passed'])
+        rows[30]['executed_action'][0]+=.01
+        self.assertIn('Executed arm targets exceed deployment derivative bounds',timing_audit(rows,30)['errors'])
+
     def test_seed_reproduction_and_holdout(self):
         self.assertEqual(parameters(123, 'red'), parameters(123, 'red'))
         self.assertEqual(parameters(EVAL_SEEDS[0], 'red', split='eval')['split'], 'eval')

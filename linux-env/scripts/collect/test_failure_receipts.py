@@ -9,7 +9,7 @@ from episode_policy import ConvergenceFailure
 class FailureReceiptTests(unittest.TestCase):
     def test_capture_timeout_keeps_original_cause_and_native_cancel_result(self):
         c,r,entry=probes.ReviewRegressions().collector()
-        def timeout(stamp,state):
+        def timeout(stamp,state,*args):
             c.servo.last_sim_ns=stamp
             raise ConvergenceFailure('arm_nonconvergence',epoch=1,stamp_ns=stamp,phase='move',
                 duration=2.,elapsed=7.7,margin=5.,state=state,reference=c.servo.reference)

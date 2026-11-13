@@ -42,6 +42,7 @@ from scene_reconcile import SceneReconciler, ros_messages
 from success import SETTLED_TICKS, initial_arm, settled_containment
 from cup_profile import PROFILE
 from diagnostics import final_stills
+from dart import DEFAULT_NOISE, SmoothDart, TargetLimiter, ExpertSchedule
 from episode_policy import (POLICY, QualityReject, ConvergenceFailure, WorkerRegistry,
                             PLANNER_REJECTIONS, FailureStreak, disposition)
 
@@ -251,6 +252,9 @@ class Servo:
         self.rng = random.Random(0)
         self.last_sim_ns = 0
         self.phase = 'hold'
+        self.noise_specs = []
+        self.noise_index = 0
+        self.limiter = None
         self.last_command_clock_ns = 0
         self.planned_sim_seconds = 0.
         self.planned_operations = 0
@@ -263,20 +267,41 @@ class Servo:
         with self.generation.own('episode parameters'):
             self.params = dict(params)
             self.rng = random.Random(params['noise_seed'])
+            self.noise_specs = []
+            self.noise_index = 0
+
+    def noise_program(self, duration, tag):
+        config=self.params.get('dart',DEFAULT_NOISE)
+        index=getattr(self,'noise_index',0);self.noise_index=index+1
+        program=SmoothDart(duration,self.params['noise_seed']+104729*index,config,
+                           enabled=tag not in ('grasp_home','grasp_home_data','home'))
+        if not hasattr(self,'noise_specs'):self.noise_specs=[]
+        self.noise_specs.append(dict(index=index,phase=tag,**program.spec))
+        return program
+
+    def commit_command(self, candidate, epoch, stamp):
+        self.generation.require(epoch,stamp)
+        self.limiter.commit(candidate,epoch,stamp)
 
     def execute(self, trajectory, done, operation=None):
         epoch = done.motion_epoch
         if operation is not None and (operation.event is not done or operation.epoch != epoch):
             raise ValueError('Planner result/event origin mismatch')
+        with self.generation.own('retiming origin'):
+            self.generation.require(epoch)
+            config=dict(self.params.get('dart',DEFAULT_NOISE))
+        schedule=ExpertSchedule(trajectory,config)
         with self.generation.own('collector motion'):
             self.generation.require(epoch)
             with self.lock:
-                duration = ns(trajectory.points[-1].time_from_start)/1e9
+                duration=schedule.duration
                 self.node._plan_motion_wait(done, duration)
                 self.planned_sim_seconds += duration
                 self.planned_operations += 1
-                self.plan = dict(trajectory=trajectory, done=done, start=None, epoch=epoch)
+                self.plan = dict(trajectory=trajectory,schedule=schedule,done=done,start=None,epoch=epoch)
                 self.phase = operation.tag if operation is not None else getattr(done,'motion_tag','home')
+                self.plan['noise']=self.noise_program(duration,self.phase)
+                self.noise_specs[-1]['expert_schedule']=schedule.spec
             self.step(True)
 
     def gripper(self, position, duration, blocking):
@@ -324,61 +349,62 @@ class Servo:
             previous = point
         return list(points[-1].positions)
 
-    def tick(self, stamp, state):
-        completed = []
-        margin = getattr(getattr(self.node, '_motion_waiter', None), 'sim_margin', 5.)
+    def tick(self, stamp, state, drive_targets=None):
+        completed=[]
+        margin=getattr(getattr(self.node,'_motion_waiter',None),'sim_margin',5.)
         with self.lock:
-            self.last_sim_ns = stamp
+            self.last_sim_ns=stamp
             if self.reference is None:
-                self.reference = list(state)
-                self.reference_epoch = self.generation.epoch
+                self.reference=list(state);self.reference_epoch=self.generation.epoch
             self.generation.require(self.reference_epoch)
-            noise_active = False
-            active = self.plan is not None or self.grip_plan is not None
+            active=self.plan is not None or self.grip_plan is not None
+            noise=[0.]*6;arm_ready=False;arm_elapsed=arm_duration=0.
             if self.plan:
-                plan = self.plan
-                if plan['start'] is None:
-                    plan['start'] = stamp
-                elapsed = (stamp - plan['start']) / 1e9
-                duration = ns(plan['trajectory'].points[-1].time_from_start) / 1e9
-                positions = self.interpolate(plan['trajectory'], elapsed + 1 / 30)
-                for name, value in zip(plan['trajectory'].joint_names, positions):
-                    self.reference[JOINTS.index(name)] = value
-                noise_active = elapsed < duration*.8 and self.phase not in ('grasp_home','grasp_home_data','home')
-                if elapsed > duration and max(abs(a - b) for a, b in zip(state[:5], self.reference[:5])) < .008:
-                    completed.append(plan['done']); self.plan = None
-                elif elapsed > duration + margin:
-                    raise ConvergenceFailure('arm_nonconvergence', epoch=plan['epoch'], stamp_ns=stamp,
-                        phase=self.phase, duration=duration, elapsed=elapsed, margin=margin,
-                        state=state, reference=self.reference)
+                plan=self.plan
+                if plan['start'] is None:plan['start']=stamp
+                arm_elapsed=(stamp-plan['start'])/1e9
+                if 'schedule' not in plan:plan['schedule']=ExpertSchedule(plan['trajectory'],self.params.get('dart',DEFAULT_NOISE))
+                arm_duration=plan['schedule'].duration
+                positions=plan['schedule'].sample(arm_elapsed+1/30)
+                for name,value in zip(plan['trajectory'].joint_names,positions):self.reference[JOINTS.index(name)]=value
+                if 'noise' not in plan:plan['noise']=self.noise_program(arm_duration,self.phase)
+                noise=plan['noise'].sample(arm_elapsed+1/30)
+                arm_ready=(arm_elapsed>arm_duration and max(abs(a-b) for a,b in zip(state[:5],self.reference[:5]))<.008)
             if self.grip_plan:
-                plan = self.grip_plan
-                if plan['start'] is None:
-                    plan['start'] = stamp
-                    plan['initial'] = state[5]
-                elapsed = (stamp - plan['start']) / 1e9
-                alpha = min(1., (elapsed + 1 / 30) / plan['duration'])
-                self.reference[5] = plan['initial'] + alpha * (plan['target'] - plan['initial'])
-                if elapsed > plan['duration'] and abs(state[5] - plan['target']) < .008:
-                    completed.append(plan['done']); self.grip_plan = None
-                elif elapsed > plan['duration'] + margin:
-                    raise ConvergenceFailure('gripper_nonconvergence', epoch=plan['epoch'], stamp_ns=stamp,
-                        phase=self.phase, duration=plan['duration'], elapsed=elapsed, margin=margin,
-                        state=state, reference=self.reference)
-            clean = corrective_action(state, self.reference)
-            executed = list(clean)
-            if noise_active and self.rng.random() < self.params['noise_probability']:
-                for i in range(5):
-                    executed[i] += max(-.012, min(.012, self.rng.gauss(0., self.params['noise_std_rad'])))
-            for i, name in enumerate(JOINTS):
-                lo, hi = JOINT_LIMITS[name]
-                executed[i] = max(lo, min(hi, executed[i]))
-            reference = list(self.reference)
-            self.last_command_clock_ns = self.node.get_clock().now().nanoseconds
-            phase = self.phase
-
-        return (clean, executed, active, phase, reference, self.last_command_clock_ns,
-                completed, self.plan is not None or self.grip_plan is not None)
+                grip=self.grip_plan
+                if grip['start'] is None:grip['start']=stamp;grip['initial']=state[5]
+                elapsed=(stamp-grip['start'])/1e9
+                alpha=min(1.,(elapsed+1/30)/grip['duration'])
+                self.reference[5]=grip['initial']+alpha*(grip['target']-grip['initial'])
+                if elapsed>grip['duration'] and abs(state[5]-grip['target'])<.008:
+                    completed.append(grip['done']);self.grip_plan=None
+                elif elapsed>grip['duration']+margin:
+                    raise ConvergenceFailure('gripper_nonconvergence',epoch=grip['epoch'],stamp_ns=stamp,
+                        phase=self.phase,duration=grip['duration'],elapsed=elapsed,margin=margin,state=state,reference=self.reference)
+            clean=corrective_action(state,self.reference)
+            if getattr(self,'limiter',None) is None:
+                config=self.params.get('dart',DEFAULT_NOISE)
+                self.limiter=TargetLimiter([JOINT_LIMITS[n] for n in JOINTS[:5]],
+                    config['arm_velocity_rad_s'],config['arm_acceleration_rad_s2'])
+            candidate=self.limiter.propose(clean,noise,drive_targets if drive_targets is not None else state,
+                                           self.generation.epoch,stamp)
+            command_settled=(max(abs(a-b) for a,b in zip(candidate.positions[:5],clean[:5]))<.008 and
+                             max(abs(v) for v in candidate.velocities)<.02)
+            if self.plan:
+                if arm_ready and command_settled:
+                    completed.append(self.plan['done']);self.plan=None
+                elif arm_elapsed>arm_duration+margin:
+                    if not command_settled:
+                        raise RuntimeError('Executed target limiter did not settle before the motion deadline')
+                    raise ConvergenceFailure('arm_nonconvergence',epoch=self.plan['epoch'],stamp_ns=stamp,
+                        phase=self.phase,duration=arm_duration,elapsed=arm_elapsed,margin=margin,state=state,reference=self.reference)
+            executed=list(candidate.positions)
+            lo,hi=JOINT_LIMITS['gripper_joint'];executed[5]=max(lo,min(hi,executed[5]))
+            reference=list(self.reference)
+            self.last_command_clock_ns=self.node.get_clock().now().nanoseconds
+            phase=self.phase
+        return (clean,executed,active,phase,reference,self.last_command_clock_ns,completed,
+                self.plan is not None or self.grip_plan is not None,candidate)
 
     def publish_reference(self, executed):
         # Expert and noisy commands are independent arrays. Never derive labels from controller feedback.
@@ -491,6 +517,7 @@ class Collector:
             self.servo.previous_executed = None
             self.servo.reference = None
             self.servo.reference_epoch = None
+            if hold is None:self.servo.limiter = None
         with self.sensors.condition:
             self.sensors.pending.clear()
             self.sensors.acks.clear()
@@ -549,6 +576,8 @@ class Collector:
                     if handover[0] is not None:
                         self.servo.reference = list(handover[0])
                         self.servo.reference_epoch = result['epoch']
+                        if getattr(self.servo,'limiter',None) is not None:
+                            self.servo.limiter.handover(result['epoch'])
                 return result
         except OwnershipStalled as exc:
             self.abort_stalled_owner(exc, 'cancel/reset')
@@ -571,6 +600,7 @@ class Collector:
         plan = self.servo.plan or self.servo.grip_plan
         duration = (ns(plan['trajectory'].points[-1].time_from_start)/1e9
                     if plan and 'trajectory' in plan else plan.get('duration') if plan else None)
+        if plan and 'schedule' in plan:duration=plan['schedule'].duration
         record = dict(epoch=epoch, sim_ns=getattr(self.servo, 'last_sim_ns', None),
             wall_ns=time.monotonic_ns(), phase=getattr(self.servo, 'phase', None),
             exception_type=type(exc).__name__, error=repr(exc),
@@ -578,6 +608,7 @@ class Collector:
             expert_reference=list(self.servo.reference) if self.servo.reference is not None else None,
             operation_start_sim_ns=plan.get('start') if plan else None,
             planned_sim_seconds=duration,
+            expert_schedule=plan['schedule'].spec if plan and 'schedule' in plan else None,
             convergence_margin_sim_seconds=getattr(getattr(self.node, '_motion_waiter', None), 'sim_margin', 5.),
             cancellation=dict(cause=repr(exc), invalidated_epoch=epoch, requested=False, completed=False))
         if isinstance(exc, ConvergenceFailure):
@@ -633,7 +664,7 @@ class Collector:
                     for plan in (self.servo.plan, self.servo.grip_plan):
                         if plan:
                             self.generation.require(plan['epoch'])
-                    clean, executed, active, phase, reference, command_clock, completed, advance = self.servo.tick(stamp, state)
+                    clean, executed, active, phase, reference, command_clock, completed, advance, candidate = self.servo.tick(stamp, state, snapshot['drive_targets'])
                     self.generation.require(epoch, stamp)
                     self.servo.publish_reference(executed)
                     self.generation.require(epoch, stamp)
@@ -641,6 +672,9 @@ class Collector:
                         observation_stamp_ns=stamp, command=executed, advance=advance))))
                     ack = self.sensors.read_ack(epoch, stamp)
                     self.generation.require(epoch, stamp)
+                    if len(ack.get('applied_command',[]))!=6 or max(abs(a-b) for a,b in zip(executed,ack['applied_command']))>1e-6:
+                        raise RuntimeError('Physical ACK differs from proposed bounded command')
+                    self.servo.commit_command(candidate,epoch,stamp)
                     row = dict(observation_epoch=snapshot['epoch'], expert_epoch=epoch,
                         invalid_through_ns=self.generation.floor_ns, sim_ns=stamp, wall_ns=time.monotonic_ns(), joint_stamp_ns=ns(joint.header.stamp),
                         joint_receive_ns=received, wrist_stamp_ns=ns(entry['wrist'][0].header.stamp),
@@ -648,6 +682,8 @@ class Collector:
                         top_receive_ns=entry['top'][1], state=state, action=clean, executed_action=executed,
                         expert_observation_stamp_ns=stamp, command_clock_ns=command_clock,
                         expert_reference=reference, executing=active, phase=phase,
+                        planned_noise_offset=list(candidate.noise_offset), command_filter_delta=list(candidate.filter_delta),
+                        command_velocity=list(candidate.velocities),
                         state_source=snapshot['state_source'], velocity=list(joint.velocity),
                         physics_state=snapshot['state'], physics_velocity=snapshot['velocity'],
                         physics_drive_targets=snapshot['drive_targets'],
@@ -932,6 +968,8 @@ class Collector:
         tracked_sources = ['linux-env/scripts/collect/collect.py', 'linux-env/scripts/collect/contract.py',
                            'linux-env/scripts/collect/checkpoint.py',
                            'linux-env/scripts/collect/episode_policy.py',
+                           'linux-env/scripts/collect/dart.py',
+                           'vla_SO-ARM101/src/so_arm101_moveit_config/config/joint_limits.yaml',
                            'linux-env/scripts/collect/storage.py',
                            'linux-env/scripts/collect/collection_runtime.py',
                            'linux-env/scripts/collect/success.py',
@@ -1151,6 +1189,7 @@ class Collector:
                             receipt['error'] = 'Object did not lift at least 25 mm before placement'
                             receipt['quality_reject'] = dict(kind='insufficient_lift',evidence=dict(lift_m=maximum_z-initial_z))
                 receipt['capture_failures'] = list(self.capture_failures[failure_log_start:])
+                receipt['noise_operations'] = list(self.servo.noise_specs)
                 if cycle_result.get('worker_error'):
                     receipt['cycle_worker_error'] = cycle_result['worker_error']
                 receipt['camera_duplicate_messages'] = {key: value - duplicate_start.get(key, 0) for key, value in self.sensors.duplicate_messages.items()}

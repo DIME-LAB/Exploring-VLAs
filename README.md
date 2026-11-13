@@ -429,6 +429,24 @@ persist that decision and resume refuses a stopped ledger. Runs carry a versione
 quality policy; use a fresh output directory for this policy rather than migrating
 an older pilot ledger. Failed episodes remain excluded from export.
 
+Smooth DART uses seeded minimum-jerk ramps with 0.3–0.8 s holds, nominal
+0.26–1 degree per-joint amplitudes and a 65% per-arm-operation on probability.
+Short motions scale the amplitude or skip it; the last 20% is quiet. Home and
+gripper motions receive no injected noise. The expert keeps the planner's
+collision-checked joint-space path. An already bounded time law is retained;
+otherwise minimum-jerk timing at path corners reserves velocity/acceleration
+budget for drift. The planned duration and all noise segments are logged.
+
+A final arm-target limiter enforces 10 rad/s and 2 rad/s², including braking room
+at joint bounds. Its state commits only after the matching physical ACK and
+carries across an idle barrier only with the validated clean hold. Gripper
+commands pass through unchanged. Frame logs separate planned noise, limiter delta
+and target velocity; the timing audit checks those components and actual target
+derivatives (0.001 tolerance for float32 read-back). `action` remains exactly
+`corrective_action(measured_state, expert_reference)`. Offline metrics can be
+reproduced with `dart_benchmark.py --input <retained-run> --output <confined-dir>`;
+its retimed fixed-observation replay is not a physical yield or throughput test.
+
 The CPU GUI parity tests pin 14 scene/wait/dispatch methods to the live-verified
 `6e439ed` implementation and compare service sequences for normal and delayed
 responses. An offline ROS regression boots the actual GUI node against concurrent,

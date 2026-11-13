@@ -14,6 +14,7 @@ from unittest.mock import patch
 import numpy as np
 from contract import JOINTS, corrective_action, parameters
 from protocol import CancelledGeneration, CommandLedger, StepGeneration, OwnershipStalled
+from dart import DEFAULT_NOISE, SmoothDart, TargetLimiter, ExpertSchedule
 from episode_policy import ConvergenceFailure, QualityReject, POLICY, WorkerRegistry, FailureStreak, disposition
 from scene_sync import physical_pose_caches, collision_pose_errors
 from success import PHYSICAL_FLOOR_M, INTERIOR_FLOOR_M, initial_arm
@@ -29,7 +30,7 @@ def load_class(filename, name):
     path = HERE/filename
     tree = ast.parse(path.read_text())
     cls = next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name==name)
-    scope = dict(initial_arm=initial_arm, ConvergenceFailure=ConvergenceFailure, QualityReject=QualityReject, POLICY=POLICY, WorkerRegistry=WorkerRegistry, FailureStreak=FailureStreak, disposition=disposition, MotionWaitTimeout=MotionWaitTimeout, contextmanager=contextmanager, OwnershipStalled=OwnershipStalled, threading=threading,time=time,np=np,json=json,JOINTS=JOINTS,
+    scope = dict(ExpertSchedule=ExpertSchedule, DEFAULT_NOISE=DEFAULT_NOISE, SmoothDart=SmoothDart, TargetLimiter=TargetLimiter, initial_arm=initial_arm, ConvergenceFailure=ConvergenceFailure, QualityReject=QualityReject, POLICY=POLICY, WorkerRegistry=WorkerRegistry, FailureStreak=FailureStreak, disposition=disposition, MotionWaitTimeout=MotionWaitTimeout, contextmanager=contextmanager, OwnershipStalled=OwnershipStalled, threading=threading,time=time,np=np,json=json,JOINTS=JOINTS,
                  String=lambda data:NS(data=data),StepGeneration=StepGeneration,
                  CancelledGeneration=CancelledGeneration,CommandLedger=CommandLedger,
                  corrective_action=corrective_action,JOINT_LIMITS={k:(-3,3) for k in JOINTS},
