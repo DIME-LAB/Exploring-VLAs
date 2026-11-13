@@ -30,6 +30,7 @@ sys.path.insert(0, str(REPO / 'omni-kit-mcp'))
 from kit_mcp.client import call as kit_call
 from so_arm101_control.pick_place import PickPlaceNode, JOINT_LIMITS
 from contract import COLORS, JOINTS, EVAL_SEEDS, corrective_action, parameters, timing_audit
+from checkpoint import progress
 
 
 def ns(stamp):
@@ -414,13 +415,39 @@ class Collector:
         allowed_root = Path(os.getenv('SOARM_COLLECTION_ROOT', '/mnt/a4500-backup/exploring-vlas')).resolve()
         if not root.is_relative_to(allowed_root):
             raise ValueError(f'Bulk collection output must be inside {allowed_root}')
-        root.mkdir(parents=True, exist_ok=False)
+        root.mkdir(parents=True, exist_ok=args.resume)
+        previous = json.loads((root / 'run.json').read_text()) if args.resume else None
+        receipts = []
+        if previous:
+            for trial, path in enumerate(sorted(root.glob('attempt-*'))):
+                if path.name != f'attempt-{trial:04d}':
+                    raise ValueError('Cannot resume a ledger with missing attempt directories')
+                receipt = json.loads((path / 'receipt.json').read_text())
+                if receipt['accepted']:
+                    rows = [json.loads(line) for line in (path / 'frames.jsonl').read_text().splitlines()]
+                    if not timing_audit(rows, 30)['passed'] or not all((path / f'{k}.mp4').exists() for k in ('wrist', 'top')):
+                        raise ValueError(f'Cannot resume invalid accepted attempt {path}')
+                receipts.append(receipt)
+            logged = [json.loads(line) for line in (root / 'episodes.jsonl').read_text().splitlines()]
+            if logged != receipts:
+                raise ValueError('Resume attempt log differs from the receipt ledger')
+        attempted, accepted = progress(receipts, args.seed)
+        if accepted > args.episodes:
+            raise ValueError('Requested target is smaller than the accepted checkpoint')
+        old_summary = json.loads((root / 'summary.json').read_text()) if (root / 'summary.json').exists() else {}
+        # Older runs did not checkpoint elapsed time. Their last receipt mtime records
+        # the end of active work; exclude the intervening shutdown/disk wait.
+        previous_wall = old_summary.get('wall_seconds', max(0., (root / 'episodes.jsonl').stat().st_mtime - previous['started']) if previous and receipts else 0.)
+        disk_wait = old_summary.get('disk_wait_seconds', 0.)
         clock_config = mcp('run_python', {'code': (REPO / 'linux-env/scripts/collect/configure_clock.py').read_text() + '\nresult=configure(30)'})
         timeline(True)
         self.wait_ready()
         self.node._cmd_toggle_ground_plane()
         timeline(False)
-        if args.replay_receipt:
+        if previous:
+            baseline = previous['baseline']
+            self.baseline_cup_layout = previous['baseline_cup_layout']
+        elif args.replay_receipt:
             replay_run = json.loads((args.replay_receipt.parent.parent / 'run.json').read_text())
             baseline = replay_run['baseline']
             self.baseline_cup_layout = replay_run['baseline_cup_layout']
@@ -437,6 +464,7 @@ class Collector:
                 position[2] = self.node._ground_z_var.get() + float(bbox['sz']) / 2
             self.baseline_cup_layout = initial['cup_layout']
         tracked_sources = ['linux-env/scripts/collect/collect.py', 'linux-env/scripts/collect/contract.py',
+                           'linux-env/scripts/collect/checkpoint.py',
                            'linux-env/scripts/collect/configure_clock.py',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/pick_place.py',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/grasp_geometry.py',
@@ -444,20 +472,38 @@ class Collector:
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/ik_calibration.yaml',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/workspace_bounds.yaml']
         source_hashes = {name: hashlib.sha256((REPO / name).read_bytes()).hexdigest() for name in tracked_sources}
-        (root / 'run.json').write_text(json.dumps(dict(instance=args.instance, host=socket.gethostname(), gpu_index=int(os.getenv('ISAACSIM_GPU', '0')),
+        provenance = dict(start_trial=attempted, started=time.time(), source_sha256=source_hashes,
+            git_commit=subprocess.check_output(['git', '-C', str(REPO), 'rev-parse', 'HEAD'], text=True).strip())
+        if previous:
+            for name, digest in previous['source_sha256'].items():
+                if name != 'linux-env/scripts/collect/collect.py' and source_hashes[name] != digest:
+                    raise ValueError(f'Resume motion/timing source changed: {name}')
+            if previous['instance'] != args.instance or previous['clock_config'] != clock_config:
+                raise ValueError('Resume instance/clock configuration differs')
+            previous.setdefault('resume_sessions', []).append(provenance)
+            (root / 'run.json').write_text(json.dumps(previous, indent=2))
+        else:
+            (root / 'run.json').write_text(json.dumps(dict(instance=args.instance, host=socket.gethostname(), gpu_index=int(os.getenv('ISAACSIM_GPU', '0')),
             clock_config=clock_config, domain=90 + args.instance,
             bridge_port=8777 + 2 * args.instance, fps=30, baseline=baseline, baseline_cup_layout=self.baseline_cup_layout, eval_seeds=EVAL_SEEDS,
-            started=time.time(), source_sha256=source_hashes, git_commit=subprocess.check_output(['git', '-C', str(REPO), 'rev-parse', 'HEAD'], text=True).strip()), indent=2))
-        accepted = 0
-        attempted = 0
+            **{k: v for k, v in provenance.items() if k != 'start_trial'}), indent=2))
         start = time.monotonic()
-        for trial in range(args.max_attempts):
+        waiting_for_disk = args.resume
+        for trial in range(attempted, args.max_attempts):
             if accepted >= args.episodes:
                 break
             if self.stop.is_set() or self.failure:
                 raise RuntimeError(self.failure or 'Collection interrupted')
-            if __import__('shutil').disk_usage('/').free < 90 * 1024**3:
-                raise RuntimeError('Root filesystem below 90 GiB free')
+            if waiting_for_disk or __import__('shutil').disk_usage('/').free < 90 * 1024**3:
+                wait_start = time.monotonic()
+                while __import__('shutil').disk_usage('/').free < 92 * 1024**3:
+                    print(json.dumps(dict(event='disk_wait', free_gib=__import__('shutil').disk_usage('/').free / 1024**3,
+                        resume_gib=92, accepted=accepted)), flush=True)
+                    if self.stop.wait(60):
+                        raise RuntimeError('Collection interrupted during disk wait')
+                disk_wait += time.monotonic() - wait_start
+                waiting_for_disk = False
+                print(json.dumps(dict(event='disk_resumed', disk_wait_seconds=disk_wait)), flush=True)
             attempted += 1
             color = COLORS[accepted % 3]
             params = (json.loads(args.replay_receipt.read_text())['params'] if args.replay_receipt
@@ -537,9 +583,14 @@ class Collector:
                         video.unlink()
             print(json.dumps(dict(trial=trial, accepted=accepted, target=args.episodes,
                 yield_fraction=accepted / (trial + 1), error=receipt.get('error'), timing=receipt.get('timing'))), flush=True)
+            elapsed = previous_wall + time.monotonic() - start
+            (root / 'summary.json').write_text(json.dumps(dict(complete=False, episodes=accepted,
+                attempts=attempted, wall_seconds=elapsed, disk_wait_seconds=disk_wait,
+                end_marker='COLLECTION_IN_PROGRESS'), indent=2))
         summary = dict(complete=accepted == args.episodes, episodes=accepted, attempts=attempted,
-            yield_fraction=accepted / attempted, wall_seconds=time.monotonic() - start,
-            episodes_per_wall_hour=accepted * 3600 / max(time.monotonic() - start, 1), end_marker='COLLECTION_FINISHED')
+            yield_fraction=accepted / max(attempted, 1), wall_seconds=previous_wall + time.monotonic() - start,
+            disk_wait_seconds=disk_wait,
+            episodes_per_wall_hour=accepted * 3600 / max(previous_wall + time.monotonic() - start, 1), end_marker='COLLECTION_FINISHED')
         (root / 'summary.json').write_text(json.dumps(summary, indent=2))
         print(json.dumps(summary), flush=True)
         if not summary['complete']:
@@ -563,8 +614,11 @@ def main():
     parser.add_argument('--max-attempts', type=int, default=250)
     parser.add_argument('--episode-deadline', type=float, default=180)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--resume', action='store_true', help='Re-audit and continue this output ledger')
     args = parser.parse_args()
     if args.replay_receipt:
+        if args.resume:
+            parser.error('Replay and resume are separate operations')
         args.episodes, args.max_attempts = 1, 1
     if args.episodes < 1 or args.episodes > 50:
         parser.error('This collector is limited to the validated 50-episode pilot')

@@ -1,4 +1,5 @@
 import unittest
+from checkpoint import progress
 from contract import EVAL_SEEDS, corrective_action, parameters, timing_audit
 
 
@@ -18,6 +19,18 @@ class ContractTests(unittest.TestCase):
 
     def test_true_clocks_pass(self):
         self.assertTrue(timing_audit(self.rows(), 30)['passed'])
+
+    def test_resume_ledger_preserves_seed_and_colour(self):
+        receipts = []
+        for trial, (color, ok) in enumerate([('red', True), ('green', False), ('green', True)]):
+            receipts.append(dict(params=dict(parameters(123 + trial, color), trial=trial),
+                                 accepted=ok, timing=dict(passed=True)))
+        self.assertEqual(progress(receipts, 123), (3, 2))
+        with self.assertRaises(ValueError):
+            progress(receipts, 124)
+        receipts[1]['accepted'] = True
+        with self.assertRaises(ValueError):
+            progress(receipts, 123)
 
     def test_duplicate_or_skipped_camera_is_rejected(self):
         rows = self.rows(); rows[30]['sim_ns'] = rows[29]['sim_ns']

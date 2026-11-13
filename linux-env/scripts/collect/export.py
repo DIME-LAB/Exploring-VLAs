@@ -23,6 +23,9 @@ def main():
     torch.set_num_threads(1)
     cv2.setNumThreads(1)
     run, report = args.run, args.report_dir
+    summary = json.loads((run / 'summary.json').read_text())
+    if not summary.get('complete') or summary.get('end_marker') != 'COLLECTION_FINISHED':
+        raise ValueError('Collection is incomplete; refusing to export a partial run')
     report.mkdir(parents=True, exist_ok=True)
     config = json.loads((run / 'run.json').read_text())
     fps = config['fps']

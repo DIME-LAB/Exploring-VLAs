@@ -327,7 +327,8 @@ World timing is selected before scene creation (including the 30 Hz physics
 frame-rate clamp). Never change World timing on a live articulation.
 Each instance has a portable root; shader caches under `~/.cache/ov` are shared.
 Collection writes only beneath `/mnt/a4500-backup/exploring-vlas/` and refuses
-to start/continue if `/` has less than 90 GiB free. Never alter the sibling
+to start another attempt if `/` has less than 90 GiB free. It logs a wait every
+60 seconds and resumes above 92 GiB; it never cleans other workspaces. Never alter the sibling
 `a4500-backup-20260828` archive. No source under `isaac/exts/` needs modification.
 
 ```bash
@@ -375,7 +376,10 @@ Every attempt has `receipt.json` with its seed, task, offsets, heights, speed,
 noise seed, cup parameters, initial poses and physical result. `frames.jsonl`
 contains original camera/joint/action sim stamps, wall receipt times, clean actions
 and executed commands. Failures retain their receipts but are excluded from the
-dataset. A run ends with `summary.json` and `COLLECTION_FINISHED`; check both,
+dataset. `--resume` re-audits an existing output ledger and continues its original baseline,
+seed sequence and accepted-colour rotation; incomplete or inconsistent ledgers
+are refused. Source hashes and resume sessions are retained in `run.json`.
+A run ends with `summary.json` and `COLLECTION_FINISHED`; check both,
 not just the process exit status. `--max-attempts` bounds retries and
 `--episode-deadline` bounds each episode in wall time. The collector refuses
 requests above 50 episodes; the lead schedules the larger run.
@@ -403,7 +407,7 @@ Validation on the assigned isolated instance: the five-episode smoke loaded in
 LeRobotDataset (4,238 frames, 30 fps; red/green/blue = 2/2/1), with all timing
 and clean-expert audits passing. Five of eight attempts were accepted (62.5%).
 The shared pure geometry matches the verified GUI mathematics on 1,000 random
-cases; 12 offline tests pass. The GUI adapter also boots and serves its widget
+cases; 13 offline tests pass. The GUI adapter also boots and serves its widget
 inventory and Quickstart services with sim time enabled in the isolated domain.
 The collection process itself needs no display.
 
