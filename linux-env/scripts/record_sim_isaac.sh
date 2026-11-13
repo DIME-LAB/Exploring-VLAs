@@ -71,12 +71,9 @@ export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
 # Camera config — pointed at Isaac Sim's existing _sim-suffixed topics.
 # Feature keys (`wrist`, `top`) become `observation.images.{wrist,top}` in
 # the v3 dataset, matching the real parity target's schema.
-# Both cameras publish at 640x480 rgba8 (alpha stripped on the lerobot
-# consumer side via the ROS2Camera _msg_to_ndarray patch in this fork —
-# stripping in the Isaac Sim publisher's render-thread callback throttles
-# RTF to ~1 Hz; consumer-side strip leaves Isaac Sim at 18 Hz).
-# Matches real-target parity dataset resolution.
-DEFAULT_CAMERAS='{wrist: {type: ros2, topic: /wrist_camera_rgb_sim, encoding: rgba8, width: 640, height: 480, fps: 30}, top: {type: ros2, topic: /workspace_camera_sim, encoding: rgba8, width: 640, height: 480, fps: 30}}'
+# Both native camera helpers publish 640x480 rgb8; ROS2Camera returns HWC RGB.
+# This resolution and feature-key mapping match the recorded training schema.
+DEFAULT_CAMERAS='{wrist: {type: ros2, topic: /wrist_camera_rgb_sim, encoding: rgb8, width: 640, height: 480, fps: 30}, top: {type: ros2, topic: /workspace_camera_sim, encoding: rgb8, width: 640, height: 480, fps: 30}}'
 
 cd "$ENV_DIR" && exec pixi run lerobot-record \
   --robot.type=so101_ros2 \

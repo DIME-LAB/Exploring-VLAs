@@ -163,6 +163,33 @@ starting the window somewhere you can't see.
 and only the pieces that `up` started (an Isaac or control stack you started
 yourself is left alone). `down --policy` stops just the policy.
 
+## Simulation cameras
+
+Both image topics publish **640×480 rgb8**, one image per 60 Hz simulation
+frame, paced by the selected wall rate. Headers use simulation time and reset
+with `/clock` on timeline stop. The wrist uses its render product and
+`ROS2CameraHelper`; the workspace helper attaches to the **existing stream
+viewport render product**, so the topic and stream share the same view and
+no second workspace render is needed. There is one publisher per topic;
+manual viewport publishers reject those reserved topics.
+
+LeRobot's real Jazzy `ROS2Camera` decoded 20 live frames per camera and matched
+equivalent RGBA decoding byte for byte. The recorder and inference camera
+defaults use rgb8. In 65 s paced and unthrottled checks, all received image
+stamps were unique with exactly 1/60 s increments and no frame gaps.
+Against the old viewport paths, 32-frame temporal means measured wrist
+PSNR 47.61 dB / MAE 0.78 and workspace 73.17 dB / MAE 0.029 (8-bit units).
+Decoded `rec_222812` AV1 samples (32 wrist, 48 workspace frames) retained the
+same camera framing and color hues: first-home-frame median blue/green/red
+hues differed by at most one OpenCV hue unit. Whole-image RGB statistics vary
+with object layout, robot motion and compression; they are not pixel equality.
+No camera pose, intrinsic, lighting or material values were changed.
+
+When removing a camera helper, also remove its writer under
+`/Render/PostProcess/SDGPipeline/`; deleting only the graph can leave a live
+publisher in Isaac 6.1. Inspect publisher counts through ROS, since the
+viewport-publisher list only describes the optional manual capture path.
+
 ## Known issues
 
 - **Robot invisible after a cold first launch.** The Isaac log shows

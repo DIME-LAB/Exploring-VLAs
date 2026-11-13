@@ -138,6 +138,12 @@ class _ViewportCameraPublisher:
         if topic_name in self._publishers:
             self.stop(topic_name)
 
+        stage = omni.usd.get_context().get_stage()
+        for graph in ("ActionGraph_WristCamera", "ActionGraph_WorkspaceCamera"):
+            helper = stage.GetPrimAtPath(f"/Graph/{graph}/RGBPublish")
+            if helper.IsValid() and helper.GetAttribute("inputs:topicName").Get() == topic_name:
+                raise ValueError(f"/{topic_name} already belongs to ROS2CameraHelper")
+
         self._ensure_node()
         pub = self._node.create_publisher(Image, f"/{topic_name}", 10)
 
@@ -229,21 +235,10 @@ if "_viewport_pub" not in globals():
 
 
 class _ReplicatorCameraPublisher:
-    """Publishes a camera prim's rendered frames to a ROS2 Image topic via
-    a dedicated hidden viewport. Bypasses the Kit ROS2CameraHelper
-    action-graph node, which silently fails to register DDS publishers on
-    Isaac Sim 5.0 / Kit 107.3 / isaacsim.ros2.bridge 4.9.3 — graph nodes
-    compute, but no publisher ever appears on the wire.
+    """Optional hidden-viewport capture for custom camera topics.
 
-    Why a hidden viewport (not replicator annotators or isaacsim Camera):
-    both of those rely on rep.orchestrator stepping to populate frames,
-    which only runs in standalone mode (not during Kit play). Viewports
-    render every frame regardless. Each hidden viewport costs ~0.3 RTF
-    — acceptable for recording use.
-
-    Use this for cameras that aren't the active UI viewport. For the one
-    camera you also want to see in the UI, _ViewportCameraPublisher
-    (active-viewport reuse) is free (~0 RTF).
+    Production wrist and workspace topics belong to ROS2CameraHelper. This
+    manual capture path rejects those topics to keep one publisher per topic.
     """
 
     def __init__(self):
@@ -270,6 +265,12 @@ class _ReplicatorCameraPublisher:
 
         if topic_name in self._publishers:
             self.stop(topic_name)
+
+        stage = omni.usd.get_context().get_stage()
+        for graph in ("ActionGraph_WristCamera", "ActionGraph_WorkspaceCamera"):
+            helper = stage.GetPrimAtPath(f"/Graph/{graph}/RGBPublish")
+            if helper.IsValid() and helper.GetAttribute("inputs:topicName").Get() == topic_name:
+                raise ValueError(f"/{topic_name} already belongs to ROS2CameraHelper")
 
         # Reuse _ViewportCameraPublisher's persistent rclpy node to keep all
         # extension publishers on a single DDS participant.
@@ -1907,46 +1908,14 @@ class DigitalTwin(omni.ext.IExt):
             else:
                 print(f"Warning: Failed to create workspace camera at {ws_prim_path}")
 
-        # Start viewport publisher for workspace camera. Force the viewport's
-        # render resolution to match the camera's intrinsic resolution so the
-        # ROS2 frames match the OpenCVPinhole calibration on the prim. Without
-        # this the active UI viewport renders at its window size (e.g.
-        # 1280x720) regardless of camera intrinsics.
-        if not _viewport_pub.is_active("workspace_camera_sim"):
-            _viewport_pub.start(ws_prim_path, "workspace_camera_sim", frame_id="workspace_camera_sim")
-            try:
-                ws_entry = _viewport_pub._publishers.get("workspace_camera_sim")
-                if ws_entry and ws_entry.get("viewport"):
-                    ws_entry["viewport"].resolution = (ws_width, ws_height)
-            except Exception as e:  # noqa: BLE001
-                print(f"Warning: failed to force workspace viewport resolution: {e}")
-            print(f"Workspace camera viewport publisher started @ {ws_width}x{ws_height}.")
-        await app.next_update_async()
-
-        # Switch active viewport to workspace camera
+        # The workspace IS the stream viewport. Attach a native helper to its
+        # existing render product: exact render cadence without a second render.
         self._set_active_viewport_camera(ws_prim_path)
-
-        # 10c. Start replicator-based wrist camera publisher.
-        # The action graph at /Graph/ActionGraph_WristCamera is left in place
-        # (forward-compatible with the eventual Kit fix), but doesn't publish
-        # on Isaac Sim 5.0 / Kit 107.3 / isaacsim.ros2.bridge 4.9.3 — the
-        # IsaacCreateRenderProduct → ROS2CameraHelper chain silently fails to
-        # register a DDS publisher. _ReplicatorCameraPublisher bypasses that
-        # broken chain by using omni.replicator.core directly + manual rclpy
-        # publish. Costs ~0.05 RTF (one extra GPU render pass for the wrist
-        # camera, no UI viewport overhead).
-        wrist_cam_prim = "/World/SO_ARM101/camera_mount_link/usb_camera/wrist_camera"
-        wrist_stage = omni.usd.get_context().get_stage()
-        if wrist_stage.GetPrimAtPath(wrist_cam_prim).IsValid():
-            if not _replicator_pub.is_active("wrist_camera_rgb_sim"):
-                _replicator_pub.start(
-                    wrist_cam_prim, "wrist_camera_rgb_sim",
-                    width=640, height=480, frame_id="camera_link",
-                )
-                print("Wrist camera replicator publisher started.")
-            await app.next_update_async()
-        else:
-            print(f"Warning: wrist camera prim {wrist_cam_prim} not found, skipping replicator publisher")
+        import omni.kit.viewport.utility as vp_utils
+        viewport = vp_utils.get_active_viewport()
+        viewport.resolution = (640, 480)
+        self._setup_workspace_camera_publisher(viewport.get_render_product_path())
+        await app.next_update_async()
 
         # 11. Create contact sensors on cups (for motion_logger at 50 Hz).
         # Must be AFTER play — sensor backend initializes on Play per
@@ -2181,7 +2150,7 @@ class DigitalTwin(omni.ext.IExt):
                     ("ros2_subscribe_joint_state.inputs:nodeNamespace", ""),
                     ("ros2_publish_clock.inputs:topicName", "/clock"),
                     ("ros2_publish_clock.inputs:nodeNamespace", ""),
-                    ("isaac_read_simulation_time.inputs:resetOnStop", False),
+                    ("isaac_read_simulation_time.inputs:resetOnStop", True),
                     ("articulation_controller.inputs:robotPath", "/World/SO_ARM101"),
                     # Use joint indices [0..5] instead of joint names because
                     # the real robot publishes URDF names (Rotation, Pitch, ...)
@@ -2513,7 +2482,7 @@ class DigitalTwin(omni.ext.IExt):
                     ("TFPublish.inputs:topicName", "tf_cam"),
                     ("TFPublish.inputs:targetPrims", CAMERA_PRIM),
                     ("TFPublish.inputs:parentPrim", "/World"),
-                    ("ReadSimTime.inputs:resetOnStop", False),
+                    ("ReadSimTime.inputs:resetOnStop", True),
                 ],
                 keys.CONNECT: [
                     ("OnPlaybackTick.outputs:tick", "RunOnce.inputs:execIn"),
@@ -2699,6 +2668,38 @@ class DigitalTwin(omni.ext.IExt):
         print(f"  Lens at usb_camera (0, 13.9mm, 0), looking along usb_camera -Y")
         print(f"  HFOV={HFOV_DEG}, {IMAGE_WIDTH}x{IMAGE_HEIGHT}, fl={focal_length:.2f}mm")
 
+    def _setup_workspace_camera_publisher(self, render_product_path):
+        """Share the stream viewport's render product, including its camera state."""
+        _viewport_pub.stop("workspace_camera_sim")
+        graph_path = "/Graph/ActionGraph_WorkspaceCamera"
+        stage = omni.usd.get_context().get_stage()
+        if stage.GetPrimAtPath(graph_path).IsValid():
+            return
+        keys = og.Controller.Keys
+        og.Controller.edit(
+            {"graph_path": graph_path, "evaluator_name": "execution"},
+            {
+                keys.CREATE_NODES: [
+                    ("Tick", "omni.graph.action.OnPlaybackTick"),
+                    ("Context", "isaacsim.ros2.bridge.ROS2Context"),
+                    ("RGBPublish", "isaacsim.ros2.bridge.ROS2CameraHelper"),
+                ],
+                keys.SET_VALUES: [
+                    ("RGBPublish.inputs:renderProductPath", str(render_product_path)),
+                    ("RGBPublish.inputs:topicName", "workspace_camera_sim"),
+                    ("RGBPublish.inputs:frameId", "workspace_camera_sim"),
+                    ("RGBPublish.inputs:type", "rgb"),
+                    ("RGBPublish.inputs:useSystemTime", False),
+                    ("RGBPublish.inputs:resetSimulationTimeOnStop", True),
+                    ("RGBPublish.inputs:frameSkipCount", 0),
+                ],
+                keys.CONNECT: [
+                    ("Tick.outputs:tick", "RGBPublish.inputs:execIn"),
+                    ("Context.outputs:context", "RGBPublish.inputs:context"),
+                ],
+            },
+        )
+
     def setup_wrist_camera_action_graph(self):
         """Create ActionGraph for wrist camera (OV9732) ROS2 publishing.
         Also attaches USB camera and creates camera prim if not present."""
@@ -2735,11 +2736,7 @@ class DigitalTwin(omni.ext.IExt):
                     ("Context", "isaacsim.ros2.bridge.ROS2Context"),
                     ("ReadSimTime", "isaacsim.core.nodes.IsaacReadSimulationTime"),
                     ("CameraInfoPublish", "isaacsim.ros2.bridge.ROS2CameraInfoHelper"),
-                    # No ROS2CameraHelper RGB node here. On Isaac Sim 5.0 it never published, so the
-                    # hidden-viewport _ReplicatorCameraPublisher (rgba8) became the wrist image source,
-                    # and the training datasets were recorded from it. Isaac Sim 6.1 fixed the helper,
-                    # so keeping it made a second publisher (rgb8) on the same topic, interleaving two
-                    # encodings and breaking lerobot's ROS2Camera (reshape to 4 channels failed).
+                    ("RGBPublish", "isaacsim.ros2.bridge.ROS2CameraHelper"),
                 ],
                 keys.SET_VALUES: [
                     ("RenderProduct.inputs:cameraPrim", CAMERA_PRIM),
@@ -2748,7 +2745,13 @@ class DigitalTwin(omni.ext.IExt):
                     ("CameraInfoPublish.inputs:topicName", "wrist_camera_info"),
                     ("CameraInfoPublish.inputs:frameId", "camera_link"),
                     ("CameraInfoPublish.inputs:resetSimulationTimeOnStop", True),
-                    ("ReadSimTime.inputs:resetOnStop", False),
+                    ("RGBPublish.inputs:topicName", ROS2_TOPIC),
+                    ("RGBPublish.inputs:type", "rgb"),
+                    ("RGBPublish.inputs:frameId", "camera_link"),
+                    ("RGBPublish.inputs:useSystemTime", False),
+                    ("RGBPublish.inputs:resetSimulationTimeOnStop", True),
+                    ("RGBPublish.inputs:frameSkipCount", 0),
+                    ("ReadSimTime.inputs:resetOnStop", True),
                 ],
                 keys.CONNECT: [
                     ("OnPlaybackTick.outputs:tick", "RunOnce.inputs:execIn"),
@@ -2756,6 +2759,9 @@ class DigitalTwin(omni.ext.IExt):
                     ("RenderProduct.outputs:execOut", "CameraInfoPublish.inputs:execIn"),
                     ("RenderProduct.outputs:renderProductPath", "CameraInfoPublish.inputs:renderProductPath"),
                     ("Context.outputs:context", "CameraInfoPublish.inputs:context"),
+                    ("RenderProduct.outputs:execOut", "RGBPublish.inputs:execIn"),
+                    ("RenderProduct.outputs:renderProductPath", "RGBPublish.inputs:renderProductPath"),
+                    ("Context.outputs:context", "RGBPublish.inputs:context"),
                 ],
             }
         )
@@ -5941,7 +5947,7 @@ class DigitalTwin(omni.ext.IExt):
                     ],
                     keys.SET_VALUES: [
                         ("ros2_publish_transform_tree.inputs:topicName", topic_name),
-                        ("isaac_read_simulation_time.inputs:resetOnStop", False),
+                        ("isaac_read_simulation_time.inputs:resetOnStop", True),
                     ],
                 },
             )
@@ -6862,7 +6868,7 @@ class DigitalTwin(omni.ext.IExt):
                     ],
                     keys.SET_VALUES: [
                         ("ros2_publish_transform_tree.inputs:topicName", topic_name),
-                        ("isaac_read_simulation_time.inputs:resetOnStop", False),
+                        ("isaac_read_simulation_time.inputs:resetOnStop", True),
                     ],
                 },
             )

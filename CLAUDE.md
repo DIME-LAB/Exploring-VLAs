@@ -166,3 +166,13 @@ Kit 110.3 requires `/app/runLoops/main/syncToPresent=false` for the main-loop
 rate limiter to take effect. The launcher sets it per launch and on `rate` calls.
 Keep physics at 60 Hz. The default 17.4 Hz ceiling targets RTF 0.29; overrides
 19.4 and 0 select the alternate timing sweep and unthrottled profiling.
+
+Production camera topics are rgb8, via ROS2CameraHelper: wrist render product
+and the existing stream viewport render product for workspace. Do not start
+a hidden/viewport publisher on either production topic. Manual publishers
+refuse duplicates. Keep `resetSimulationTimeOnStop=true` and the `/clock` /
+pose nodes' `resetOnStop=true` together: camera stamps and `/clock` then share
+the same simulation clock. The 6.1 monotonic frame-time lookup emits warnings
+for rounded Fabric times; the reset-on-stop lookup avoids that path.
+Helper removal also requires its SDGPipeline writer cleanup. Preserve all
+camera intrinsics, transforms and renderer/material settings when changing cadence.
