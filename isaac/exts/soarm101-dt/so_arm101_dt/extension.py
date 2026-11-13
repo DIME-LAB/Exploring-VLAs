@@ -1487,6 +1487,29 @@ class DigitalTwin(omni.ext.IExt):
     def _skip_patterns(self):
         return self._objects_config.get("skip_patterns", [])
 
+    def _apply_sim_rate(self, hz=None):
+        """Apply Kit wall pacing after World initialization; physics stays at 60 Hz."""
+        if World.instance() is None:
+            raise RuntimeError("Create the World before applying sim pacing")
+        settings = carb.settings.get_settings()
+        if hz is None:
+            hz = settings.get("/soarm101/rateHz")
+            if hz is None:
+                raise RuntimeError("Launch with isaacsim_launch.sh to configure sim pacing")
+        hz = float(hz)
+        if not math.isfinite(hz) or hz < 0:
+            raise ValueError("Sim rate must be finite and nonnegative")
+        settings.set_float("/soarm101/rateHz", hz)
+        settings.set_bool("/app/runLoops/main/rateLimitEnabled", hz > 0)
+        if hz > 0:
+            settings.set_float("/app/runLoops/main/rateLimitFrequency", hz)
+        actual = {"enabled": settings.get("/app/runLoops/main/rateLimitEnabled"),
+                  "hz": settings.get("/app/runLoops/main/rateLimitFrequency")}
+        if actual["enabled"] != (hz > 0) or (hz > 0 and abs(actual["hz"] - hz) > 1e-4):
+            raise RuntimeError(f"Kit pacing readback mismatch: {actual}")
+        print(f"[SimRate] requested={hz:g} Hz, readback={actual}")
+        return actual
+
     async def load_scene(self):
         stage = omni.usd.get_context().get_stage()
 
@@ -1499,6 +1522,8 @@ class DigitalTwin(omni.ext.IExt):
         else:
             world = World()
             print("Physics scene already exists, skipping initialization")
+
+        self._apply_sim_rate()
 
         # Check for ground plane on stage and add if missing.
         # Two layers: a large default-gray collision plane covers the
@@ -1906,6 +1931,7 @@ class DigitalTwin(omni.ext.IExt):
         # visited by stage.Traverse()).
         self._suppress_camera_mesh_decorations()
 
+        self._apply_sim_rate()
         print("=== Quick Start Complete ===")
 
     def _suppress_camera_mesh_decorations(self):

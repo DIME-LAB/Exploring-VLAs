@@ -149,10 +149,13 @@ yourself is left alone). `down --policy` stops just the policy.
   Workaround: `isaacsim_launch.sh close`, then `deploy_sim.sh up` again (a warm
   launch renders it). Planned fix: de-instance the robot's visual meshes when
   the scene is built.
-- **Sim speed depends on box load.** Real-time factor is ~0.47x on an idle box
-  and ~0.31x with other jobs running. The training data was recorded at ~0.32x
-  with a ~19.4 Hz wall-clock loop; matching that (rate limit, client fps ~19)
-  is planned.
+- **Sim pacing is a ceiling under shared CPU load.** `up --rate-hz 19.4` (default)
+  sets and reads back Kit's main run-loop limiter after the World exists;
+  physics remains 60 Hz, so the target RTF is 19.4/60 = 0.3233. `--rate-hz 0`
+  disables pacing for profiling. An idempotent `up` applies the requested rate
+  to the live scene too. A 65.10 s loaded-box run measured RTF 0.3039
+  (18.23 frames/s, 54.84 ms/frame; load 28.18). The limiter cannot recover CPU
+  time lost to other jobs; inspect measured RTF before interpreting a rollout.
 - **RTC (real-time chunking) is not actually applied.** `LEROBOT_RTC_ENABLED=1` logs
   "RTC enabled", but the fork's `policy_server.py` calls `predict_action_chunk(observation)`
   without `prev_chunk_left_over` / `inference_delay`, so RTC returns the unguided output

@@ -12,7 +12,7 @@ cadence (~14 Hz) not matching the camera-bound recording loop.
 
 - [ ] 1.1 Confirm the recording rate of `rec_222812` from the data itself (count duplicate consecutive
       frames in the dataset videos) — settles 19.4 Hz vs ~0.4× RTF ambiguity.
-- [ ] 1.2 Pin sim speed: Kit run-loop rate limit (`/app/runLoops/main/rateLimitEnabled`,
+- [x] 1.2 Pin sim speed: Kit run-loop rate limit (`/app/runLoops/main/rateLimitEnabled`,
       `rateLimitFrequency`) set at launch after the World exists and read back; launcher flag
       `--rate-hz` (default from 1.1). Verify RTF ≈ 0.32 ± 0.02.
 - [ ] 1.3 Robot client loop at the recorded rate (fps ≈ 19, `action_duration_s` to match); confirm

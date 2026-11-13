@@ -1,11 +1,11 @@
 #!/bin/bash
 # deploy_sim.sh — one command for the SO-ARM101 digital twin + SmolVLA policy.
 #
-#   up [--stream] [--gui|--no-gui] [--rviz|--no-rviz] [--model <preset|hf_id|path>] [--task "<text>"] [--no-policy]
+#   up [--rate-hz HZ] [--stream] [--gui|--no-gui] [--rviz|--no-rviz] [--model <preset|hf_id|path>] [--task "<text>"] [--no-policy] [--fps Hz] [--action-duration-s seconds] [--no-rtc]
 #       1. Isaac Sim + soarm101-dt + omni-kit-mcp bridge     (isaac/isaacsim_launch.sh)
 #       2. Scene: soarm101.quick_start over the bridge        (skipped if already live)
 #       3. ROS 2 control stack: MoveIt + ros2_control (+ control_gui, + RViz)
-#       4. SmolVLA async policy server + robot client on GPU 1 (RTC flag set but currently inactive, see README Known issues)
+#       4. SmolVLA async policy server + robot client on GPU 1 (RTC prefix guidance)
 #          (inference_async_lerobot.sh → run_async_inference_sim.py)
 #   down [--policy]
 #            Stop what `up` started, in reverse order. Things that were already
@@ -77,9 +77,14 @@ usage() { sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; }
 # ---------------------------------------------------------------------------
 cmd_up() {
     local stream="" rviz="" gui="" model_arg="" task="$DEFAULT_TASK" policy=1 model
+    local policy_args=()
     while [ $# -gt 0 ]; do
         case "$1" in
+            --fps|--action-duration-s) policy_args+=("$1" "${2:?option needs a value}"); shift ;;
+            --fps=*|--action-duration-s=*|--no-rtc) policy_args+=("$1") ;;
             --stream)    stream="--stream" ;;
+            --rate-hz) export SOARM_SIM_RATE_HZ="${2:?--rate-hz needs a value}"; shift ;;
+            --rate-hz=*) export SOARM_SIM_RATE_HZ="${1#--rate-hz=}" ;;
             --model)     model_arg="${2:?--model needs a value}"; shift ;;
             --model=*)   model_arg="${1#--model=}" ;;
             --task)      task="${2:?--task needs a value}"; shift ;;
@@ -136,7 +141,7 @@ cmd_up() {
         # bash starts `&` jobs with SIGINT ignored, and a Python started that way
         # never raises KeyboardInterrupt, so `down` could only SIGTERM it.
         setsid env --default-signal=INT bash "$SCRIPT_DIR/inference_async_lerobot.sh" \
-            --pretrained="$model" --task="$task" > "$log" 2>&1 < /dev/null &
+            --pretrained="$model" --task="$task" "${policy_args[@]}" > "$log" 2>&1 < /dev/null &
         pid=$!
         echo "$pid" > "$POLICY_PIDFILE"
         echo "$log" > "$POLICY_LOGFILE"

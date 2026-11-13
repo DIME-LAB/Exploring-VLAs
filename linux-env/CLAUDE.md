@@ -26,7 +26,7 @@ colcon. Idempotent — safe to re-run.
 
 ```bash
 # Deploy: Isaac + scene + control stack + SmolVLA async policy (GPU 1)
-bash linux-env/scripts/deploy_sim.sh up [--stream] [--gui|--no-gui] [--rviz|--no-rviz] [--model <preset|hf_id>] [--no-policy]
+bash linux-env/scripts/deploy_sim.sh up [--rate-hz HZ] [--stream] [--gui|--no-gui] [--rviz|--no-rviz] [--model <preset|hf_id>] [--no-policy]
 bash linux-env/scripts/deploy_sim.sh status
 bash linux-env/scripts/deploy_sim.sh down [--policy]
 
@@ -215,3 +215,8 @@ episodes.
   this is still informative; for tighter sim2real fidelity, add a
   `reference.positions + reference.velocities × lookahead_s` projection
   (~100 ms) or detune the joint drives.
+
+Sim pacing: the launcher's `DEFAULT_SIM_RATE_HZ` is the single default cadence.
+`deploy_sim.sh up --rate-hz HZ` applies Kit pacing after World initialization
+and prints the readback; `0` is unthrottled. At 60 Hz physics, RTF = Hz/60 only
+when the box has enough CPU headroom. Do not change physics dt to tune wall pacing.

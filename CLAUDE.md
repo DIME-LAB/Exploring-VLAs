@@ -83,7 +83,7 @@ export PATH="$HOME/.pixi/bin:$PATH"
 bash linux-env/scripts/bootstrap.sh        # preflight + submodules + pixi env + colcon build
 
 # Each session — deploy (sim + SmolVLA policy)
-bash linux-env/scripts/deploy_sim.sh up [--stream] [--gui|--no-gui] [--model <preset|hf_id>]
+bash linux-env/scripts/deploy_sim.sh up [--rate-hz HZ] [--stream] [--gui|--no-gui] [--model <preset|hf_id>]
 #   control_gui/RViz are opt-in (default on locally, off with --stream); a requested
 #   window with no usable X display fails fast — no virtual-display fallback
 bash linux-env/scripts/deploy_sim.sh status
@@ -149,3 +149,8 @@ For real-hardware data collection see [`LEROBOT_ROS2_MAC_SETUP.md`](vla_SO-ARM10
 - **Don't create `.md` files unless the user asks** (or the work landing genuinely needs one — e.g., a new architectural doc).
 - **Trust the planning dir.** `.planning/STATE.md` reflects current truth; if something contradicts it, suspect drift and ask.
 - **Match commit style** — the existing `feat(scope):`, `fix(scope):`, `docs(scope):`, `chore:` convention with multi-paragraph bodies covering motivation + implementation + verification.
+
+Sim pacing: the launcher's `DEFAULT_SIM_RATE_HZ` is the single default cadence.
+`deploy_sim.sh up --rate-hz HZ` applies Kit pacing after World initialization
+and prints the readback; `0` is unthrottled. At 60 Hz physics, RTF = Hz/60 only
+when the box has enough CPU headroom. Do not change physics dt to tune wall pacing.

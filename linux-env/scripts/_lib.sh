@@ -200,6 +200,9 @@ scene_up() {
         fi
         printf '%s\n' "$out" | grep -m1 '"message"' | sed 's/^ */  /' || true
     fi
+    # World initialization resets Kit pacing. Apply and read it after scene creation,
+    # including an idempotent up against an already-live scene.
+    bash "$ISAAC_LAUNCHER" rate || return $?
     echo "  Waiting for /clock to tick..."
     local i
     for i in 1 2 3 4 5 6 7 8 9 10; do

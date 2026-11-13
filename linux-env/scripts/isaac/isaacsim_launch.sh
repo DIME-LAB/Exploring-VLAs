@@ -2,7 +2,8 @@
 # Launch, close and check Isaac Sim 6.1 with the soarm101-dt extension and the omni-kit-mcp bridge.
 #
 # Usage:
-#   isaacsim_launch.sh launch [ext-id] [--stream]  # launch, then block until the bridge answers
+#   isaacsim_launch.sh launch [ext-id] [--stream] [--rate-hz HZ]  # launch, then block until the bridge answers
+#   isaacsim_launch.sh rate [hz]                   # apply/read pacing after World exists; 0 = unlimited
 #   isaacsim_launch.sh wait [window]               # block until the bridge answers; first-run RTX compile extends it
 #   isaacsim_launch.sh quick-start [json]          # soarm101.quick_start while watching Kit (wedge detection, no retry)
 #   isaacsim_launch.sh status                      # process, bridge, stream port
@@ -52,6 +53,9 @@ TOOLS_PATH="$REPO_ROOT/isaac"
 TOOLS_MODULE="soarm101_tools"
 CYCLONEDDS_XML="$REPO_ROOT/linux-env/cyclonedds.xml"
 GPU="${ISAACSIM_GPU:-0}"
+# Default recording cadence; update this one value when dataset timing changes.
+DEFAULT_SIM_RATE_HZ=19.4
+RATE_HZ="${SOARM_SIM_RATE_HZ:-$DEFAULT_SIM_RATE_HZ}"
 MCP_PORT="${OMNI_KIT_MCP_PORT:-${SOARM_KIT_MCP_PORT:-8767}}"
 STREAM_SIGNAL_PORT=49100
 LOG="${ISAACSIM_LOG:-/tmp/isaacsim-soarm101.log}"
@@ -203,15 +207,43 @@ do_quick_start() {
     return "$rc"
 }
 
+validate_rate() {
+    python3 - "$RATE_HZ" <<'PY'
+import math, sys
+try:
+    hz = float(sys.argv[1])
+    assert math.isfinite(hz) and hz >= 0
+except (ValueError, AssertionError):
+    sys.exit("--rate-hz must be finite and nonnegative (0 = unthrottled)")
+PY
+}
+
+do_rate() {
+    RATE_HZ="${1:-$RATE_HZ}"
+    validate_rate || return 2
+    local params
+    params="$(python3 - "$RATE_HZ" <<'PY'
+import json, sys
+print(json.dumps({"code": "from so_arm101_dt.extension import get_instance\nresult=get_instance()._apply_sim_rate(" + repr(float(sys.argv[1])) + ")"}))
+PY
+)"
+    client run_python "$params" --timeout 30
+}
+
 do_launch() {
     local ext="soarm101-dt" stream=0 arg
-    for arg in "$@"; do
+    while [ $# -gt 0 ]; do
+        arg="$1"
         case "$arg" in
+            --rate-hz) RATE_HZ="${2:?--rate-hz needs a value}"; shift ;;
+            --rate-hz=*) RATE_HZ="${arg#--rate-hz=}" ;;
             --stream) stream=1 ;;
             -*) echo "unknown option: $arg" >&2; return 2 ;;
             *) ext="$arg" ;;
         esac
+        shift
     done
+    validate_rate || return 2
 
     if [ ! -x "$ISAACSIM_BIN" ]; then
         echo "ERROR: ISAACSIM_BIN not executable: $ISAACSIM_BIN" >&2
@@ -275,7 +307,8 @@ do_launch() {
            # 83dcf46 / e2a2247 (ur5e-dt, aic-dt launchers).
            --/exts/isaacsim.core.throttling/enable_async=false
            # Never save this session's /persistent settings into the shared install's config.
-           --/app/settings/persistent=false)
+           --/app/settings/persistent=false
+           "--/soarm101/rateHz=$RATE_HZ")
     # shellcheck disable=SC2206
     [ -n "${ISAACSIM_EXTRA_ARGS:-}" ] && args+=(${ISAACSIM_EXTRA_ARGS})
 
@@ -388,6 +421,7 @@ do_status() {
 
 case "${1:-help}" in
     launch)  shift; do_launch "$@" ;;
+    rate)    do_rate "${2:-$RATE_HZ}" ;;
     wait)    do_wait "${2:-$WEDGE_S}" ;;
     quick-start) do_quick_start "${2:-}" ;;
     status)  do_status ;;
