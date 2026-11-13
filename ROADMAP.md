@@ -169,10 +169,17 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       - P2: GPU mapping; consistent disk policy; output confinement; full velocity reset; no rigid-body rebuild
         beside the live articulation.
       Review: coursework-eee598/roadmap-2026-11/phase3/3.1-collection/independent-review-3.1a-c.md.
-- [ ] 3.1e Training throughput before the large run (rtx6000, RTX 6000 Ada 48 GB): the 3.0b run is GPU-bound at
+- [x] 3.1e Training throughput before the large run (rtx6000, RTX 6000 Ada 48 GB): the 3.0b run is GPU-bound at
       1.33 steps/s with batch 64, fp32 expert (`use_amp=False`), frozen vision encoder, 16/48 GB used. Benchmark
       bf16 AMP, larger batch with scaled LR, and `torch.compile` on 500-step runs; pick the fastest config that
       matches the fp32 loss curve; size steps by passes over the data (~600k frames for ~900 episodes).
+      Done 2026-11-13: frozen VLM, full expert/state/action-projection FT (no LoRA), fp32 master weights + bf16 AMP
+      (3.0b with use_amp=False still left 96.6M expert params in bf16; use train_fp32_master31e.py), batch 64,
+      LR 1e-4, torch.compile max-autotune, 16 persistent workers, native brightness/contrast/saturation/hue/sharpness
+      (3 of 5) on both cameras: 1.77 steps/s (113 samples/s), 13.6 GiB peak; loss within ~1% of the fp32 reference
+      by 500 steps. 600k frames x 20 passes = 187,500 updates, ~29-34 h; review held-out at 10 passes (~15-17 h).
+      Cameras: keep raw top then wrist, rename_map={}, empty_cameras=0 (3.0b already matched pretraining order).
+      Mac: coursework-eee598/roadmap-2026-11/phase3/3.1e-throughput/.
 - [ ] 3.2 Fine-tune (more steps/episodes than 10k/100), sim/real mix per the coursework findings.
 - [ ] 3.3 Re-run the Phase 1 evaluation matrix.
 
