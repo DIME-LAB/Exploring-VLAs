@@ -1,0 +1,70 @@
+name: ROS 2 LeRobot packages
+on:
+  push:
+    branches: [dev, main]
+    paths: ["packages/**", ".github/workflows/ros2-plugins.yml", "lerobot"]
+  pull_request:
+    paths: ["packages/**", ".github/workflows/ros2-plugins.yml", "lerobot"]
+  workflow_dispatch:
+
+jobs:
+  packages:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        lerobot: [pypi, fork]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: jazzy
+      - name: Install ROS interfaces and Python tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-venv ffmpeg libgl1 ros-jazzy-control-msgs ros-jazzy-rosidl-default-generators ros-jazzy-rmw-cyclonedds-cpp
+          python3 -m venv --system-site-packages .venv
+          .venv/bin/python -m pip install --upgrade pip setuptools wheel pytest build
+          .venv/bin/python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+      - name: Install PyPI LeRobot
+        if: matrix.lerobot == 'pypi'
+        run: .venv/bin/python -m pip install 'lerobot==0.7.0'
+      - name: Install deployment fork for comparison
+        if: matrix.lerobot == 'fork'
+        run: |
+          git submodule update --init lerobot
+          .venv/bin/python -m pip install -e ./lerobot
+      - name: Build and install package wheels
+        run: |
+          for package in lerobot_ros2_context lerobot_camera_ros2 lerobot_robot_ros2_joint lerobot_teleoperator_ros2_joint lerobot_ros2_task; do
+            .venv/bin/python -m build --wheel --outdir "$PWD/package-wheels" "packages/$package"
+          done
+          .venv/bin/python -m pip install package-wheels/*.whl
+      - name: Fake-message tests and fork comparisons
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          .venv/bin/python -m pytest packages/tests -q --junitxml=packages-fake.xml
+      - name: Build RunTask action and check native ROS transport
+        env:
+          ROS_DOMAIN_ID: '94'
+          RMW_IMPLEMENTATION: rmw_cyclonedds_cpp
+          RUN_NATIVE_ROS: '1'
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          export CYCLONEDDS_URI="file://$GITHUB_WORKSPACE/linux-env/cyclonedds.xml"
+          colcon --log-base "$RUNNER_TEMP/phase2-interfaces/log" build \
+            --base-paths packages/lerobot_ros2_interfaces \
+            --build-base "$RUNNER_TEMP/phase2-interfaces/build" \
+            --install-base "$RUNNER_TEMP/phase2-interfaces/install" \
+            --cmake-args -DPython3_EXECUTABLE="$PWD/.venv/bin/python"
+          source "$RUNNER_TEMP/phase2-interfaces/install/setup.bash"
+          .venv/bin/python -m pytest packages/tests/test_native_lifecycle.py packages/tests/test_native_task.py -q --junitxml=packages-native.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ros2-packages-${{ matrix.lerobot }}
+          path: |
+            packages-fake.xml
+            packages-native.xml
+            package-wheels/*.whl
