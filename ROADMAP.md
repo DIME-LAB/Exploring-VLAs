@@ -215,6 +215,8 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       and its children (ros2_control_node, move_group, robot_state_publisher, control_gui, publishers) keep running
       with ppid 1 while status reports "Control stack: no". Reproduced 2026-11-13 twice. Stop the process group (or
       record child pids) and verify none survive before reporting down.
+- [ ] `deploy_sim.sh status` reports "Up" while control_gui's ROS executor has died (seen 2026-11-13 in the
+      pre-merge GUI check): status should probe a GUI/control service, not just the process, and fail when it hangs.
 - [ ] Check the Mac's offloaded Exploring-VLAs copy (G-DRIVE: unknown commit `5586bab` + 1 uncommitted file)
 - [ ] Housekeeping outside the repo: discard the unsent WhatsApp zip draft (us account); commit the
       Career repo's lerobot keep-edit; decide whether `coursework-eee598/` is git-ignored; fix the Mac
