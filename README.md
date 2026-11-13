@@ -397,6 +397,25 @@ The audit rejects skipped/duplicate ticks, mismatched physical state/images/pose
 noisy labels, changed applied targets, and application latency above one tick.
 A five-sim-second-late application probe must fail.
 
+Success uses a measured height-dependent interior profile from the full cup
+STL, not a single radius. `cup_profile.json` contains a concave envelope verified
+against every active triangle supporting plane, with a 0.1 mm fitting allowance
+and an additional 0.7 mm radial margin (0.5 mm absolute block rest offset plus
+both 0.1 mm contact offsets). All eight oriented block corners must fit their
+height's radius. Concavity makes the admitted volume convex, so fitting the
+corners also bounds the box between them. The 0.6 mm lower gate, 94 mm ceiling,
+15 settled ticks and 25 mm lift requirement remain. Receipts log each corner's
+height, radial bound and clearance; run metadata includes the profile and source
+hashes. A changed cup STL refuses collection until recalibrated.
+See [cup geometry and calibration](docs/notes/collection-success-geometry.md).
+
+For smoke/diagnostic runs, `--diagnostic` retains failed-attempt videos and saves
+`final-top.png` / `final-wrist.png` from the final recorded frame without advancing
+simulation. The receipt records its frame index and native sim stamp; the settled
+verification tail is outside the video. Production defaults still remove failed
+videos. Both modes exclude failed episodes from LeRobot export. Retention mode
+must stay the same when resuming a run.
+
 `deploy-clock` restores the ROS follower, keeps physical feedback publishing,
 and caps the identical simulation/camera profile at 30 app Hz (target RTF 1.0).
 `deploy` also starts the policy launcher with **fps=30**, action duration=1/30 s
@@ -433,12 +452,12 @@ ISAACSIM_GPU=0 bash linux-env/scripts/collect_sim.sh up 0
 bash linux-env/scripts/collect_sim.sh clock-sanity 0 \
   --output /mnt/a4500-backup/exploring-vlas/runtime/instance-0/clock-sanity.json
 
-bash linux-env/scripts/collect_sim.sh run 0 --episodes 5 --seed 310000 \
-  --output /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-physical-v3
+bash linux-env/scripts/collect_sim.sh run 0 --episodes 5 --seed 310000 --diagnostic \
+  --output /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-physical-v4
 bash linux-env/scripts/collect_sim.sh export 0 \
-  /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-physical-v3 \
+  /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-physical-v4 \
   --repo-id local/soarm101_headless_smoke \
-  --report-dir /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-physical-v3/report
+  --report-dir /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-physical-v4/report
 
 # Only after the corrected five-episode smoke passes; accepted colours rotate 17/17/16.
 bash linux-env/scripts/collect_sim.sh run 0 --episodes 50 --seed 320000 \

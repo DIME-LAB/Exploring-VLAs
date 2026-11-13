@@ -1,0 +1,42 @@
+{
+  "source": "vla_SO-ARM101/src/so_arm101_description/meshes/cup/cup.stl",
+  "source_sha256": "4abd3eeafc63dff6e4a7f85cd94835ed4f76b941fdf8b26cec62c73484e9a439",
+  "method": "Minimum axis distance of each STL/plane slice; concave four-node chord envelope, 100 um fit allowance; each active triangle supporting-plane inequality checked at all affine interval endpoints and zero crossings",
+  "samples": [
+    {
+      "height_m": 0.00120001,
+      "measured_inradius_m": 0.024165596308945103,
+      "supporting_plane_inradius_m": 0.02365826019617875,
+      "envelope_m": 0.02355826019617875
+    },
+    {
+      "height_m": 0.002,
+      "measured_inradius_m": 0.026200947729128055,
+      "supporting_plane_inradius_m": 0.026190447834606362,
+      "envelope_m": 0.026090447834606362
+    },
+    {
+      "height_m": 0.004,
+      "measured_inradius_m": 0.0271610535494793,
+      "supporting_plane_inradius_m": 0.027161050268672687,
+      "envelope_m": 0.027061050268672688
+    },
+    {
+      "height_m": 0.094,
+      "measured_inradius_m": 0.03663473718810569,
+      "supporting_plane_inradius_m": 0.03661636788599626,
+      "envelope_m": 0.036516367885996256
+    }
+  ],
+  "slopes": [
+    3.1652741139609386,
+    0.48530121703316276,
+    0.10505908463692855
+  ],
+  "fit_allowance_m": 0.0001,
+  "radial_margin_m": 0.0007,
+  "radial_margin_basis": "0.5 mm absolute block rest offset + two 0.1 mm contact offsets; separate 100 um envelope fit allowance",
+  "triangle_count": 24010,
+  "supporting_plane_violations": 0,
+  "worst_violations": []
+}

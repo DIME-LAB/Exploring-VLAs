@@ -1,9 +1,8 @@
 """Whole-block containment in the cup frame, using synchronized physical poses."""
 import math
+from cup_profile import radial_limit
 
-# A cylinder strictly within the cup STL's minimum inner radius (~25.96 mm).
 # Cup body coordinates have their origin at the base; rim height is 96.52 mm.
-INTERIOR_RADIUS_M = .025
 # Asset floor is 1.2 mm; block restOffset=-0.5 mm, cup restOffset=0.
 # Allow that resting overlap plus 0.1 mm numerical/collision tolerance.
 PHYSICAL_FLOOR_M = .0012
@@ -51,15 +50,20 @@ def contained(snapshot, object_name, color):
         relative = [block['position'][i]+offset[i]-cup['position'][i] for i in range(3)]
         corners.append(rotate(inverse, relative))
     radius = max(math.hypot(c[0], c[1]) for c in corners)
+    radial_checks = [dict(corner=index, height_m=c[2], radius_m=math.hypot(c[0],c[1]),
+                          allowed_radius_m=radial_limit(c[2]),
+                          clearance_m=radial_limit(c[2])-math.hypot(c[0],c[1]))
+                     for index,c in enumerate(corners)]
     low, high = min(c[2] for c in corners), max(c[2] for c in corners)
     velocity = max(math.sqrt(sum(v*v for v in body['velocity'][:3])) for body in (block, cup))
     angular = max(math.sqrt(sum(v*v for v in body['velocity'][3:])) for body in (block, cup))
     upright = rotate(cup['orientation'], [0, 0, 1])[2] > math.cos(math.radians(5))
-    ok = (radius <= INTERIOR_RADIUS_M and low >= INTERIOR_FLOOR_M and high <= INTERIOR_RIM_M
+    ok = (all(c['clearance_m'] >= 0 for c in radial_checks) and low >= INTERIOR_FLOOR_M and high <= INTERIOR_RIM_M
           and velocity <= .015 and angular <= .15 and upright)
     return dict(passed=ok, max_corner_radius_m=radius, lowest_corner_m=low,
                 highest_corner_m=high, linear_speed_m_s=velocity, angular_speed_rad_s=angular,
-                upright=upright)
+                upright=upright, min_radial_clearance_m=min(c['clearance_m'] for c in radial_checks),
+                radial_checks=radial_checks)
 
 
 def settled_containment(snapshots, object_name, color):

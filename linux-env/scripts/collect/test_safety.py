@@ -13,7 +13,7 @@ import numpy as np
 from storage import CANONICAL_ROOT, confined, prepare_environment
 from protocol import CommandLedger
 from success import (contained, initial_arm, settled_containment, SETTLED_TICKS,
-                     INTERIOR_FLOOR_M, INTERIOR_RIM_M, INTERIOR_RADIUS_M)
+                     INTERIOR_FLOOR_M, INTERIOR_RIM_M)
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0,str(ROOT/'vla_SO-ARM101/src/so_arm101_control'))
@@ -96,9 +96,8 @@ class SafetyTests(unittest.TestCase):
         self.assertLessEqual(INTERIOR_FLOOR_M,asset_floor)
         self.assertTrue(contained(self.snapshot(asset_floor+.0064),'red_2x3_0','red')['passed'])
         self.assertLess(INTERIOR_RIM_M,float(data['v'][...,2].max())/1000)
-        inward=((normals[:,:2]*centers[:,:2]).sum(1)<0)&(np.abs(normals[:,2])<.9)&(centers[:,2]>1.19)
-        support=-(data['v'][inward,:,:2]*normals[inward,None,:2]).sum(-1)/np.linalg.norm(normals[inward,:2],axis=1)[:,None]
-        self.assertLess(INTERIOR_RADIUS_M,float(support.min())/1000)
+        from cup_profile import verify_shell
+        self.assertTrue(verify_shell(raw)['passed'])
 
     def test_floor_supported_block_is_valid_with_authored_rest_offset(self):
         from success import PHYSICAL_FLOOR_M

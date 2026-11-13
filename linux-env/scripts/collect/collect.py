@@ -39,6 +39,8 @@ from protocol import StepGeneration, CancelledGeneration, OwnershipStalled
 from scene_sync import physical_pose_caches, collision_pose_errors
 from scene_reconcile import SceneReconciler, ros_messages
 from success import SETTLED_TICKS, initial_arm, settled_containment
+from cup_profile import PROFILE
+from diagnostics import final_stills
 
 def ns(stamp):
     return stamp.sec * 1000000000 + stamp.nanosec
@@ -699,6 +701,8 @@ class Collector:
             raise ValueError('Superseded diagnostic run requires a fresh output directory')
         root.mkdir(parents=True, exist_ok=args.resume)
         previous = json.loads((root / 'run.json').read_text()) if args.resume else None
+        if previous and previous.get('diagnostic', False) != args.diagnostic:
+            raise ValueError('Resume diagnostic retention mode differs from the existing run')
         receipts = []
         if previous:
             for trial, path in enumerate(sorted(root.glob('attempt-*'))):
@@ -762,6 +766,9 @@ class Collector:
                            'linux-env/scripts/collect/storage.py',
                            'linux-env/scripts/collect/collection_runtime.py',
                            'linux-env/scripts/collect/success.py',
+                           'linux-env/scripts/collect/cup_profile.py',
+                           'linux-env/scripts/collect/cup_profile.json',
+                           'linux-env/scripts/collect/diagnostics.py',
                            'linux-env/scripts/collect/scene_sync.py',
                            'linux-env/scripts/collect/scene_reconcile.py',
                            'linux-env/scripts/collect/protocol.py',
@@ -774,7 +781,10 @@ class Collector:
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/compute_workspace.py',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/ik_calibration.yaml',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/workspace_bounds.yaml']
+        tracked_sources.append(PROFILE['source'])
         source_hashes = {name: hashlib.sha256((REPO / name).read_bytes()).hexdigest() for name in tracked_sources}
+        if source_hashes[PROFILE['source']] != PROFILE['source_sha256']:
+            raise RuntimeError('Cup shell differs from the calibrated success profile; recalibrate before collecting')
         if transport_config['loaded_sha256'] != source_hashes['linux-env/scripts/collect/collection_runtime.py']:
             raise RuntimeError('Kit loaded a different collection runtime')
         if any(source_hashes['linux-env/scripts/collect/'+name] != digest
@@ -796,6 +806,7 @@ class Collector:
         else:
             (root / 'run.json').write_text(json.dumps(dict(instance=args.instance, host=socket.gethostname(), gpu_index=int(os.getenv('ISAACSIM_GPU', '0')),
             recording_version=2, transport_config=transport_config, observation_state_topic='/joint_states_measured',
+            diagnostic=args.diagnostic, success_profile=PROFILE,
             application_contract='Held at observation tick; read-back verified PhysX targets before one-frame advance; maximum one sim tick latency',
             clock_config=clock_config, domain=90 + args.instance,
             bridge_port=8777 + 2 * args.instance, fps=30, baseline=baseline, baseline_cup_layout=self.baseline_cup_layout, eval_seeds=EVAL_SEEDS,
@@ -883,6 +894,13 @@ class Collector:
                     writer.close()
                     receipt['timing'] = timing_audit(writer.rows, 30)
                     receipt['accepted'] = receipt['accepted'] and receipt['timing']['passed']
+                    if args.diagnostic:
+                        try:
+                            receipt['diagnostics'] = final_stills(path, writer.rows)
+                        except Exception as exc:
+                            receipt['diagnostics'] = dict(saved=False, error=repr(exc))
+                            receipt['accepted'] = False
+                            receipt['error'] = 'Diagnostic still capture failed: '+repr(exc)
                     if receipt.get('score'):
                         initial_z = receipt['initial_physical']['bodies'][params['object']]['position'][2]
                         maximum_z = max((row.get('target_object_pose', {}).get('z', initial_z) for row in writer.rows), default=initial_z)
@@ -898,7 +916,7 @@ class Collector:
                     log.write(json.dumps(receipt) + '\n')
             if receipt['accepted']:
                 accepted += 1
-            else:
+            elif not args.diagnostic:
                 # Keep every failed seed and diagnosis; delete only this attempt's two known bulk files.
                 for key in ('wrist', 'top'):
                     video = path / f'{key}.mp4'
@@ -949,6 +967,7 @@ def main():
     parser.add_argument('--episode-deadline', type=float, default=180)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--resume', action='store_true', help='Re-audit and continue this output ledger')
+    parser.add_argument('--diagnostic', action='store_true', help='Keep failed videos and save final recorded-frame stills')
     args = parser.parse_args()
     if args.replay_receipt:
         if args.resume:
