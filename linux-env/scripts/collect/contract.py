@@ -58,6 +58,13 @@ def timing_audit(rows, fps):
         errors.append('Recorded action differs from the clean corrective expert')
     if any(r['expert_observation_stamp_ns'] != r['sim_ns'] for r in rows):
         errors.append('Expert action is conditioned on a different observation tick')
+    planning_idle = sum(not r.get('executing', True) for r in rows) / len(rows)
+    stationary = sum(max(abs(x - y) for x, y in zip(a['state'], b['state'])) < 1e-4
+                     for a, b in zip(rows, rows[1:])) / (len(rows) - 1)
+    if planning_idle > .03:
+        errors.append('Planning/hold frames exceed 3%')
+    if stationary > .05:
+        errors.append('Stationary state frames exceed 5%')
     hz = (len(rows) - 1) / sum(wall) if sum(wall) > 0 else 0
     p95 = sorted(wall)[int(.95 * (len(wall) - 1))]
     if any(not all(math.isfinite(v) for v in r['action'] + r['state'] + r['executed_action']) for r in rows):
@@ -67,7 +74,7 @@ def timing_audit(rows, fps):
                 wall_gap_max_ms=max(wall) * 1000,
                 sim_hz=1e9 * (len(rows) - 1) / sum(sim) if sum(sim) > 0 else 0,
                 real_time_factor=sum(sim) / 1e9 / sum(wall),
-                idle_frame_fraction=sum(not r.get('executing', True) for r in rows) / len(rows),
+                idle_frame_fraction=planning_idle, stationary_frame_fraction=stationary,
                 command_latency_sim_ms_max=max((r['command_clock_ns'] - r['sim_ns']) / 1e6 for r in rows),
                 state_image_stamp_skew_ns_max=max(abs(r['joint_stamp_ns'] - r['sim_ns']) for r in rows),
                 noisy_steps=sum(r['action'] != r['executed_action'] for r in rows))

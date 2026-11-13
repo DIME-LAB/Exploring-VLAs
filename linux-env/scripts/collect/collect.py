@@ -47,16 +47,8 @@ def mcp(tool, params=None):
 
 
 def timeline(play):
-    # Rate limiting a paused app saves rendering CPU while ROS plans on wall time.
-    code = "import omni.timeline, carb\ns=carb.settings.get_settings()\n"
-    if play:
-        code += "s.set_bool('/app/runLoops/main/rateLimitEnabled',False)\n"
-        code += "omni.timeline.get_timeline_interface().play()\n"
-    else:
-        code += "omni.timeline.get_timeline_interface().pause()\n"
-        code += "s.set_int('/app/runLoops/main/rateLimitFrequency',10)\n"
-        code += "s.set_bool('/app/runLoops/main/rateLimitEnabled',True)\n"
-    return mcp('run_python', {'code': code + 'result=True'})
+    return mcp('run_python', {'code': 'import omni.timeline\nomni.timeline.get_timeline_interface().' +
+                              ('play()' if play else 'pause()') + '\nresult=True'})
 
 
 class Sensors:
@@ -200,6 +192,13 @@ class Servo:
         timeline(True)
 
     def gripper(self, position, duration, blocking):
+        with self.lock:
+            if abs(self.node._actual_positions['gripper_joint'] - position) < .0005:
+                if self.reference is None:
+                    self.reference = [self.node._actual_positions[name] for name in JOINTS]
+                self.reference[5] = position
+                self.node._last_motion_status = dict(ok=True, outcome='gripper_already_at_target')
+                return True if blocking else None
         done = threading.Event()
         with self.lock:
             self.grip_plan = dict(target=position, duration=duration, done=done, start=None)
@@ -416,9 +415,9 @@ class Collector:
         if not root.is_relative_to(allowed_root):
             raise ValueError(f'Bulk collection output must be inside {allowed_root}')
         root.mkdir(parents=True, exist_ok=False)
+        clock_config = mcp('run_python', {'code': (REPO / 'linux-env/scripts/collect/configure_clock.py').read_text() + '\nresult=configure(30)'})
         timeline(True)
         self.wait_ready()
-        clock_config = mcp('run_python', {'code': (REPO / 'linux-env/scripts/collect/configure_clock.py').read_text() + '\nresult=configure(30)'})
         self.node._cmd_toggle_ground_plane()
         timeline(False)
         if args.replay_receipt:
@@ -549,6 +548,7 @@ class Collector:
     def close(self):
         self.stop.set()
         timeline(False)
+        mcp('run_python', {'code': "import carb\ns=carb.settings.get_settings()\ns.set_int('/app/runLoops/main/rateLimitFrequency',10)\ns.set_bool('/app/runLoops/main/rateLimitEnabled',True)\nresult=True"})
         self.executor.shutdown(timeout_sec=5)
         self.node.destroy_node()
         rclpy.shutdown()

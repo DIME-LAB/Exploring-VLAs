@@ -366,8 +366,8 @@ canonical `gripper.pos` feature name. Never run the controller-reference mirror
 in this domain: its output contains noisy execution commands and is not the label.
 The timeline pauses between motion segments, including MoveIt planning and
 attach/detach service calls, so wall-time planning delays do not create long
-stationary stretches in simulated demonstrations. Paused app updates are capped
-at 10 Hz to leave CPU time for ROS planning. Original command-dispatch clock
+stationary stretches in simulated demonstrations. The app-rate configuration stays fixed across pause/resume during an episode.
+After collection exits, idle app updates are capped at 10 Hz during export. Original command-dispatch clock
 stamps are logged separately from the observation tick used by the expert.
 
 `run.json` fixes the baseline scene and held-out eval seeds (900000–900029).
@@ -403,6 +403,10 @@ Validation on the assigned isolated instance: the five-episode smoke loaded in
 LeRobotDataset (4,238 frames, 30 fps; red/green/blue = 2/2/1), with all timing
 and clean-expert audits passing. Five of eight attempts were accepted (62.5%).
 The shared pure geometry matches the verified GUI mathematics on 1,000 random
-cases; 11 offline tests pass. The GUI adapter also boots and serves its widget
+cases; 12 offline tests pass. The GUI adapter also boots and serves its widget
 inventory and Quickstart services with sim time enabled in the isolated domain.
 The collection process itself needs no display.
+
+Already-reached gripper targets complete immediately. The audit separately reports
+planning/hold frames (limit 3%) and near-stationary joint steps (maximum joint
+change below 0.0001 rad; limit 5%), so a commanded hold cannot hide as motion.

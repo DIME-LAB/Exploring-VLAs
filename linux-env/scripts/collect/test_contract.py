@@ -11,8 +11,8 @@ class ContractTests(unittest.TestCase):
             out.append(dict(wall_ns=wall, sim_ns=sim, wrist_stamp_ns=sim, top_stamp_ns=sim,
                             joint_receive_ns=wall - 100, wrist_receive_ns=wall - 200,
                             top_receive_ns=wall - 300, joint_stamp_ns=sim,
-                            image_receive_epoch_ns=wall, state=[0.] * 6,
-                            action=[.035] * 6, executed_action=[.04] * 6, expert_reference=[1.] * 6,
+                            image_receive_epoch_ns=wall, state=[i * .001] * 6,
+                            action=[i * .001 + .035] * 6, executed_action=[i * .001 + .04] * 6, expert_reference=[1. + i * .001] * 6,
                             expert_observation_stamp_ns=sim, command_clock_ns=sim + 33333333))
         return out
 
@@ -34,6 +34,12 @@ class ContractTests(unittest.TestCase):
         self.assertLess(corrective_action([.02], [0])[0], .02)
         self.assertGreater(corrective_action([-.02], [0])[0], -.02)
         self.assertEqual(corrective_action([0], [1])[0], .035)
+
+    def test_stationary_holds_are_rejected(self):
+        rows = self.rows()
+        for row in rows:
+            row.update(state=[0.] * 6, action=[.035] * 6, expert_reference=[1.] * 6)
+        self.assertFalse(timing_audit(rows, 30)['passed'])
 
     def test_noisy_labels_are_rejected(self):
         rows = self.rows(); rows[20]['action'] = list(rows[20]['executed_action'])
