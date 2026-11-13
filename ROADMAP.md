@@ -119,7 +119,7 @@ mislabeled (0real_100sim has the real-only set's exact 162,221 frames). No ~1000
 - [ ] 3.1f In-process ("battery"-style) collector, if the 3.1d pilot's throughput is too low for ~900+ episodes:
       standalone headless Isaac process, sim stepped only on demand, in-process IK/planning (Lula/RMPflow with cup
       obstacles), cameras via render products/annotators, LeRobotDataset frames per sim tick, several processes per
-      GPU (template: prompt2assembly Type-1 headless batteries, via plan47). Reuses the 3.1 episode spec. Validated
+      GPU (template: prompt2assembly Type-1 headless batteries; pointers in docs/notes/battery-collector-pointers.md). Reuses the 3.1 episode spec. Validated
       against the ROS pilot on the same seeds: success rate, state/action semantics (joint-position targets as
       deployment sends them) and trajectory statistics. ROS 2 + MoveIt stays the deployment/eval/real-robot stack.
 - [ ] 3.1e Training throughput before the large run (rtx6000, RTX 6000 Ada 48 GB): the 3.0b run is GPU-bound at
