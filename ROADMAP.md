@@ -79,11 +79,21 @@ cadence (~14 Hz) not matching the camera-bound recording loop.
       JointState cache, goal tracking; SO-101 preset.
 - [x] 2.4 `lerobot_teleoperator_ros2_joint` (commanded-joint topic) for recording; reconcile its
       `action_stale_ms` check with control_gui publishing commands only on change.
-- [ ] 2.5 RunTask ROS 2 node: action {instruction, max_duration} → home → run → success/timeout/cancel
+- [x] 2.5 RunTask ROS 2 node: action {instruction, max_duration} → home → run → success/timeout/cancel
       → home; Isaac panel button `soarm101.run_task`; live prompt per goal.
-- [ ] 2.5b Prompt control: change the instruction live (ROS topic + Isaac panel text box) and pick the model
+- [x] 2.5b Prompt control: change the instruction live (ROS topic + Isaac panel text box) and pick the model
       from the Isaac panel; both go through the same RunTask/goal interface.
-- [ ] 2.6 Unit tests with fake rclpy messages; CI.
+- [x] 2.6 Unit tests with fake rclpy messages; CI.
+      Verified 2026-11-13: opt-in [packages](packages/README.md), five pip wheels and a ROS action interface.
+      Fork suite 117 passed; PyPI 0.7 wheel suite 83 passed (fork comparisons skipped); native Jazzy 10/10.
+      Two independent reviews checked lifecycle, discovery, real spawned workers and action results.
+      Live: 20 pixel-identical frames/camera, exact reference-state features, tracked home and
+      174 streaming targets at 17.3999 Hz; base-ft policy, prompt update, cancel and final home exercised.
+      The installed rclpy result-publication race and back-to-back admission race were fixed and then
+      verified offline with native regression tests. Kit panel instantiated; no GUI still was available.
+      Measured-topic selection has unit coverage; that topic was absent on the standard live instance.
+      Current deployment stays on the fork's FIFO10/RTC path; 2.7/2.8 and the merge gate remain open.
+      Mac proof: `coursework-eee598/roadmap-2026-11/phase2/{2.1,2.2,2.3,2.4,2.5,2.6,2.5b}/`.
 - [ ] 2.7 Switch Exploring-VLAs to PyPI LeRobot + our packages; drop the fork patches; archive the fork
       (never delete — it holds `f26b0a6`).
 - [ ] 2.8 Port 1.7 (RTC) upstream-compatible or as a small upstream PR.

@@ -17,6 +17,11 @@ livestream and, optionally, scripts the bridge through an ssh tunnel.
 > Mac-native Gazebo backend, dataset recording and the planner internals are
 > covered in [`CLAUDE.md`](CLAUDE.md) and the docs it links.
 
+Standalone LeRobot ROS 2 plugins and the opt-in RunTask node live in
+[`packages/`](packages/README.md). Current launchers retain the pinned fork until
+ROADMAP 2.7; package installation, native checks and the optional Isaac panel are
+documented there.
+
 ## Prerequisites (the Linux box)
 
 - Ubuntu 22.04 with an NVIDIA GPU (tested: 2x RTX A4500). One GPU also works:
