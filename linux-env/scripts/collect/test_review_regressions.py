@@ -231,7 +231,7 @@ class ReviewRegressions(unittest.TestCase):
         with patch.dict(sys.modules,{'moveit_msgs':NS(),'moveit_msgs.srv':NS(GetPlanningScene=service)}):
             with self.assertRaisesRegex(TimeoutError,'Full planning scene reset verification'):c.sync_scene()
 
-    def test_indexed_launcher_overrides_inherited_mcp_output_escape(self):
+    def test_indexed_launcher_replaces_output_outside_instance_root(self):
         source=(ROOT/'linux-env/scripts/isaac/isaacsim_launch.sh').read_text()
         segment=source[source.index('        default_output=/tmp/soarm101-resources'):source.index('        mkdir -p "$MCP_CLIENT_OUTPUT_DIR"')]
         probe='SCRIPT_DIR='+str(ROOT/'linux-env/scripts/isaac')+'\nINSTANCE_ROOT=/mnt/a4500-backup/exploring-vlas/runtime/instance-0\nMCP_CLIENT_OUTPUT_DIR=/tmp/elsewhere\n'+segment+'\nprintf "%s" "$MCP_CLIENT_OUTPUT_DIR"\n'

@@ -161,12 +161,12 @@ class SafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Fresh scene required'):
             require(fake)
 
-    def test_output_cannot_escape_canonical_root(self):
+    def test_output_must_stay_within_canonical_root(self):
         self.assertEqual(confined(CANONICAL_ROOT/'datasets/run'), CANONICAL_ROOT/'datasets/run')
         for path in ('/tmp/data', CANONICAL_ROOT/'../../outside'):
             with self.assertRaises(ValueError):confined(path)
 
-    def test_environment_escape_is_refused_before_runtime_imports(self):
+    def test_environment_outside_root_is_refused_before_runtime_imports(self):
         import os
         from unittest.mock import patch
         with patch.dict(os.environ, {'SOARM_COLLECTION_ROOT':'/tmp/not-collection'}):
