@@ -88,3 +88,13 @@ def test_closing_old_context_does_not_stop_replacement(ros):
     first.close()
     assert node.context.ok()
     second.close()
+
+
+def test_existing_context_does_not_need_environment_reinitialization(ros, monkeypatch):
+    context = Context()
+    context.running = True
+    monkeypatch.setenv("RMW_IMPLEMENTATION", "rmw_cyclonedds_cpp")
+    monkeypatch.delenv("CYCLONEDDS_URI", raising=False)
+    with acquire(context=context, executor=Executor(context)) as lease:
+        assert lease.node.context is context
+    assert context.ok()

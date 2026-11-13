@@ -126,3 +126,26 @@ def test_bad_layout_and_warmup_cleanup(ros):
     msg.step = 1
     with pytest.raises(ValueError, match="payload"):
         camera._convert(msg)
+
+
+def test_peek_does_not_wait_behind_fresh_read(ros):
+    camera = ROS2Camera(ROS2CameraConfig(topic="/peek"))
+    camera.connect(warmup=False)
+    camera._on_message(image())
+    camera.async_read(0)
+    started, finished = threading.Event(), threading.Event()
+    def wait_for_next():
+        started.set()
+        try:
+            camera.async_read(500)
+        except Exception:
+            pass
+        finished.set()
+    worker = threading.Thread(target=wait_for_next)
+    worker.start()
+    assert started.wait(1)
+    frame = camera.read_latest()
+    assert frame.shape == (2, 3, 3)
+    assert not finished.is_set()
+    camera.disconnect()
+    worker.join(1)

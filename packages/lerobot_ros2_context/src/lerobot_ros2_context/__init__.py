@@ -15,6 +15,13 @@ class _Session:
         import rclpy
         from rclpy.executors import SingleThreadedExecutor
 
+        if not context.ok() and rclpy.get_rmw_implementation_identifier() == "rmw_cyclonedds_cpp" and not os.environ.get("CYCLONEDDS_URI"):
+            raise RuntimeError(
+                "CycloneDDS requires an explicit CYCLONEDDS_URI. For Exploring-VLAs set "
+                "CYCLONEDDS_URI=file:///absolute/path/to/Exploring-VLAs/linux-env/cyclonedds.xml "
+                "(loopback transport). No ROS context was started."
+            )
+
         self.context = context
         self.default_context = context is rclpy.get_default_context()
         self.owns_context = not context.ok()
@@ -115,13 +122,6 @@ class Lease:
 def acquire(*, context=None, executor=None):
     """Acquire the shared node. An external executor is spun by its caller."""
     import rclpy
-
-    if rclpy.get_rmw_implementation_identifier() == "rmw_cyclonedds_cpp" and not os.environ.get("CYCLONEDDS_URI"):
-        raise RuntimeError(
-            "CycloneDDS requires an explicit CYCLONEDDS_URI. For Exploring-VLAs set "
-            "CYCLONEDDS_URI=file:///absolute/path/to/Exploring-VLAs/linux-env/cyclonedds.xml "
-            "(loopback transport). No ROS context was started."
-        )
 
     if context is None:
         context = executor.context if executor is not None else rclpy.get_default_context()

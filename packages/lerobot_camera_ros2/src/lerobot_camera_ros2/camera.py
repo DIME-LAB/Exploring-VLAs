@@ -85,16 +85,29 @@ class ROS2Camera(Camera):
 
     @staticmethod
     def find_cameras(discovery_s=2.0):
+        if discovery_s < 0:
+            raise ValueError("discovery_s must be nonnegative")
         with acquire() as lease:
             deadline = time.monotonic() + discovery_s
-            event = lease.node.get_graph_event()
-            while True:
-                cameras = [{"topic": topic, "type": kind} for topic, kinds in lease.node.get_topic_names_and_types()
-                           for kind in kinds if kind in ("sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage")]
-                if cameras or time.monotonic() >= deadline:
-                    return cameras
-                lease.node.wait_for_graph_change(event, timeout_sec=max(0, deadline - time.monotonic()))
-                event.clear()
+            done = threading.Event()
+            cameras = {}
+            def collect():
+                for topic, kinds in lease.node.get_topic_names_and_types():
+                    for kind in kinds:
+                        if kind in ("sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"):
+                            cameras[(topic, kind)] = {"topic": topic, "type": kind}
+                if time.monotonic() >= deadline:
+                    done.set()
+            # rclpy provides graph snapshots; the managed executor's timer samples
+            # the graph for the full discovery interval, including late peers.
+            timer = lease.node.create_timer(0.05, collect)
+            try:
+                if not done.wait(discovery_s + 1):
+                    lease.check()
+                    raise TimeoutError("Camera discovery executor did not finish")
+                return list(cameras.values())
+            finally:
+                lease.node.destroy_timer(timer)
 
     def connect(self, warmup=True):
         if self.is_connected:
@@ -171,6 +184,8 @@ class ROS2Camera(Camera):
         return np.ascontiguousarray(np.rot90(img, rotations[self.config.rotation]))
 
     def _get(self, *, fresh, timeout_ms=0, max_age_ms=None, consume=True):
+        if not consume:
+            return self._read_frame(fresh=fresh, timeout_ms=timeout_ms, max_age_ms=max_age_ms, consume=False)
         with self._read_lock:
             return self._read_frame(fresh=fresh, timeout_ms=timeout_ms, max_age_ms=max_age_ms, consume=consume)
 

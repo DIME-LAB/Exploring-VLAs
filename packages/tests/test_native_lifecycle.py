@@ -49,3 +49,24 @@ def test_real_external_executor_is_left_running():
     finally:
         executor.shutdown()
         context.shutdown()
+
+
+def test_real_camera_discovery_and_following_connect():
+    import rclpy
+    from sensor_msgs.msg import Image, CompressedImage
+    from lerobot_camera_ros2 import ROS2Camera, ROS2CameraConfig
+    assert ROS2Camera.find_cameras(discovery_s=0.05) == []
+    rclpy.init()
+    node = rclpy.create_node("phase2_discovery_sources")
+    one = node.create_publisher(Image, "/phase2_test/raw", 10)
+    two = node.create_publisher(CompressedImage, "/phase2_test/compressed", 10)
+    try:
+        cameras = ROS2Camera.find_cameras(discovery_s=0.25)
+        assert {item["topic"] for item in cameras} >= {"/phase2_test/raw", "/phase2_test/compressed"}
+        camera = ROS2Camera(ROS2CameraConfig(topic="/phase2_test/raw"))
+        camera.connect(warmup=False)
+        camera.disconnect()
+        assert rclpy.ok()
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
