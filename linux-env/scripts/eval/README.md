@@ -64,6 +64,18 @@ image hashes and ROI medians as a child-process wiring proof, written at episode
 end. The top ROI is the calibration table patch; the wrist ROI is only a fixed
 image patch. This harness wrapper does not modify the LeRobot fork.
 
+The 1.10a inverse-gain test reused the ten 1.9 NEW/17.4/RTC-off seeds: treatment
+and historical baseline both had 0/10 placements and no sustained object lift.
+Mean paired closest command-FK distance changed by +11.71 mm (farther), with
+two seeds >=1 mm closer and seven >=1 mm farther. This small, non-interleaved
+comparison with unpaired policy noise does not establish a causal lighting
+effect. Treatment had zero scheduling misses/stale-camera aborts. The Mac
+`phase1/1.10-decision/lighting-ab/` folder contains the result-first README,
+paired CSV, first-child calibration proof and short clips for three seeds.
+After running `characterize_failures.py` on a report with `raw/baseline/` and
+`raw/treatment/`, generate this comparison with
+`python3 linux-env/scripts/eval/report_lighting_ab.py /path/to/lighting-ab`.
+
 The orchestration process records clock/wrist/workspace message arrival stamps.
 An in-memory Kit update probe records wall/sim time without touching extension
 files, and per-episode Isaac major-fault counts test page-in stalls. This allows
