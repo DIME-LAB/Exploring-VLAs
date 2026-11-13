@@ -736,6 +736,7 @@ class Collector:
         self.wait_ready()
         self.episode_start_physical = self.last_snapshot
         self.sync_scene()
+        (root / 'first-reset-scene.json').write_text(json.dumps(self.scene_pose_check, indent=2))
         self.timeline(False)
         if previous:
             baseline = previous['baseline']

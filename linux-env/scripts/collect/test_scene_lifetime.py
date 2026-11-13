@@ -1,6 +1,10 @@
 """Scene-request completion, authoritative reset and diagnostic regressions."""
 import copy
+from bisect import bisect_left
+import errno
+import io
 import json
+import os
 from pathlib import Path
 from types import MethodType, SimpleNamespace as NS
 from unittest.mock import patch
@@ -8,7 +12,7 @@ import threading
 import unittest
 import numpy as np
 from protocol import OwnershipStalled
-from scene_reconcile import SceneReconciler, collision_policy, policy_matches, FULL_SCENE
+from scene_reconcile import SceneReconciler, collision_policy, policy_matches, geometry_check, FULL_SCENE
 from storage import SceneSafetyMarker, scene_stack_ready
 from test_safety import method
 import test_motion_operations as motions
@@ -62,6 +66,35 @@ MESSAGES=NS(Scene=Scene,Object=Object,Attached=Attached,Entry=lambda:NS(enabled=
             Get=NS(Request=Request),Apply=NS(Request=Request))
 
 
+def moveit_acm_roundtrip(msg):
+    """Model MoveIt 2.5.10, not a verbatim message copy.
+
+    collision_matrix.cpp lines 66-96 (constructor), 283-305 (pair defaults),
+    332-361 (getMessage): only the upper triangle is imported, entries equal
+    to defaults are omitted, names come from retained entries/defaults.
+    https://github.com/moveit/moveit2/blob/2.5.10/moveit_core/collision_detection/src/collision_matrix.cpp#L66-L96
+    https://github.com/moveit/moveit2/blob/2.5.10/moveit_core/collision_detection/src/collision_matrix.cpp#L332-L361
+    """
+    defaults=dict(zip(msg.default_entry_names,msg.default_entry_values));entries={}
+    def default(a,b):
+        values=[defaults[n] for n in (a,b) if n in defaults]
+        return all(values) if values else False
+    for i,a in enumerate(msg.entry_names):
+        for j in range(i+1,len(msg.entry_names)):
+            b=msg.entry_names[j];value=bool(msg.entry_values[i].enabled[j])
+            if value!=default(a,b):entries[a,b]=entries[b,a]=value
+    names=sorted({n for pair in entries for n in pair})
+    # getAllEntryNames, lines 319-330 in this release: a default-only name
+    # is inserted only if lower_bound is not end(). Preserve that behavior.
+    for name in sorted(defaults):
+        index=bisect_left(names,name)
+        if index<len(names) and names[index]!=name:names.insert(index,name)
+    return NS(entry_names=names,
+        entry_values=[NS(enabled=[entries.get((a,b),default(a,b)) for b in names]) for a in names],
+        default_entry_names=[n for n in names if n in defaults],
+        default_entry_values=[defaults[n] for n in names if n in defaults])
+
+
 class SceneServer:
     def __init__(self):
         self.scene=Scene();self.pending_kind=None;self.false_kind=None;self.pending=[];self.queries=[];self.calls=[]
@@ -83,7 +116,7 @@ class SceneServer:
             if obj.operation==Object.REMOVE:world.pop(obj.id,None)
             else:world[obj.id]=copy.deepcopy(obj)
         if scene.allowed_collision_matrix.entry_names:
-            self.scene.allowed_collision_matrix=copy.deepcopy(scene.allowed_collision_matrix)
+            self.scene.allowed_collision_matrix=moveit_acm_roundtrip(scene.allowed_collision_matrix)
         self.scene.world.collision_objects=list(world.values())
         self.scene.robot_state.attached_collision_objects=list(attached.values())
     def apply(self,request):
@@ -124,7 +157,7 @@ class SceneLifetimeTests(unittest.TestCase):
         for name in ('_ensure_lego_state','_attach_lego_to_gripper','_detach_lego_sync','_pose7_to_mat','_mat_to_pose7',
                      '_dispatch_scene_update','_remove_single_lego_from_world','_remove_lego_collision_objects',
                      '_remove_cup_collision_objects','_add_cup_collision_objects','_add_lego_collision_objects',
-                     '_acm_allow_ground_rest','_cmd_toggle_ground_plane','_scene_unresolved'):
+                     '_build_cup_geometry','_acm_allow_ground_rest','_cmd_toggle_ground_plane','_scene_unresolved'):
             fn=method(SHARED,'PickPlaceNode',name);fn=getattr(fn,'__func__',fn);fn.__globals__.update(globals_)
             setattr(n,name,fn if name in ('_pose7_to_mat','_mat_to_pose7') else MethodType(fn,n))
         raw=NS(call_async=server.apply,wait_for_service=lambda **kw:True)
@@ -200,17 +233,88 @@ class SceneLifetimeTests(unittest.TestCase):
 
     def test_verification_rejects_extra_world_attachment_policy_and_wrong_ground(self):
         c,_,_,server,_=self.setup_scene();self.populate(c);baseline=copy.deepcopy(server.scene)
-        for kind in ('world','attached','acm','ground'):
+        for kind in ('world','attached','acm','ground','block_shape','cup_shape','octomap'):
             server.scene=copy.deepcopy(baseline)
             if kind=='world':
                 obj=Object();obj.id='late_part';server.scene.world.collision_objects.append(obj)
             elif kind=='attached':
                 obj=Attached();obj.object.id='lego_red_2x3_0';server.scene.robot_state.attached_collision_objects.append(obj)
             elif kind=='acm':server.scene.allowed_collision_matrix.default_entry_names=['*'];server.scene.allowed_collision_matrix.default_entry_values=[True]
-            else:
+            elif kind=='ground':
                 ground=next(o for o in server.scene.world.collision_objects if o.id=='ground_plane')
                 ground.primitive_poses[0].position.z=99.
+            elif kind in ('block_shape','cup_shape'):
+                obj=next(o for o in server.scene.world.collision_objects if o.id.startswith('lego_' if kind=='block_shape' else 'cup_'))
+                obj.primitives[0].dimensions=[.001]*len(obj.primitives[0].dimensions)
+            else:server.scene.world.octomap.octomap.data=[1]
             with self.subTest(kind=kind):self.assertFalse(c.scene_reset.verify(c.episode_start_physical,JOINTS)['passed'])
+
+    def test_native_acm_clear_rebuild_and_receipt(self):
+        c,_,_,server,_=self.setup_scene()
+        matrix=server.scene.allowed_collision_matrix
+        self.assertTrue(all(not row.enabled[i] for i,row in enumerate(matrix.entry_values)))
+        cleared=c.scene_reset.clear()
+        self.assertTrue(cleared['verified']);self.assertEqual(cleared['native_scene']['octomap_bytes'],0)
+        self.populate(c)
+        check=c.scene_pose_check
+        self.assertTrue(check['passed']);self.assertTrue(check['occupancy_empty'])
+        self.assertTrue(all(item['passed'] for item in check['geometry'].values()))
+        self.assertEqual(check['native_scene']['acm']['entry_names'],server.scene.allowed_collision_matrix.entry_names)
+
+    def test_off_diagonal_policy_is_strict_but_false_only_names_and_self_pairs_are_irrelevant(self):
+        policy=dict(names=['a','b','isolated'],allowed=[True,True,False,True,True,False,False,False,True])
+        submitted=NS(entry_names=policy['names'],entry_values=[NS(enabled=policy['allowed'][i:i+3]) for i in (0,3,6)],
+                     default_entry_names=[],default_entry_values=[])
+        native=moveit_acm_roundtrip(submitted)
+        self.assertEqual(native.entry_names,['a','b'])
+        self.assertEqual([row.enabled[i] for i,row in enumerate(native.entry_values)],[False,False])
+        self.assertTrue(policy_matches(native,policy))
+        for diagonal in (False,True):
+            for i,row in enumerate(native.entry_values):row.enabled[i]=diagonal
+            self.assertTrue(policy_matches(native,policy))
+        native.entry_values[0].enabled[1]=False
+        self.assertFalse(policy_matches(native,policy))  # Missing/asymmetric allowed pair.
+        native=moveit_acm_roundtrip(submitted)
+        native.entry_names.append('unexpected')
+        for row in native.entry_values:row.enabled.append(False)
+        native.entry_values.append(NS(enabled=[False]*3))
+        self.assertTrue(policy_matches(native,policy))
+        native.entry_values[0].enabled[2]=native.entry_values[2].enabled[0]=True
+        self.assertFalse(policy_matches(native,policy))
+        native=moveit_acm_roundtrip(submitted);native.default_entry_names=['a'];native.default_entry_values=[False]
+        self.assertFalse(policy_matches(native,policy))
+
+    def test_mesh_identity_accepts_native_reordering_and_rejects_changed_vertices_or_faces(self):
+        mesh=NS(vertices=[NS(x=x,y=y,z=z) for x,y,z in ((0,0,0),(.01,0,0),(0,.02,0),(0,0,.03))],
+                triangles=[NS(vertex_indices=list(t)) for t in ((0,1,2),(0,2,3),(0,1,3),(1,2,3))])
+        obj=Object();obj.meshes=[copy.deepcopy(mesh)]
+        self.assertTrue(geometry_check(obj,'mesh',mesh)['passed'])
+        obj.meshes[0].vertices.reverse()
+        for triangle in obj.meshes[0].triangles:triangle.vertex_indices=[3-i for i in reversed(triangle.vertex_indices)]
+        obj.meshes[0].triangles.reverse()
+        self.assertTrue(geometry_check(obj,'mesh',mesh)['passed'])
+        good=copy.deepcopy(obj)
+        obj.meshes[0].vertices[0].z+=.001
+        self.assertFalse(geometry_check(obj,'mesh',mesh)['passed'])
+        obj=copy.deepcopy(good);obj.meshes[0].triangles[0].vertex_indices=[0,1,3]
+        self.assertFalse(geometry_check(obj,'mesh',mesh)['passed'])
+        obj=copy.deepcopy(good);obj.meshes[0].triangles[0].vertex_indices=[-1,0,1]
+        self.assertFalse(geometry_check(obj,'mesh',mesh)['passed'])
+
+    def test_final_query_rejects_changed_cup_and_block_meshes(self):
+        c,_,_,server,_=self.setup_scene()
+        mesh=NS(vertices=[NS(x=x,y=y,z=z) for x,y,z in ((0,0,0),(.01,0,0),(0,.02,0),(0,0,.03))],
+                triangles=[NS(vertex_indices=list(t)) for t in ((0,1,2),(0,2,3),(0,1,3),(1,2,3))])
+        c.node._build_lego_geometry=lambda name:('mesh',mesh)
+        c.node._build_cup_geometry=lambda:('mesh',mesh)
+        self.populate(c);baseline=copy.deepcopy(server.scene)
+        for prefix in ('lego_','cup_'):
+            server.scene=copy.deepcopy(baseline)
+            obj=next(o for o in server.scene.world.collision_objects if o.id.startswith(prefix))
+            obj.meshes[0].vertices[1].x+=.001
+            check=c.scene_reset.verify(c.episode_start_physical,JOINTS)
+            self.assertTrue(check['poses']['passed'])
+            self.assertFalse(check['geometry'][obj.id]['passed']);self.assertFalse(check['passed'])
 
     def test_conclusive_false_response_does_not_hide_remote_attachment_from_reset(self):
         c,_,_,server,_=self.setup_scene();server.false_kind='attach'
@@ -294,24 +398,96 @@ class MemoryPath:
     def write_text(self,text):self.files[self.key]=text
     def with_suffix(self,suffix):return MemoryPath(self.key+suffix,self.files)
     def replace(self,target):self.files[target.key]=self.files.pop(self.key)
+    def __str__(self):return self.key
 
 
 class SceneMarkerTests(unittest.TestCase):
+    def marker(self):
+        marker=object.__new__(SceneSafetyMarker);marker.runtime=object();marker.path=MemoryPath('marker',{})
+        marker._read=lambda:marker.path.read_text() if marker.path.exists() else None
+        marker._write=marker.path.write_text
+        return marker
+
+    @staticmethod
+    def identity(pid):return dict(pid=pid,start_ticks=str(pid*100),boot_id='test-boot')
+
     def test_same_or_unknown_stack_cannot_clear_a_scene_marker(self):
         self.assertFalse(scene_stack_ready(None,{'pid':2}))
         self.assertFalse(scene_stack_ready({'pid':1},None))
         self.assertFalse(scene_stack_ready({'pid':1},{'pid':1}))
-        marker=object.__new__(SceneSafetyMarker);marker.runtime=object();marker.path=MemoryPath('marker',{})
-        identities={'control.pid':{'pid':1},'isaacsim-soarm101.pid':{'pid':2}}
+        marker=self.marker()
+        identities={'control.pid':self.identity(1),'isaacsim-soarm101.pid':self.identity(2)}
         with patch('storage.control_identity',side_effect=lambda runtime,pidfile='control.pid':identities[pidfile]):
             marker.record('pending attach')
             with self.assertRaises(RuntimeError):marker.require_fresh_stack()
-            identities['control.pid']={'pid':3};marker.require_fresh_stack()
+            identities['control.pid']=self.identity(3);marker.require_fresh_stack()
             marker.record('pending pose reset',source='Kit')
-            identities['control.pid']={'pid':4}
+            identities['control.pid']=self.identity(4)
             with self.assertRaises(RuntimeError):marker.require_fresh_stack()
-            identities['isaacsim-soarm101.pid']={'pid':5};marker.require_fresh_stack()
+            identities['isaacsim-soarm101.pid']=self.identity(5);marker.require_fresh_stack()
         self.assertEqual(list(marker.path.files),['marker'])
+
+    def test_unknown_recorded_identity_needs_manual_reconcile_after_every_restart(self):
+        marker=self.marker();identity=[None]
+        with patch('storage.control_identity',side_effect=lambda *a,**k:identity[0]):
+            marker.record('pending attach completion')
+            for pid in (2,3):
+                identity[0]=self.identity(pid)
+                with self.assertRaises(RuntimeError) as raised:marker.require_fresh_stack()
+                for text in ('marker','pending attach completion','identity unknown at record time: control',
+                             'a restart cannot clear','manual scene reconciliation'):
+                    self.assertIn(text,str(raised.exception))
+
+    def test_missing_current_identity_and_malformed_marker_are_actionable(self):
+        marker=self.marker()
+        with patch('storage.control_identity',return_value=self.identity(1)):marker.record('world add pending')
+        with patch('storage.control_identity',return_value=None):
+            with self.assertRaisesRegex(RuntimeError,'current identity missing: control'):marker.require_fresh_stack()
+        marker.path.write_text('{bad json')
+        with self.assertRaisesRegex(RuntimeError,'marker; original error: unavailable'):marker.require_fresh_stack()
+        payload=dict(error='pending',identities=dict(control={}),required_restart=dict(control='control.pid'))
+        marker.path.write_text(json.dumps(payload))
+        with self.assertRaisesRegex(RuntimeError,'Malformed recorded identity: control'):marker.require_fresh_stack()
+
+    def test_leaf_reads_and_temporary_creates_refuse_symlinks_without_filesystem_writes(self):
+        marker=object.__new__(SceneSafetyMarker);marker.path=Path('/confined/scene-unresolved.json')
+        def refuse(path,flags,*args):
+            self.assertTrue(flags & os.O_NOFOLLOW)
+            if flags & os.O_CREAT:self.assertTrue(flags & os.O_EXCL)
+            raise OSError(errno.ELOOP,'symbolic link refused',str(path))
+        with patch('storage.os.open',side_effect=refuse) as opened:
+            with self.assertRaises(OSError):marker._read()
+            with self.assertRaises(OSError):marker._write('payload')
+            with self.assertRaisesRegex(RuntimeError,'scene-unresolved.json; original error: unavailable'):
+                marker.require_fresh_stack()
+        self.assertEqual(opened.call_count,3)
+
+    def test_leaf_read_uses_descriptor_and_rejects_nonregular_files(self):
+        marker=object.__new__(SceneSafetyMarker);marker.path=Path('/confined/scene-unresolved.json')
+        class Stream(io.StringIO):
+            def fileno(self):return 42
+        with patch('storage.os.open',return_value=42),patch('storage.os.fdopen',return_value=Stream('payload')),\
+             patch('storage.os.fstat',return_value=NS(st_mode=0o100600)):
+            self.assertEqual(marker._read(),'payload')
+        with patch('storage.os.open',return_value=42),patch('storage.os.fdopen',return_value=Stream('payload')),\
+             patch('storage.os.fstat',return_value=NS(st_mode=0o010600)):
+            with self.assertRaisesRegex(ValueError,'not a regular file'):marker._read()
+
+    def test_leaf_write_flushes_before_atomic_rename(self):
+        marker=object.__new__(SceneSafetyMarker);marker.path=Path('/confined/scene-unresolved.json')
+        class Stream(io.StringIO):
+            def fileno(self):return 42
+        stream=Stream()
+        with patch('storage.os.open',return_value=42) as opened,patch('storage.os.fdopen',return_value=stream),\
+             patch('storage.os.fsync') as flushed,patch('storage.os.replace') as renamed,\
+             patch('pathlib.Path.unlink') as removed:
+            marker._write('payload')
+            flags=opened.call_args.args[1]
+            self.assertTrue(flags & os.O_NOFOLLOW);self.assertTrue(flags & os.O_EXCL)
+            flushed.assert_called_once_with(42)
+            self.assertTrue(stream.closed);self.assertEqual(renamed.call_args.args[1],marker.path)
+            self.assertEqual(renamed.call_args.args[0],opened.call_args.args[0])
+            removed.assert_called_once_with(missing_ok=True)
 
 
 if __name__=='__main__':unittest.main()

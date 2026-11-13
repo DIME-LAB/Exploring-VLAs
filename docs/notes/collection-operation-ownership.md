@@ -78,6 +78,12 @@ prove a restart. Unresolved Kit pose/reset RPCs are also terminal and require
 both the instance's control and Isaac processes to have changed. Restart the
 assigned instance with collect_sim.sh down/up; leave other instances alone.
 The record remains for diagnosis and is never cleared by an ordinary retry.
+If the recorded identity is unknown, another restart cannot prove replacement.
+The error names the marker, original failure and affected identity; collection
+stays stopped until the operator performs the manual scene reconciliation in
+README's "Collecting sim data" section. Malformed/unreadable records also refuse
+startup. Marker leaf reads use O_NOFOLLOW; temporary writes use O_NOFOLLOW and
+O_EXCL, then flush/fsync and atomic rename. No marker-leaf target is followed.
 
 At startup and every scene reset, `SceneReconciler` queries all planning-scene
 components (mask 1023). It checks pending request completion, removes every
@@ -92,7 +98,15 @@ map refuses setup and requires a fresh control stack.
 The scene is rebuilt with the shared ground/cup/block geometry methods. A full
 query must then show exactly the expected world IDs, no attached objects,
 matching object/cup poses and physical joints, the expected ground geometry,
-and the complete canonical ACM. Every accepted receipt contains cleanup and
+the rebuilt primitive dimensions or mesh identity from the shared shape builders,
+empty occupancy, and canonical off-diagonal ACM policy. Missing false-only names
+and self-pairs have no effect on that policy; changed robot/world permissions or
+defaults reject. The fake service models MoveIt 2.5.10's constructor/serializer
+instead of copying the input matrix. Mesh identity comparison tolerates vertex
+and triangle reordering/winding and numeric differences up to 1e-7 m, while
+requiring the same vertices and triangle content. `first-reset-scene.json`
+retains the actual first query's matrix, IDs, occupancy and verification results
+for smoke evidence. Every accepted receipt contains cleanup and
 verification results. This is independent of the node's local attached name or
 collision-name lists. MoveIt's [Humble planning-scene implementation](https://moveit.picknik.ai/humble/api/html/moveit__core_2planning__scene_2src_2planning__scene_8cpp_source.html)
 treats world and attached-object changes separately and replaces an explicitly

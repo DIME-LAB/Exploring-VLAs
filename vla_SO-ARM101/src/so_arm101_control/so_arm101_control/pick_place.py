@@ -1607,6 +1607,16 @@ class PickPlaceNode(Node):
             self._wait_future(fut, timeout_sec=5.0)
 
 
+    def _build_cup_geometry(self):
+        """Return the shared cup collision shape for authoring and read-back."""
+        mesh, ok = _load_cup_mesh()
+        if ok:
+            return 'mesh', mesh
+        cylinder = SolidPrimitive()
+        cylinder.type = SolidPrimitive.CYLINDER
+        cylinder.dimensions = [0.0965 * _CUP_COLLISION_PADDING, 0.039 * _CUP_COLLISION_PADDING]
+        return 'cylinder', cylinder
+
     def _add_cup_collision_objects(self, cups_dict=None):
         """Add cup collision objects to MoveIt planning scene.
 
@@ -1622,11 +1632,8 @@ class PickPlaceNode(Node):
         if not MOVEIT_AVAILABLE or not hasattr(self, '_apply_scene_client'):
             return
 
-        # Cylinder fallback dimensions (mm → m, with padding)
-        CUP_RADIUS = 0.039 * _CUP_COLLISION_PADDING
-        CUP_HEIGHT = 0.0965 * _CUP_COLLISION_PADDING
-
-        cup_mesh, mesh_ok = _load_cup_mesh()
+        geometry_kind, cup_shape = self._build_cup_geometry()
+        mesh_ok = geometry_kind == 'mesh'
 
         def _apply():
             if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
@@ -1670,16 +1677,13 @@ class PickPlaceNode(Node):
                     p.position.x -= 2*(qx*qz+qw*qy)*h/norm
                     p.position.y -= 2*(qy*qz-qw*qx)*h/norm
                     p.position.z = pos['z'] - (1-2*(qx*qx+qy*qy)/norm)*h
-                    co.meshes.append(cup_mesh)
+                    co.meshes.append(cup_shape)
                     co.mesh_poses.append(p)
                 else:
                     # SolidPrimitive.CYLINDER is center-based (same convention
                     # as /drop_poses now), so no Z adjustment.
                     p.position.z = pos['z']
-                    cyl = SolidPrimitive()
-                    cyl.type = SolidPrimitive.CYLINDER
-                    cyl.dimensions = [CUP_HEIGHT, CUP_RADIUS]
-                    co.primitives.append(cyl)
+                    co.primitives.append(cup_shape)
                     co.primitive_poses.append(p)
                 scene.world.collision_objects.append(co)
             if not scene.world.collision_objects:

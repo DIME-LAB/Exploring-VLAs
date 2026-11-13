@@ -349,12 +349,44 @@ a new instance control process before a later collector starts. A timed-out Kit
 pose/reset RPC requires fresh control and Isaac processes. Use this instance's
 `collect_sim.sh down N` / `up N`; the marker retains the diagnosis.
 
+The marker error names its path, original request error and missing/unchanged
+process identities. Marker reads and temporary-file creates use no-follow
+opens; temporary files are exclusive, flushed and atomically renamed. If an
+identity was unknown when recorded, **a restart cannot clear the marker**.
+Malformed/unreadable markers also refuse startup.
+
+**Manual scene reconciliation:** stop only the assigned instance with
+`collect_sim.sh down N`, confirm its recorded control/Isaac process groups and
+MoveIt server have exited, and start fresh control and Isaac processes with
+`collect_sim.sh up N`. Before collecting, an operator must inspect the full
+MoveIt scene (`GetPlanningScene`, mask 1023): no attachments, unexpected world
+objects, occupancy or stale collision exemptions, and the intended fresh
+physical scene on the assigned domain/bridge. Save those queries and process
+identities with the original marker under this instance's runtime directory.
+Only after that inspection, rename the explicit `scene-unresolved.json` leaf
+to an explicit diagnostic filename in the same directory. The collector never
+automates that override. If the old processes or scene cannot be verified,
+leave the marker and collection stopped. Inspect leaf symlinks without opening
+their targets and retain malformed-marker bytes for diagnosis.
+
 Every reset queries the full MoveIt scene, removes remote attachments independently
 of local bookkeeping, clears world objects and rebuilds collision allowances from
 the checked-in SRDF. Final verification requires exact expected world IDs/poses,
 no attached objects, the correct ground, measured robot state and canonical ACM.
-The instance must have no unexpected occupancy map. Receipts retain cleanup and
-verification results. Pose-cache subscribers recheck bypass under the map lock;
+ACM comparison checks off-diagonal pairs: missing names/pairs mean false and
+self-pairs are irrelevant. All robot/world permissions remain strict, including
+rejection of defaults. The CPU service fake models MoveIt 2.5.10's
+[constructor](https://github.com/moveit/moveit2/blob/2.5.10/moveit_core/collision_detection/src/collision_matrix.cpp#L66-L96)
+and [serializer](https://github.com/moveit/moveit2/blob/2.5.10/moveit_core/collision_detection/src/collision_matrix.cpp#L332-L361).
+Final verification checks each rebuilt primitive's type/dimensions and each
+mesh's vertices/triangle identity against the shared shape builders, with
+1e-7 m numeric tolerance and harmless mesh indexing/order changes accepted.
+Both cleanup and final rebuild require empty occupancy. The first startup reset
+writes `first-reset-scene.json` in the run directory, including the native ACM,
+world/attached IDs, occupancy size and geometry checks. Accepted receipts retain
+the same cleanup and verification results. Include this file in the smoke report;
+CPU serialization tests do not establish the live MoveIt round trip.
+Pose-cache subscribers recheck bypass under the map lock;
 controller-reference diagnostics carry source time/epoch validity and are never
 used as expert labels. Post-step
 drive-target read-back checks that the command persisted through the next frame.

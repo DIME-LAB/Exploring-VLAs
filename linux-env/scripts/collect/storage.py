@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import stat
 import time
+import uuid
 
 CANONICAL_ROOT = Path('/mnt/a4500-backup/exploring-vlas')
 
@@ -132,13 +133,61 @@ class SceneSafetyMarker:
         self.runtime = confined(runtime)
         self.path = self.runtime/'scene-unresolved.json'
 
+    def _read(self):
+        try:
+            fd=os.open(self.path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC|os.O_NONBLOCK)
+        except FileNotFoundError:
+            return None
+        with os.fdopen(fd,'r') as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ValueError('Marker is not a regular file')
+            text=stream.read(1024*1024+1)
+            if len(text)>1024*1024:raise ValueError('Marker exceeds 1 MiB')
+            return text
+
+    def _write(self, text):
+        temporary=self.path.with_suffix('.'+uuid.uuid4().hex+'.tmp')
+        fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600)
+        try:
+            with os.fdopen(fd,'w') as stream:
+                stream.write(text);stream.flush();os.fsync(stream.fileno())
+            # Rename replaces a destination symlink itself, never its target.
+            os.replace(temporary,self.path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
     def require_fresh_stack(self):
-        if self.path.exists():
-            failure = json.loads(self.path.read_text())
-            identities=failure['identities']
-            if any(not scene_stack_ready(identities[name],control_identity(self.runtime,pidfile))
-                   for name,pidfile in failure['required_restart'].items()):
-                raise RuntimeError('Unresolved scene mutation: restart required instance processes before collecting: '+str(sorted(identities)))
+        original='unavailable (marker unreadable or malformed)'
+        try:
+            text=self._read()
+            if text is None:return
+            failure=json.loads(text)
+            original=failure['error']
+            identities=failure['identities'];required=failure['required_restart']
+            permitted={'control':'control.pid','isaac':'isaacsim-soarm101.pid'}
+            if ('control' not in required or set(identities)!=set(required) or
+                any(permitted.get(name)!=pidfile for name,pidfile in required.items())):
+                raise ValueError('Missing required restart identity fields')
+            for name,identity in identities.items():
+                if identity is not None and (not isinstance(identity,dict) or
+                    set(identity)!={'pid','start_ticks','boot_id'} or
+                    not isinstance(identity['pid'],int) or identity['pid']<=0 or
+                    not str(identity['start_ticks']).isdigit() or not isinstance(identity['boot_id'],str) or
+                    not identity['boot_id']):
+                    raise ValueError('Malformed recorded identity: '+name)
+            unknown=[name for name in required if identities[name] is None]
+            if unknown:
+                raise ValueError('identity unknown at record time: '+', '.join(unknown)+
+                    '; a restart cannot clear this marker; manual scene reconciliation required')
+            current={name:control_identity(self.runtime,pidfile) for name,pidfile in required.items()}
+            blocked=[name for name in required if not scene_stack_ready(identities[name],current[name])]
+            if blocked:
+                missing=[name for name in blocked if current[name] is None]
+                raise ValueError('restart required for: '+', '.join(blocked)+
+                    ('; current identity missing: '+', '.join(missing) if missing else ''))
+        except (OSError,ValueError,KeyError,TypeError,AttributeError) as exc:
+            raise RuntimeError(f'Unresolved scene marker {self.path}; original error: {original}; {exc}. '
+                'See README "Collecting sim data", manual scene reconciliation.') from exc
 
     def record(self, error, source='MoveIt'):
         required={'control':'control.pid'}
@@ -146,9 +195,7 @@ class SceneSafetyMarker:
         payload = dict(error=str(error), source=source, required_restart=required,
                        identities={name:control_identity(self.runtime,pidfile) for name,pidfile in required.items()},
                        recorded_wall_ns=time.time_ns())
-        temporary = self.path.with_suffix('.json.tmp')
-        temporary.write_text(json.dumps(payload,indent=2))
-        temporary.replace(self.path)
+        self._write(json.dumps(payload,indent=2))
 
 
 if __name__ == '__main__':

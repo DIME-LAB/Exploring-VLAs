@@ -1,5 +1,7 @@
 """Authoritative MoveIt reset: world objects, attachments and collision policy."""
 import math
+import hashlib
+import json
 import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 from scene_sync import collision_pose_errors, physical_pose_caches, multiply
@@ -21,18 +23,70 @@ def collision_policy(srdf, world_ids=()):
     pairs.add(tuple(sorted(('base','ground_plane'))))
     pairs.update(tuple(sorted((name,'ground_plane'))) for name in world_ids)
     names = sorted({name for pair in pairs for name in pair})
-    return dict(names=names, allowed=[(a==b or tuple(sorted((a,b))) in pairs)
+    return dict(names=names, allowed=[(a!=b and tuple(sorted((a,b))) in pairs)
                                     for a in names for b in names])
 
 
 def policy_matches(acm, policy):
     names=list(acm.entry_names);expected=policy['names']
-    if len(names)!=len(set(names)) or set(names)!=set(expected) or len(acm.entry_values)!=len(names):return False
+    if len(names)!=len(set(names)) or len(acm.entry_values)!=len(names):return False
     if acm.default_entry_names or acm.default_entry_values:return False
     if any(len(row.enabled)!=len(names) for row in acm.entry_values):return False
     order={name:i for i,name in enumerate(names)}
-    return all(bool(acm.entry_values[order[a]].enabled[order[b]])==value
-               for (a,b),value in zip(((a,b) for a in expected for b in expected),policy['allowed']))
+    wanted={(a,b):value for (a,b),value in
+            zip(((a,b) for a in expected for b in expected),policy['allowed'])}
+    # MoveIt imports only i<j and omits names without explicit/default entries.
+    # Missing pairs therefore mean false; self-pairs have no collision meaning.
+    union=set(names)|set(expected)
+    return all((bool(acm.entry_values[order[a]].enabled[order[b]])
+                if a in order and b in order else False)==wanted.get((a,b),False)
+               for a in union for b in union if a!=b)
+
+
+def native_scene_summary(scene):
+    """Retain the service representation, including diagonals, for live proof."""
+    acm=scene.allowed_collision_matrix
+    return dict(query_components=FULL_SCENE,
+        world_ids=sorted(obj.id for obj in scene.world.collision_objects),
+        attached_ids=sorted(obj.object.id for obj in scene.robot_state.attached_collision_objects),
+        octomap_bytes=len(scene.world.octomap.octomap.data),
+        robot_joints=dict(names=list(scene.robot_state.joint_state.name),
+                          positions=list(scene.robot_state.joint_state.position)),
+        acm=dict(entry_names=list(acm.entry_names),entry_values=[list(row.enabled) for row in acm.entry_values],
+                 default_entry_names=list(acm.default_entry_names),default_entry_values=list(acm.default_entry_values)))
+
+
+def shape_content(kind, shape):
+    """Mesh identity independent of vertex/triangle ordering and winding."""
+    if kind!='mesh':
+        return dict(kind='primitive', type=int(shape.type), dimensions=list(shape.dimensions))
+    vertices=[tuple(float(getattr(v,k)) for k in ('x','y','z')) for v in shape.vertices]
+    triangles=[]
+    for triangle in shape.triangles:
+        indices=list(triangle.vertex_indices)
+        if len(indices)!=3 or any(i<0 or i>=len(vertices) for i in indices):
+            raise ValueError('Invalid mesh triangle indices')
+        triangles.append(sorted(vertices[i] for i in indices))
+    return dict(kind='mesh', vertices=sorted(vertices), triangles=sorted(triangles))
+
+
+def geometry_check(obj, kind, shape):
+    def close(a,b):
+        if isinstance(a,dict):return isinstance(b,dict) and a.keys()==b.keys() and all(close(a[k],b[k]) for k in a)
+        if isinstance(a,(list,tuple)):return isinstance(b,(list,tuple)) and len(a)==len(b) and all(close(x,y) for x,y in zip(a,b))
+        if isinstance(a,(int,float)):
+            return isinstance(b,(int,float)) and math.isfinite(a) and math.isfinite(b) and abs(a-b)<=1e-7
+        return a==b
+    try:
+        if obj is None or getattr(obj,'planes',[]):raise ValueError('Missing object or unexpected plane')
+        shapes=list(obj.meshes)+list(obj.primitives)
+        if len(shapes)!=1 or bool(obj.meshes)!=(kind=='mesh'):raise ValueError('Shape kind/count mismatch')
+        expected=shape_content(kind,shape);actual=shape_content(kind,shapes[0])
+        digest=lambda value:hashlib.sha256(json.dumps(value,sort_keys=True,allow_nan=False).encode()).hexdigest()
+        return dict(passed=close(expected,actual),kind=expected['kind'],expected_sha256=digest(expected),
+                    observed_sha256=digest(actual))
+    except (ValueError,TypeError,AttributeError,IndexError) as exc:
+        return dict(passed=False,error=str(exc))
 
 
 def ground_matches(obj, snapshot, height):
@@ -124,7 +178,8 @@ class SceneReconciler:
             self.node._attached_lego_name=None;self.node._attached_lego_tcp_offset=None
             self.node._lego_collision_names=[];self.node._cup_collision_names=[]
             return dict(removed_attached=[obj.object.id for obj in attached],
-                        removed_world=[obj.id for obj in world], verified=True, query_components=FULL_SCENE)
+                        removed_world=[obj.id for obj in world], verified=True, query_components=FULL_SCENE,
+                        native_scene=native_scene_summary(final))
 
     def verify(self, snapshot, joint_names):
         observed=self.query()
@@ -137,8 +192,20 @@ class SceneReconciler:
         poses=collision_pose_errors(observed.world.collision_objects,snapshot)
         attachments=[obj.object.id for obj in observed.robot_state.attached_collision_objects]
         ground=ground_matches(world.get('ground_plane'),snapshot,self.node._ground_z_var.get())
+        geometry={}
+        for name in objects:
+            kind,shape=self.node._build_lego_geometry(name)
+            geometry['lego_'+name]=geometry_check(world.get('lego_'+name),kind,shape)
+        cup_kind,cup_shape=self.node._build_cup_geometry()
+        for name in cups:
+            geometry['cup_'+name]=geometry_check(world.get('cup_'+name),cup_kind,cup_shape)
+        geometry_ok=all(check['passed'] for check in geometry.values())
+        native=native_scene_summary(observed)
+        occupancy_empty=native['octomap_bytes']==0
         return dict(passed=bool(poses['passed'] and feedback and set(world)==expected and not attachments
-                                and policy_matches(observed.allowed_collision_matrix,policy) and ground),
+                                and policy_matches(observed.allowed_collision_matrix,policy) and ground
+                                and geometry_ok and occupancy_empty),
                     poses=poses, physical_feedback=feedback, ground=ground, unexpected_world=sorted(set(world)-expected),
                     missing_world=sorted(expected-set(world)), attached=attachments,
+                    geometry=geometry, occupancy_empty=occupancy_empty,native_scene=native,
                     collision_policy=policy_matches(observed.allowed_collision_matrix,policy),query_components=FULL_SCENE)
