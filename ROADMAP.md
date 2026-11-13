@@ -32,7 +32,9 @@ cadence (~14 Hz) not matching the camera-bound recording loop.
 - [ ] 1.8 Episode harness (interim, before RunTask): home → randomize (blue visible) → start policy →
       success / timeout → stop → record viewport mp4 → score from `/objects_poses_sim`.
 - [ ] 1.9 Evaluation matrix, idle box (no prompt2assembly jobs), 10 episodes each:
-      A baseline (today) · B timing-matched (1.2–1.4) · C timing + real RTC (1.7).
+      A baseline (30 fps, rgba8 viewport cameras, no RTC) · B timing-matched (1.2–1.4) · C timing + real RTC (1.7).
+      Rate sweep for B and C: 17.4 Hz (default, from the 1.1 motion-phase clock) and 19.4 Hz (whole-run estimate),
+      because 1.1 could not prove the April rate/RTF (lead decision, 2026-11-12).
       Report success, grasp-only, failure mode, per-episode videos.
 - [ ] 1.10 **Retraining decision** from 1.9 (see Phase 3 criteria). Record results in the coursework README.
 - **Merge gate → main:** 1.1–1.9 done, `deploy_sim.sh up` still one command, README updated.
