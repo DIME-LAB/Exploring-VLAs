@@ -67,6 +67,7 @@ def test_stream_and_observation_equivalence_to_fork(make_robot):
 def test_measured_state_merged_cache_and_per_joint_age(make_robot):
     robot = make_robot(joint_states_topic="/joint_states_measured")
     assert robot._sub.topic == "/joint_states_measured"
+    assert robot._sub.qos.depth == 5
     robot._on_joint_state(state(["shoulder_pan"], [0.25]))
     obs = robot.get_observation()
     assert obs["shoulder_pan.pos"] == 0.25 * 180 / math.pi

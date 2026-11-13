@@ -48,7 +48,7 @@ class ROS2JointRobotConfig(RobotConfig):
     action_duration_s: float = 0.1
     robot_type: str | None = None
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
-    qos: QoSConfig = field(default_factory=QoSConfig)
+    qos: QoSConfig = field(default_factory=lambda: QoSConfig(depth=5))
 
     def __post_init__(self):
         super().__post_init__()

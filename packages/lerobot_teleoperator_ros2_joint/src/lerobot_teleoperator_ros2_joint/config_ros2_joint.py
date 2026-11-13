@@ -17,7 +17,7 @@ class ROS2JointTeleoperatorConfig(TeleoperatorConfig):
     action_warmup_s: float = 2.0
     action_stale_ms: float = 500.0
     command_mode: str = "continuous"
-    qos: QoSConfig = field(default_factory=QoSConfig)
+    qos: QoSConfig = field(default_factory=lambda: QoSConfig(depth=5))
 
     def __post_init__(self):
         if not self.action_topic or not self.joint_names or len(set(self.joint_names)) != len(self.joint_names):

@@ -14,6 +14,8 @@ install these packages only into that new venv. Run its interpreter through
 `pixi run --manifest-path linux-env/pixi.toml` for the ROS native library paths.
 Build the action with that same pixi environment and Python (Jazzy/Python 3.12).
 A Humble/Python 3.10 generated overlay cannot be used by the Jazzy interpreter.
+The wheel also installs the SO-101 example under `sys.prefix/share/lerobot_ros2_task/examples/so101.json`;
+use that path with `--robot-config` when working outside a repository checkout.
 
 ```bash
 # From the repository root, after building/sourcing the action interface:
@@ -130,6 +132,9 @@ from soarm101_task_tools.panel import show
 attach_to_soarm101(get_mcp_bridge())
 show()
 ```
+
+Alias attachment can be repeated. Reattach after reloading `soarm101_tools`, which
+removes its aliases. The owner must permit additions; a sealed owner refuses them.
 
 The panel has instruction/model fields, maximum duration, Run task, Update prompt
 and Cancel and home. It does not change the deployed `isaac/exts/` extension or

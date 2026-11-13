@@ -173,3 +173,49 @@ def test_early_result_request_survives_work_after_terminal_transition(state):
         server.destroy()
         node.destroy_node()
         rclpy.shutdown()
+
+
+def test_next_goal_is_accepted_when_previous_result_is_published(monkeypatch):
+    import rclpy
+    from rclpy.action import ActionClient
+    from rclpy.executors import MultiThreadedExecutor
+    from rclpy.parameter import Parameter
+    from lerobot_ros2_interfaces.action import RunTask
+    import lerobot_ros2_task.node as module
+    from test_task import Robot, Policy
+    rclpy.init()
+    published, return_allowed = threading.Event(), threading.Event()
+    original = module.finish_goal
+    first = [True]
+    def finish(goal, state, result):
+        original(goal, state, result)
+        if first[0]:
+            first[0] = False
+            published.set()
+            assert return_allowed.wait(5)
+    monkeypatch.setattr(module, "finish_goal", finish)
+    node = module.create_node(robot=Robot(), policy_factory=Policy)
+    node.set_parameters([Parameter("model", value="stub"), Parameter("fps", value=1000.)])
+    client = ActionClient(node, RunTask, "run_task")
+    executor = MultiThreadedExecutor(num_threads=6)
+    executor.add_node(node)
+    thread = threading.Thread(target=executor.spin, daemon=True)
+    thread.start()
+    try:
+        assert client.wait_for_server(timeout_sec=5)
+        goal = RunTask.Goal(instruction="pick", max_duration=.01)
+        first_handle = wait(client.send_goal_async(goal))
+        first_result = first_handle.get_result_async()
+        assert published.wait(5)
+        second_handle = wait(client.send_goal_async(goal))
+        assert second_handle.accepted
+        return_allowed.set()
+        assert wait(first_result).result.outcome == "timeout"
+        assert wait(second_handle.get_result_async()).result.outcome == "timeout"
+    finally:
+        return_allowed.set()
+        executor.shutdown(timeout_sec=10)
+        thread.join(2)
+        client.destroy()
+        node.destroy_node()
+        rclpy.shutdown()

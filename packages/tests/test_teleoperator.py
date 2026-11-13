@@ -14,6 +14,7 @@ def test_fork_command_equivalence(ros):
     fork._is_connected = True
     plugin = ROS2JointTeleoperator(ROS2JointTeleoperatorConfig(action_warmup_s=0))
     plugin.connect()
+    assert plugin._sub.qos.depth == 5
     fork._on_action(message())
     plugin._on_action(message())
     assert plugin.get_action() == fork.get_action()

@@ -55,7 +55,14 @@ def register(registrar):
 def attach_to_soarm101(bridge):
     """Add the requested aliases to the existing SO-ARM tool owner explicitly."""
     from omni_kit_mcp import OwnerRegistrar
-    if "soarm101_tools" not in bridge.get_owners():
+    owner = bridge.get_owners().get("soarm101_tools")
+    if owner is None:
         raise RuntimeError("Load soarm101_tools before attaching RunTask aliases")
+    names = ["soarm101.run_task", "soarm101.set_task_instruction", "soarm101.cancel_task"]
+    present = set(owner.get("tools", [])) & set(names)
+    if present == set(names):
+        return names
+    if present:
+        raise RuntimeError("Some RunTask alias names are already registered")
     register(OwnerRegistrar(bridge, "soarm101_tools", "soarm101"))
-    return ["soarm101.run_task", "soarm101.set_task_instruction", "soarm101.cancel_task"]
+    return names

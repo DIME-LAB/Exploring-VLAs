@@ -152,18 +152,19 @@ def create_node(*, robot=None, policy_factory=None, parameter_overrides=None):
                 self.get_logger().info(f"RunTask finished: {outcome.outcome}; {outcome.message}")
                 result.success, result.outcome, result.message = bool(outcome.success), str(outcome.outcome), str(outcome.message)
                 if outcome.outcome == "cancel":
-                    finish_goal(goal, "canceled", result)
+                    terminal = "canceled" if goal.is_cancel_requested else "abort"
                 elif outcome.success:
-                    finish_goal(goal, "succeed", result)
+                    terminal = "succeed"
                 else:
-                    finish_goal(goal, "abort", result)
+                    terminal = "abort"
             except Exception as exc:
                 result.outcome, result.message = "error", str(exc)
-                finish_goal(goal, "abort", result)
+                terminal = "abort"
             finally:
                 with self._lock:
                     self._episode = self._goal = None
                     self._reserved = False
+            finish_goal(goal, terminal, result)
             return result
 
         def destroy_node(self):
