@@ -10,7 +10,7 @@ contracts**:
 
 | Platform | Physics | Producer-side ROS2 | Consumer-side ROS2 |
 |---|---|---|---|
-| **Linux** (Ubuntu 22.04 + NVIDIA) | Isaac Sim 5.x | system Humble | pixi-Jazzy (lerobot) |
+| **Linux** (Ubuntu 22.04 + NVIDIA) | Isaac Sim 6.1 | system Humble | pixi-Jazzy (lerobot) |
 | **macOS** (Apple Silicon) | Gazebo Harmonic | pixi-Jazzy via RoboStack | same pixi-Jazzy |
 
 The control stack (MoveIt 2 + `control_gui` tkinter + ros2_control) is the
@@ -31,8 +31,9 @@ This CLAUDE.md is the **source of truth** for layout. Everything else cross-link
 | --- | --- | --- |
 | `vla_SO-ARM101/` | Robot description, Gazebo world, MoveIt config, control_gui, jointstatereader, so_arm101_bringup, sim_ground_truth. Colcon workspace builds in-tree on Linux, at `/tmp/soarm-ws/` on Mac (spaceless-path constraint). | In-tree directory (part of this clone) |
 | `lerobot/` | HF `lerobot` fork with `so101_ros2` Robot/Teleop + `ros2` Camera plugins | Git submodule (`git submodule update --init --recursive`) |
-| `isaac-sim-mcp/` | Isaac Sim digital twin extension (`soarm101-dt`) — physics backend on Linux. MCP socket on `localhost:8767`. Provides `/joint_states`, `/clock`, `/objects_poses_sim`, `/drop_poses`, `/wrist_camera_rgb_sim`, `/workspace_camera_sim`. | Git submodule |
-| `linux-env/` | Linux-side: pixi-Jazzy env for lerobot, bootstrap + stack_*.sh scripts, vendored `isaacsim_launch.sh`, mirror node, `cyclonedds.xml` for cross-Python DDS | In-tree directory |
+| `isaac/exts/soarm101-dt/` | Isaac Sim digital twin extension (`soarm101-dt`, vendored) — physics backend on Linux. Its scene commands are served on the omni-kit-mcp bridge as `soarm101.<name>` by the `isaac/soarm101_tools` package (registered per launch by `linux-env/scripts/isaac/isaacsim_launch.sh`). Provides `/joint_states`, `/clock`, `/objects_poses_sim`, `/drop_poses`, `/wrist_camera_rgb_sim`, `/workspace_camera_sim`. | In-tree directory |
+| `omni-kit-mcp/` | Bridge that drives Omniverse Kit apps: one TCP port per Isaac process (this repo: 8767, since omni-kit-mcp's usual 9009 belongs to another project's bridge on the shared box), plus the stdlib-only client `kit_mcp/client.py` every caller here uses (control_gui, `sim_reset.sh`, the `linux-env` scripts). Enabled per launch, never installed into Isaac's shared user config. | Git submodule |
+| `linux-env/` | Linux-side: pixi-Jazzy env for lerobot, bootstrap + `deploy_sim.sh` (sim + policy, one command) + stack_*.sh scripts, `isaacsim_launch.sh` (Isaac 6.1 + bridge, optional WebRTC stream), mirror node, `cyclonedds.xml` for cross-Python DDS | In-tree directory |
 | `mac-env/` | Mac-side: pixi env (RoboStack) for the WHOLE stack, bootstrap + stack_*.sh scripts | In-tree directory |
 | `aruco_camera_localizer/` | Real-side ArUco / YOLO object localization → `/objects_poses_real`, `/objects_bbox_real`, `/drop_poses`. **Not a submodule** (git submodule-add hits a pack-index bug on macOS spaced paths). On Mac auto-cloned to `/tmp/aruco_camera_localizer` by bootstrap; on Linux currently expected at `~/Desktop/ros2_ws/src/aruco_camera_localizer` (location being normalized — see cleanup tally). | Manual clone (Linux) / auto-cloned (Mac) |
 | `vla_cartpole/` | Tangential — separate experiment, not wired into the SO-ARM101 stack | In-tree |
@@ -48,7 +49,8 @@ Recreate after a reboot or to start clean: re-run the bootstrap for your platfor
 
 ## Doc map
 
-This file (root `CLAUDE.md`) is the entry point. Per-area docs cross-link from here:
+This file (root `CLAUDE.md`) is the entry point. Per-area docs cross-link from here.
+Human-facing quick start (Linux box + watching from a Mac): [`README.md`](README.md).
 
 **First-time setup:**
 - **Linux**: [`vla_SO-ARM101/docs/ROS2_LINUX_SETUP.md`](vla_SO-ARM101/docs/ROS2_LINUX_SETUP.md) — full from-zero (Humble + pixi + Isaac Sim + colcon)
@@ -59,8 +61,8 @@ This file (root `CLAUDE.md`) is the entry point. Per-area docs cross-link from h
 - [`vla_SO-ARM101/CLAUDE.md`](vla_SO-ARM101/CLAUDE.md) — package inventory + tiered planner + sim-world conventions
 - [`vla_SO-ARM101/docs/grasp_pipeline.md`](vla_SO-ARM101/docs/grasp_pipeline.md) — control_gui → MoveIt grasp flow
 - [`vla_SO-ARM101/docs/AGENT_DEBUG_GUIDE.md`](vla_SO-ARM101/docs/AGENT_DEBUG_GUIDE.md) — debugging the sim stack
-- [`isaac-sim-mcp/CLAUDE.md`](isaac-sim-mcp/CLAUDE.md) — Isaac Sim extension internals + MCP tool inventory (Linux backend)
-- [`isaac-sim-mcp/docs/DEBUG-GUIDE.md`](isaac-sim-mcp/docs/DEBUG-GUIDE.md) — physics + planner integration debugging
+- [`isaac/exts/soarm101-dt/docs/README.md`](isaac/exts/soarm101-dt/docs/README.md) — Isaac Sim extension (Linux backend); live tool inventory: `PYTHONPATH=omni-kit-mcp python3 -m kit_mcp.client list_tools --port 8767`
+- [`omni-kit-mcp/README.md`](omni-kit-mcp/README.md) — the bridge, its client/CLI, remote access
 
 **Per-area conventions:**
 - [`linux-env/CLAUDE.md`](linux-env/CLAUDE.md) — Linux record stack (mirror, lerobot-record wrapper, Record Sim tab)
@@ -80,14 +82,25 @@ git submodule update --init --recursive
 export PATH="$HOME/.pixi/bin:$PATH"
 bash linux-env/scripts/bootstrap.sh        # preflight + submodules + pixi env + colcon build
 
-# Each session
+# Each session — deploy (sim + SmolVLA policy)
+bash linux-env/scripts/deploy_sim.sh up [--stream] [--gui|--no-gui] [--model <preset|hf_id>]
+#   control_gui/RViz are opt-in (default on locally, off with --stream); a requested
+#   window with no usable X display fails fast — no virtual-display fallback
+bash linux-env/scripts/deploy_sim.sh status
+bash linux-env/scripts/deploy_sim.sh down  # only what `up` started
+
+# Each session — sim + control stack only (e.g. recording)
 bash linux-env/scripts/stack_start.sh      # Isaac Sim + control stack + RViz + tkinter GUI
 bash linux-env/scripts/stack_status.sh     # health check across all layers
 # … record episodes via control_gui's Record Sim tab (see linux-env/CLAUDE.md) …
 bash linux-env/scripts/stack_stop.sh       # graceful tear-down (SIGINT-first)
 ```
 
-**Hard requirements** (the bootstrap preflight checks these): Ubuntu 22.04, NVIDIA driver compatible with Isaac Sim 5.x, ROS2 Humble at `/opt/ros/humble`, pixi installed, ~50 GB free, X11 session. Full walk-through: [`ROS2_LINUX_SETUP.md`](vla_SO-ARM101/docs/ROS2_LINUX_SETUP.md).
+Scripting the sim: every scene command is a bridge tool, e.g.
+`PYTHONPATH=omni-kit-mcp python3 -m kit_mcp.client soarm101.randomize_object_poses --port 8767`
+(exit 0 ok · 1 tool error · 2 unreachable). Arbitrary Kit Python: the `run_python` builtin.
+
+**Hard requirements** (the bootstrap preflight checks these): Ubuntu 22.04, NVIDIA driver compatible with Isaac Sim 6.1 (pip venv at `~/env_isaacsim61`, or set `ISAACSIM_BIN`), ROS2 Humble at `/opt/ros/humble`, pixi installed, ~50 GB free, X11 session. Full walk-through: [`ROS2_LINUX_SETUP.md`](vla_SO-ARM101/docs/ROS2_LINUX_SETUP.md).
 
 ## Bringing it up — macOS
 

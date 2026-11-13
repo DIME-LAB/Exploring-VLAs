@@ -22,12 +22,30 @@ REPO_ROOT="$(cd "$ENV_DIR/.." && pwd)"
 unset PYTHONPATH AMENT_PREFIX_PATH CMAKE_PREFIX_PATH COLCON_PREFIX_PATH \
       ROS_DISTRO ROS_VERSION ROS_PYTHON_VERSION ROSCONSOLE_FORMAT \
       ROS_LOCALHOST_ONLY ROS_AUTOMATIC_DISCOVERY_RANGE
+# `|| true`: grep -v exits 1 when EVERY entry is a ROS path (any shell that
+# sourced only /opt/ros/humble, e.g. deploy_sim.sh or control_gui). Under
+# `set -euo pipefail` that silently killed this script before its first output
+# line (empty log, no process).
 if [ -n "${LD_LIBRARY_PATH:-}" ]; then
     LD_LIBRARY_PATH="$(printf '%s' "$LD_LIBRARY_PATH" | tr ':' '\n' \
-        | grep -vE '/(opt/ros|ros2_ws|Desktop/ros2_ws)' \
+        | { grep -vE '/(opt/ros|ros2_ws|Desktop/ros2_ws)' || true; } \
         | paste -sd: -)"
-    export LD_LIBRARY_PATH
+    if [ -n "$LD_LIBRARY_PATH" ]; then export LD_LIBRARY_PATH; else unset LD_LIBRARY_PATH; fi
 fi
+
+# GPU — the policy runs on SOARM_POLICY_GPU (nvidia-smi index, default 1) so a
+# server started from here, control_gui's Inference tab or deploy_sim.sh never
+# lands on Isaac's GPU 0. Pinned by UUID: CUDA's default device order need not
+# match nvidia-smi's. An explicit CUDA_VISIBLE_DEVICES wins.
+if [ -z "${CUDA_VISIBLE_DEVICES:-}" ]; then
+    _gpu_uuid="$(nvidia-smi --query-gpu=uuid --format=csv,noheader -i "${SOARM_POLICY_GPU:-1}" 2>/dev/null | head -1 || true)"
+    if [[ "$_gpu_uuid" == GPU-* ]]; then   # nvidia-smi prints errors on stdout
+        export CUDA_VISIBLE_DEVICES="$_gpu_uuid"
+    else
+        echo "[$(basename "$0")] WARNING: no GPU at index ${SOARM_POLICY_GPU:-1}; leaving CUDA_VISIBLE_DEVICES unset (set SOARM_POLICY_GPU)" >&2
+    fi
+fi
+echo "[$(basename "$0")] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<all>}" >&2
 
 # Cyclone DDS — multicast on lo so the pixi-Jazzy client discovers Isaac
 # Sim's Humble-side topics (joint_states + cameras + arm_controller actions).

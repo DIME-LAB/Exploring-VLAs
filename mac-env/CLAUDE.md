@@ -4,7 +4,7 @@ This dir is the **macOS / pixi build environment** + **session-management script
 
 > **Inherits**: see `../CLAUDE.md` for repo topology, build paths, macOS gotchas.
 >
-> **Linux counterpart**: `../linux-env/CLAUDE.md` — Isaac-Sim-backed recording stack (no Gazebo). Uses pixi-Jazzy for the lerobot consumer + a system-Humble mirror node, paired with the Isaac Sim digital twin at `~/Documents/isaac-sim-mcp/`.
+> **Linux counterpart**: `../linux-env/CLAUDE.md` — Isaac-Sim-backed recording stack (no Gazebo). Uses pixi-Jazzy for the lerobot consumer + a system-Humble mirror node, paired with the Isaac Sim digital twin (`../isaac/exts/soarm101-dt/`, driven over the omni-kit-mcp bridge). To watch that Linux sim from this Mac, see [`../README.md`](../README.md#from-a-mac).
 
 ## Why `mac-env/` exists
 

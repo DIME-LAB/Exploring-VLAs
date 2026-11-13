@@ -4,7 +4,8 @@
 
 Automated verification loop for the SO-ARM101 drop motion pipeline.
 Runs the full sequence: grasp_home → drop_point → drop_sweep → check cups →
-grasp_home (return) → check cups. Queries Isaac Sim via socket to detect
+grasp_home (return) → check cups. Queries Isaac Sim via the omni-kit-mcp
+bridge (`run_python` builtin) to detect
 fallen cups after each motion step.
 
 Requirements:
@@ -23,11 +24,20 @@ Usage:
     python3 verify_drop_collision.py --passes 1          # quick single-pass check
 """
 import argparse
-import json
-import socket
+import os
 import subprocess
 import sys
 import time
+from pathlib import Path
+
+# omni-kit-mcp's stdlib-only client, from the in-repo submodule.
+_KIT_MCP_DIR = os.environ.get(
+    'SOARM_KIT_MCP_DIR', str(Path(__file__).resolve().parents[2] / 'omni-kit-mcp'))
+sys.path.insert(0, _KIT_MCP_DIR)
+from kit_mcp.client import call as kit_call  # noqa: E402
+
+KIT_MCP_HOST = os.environ.get('SOARM_KIT_MCP_HOST', '127.0.0.1')
+KIT_MCP_PORT = int(os.environ.get('SOARM_KIT_MCP_PORT', '8767'))
 
 
 def ros2_service(service, timeout=30):
@@ -57,7 +67,7 @@ def ros2_param_set(node, param, value):
         capture_output=True, text=True, timeout=10)
 
 
-def check_cups_isaac_sim(port=8767):
+def check_cups_isaac_sim(port=KIT_MCP_PORT):
     """Query Isaac Sim for cup states. Returns dict of cup_name -> {upright, pos}."""
     code = '''
 import omni.usd
@@ -77,27 +87,9 @@ for cup_name in ['cup_red', 'cup_green', 'cup_blue']:
     lines.append(f'{cup_name}|{upright}|{pos[0]*1000:.1f}|{pos[1]*1000:.1f}|{pos[2]*1000:.1f}')
 result = ';'.join(lines)
 '''
-    s = socket.socket()
-    s.settimeout(15)
-    s.connect(('localhost', port))
-    s.sendall(json.dumps({'type': 'execute_python_code', 'params': {'code': code}}).encode())
-    d = b''
-    while True:
-        c = s.recv(16384)
-        if not c:
-            break
-        d += c
-        try:
-            json.loads(d.decode())
-            break
-        except json.JSONDecodeError:
-            continue
-    s.close()
-    resp = json.loads(d.decode())
-    raw = resp.get('result', '')
-    if isinstance(raw, dict):
-        raw = raw.get('result', str(raw))
-
+    payload = kit_call('run_python', {'code': code},
+                       host=KIT_MCP_HOST, port=port, timeout=15)
+    raw = payload.get('result') or ''
     cups = {}
     for entry in raw.split(';'):
         parts = entry.split('|')

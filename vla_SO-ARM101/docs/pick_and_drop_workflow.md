@@ -9,7 +9,7 @@ Works with Isaac Sim or Gazebo as the simulation backend.
                   Isaac Sim                           Gazebo
                   --------                            ------
                   soarm101-dt extension               gazebo.launch.py
-                  port 8767                           gz_ros2_control
+                  omni-kit-mcp :8767                  gz_ros2_control
                        |                                   |
                        v                                   v
               /wrist_camera_rgb_sim              /wrist_camera
@@ -29,7 +29,7 @@ Three repos involved:
 
 | Repo | Path | Role |
 |------|------|------|
-| isaac-sim-mcp | `~/Documents/isaac-sim-mcp` | Isaac Sim extension (sim, cameras, drop pose publishing) |
+| Exploring-VLAs `isaac/exts/soarm101-dt` + `omni-kit-mcp/` | (in this repo) | Isaac Sim extension (sim, cameras, drop pose publishing) and the bridge that serves its tools |
 | aruco_camera_localizer | `~/Desktop/ros2_ws/src/aruco_camera_localizer` | YOLOE object detection + ArUco drop pose detection |
 | vla_SO-ARM101 | `~/Projects/Exploring-VLAs/vla_SO-ARM101` | Control GUI, IK, MoveIt, trajectories |
 
@@ -52,47 +52,25 @@ colcon build --packages-select so_arm101_description
 ### A1. Launch Isaac Sim
 
 ```bash
-DISPLAY=:0 ~/env_isaaclab/bin/isaacsim \
-  --ext-folder ~/Documents/isaac-sim-mcp/exts \
-  --enable soarm101-dt
+bash ../../linux-env/scripts/isaac/isaacsim_launch.sh launch soarm101-dt   # blocks until ready
 ```
 
-Wait ~60s for full startup. Verify the MCP socket responds:
+The launcher enables the soarm101-dt extension and the omni-kit-mcp bridge
+for this launch; the extension's tools are served on the bridge as
+`soarm101.<name>`. All calls below use omni-kit-mcp's stdlib-only client
+(run from the repo root, or point `PYTHONPATH` at `omni-kit-mcp/`):
 
-```python
-import socket, json, time
-s = socket.socket(); s.settimeout(5)
-s.connect(('localhost', 8767))
-s.sendall(json.dumps({'type': 'list_available_tools', 'params': {}}).encode())
-d = b''
-t0 = time.time()
-while time.time() - t0 < 5:
-    c = s.recv(4096)
-    if not c: break
-    d += c
-    try: json.loads(d.decode()); print('RESPONSIVE'); break
-    except: continue
-s.close()
+```bash
+export PYTHONPATH=$PWD/omni-kit-mcp
+python3 -m kit_mcp.client list_tools --port 8767     # every registered tool
 ```
 
 ### A2. Quick Start (loads scene)
 
-Via MCP socket or UI "Quick Start" button:
+Via the bridge or the UI "Quick Start" button:
 
-```python
-import socket, json
-s = socket.socket(); s.settimeout(120)
-s.connect(('localhost', 8767))
-s.sendall(json.dumps({'type': 'quick_start', 'params': {}}).encode())
-d = b''
-while True:
-    c = s.recv(16384)
-    if not c: break
-    d += c
-    try: json.loads(d.decode()); break
-    except: continue
-print(json.loads(d.decode()).get('result', {}).get('message', ''))
-s.close()
+```bash
+python3 -m kit_mcp.client soarm101.quick_start --port 8767 --timeout 300
 ```
 
 Wait ~30s for full scene load (robot, action graphs, objects, simulation start).
@@ -100,34 +78,19 @@ Wait ~30s for full scene load (robot, action graphs, objects, simulation start).
 ### A3. Add Cups + Drop Pose Publisher
 
 ```python
-# Add cups (via MCP socket)
-import socket, json
-def send_cmd(tool, params={}, port=8767, timeout=30):
-    msg = json.dumps({"type": tool, "params": params})
-    s = socket.socket(); s.settimeout(timeout)
-    s.connect(("localhost", port))
-    s.sendall(msg.encode())
-    d = b""
-    while True:
-        c = s.recv(4096)
-        if not c: break
-        d += c
-        try: json.loads(d.decode()); break
-        except: continue
-    s.close()
-    return json.loads(d.decode())
+from kit_mcp.client import call   # returns the tool's result dict; raises BridgeError on failure
 
-# Add cups to scene
-send_cmd("add_cups")
-
-# Start publishing /drop_poses (ArUco marker poses on cups)
-send_cmd("publish_drop_poses")
+call("soarm101.add_cups", port=8767, timeout=120)          # add cups to scene
+call("soarm101.publish_drop_poses", port=8767)             # /drop_poses (ArUco marker poses on cups)
 ```
 
 ### A4. Move to Grasp Home
 
+Arbitrary Python runs on Kit's main thread through the bridge's `run_python`
+builtin (it replaces the old `execute_python_code` command):
+
 ```python
-send_cmd("execute_python_code", {"code": """
+call("run_python", {"code": """
 from pxr import UsdPhysics
 import omni.usd
 stage = omni.usd.get_context().get_stage()
@@ -135,7 +98,7 @@ d = UsdPhysics.DriveAPI.Get(
     stage.GetPrimAtPath('/World/SO_ARM101/joints/wrist_flex'), 'angular')
 d.GetTargetPositionAttr().Set(90.0)
 result = "Moved to grasp home"
-"""})
+"""}, port=8767)
 ```
 
 Wait 3-5s for physics to settle.
@@ -396,7 +359,7 @@ Dictionary: DICT_4X4_50, marker size: 25mm, placed at 45% cup height.
 
 | Source | How | Topic |
 |--------|-----|-------|
-| Isaac Sim | `publish_drop_poses` MCP tool/button | `/drop_poses` |
+| Isaac Sim | `soarm101.publish_drop_poses` bridge tool/button | `/drop_poses` |
 | ArUco camera | `merged_localization_aruco --drop --robot so_arm101` | `/drop_poses` |
 
 Both publish `TFMessage` with `child_frame_id = drop_0, drop_1, drop_2`.
@@ -479,9 +442,11 @@ see `../../linux-env/CLAUDE.md`.
 
 ## Connection Recovery
 
-### Isaac Sim MCP Socket Drop (port 8767)
+### Isaac Sim bridge stops answering (omni-kit-mcp, port 8767)
 
-The MCP socket can die during `delete_cups`/`add_cups` (Blender baking blocks the extension thread) or if `touch extension.py` runs while a socket call is in flight.
+A long tool call (first-time `add_cups` Blender baking, `quick_start`) holds
+Kit's main thread; other calls queue behind it and are refused with
+`DOORWAY_BUSY` once their queue budget runs out. That means busy, not dead.
 
 **Diagnosis:**
 ```bash
@@ -489,13 +454,12 @@ bash ../../linux-env/scripts/isaac/isaacsim_launch.sh status
 ```
 
 **Recovery:**
-1. If process alive but socket dead: open new stage in Isaac Sim GUI (Ctrl+N) to trigger extension re-init, then run `quick_start`
-2. If process dead: relaunch with `bash ../../linux-env/scripts/isaac/isaacsim_launch.sh launch soarm101-dt`, wait for socket, then `quick_start`
+1. If process alive but `soarm101.*` not answering: open a new stage in the Isaac Sim GUI (Ctrl+N) to trigger extension re-init, then run `soarm101.quick_start`
+2. If process dead: relaunch with `bash ../../linux-env/scripts/isaac/isaacsim_launch.sh launch soarm101-dt` (blocks until ready), then `soarm101.quick_start`
 
 **Prevention:**
-- Never `touch extension.py` while making socket calls
-- Use 120s timeout for `add_cups` (first-time Blender baking is slow)
-- Don't chain rapid socket calls — wait for each response
+- Use a 120s+ timeout for `add_cups` (first-time Blender baking is slow)
+- Don't fire rapid calls in parallel — wait for each response
 
 ### arm_controller Spawn Failure (ros2_control)
 
@@ -538,7 +502,7 @@ No `sleep` needed between sequential service calls — each waits for completion
 - If using sim poses only (no YOLOE): check `ros2 topic echo /objects_poses_sim --once`
 
 ### Drop poses empty
-- Isaac Sim: cups must be added first (`add_cups` via MCP or UI button). `quick_start` now includes this.
+- Isaac Sim: cups must be added first (`soarm101.add_cups` via the bridge or UI button). `quick_start` now includes this.
 - If you deleted cups and re-added: the drop pose action graph was also deleted. Call `publish_drop_poses` again.
 - Gazebo: ensure `merged_localization_aruco --drop --robot so_arm101` is running
 - Check topic: `ros2 topic echo /drop_poses --once`
@@ -551,7 +515,7 @@ No `sleep` needed between sequential service calls — each waits for completion
 
 ### Object poses topic empty after scene changes
 - If cups were deleted/re-added, the object pose publisher action graph may have been destroyed
-- Recreate it: call `setup_pose_publisher` MCP tool or UI button
+- Recreate it: call the `soarm101.setup_pose_publisher` bridge tool or UI button
 
 ### "Drop rejected" / IK fails
 - Cup is outside workspace (R beyond arm reach at 45° grip angle)

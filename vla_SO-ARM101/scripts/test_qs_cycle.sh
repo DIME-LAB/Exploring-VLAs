@@ -6,7 +6,8 @@
 # Usage:
 #   scripts/test_qs_cycle.sh [lego_name] [log_out_path]
 #
-# Defaults: lego=blue_2x4, log=/tmp/qs_cycle_test.log
+# Defaults: lego=blue_2x3_0, log=/tmp/qs_cycle_test.log
+# Scene legos: {red,green,blue}_2x3_{0,1} (control_gui REC_LEGOS_BY_COLOR).
 #
 # Terminal sentinels in get_log:
 #   "Quickstart: pick-and-drop cycle complete"   → SUCCESS
@@ -15,7 +16,7 @@
 
 set -euo pipefail
 
-LEGO="${1:-blue_2x4}"
+LEGO="${1:-blue_2x3_0}"
 LOG_FILE="${2:-/tmp/qs_cycle_test.log}"
 TIMEOUT_S="${TIMEOUT_S:-180}"
 POLL_INTERVAL_S="${POLL_INTERVAL_S:-2}"
@@ -30,7 +31,11 @@ echo "started:     $(date -Iseconds)"
 echo
 
 # 1) Set ik_target so qs_select picks the right lego (Trigger service has no args).
-ros2 param set "$NODE" ik_target "$LEGO" >/dev/null
+#    Through the node's own set_parameters service, not `ros2 param set`: the CLI
+#    first lists node names and intermittently fails with "empty node name
+#    returned by the RMW layer". type 4 = PARAMETER_STRING.
+ros2 service call "$NODE/set_parameters" rcl_interfaces/srv/SetParameters \
+    "{parameters: [{name: ik_target, value: {type: 4, string_value: '$LEGO'}}]}" >/dev/null
 echo "[1/4] set ik_target=$LEGO"
 
 # 2) Refresh both listboxes. _cmd_qs_refresh_all fires grasp_refresh + drop_refresh

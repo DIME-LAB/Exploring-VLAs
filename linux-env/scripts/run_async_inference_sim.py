@@ -152,7 +152,9 @@ def main() -> int:
     # them at startup — see LEROBOT_RTC_* env block there).
     p.add_argument("--rtc.enabled", dest="rtc_enabled", action="store_true",
                    default=True,
-                   help="Enable RTC on the policy server. Default ON because "
+                   help="Set the RTC flag on the policy server. NOTE: currently a no-op: the fork's "
+                        "policy_server never passes prev_chunk_left_over/inference_delay "
+                        "to predict_action_chunk (see README Known issues). Default ON because "
                         "every flow-matching policy benefits and it's "
                         "additive with aggregate_fn=weighted_average.")
     p.add_argument("--no-rtc", dest="rtc_enabled", action="store_false",
@@ -240,7 +242,7 @@ def main() -> int:
         server_env["LEROBOT_RTC_EXECUTION_HORIZON"] = str(args.rtc_execution_horizon)
         server_env["LEROBOT_RTC_MAX_GUIDANCE_WEIGHT"] = str(args.rtc_max_guidance_weight)
         server_env["LEROBOT_RTC_PREFIX_ATTENTION_SCHEDULE"] = args.rtc_schedule
-        print(f"[launcher] RTC ON: horizon={args.rtc_execution_horizon}, "
+        print(f"[launcher] RTC flag ON (currently inactive, see README Known issues): horizon={args.rtc_execution_horizon}, "
               f"weight={args.rtc_max_guidance_weight}, schedule={args.rtc_schedule}")
     else:
         print("[launcher] RTC OFF (aggregate-only smoothness)")

@@ -14,8 +14,8 @@ import math
 import os
 import random
 import signal
-import socket
 import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
@@ -184,7 +184,7 @@ _CUP_STL_SCALE = 0.001
 # Cup body height in meters. /drop_poses publishes cup BODY-CENTER pose
 # (same convention as /objects_poses_sim for legos), so every consumer
 # that needs the cup base or the cup rim has to add/subtract half this.
-# Sim-side (isaac-sim-mcp soarm101-dt extension) lifts each drop_{id}
+# Sim-side (soarm101-dt extension, isaac/exts/) lifts each drop_{id}
 # wrapper by this/2 when publishing; the real-world equivalent is
 # aruco_camera_localizer applying its marker→cup transform to land on
 # the same body-center convention.
@@ -245,9 +245,35 @@ REC_DATASET_ROOT = os.environ.get(
     "LEROBOT_LOCAL_DATASET_ROOT",
     os.path.expanduser("~/.cache/huggingface/lerobot/local"),
 )
-# MCP socket — Isaac Sim digital twin (soarm101-dt extension).
-REC_MCP_HOST = os.environ.get("SOARM_MCP_HOST", "localhost")
-REC_MCP_PORT = int(os.environ.get("SOARM_MCP_PORT", "8767"))
+# Isaac Sim digital twin — the soarm101-dt scene tools are served on the
+# omni-kit-mcp bridge as `soarm101.<name>` (registered by isaac/soarm101_tools).
+# We talk to it with omni-kit-mcp's stdlib-only reference client
+# (kit_mcp.client), imported from the in-repo submodule so this works under
+# system Humble Python 3.10 without any pip install.
+REC_KIT_MCP_HOST = os.environ.get("SOARM_KIT_MCP_HOST", "127.0.0.1")
+REC_KIT_MCP_PORT = int(os.environ.get("SOARM_KIT_MCP_PORT", "8767"))
+REC_KIT_MCP_NAMESPACE = "soarm101"
+REC_KIT_MCP_DIR = os.environ.get(
+    "SOARM_KIT_MCP_DIR", os.path.join(_REPO_ROOT, "omni-kit-mcp"))
+
+
+def _import_kit_mcp_client():
+    """Return the ``kit_mcp.client`` module from the omni-kit-mcp submodule.
+
+    ``SOARM_KIT_MCP_DIR`` overrides the location (default:
+    ``<repo>/omni-kit-mcp``). Raises ImportError with a pointer at the
+    submodule when it isn't checked out.
+    """
+    if os.path.isdir(REC_KIT_MCP_DIR) and REC_KIT_MCP_DIR not in sys.path:
+        sys.path.insert(0, REC_KIT_MCP_DIR)
+    try:
+        from kit_mcp import client as kit_client
+    except ImportError as exc:
+        raise ImportError(
+            f"kit_mcp.client not importable from {REC_KIT_MCP_DIR} ({exc}); "
+            "run `git submodule update --init omni-kit-mcp` or set "
+            "SOARM_KIT_MCP_DIR") from exc
+    return kit_client
 # Hardcoded scene contract — MUST stay in sync with extension.py
 # LEGO_USDS block_names. 1 episode = 1 lego pick-place. Lego rotates
 # through this list per episode for uniform dataset coverage.
@@ -284,7 +310,7 @@ INF_ASYNC_SCRIPT = os.path.join(_REPO_ROOT, "linux-env/scripts/inference_async_l
 #                path that ships for real-hardware deploy → easier transition.
 INF_METHOD_LABELS = {
     "custom":    "Custom (chunk replan @ 1 Hz)",
-    "async_rtc": "Async + RTC (lerobot canonical)",
+    "async_rtc": "Async (lerobot canonical; RTC flag inactive)",
 }
 
 # Preset model dropdown — keys feed the combobox; values are
@@ -299,6 +325,13 @@ INF_MODEL_PRESETS = {
     # first so a fresh GUI session lands on it without manual selection.
     "Sim FT (full, blue_sort 100ep)":
         ("anirudhrani/smolvla_sim_100ep_fft__10ksteps_h200", "", "{}"),
+    # Sim/real mixes (fraction of sim vs real episodes in the fine-tune set).
+    "Mixed FT (75% sim / 25% real)":
+        ("anirudhrani/smolvla_sim_100ep_75S_25R_fft__10ksteps_h200", "", "{}"),
+    "Mixed FT (25% sim / 75% real)":
+        ("anirudhrani/smolvla_sim_100ep_25S_75R_fft__10ksteps_h200", "", "{}"),
+    "Mixed FT (50 sim + 50 real, blue_sort)":
+        ("anirudhrani/smolvla_blue_sort_50sim_50real_10k", "", "{}"),
     "Full FT (real-world, smoke)":
         ("anirudhrani/smolvla_blue_sort_ven_50k", "050000", "{}"),
     "LoRA (real-world, smoke)":
@@ -2129,6 +2162,18 @@ class SOArm101ControlGUI(Node):
 
         self._finalize_widget_registry()
         self._gui_ready = True
+
+        # Signal heartbeat. Python runs signal handlers only on the main thread
+        # between bytecodes, and _tkinter's mainloop sits blocked in Tcl waiting
+        # for an event: on an idle window main()'s SIGINT/SIGTERM handler (which
+        # schedules _on_close) never ran, so `ros2 launch` / deploy_sim.sh had to
+        # escalate to SIGKILL. A cheap periodic after() wakes the loop so pending
+        # signals are handled within ~0.2 s.
+        def _signal_heartbeat():
+            if self.running:
+                self.root.after(200, _signal_heartbeat)
+        self.root.after(200, _signal_heartbeat)
+
         self.root.mainloop()
         self._gui_ready = False
 
@@ -5982,27 +6027,30 @@ class SOArm101ControlGUI(Node):
             pass
 
     def _rec_mcp_call(self, cmd_type, params=None, timeout=120):
-        """Call an Isaac Sim MCP tool via socket 8767. Returns response dict
-        or None on failure. Used for randomize_object_poses, randomize_cups."""
-        msg = json.dumps({"type": cmd_type, "params": params or {}})
+        """Call a soarm101-dt scene tool on the omni-kit-mcp bridge.
+
+        ``cmd_type`` is the bare tool name (``randomize_object_poses``) and is
+        sent as ``soarm101.<cmd_type>``; a dotted name passes through as-is
+        (e.g. the ``run_python`` builtin is not namespaced).
+
+        Returns the same envelope the old raw-socket server produced, so
+        callers don't change: ``{"status": "success", "result": <payload>}``
+        on success, ``{"status": "error", "message": ...}`` when the bridge
+        or the tool reported an error, ``None`` when the bridge is
+        unreachable."""
+        tool = cmd_type if '.' in cmd_type else f'{REC_KIT_MCP_NAMESPACE}.{cmd_type}'
+        kit_client = None
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(timeout)
-            sock.connect((REC_MCP_HOST, REC_MCP_PORT))
-            sock.sendall(msg.encode("utf-8"))
-            data = b""
-            while True:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                data += chunk
-                try:
-                    return json.loads(data.decode("utf-8"))
-                except json.JSONDecodeError:
-                    continue
-            sock.close()
+            kit_client = _import_kit_mcp_client()
+            payload = kit_client.call(
+                tool, params or {}, host=REC_KIT_MCP_HOST,
+                port=REC_KIT_MCP_PORT, timeout=timeout)
+            return {"status": "success", "result": payload}
         except Exception as exc:
-            self._append_log(f'Record: MCP {cmd_type} failed: {exc}', 'warn')
+            if kit_client is not None and isinstance(exc, kit_client.BridgeError):
+                self._append_log(f'Record: MCP {tool} error: {exc}', 'warn')
+                return {"status": "error", "message": str(exc)}
+            self._append_log(f'Record: MCP {tool} failed: {exc}', 'warn')
         return None
 
     def _rec_call_trigger(self, srv_name, timeout=20):
@@ -6842,7 +6890,7 @@ class SOArm101ControlGUI(Node):
         if not hasattr(self, '_inf_record_dataset_var'):
             self._inf_record_dataset_var = tk.StringVar(value='')
         # Inference method radio — see INF_METHOD_LABELS for the two options.
-        # Default to async_rtc since RTC overlaps inference with execution
+        # Default to async_rtc since async inference overlaps inference with execution
         # (no queue-starvation gaps the custom 1Hz replan suffers).
         if not hasattr(self, '_inf_method_var'):
             self._inf_method_var = tk.StringVar(value='async_rtc')
@@ -7156,7 +7204,7 @@ class SOArm101ControlGUI(Node):
         if record_on and method == 'async_rtc':
             self._append_log(
                 'Inference: Record this run is not yet supported with '
-                'Async + RTC method — skipping recording subprocesses. '
+                'Async method — skipping recording subprocesses. '
                 'Use Custom method to record, or read about the canonical '
                 'lerobot-record + policy mode for the async case.', 'warn')
             record_on = False
@@ -8882,7 +8930,7 @@ class SOArm101ControlGUI(Node):
         Purpose: synchronize the TF and /objects_poses_sim streams before
         reading them in _attach_lego_to_gripper / _refresh_attached_pose.
         When the arm is moving, Layer-B lag (documented in
-        isaac-sim-mcp/docs/DEBUG-GUIDE.md § 4) makes /joint_states-derived
+        upstream isaac-sim-mcp repo, docs/DEBUG-GUIDE.md § 4) makes /joint_states-derived
         TF disagree with Isaac physics' object poses — baking a 10-50 mm
         offset into the attached lego's mesh_poses[0] that then looks like
         the block hovering offset from the gripper in RViz. Waiting for
@@ -11621,7 +11669,12 @@ def main(args=None):
             os._exit(0)
 
         import threading as _t
-        _t.Timer(2.5, _force_exit).start()
+        # daemon: a clean exit must not wait for this guard. As a non-daemon
+        # thread it kept every process alive for the full 2.5 s and then
+        # os._exit()-ed it, even when the Tk + rclpy shutdown had finished.
+        _guard = _t.Timer(2.5, _force_exit)
+        _guard.daemon = True
+        _guard.start()
 
     signal.signal(signal.SIGINT, _shutdown_handler)
     signal.signal(signal.SIGTERM, _shutdown_handler)
@@ -11638,6 +11691,10 @@ def main(args=None):
     finally:
         node.running = False
         executor.shutdown()
+        # Let the spin thread leave rcl before teardown: a daemon thread still
+        # inside the executor's wait set when the interpreter finalizes aborts
+        # the process ("terminate called without an active exception").
+        spin_thread.join(timeout=2.0)
         node.destroy_node()
         rclpy.try_shutdown()
 

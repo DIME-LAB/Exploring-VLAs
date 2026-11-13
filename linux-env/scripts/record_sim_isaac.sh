@@ -19,7 +19,7 @@
 #        bash linux-env/scripts/stack_start.sh   # easiest
 #      Or manually:
 #        bash linux-env/scripts/isaac/isaacsim_launch.sh launch soarm101-dt
-#        # then send {"type": "quick_start"} on socket 8767
+#        PYTHONPATH=omni-kit-mcp python3 -m kit_mcp.client soarm101.quick_start --port 8767
 #        ros2 launch so_arm101_control control.launch.py rviz:=true
 #   4. Verify topics live:
 #        ros2 topic hz /wrist_camera_rgb_sim

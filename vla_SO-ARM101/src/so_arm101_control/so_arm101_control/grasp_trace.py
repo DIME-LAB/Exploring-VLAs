@@ -14,8 +14,10 @@ can diff them post-hoc to prove / disprove the "scene changed between
 plan and check" hypothesis for Mode B failures.
 
 Output directory:
-    /home/aaugus11/Documents/isaac-sim-mcp/.planning/phases/
-    09-collision-scene-completeness/traces/cycle_{ts}.json
+    $SOARM_GRASP_TRACE_DIR/cycle_{ts}.json  (default /tmp/soarm_grasp_traces).
+    Previously hardcoded into the maintainer's isaac-sim-mcp checkout; that
+    path doesn't exist on other machines (or on the Mac), so it is now an
+    env-overridable scratch dir.
 
 Hot-reload safe: state lives on the singleton which is re-created on
 module reimport; open cycles are dropped on reload (by design — a
@@ -31,10 +33,8 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-TRACE_DIR = Path(
-    '/home/aaugus11/Documents/isaac-sim-mcp/.planning/phases/'
-    '09-collision-scene-completeness/traces'
-)
+TRACE_DIR = Path(os.environ.get(
+    'SOARM_GRASP_TRACE_DIR', '/tmp/soarm_grasp_traces')).expanduser()
 
 
 def _json_safe(value: Any) -> Any:

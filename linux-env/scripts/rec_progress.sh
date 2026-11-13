@@ -77,8 +77,9 @@ else
     echo "  mirror node   : not running"
 fi
 ISAAC_PID=$(pgrep -f "bin/isaacsim" | head -1)
-SOCK_OK=$(ss -tlnp 2>/dev/null | grep -q ':8767' && echo "ok" || echo "DOWN")
-echo "  Isaac Sim     : ${ISAAC_PID:+alive (PID $ISAAC_PID)} ${ISAAC_PID:-DOWN}, MCP socket :8767 $SOCK_OK"
+KIT_PORT="${SOARM_KIT_MCP_PORT:-8767}"
+SOCK_OK=$(ss -tln 2>/dev/null | grep -q ":$KIT_PORT " && echo "ok" || echo "DOWN")
+echo "  Isaac Sim     : ${ISAAC_PID:+alive (PID $ISAAC_PID)} ${ISAAC_PID:-DOWN}, omni-kit-mcp bridge :$KIT_PORT $SOCK_OK"
 
 # 3. Per-run save/retry stats (scoped — won't double-count across runs)
 SAVED=$(scoped | grep -c "Record: ✓ episode" 2>/dev/null)
@@ -133,7 +134,7 @@ fi
 # 6. FOV constraint hits (visibility check fired N times)
 echo ""
 echo "[FOV constraint]"
-FOV_HITS=$(grep -c "requiring.*lego.*in workspace.*FOV" /tmp/isaacsim.log 2>/dev/null)
+FOV_HITS=$(grep -c "requiring.*lego.*in workspace.*FOV" "${ISAACSIM_LOG:-/tmp/isaacsim-soarm101.log}" 2>/dev/null)
 echo "  randomize calls with FOV constraint: $FOV_HITS"
 
 # 7. Last 3 record events

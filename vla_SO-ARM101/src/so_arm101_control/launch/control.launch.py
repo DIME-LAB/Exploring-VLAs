@@ -10,6 +10,9 @@ Usage:
   # Without RViz (headless / faster startup):
   ros2 launch so_arm101_control control.launch.py rviz:=false
 
+  # Headless: ros2_control + MoveIt + pose publishers, no control_gui window:
+  ros2 launch so_arm101_control control.launch.py gui:=false
+
   # Simulation mode flag (sets default topics in GUI):
   ros2 launch so_arm101_control control.launch.py use_sim:=true
 
@@ -51,6 +54,7 @@ def generate_launch_description():
     use_rviz = LaunchConfiguration('rviz')
     use_sim = LaunchConfiguration('use_sim')
     use_mtc = LaunchConfiguration('mtc')
+    use_gui = LaunchConfiguration('gui')
 
     return LaunchDescription([
         # Arguments
@@ -64,6 +68,10 @@ def generate_launch_description():
                               description='Simulation mode (sets default topics in GUI)'),
         DeclareLaunchArgument('mtc', default_value='false',
                               description='Launch MoveIt Task Constructor pick-place node'),
+        DeclareLaunchArgument('gui', default_value='true',
+                              description='Launch the control_gui Tk window (needs an X display). '
+                                          'false = headless: ros2_control, MoveIt and the pose '
+                                          'publishers only'),
 
         # Robot State Publisher (with xacro-processed URDF including ros2_control)
         Node(
@@ -135,13 +143,14 @@ def generate_launch_description():
             condition=IfCondition(real_hardware),
         ),
 
-        # Control GUI
+        # Control GUI (opt-in with gui:=true, the default; needs an X display)
         Node(
             package='so_arm101_control',
             executable='control_gui',
             name='so_arm101_control_gui',
             parameters=[{'use_sim': use_sim}],
             output='screen',
+            condition=IfCondition(use_gui),
         ),
 
         # EE Pose Publisher

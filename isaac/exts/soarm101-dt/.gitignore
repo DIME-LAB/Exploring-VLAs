@@ -1,0 +1,7 @@
+# Runtime cache: add_objects regenerates per-instance lego USDs here when missing.
+assets/legos/instances/
+
+# Baked ArUco marker meshes are a committed cache (training images show markers on the cups;
+# rebaking needs Blender 4.x). Keep them tracked even if a broader *.usda rule is added.
+!assets/aruco_markers/meshes/*.usda
+!assets/aruco_markers/meshes/textures/

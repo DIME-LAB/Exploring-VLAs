@@ -123,8 +123,8 @@ End-to-end automated cycle testing without GUI interaction. Three scripts, all r
 scripts/test_qs_cycle.sh red_2x3                    # default log: /tmp/qs_cycle_test.log
 
 # Reset Isaac Sim scene + control_gui state to a clean starting point
-scripts/sim_reset.sh                                # qs_restart → detach → MCP update_cups
-                                                    # → MCP randomize_object_poses
+scripts/sim_reset.sh                                # qs_restart → detach → soarm101.update_cups
+                                                    # → soarm101.randomize_object_poses (omni-kit-mcp bridge)
                                                     # → qs_refresh_all → grasp_home
 
 # Sequentially pick-and-place every available lego, log per-lego verdicts
@@ -135,7 +135,7 @@ scripts/test_pick_all.sh /tmp/pick_all_$(date +%Y%m%dT%H%M%S)
                                                     #   refused_n, halt_step, halt_reason
 ```
 
-`test_qs_cycle.sh` polls `/so_arm101_control_gui/get_log` for terminal sentinels (`pick-and-drop cycle complete`, `Quickstart halted at`, `Quickstart aborted`) and trims the captured log to per-cycle scope before exiting, so downstream consumers (e.g. `test_pick_all.sh`) see only this-cycle counts. `sim_reset.sh` calls the Isaac Sim MCP socket on `localhost:8767` for `update_cups` and `randomize_object_poses`. All scripts work over ROS2 services on port 7400 — no GUI focus required.
+`test_qs_cycle.sh` polls `/so_arm101_control_gui/get_log` for terminal sentinels (`pick-and-drop cycle complete`, `Quickstart halted at`, `Quickstart aborted`) and trims the captured log to per-cycle scope before exiting, so downstream consumers (e.g. `test_pick_all.sh`) see only this-cycle counts. `sim_reset.sh` calls `soarm101.update_cups` and `soarm101.randomize_object_poses` on the Isaac Sim omni-kit-mcp bridge (`localhost:8767`, override with `SOARM_KIT_MCP_HOST/PORT`). All scripts work over ROS2 services on port 7400 — no GUI focus required.
 
 ## Key Configuration
 

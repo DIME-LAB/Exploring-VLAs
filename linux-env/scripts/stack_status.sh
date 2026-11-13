@@ -20,15 +20,14 @@ echo ""
 # ---------------------------------------------------------------------------
 
 echo "[Isaac Sim]"
-if pgrep -f "bin/isaacsim" >/dev/null; then
-    echo "  Process: RUNNING"
-else
-    echo "  Process: not running"
-fi
-if ss -tlnp 2>/dev/null | grep -q ":$MCP_PORT "; then
-    echo "  MCP socket :$MCP_PORT: LISTENING"
-else
-    echo "  MCP socket :$MCP_PORT: down"
+# Process / bridge / stream, as the launcher sees them.
+bash "$ISAAC_LAUNCHER" status 2>/dev/null | sed 's/^/  /'
+if kit_mcp_ready; then
+    if scene_is_live; then
+        echo "  Scene: SO_ARM101 loaded, timeline playing"
+    else
+        echo "  Scene: not loaded, paused, or Kit busy (see launcher status above)"
+    fi
 fi
 echo ""
 
@@ -37,14 +36,21 @@ echo ""
 # ---------------------------------------------------------------------------
 
 echo "[Control stack]"
-NODES="$(ros2 node list 2>/dev/null | sort)"
+NODES="$(ros2 node list --no-daemon 2>/dev/null | sort)"
 for n in /so_arm101_control_gui /move_group /controller_manager /robot_state_publisher /rviz; do
     if echo "$NODES" | grep -q "^$n\$"; then
         echo "  $n: alive"
+    elif [ "$n" = /so_arm101_control_gui ] || [ "$n" = /rviz ]; then
+        echo "  $n: not running (expected when started headless: --stream / --no-gui / --no-rviz)"
     else
         echo "  $n: missing"
     fi
 done
+if controllers_active; then
+    echo "  controllers: joint_state_broadcaster, arm_controller, gripper_controller active"
+else
+    echo "  controllers: not all active"
+fi
 echo ""
 
 # ---------------------------------------------------------------------------

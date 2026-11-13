@@ -175,8 +175,8 @@
 
     <!--
       Drop containers — colored cups for sim/real-parity grasp-and-drop work.
-      Mirrors isaac-sim-mcp@so-arm101 phase 01 naming (cup_red / cup_green /
-      cup_blue). Each cup is a static cylinder; the ArUco marker position
+      Mirrors the soarm101-dt Isaac extension's naming (isaac/exts/soarm101-dt:
+      cup_red / cup_green / cup_blue). Each cup is a static cylinder; the ArUco marker position
       sits on the +X face at 45% of cup height, normal pointing radially
       outward.
 

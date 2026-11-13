@@ -3,7 +3,7 @@
 #
 # What this does:
 #   1. Preflight (Humble installed, pixi available, Isaac Sim findable)
-#   2. Initialize git submodules (lerobot, isaac-sim-mcp)
+#   2. Initialize git submodules (lerobot, omni-kit-mcp)
 #   3. Install the linux-env pixi env (Jazzy + lerobot deps)
 #   4. Build the colcon workspace at vla_SO-ARM101/
 #   5. Print a ready summary
@@ -53,14 +53,15 @@ if ! command -v pixi >/dev/null 2>&1; then
 fi
 echo "  ✓ pixi $(pixi --version 2>/dev/null | awk '{print $2}')"
 
-# Isaac Sim launcher (best-effort — colleague may install elsewhere)
-ISAACSIM_BIN_DEFAULT="${ISAACSIM_BIN:-$HOME/env_isaaclab/bin/isaacsim}"
+# Isaac Sim launcher (best-effort — colleague may install elsewhere).
+# Same default as linux-env/scripts/isaac/isaacsim_launch.sh.
+ISAACSIM_BIN_DEFAULT="${ISAACSIM_BIN:-$HOME/env_isaacsim61/bin/isaacsim}"
 if [ ! -x "$ISAACSIM_BIN_DEFAULT" ]; then
     echo "  ⚠ Isaac Sim launcher not found at $ISAACSIM_BIN_DEFAULT"
-    echo "    Install Isaac Sim 5.x and either symlink to that path or"
-    echo "    export ISAACSIM_BIN=/your/path/to/isaacsim"
+    echo "    Install Isaac Sim 6.1 (pip, into a venv) and either put it at that"
+    echo "    path or export ISAACSIM_BIN=/your/path/to/isaacsim"
     echo "    (continuing — bootstrap doesn't actually require Isaac Sim,"
-    echo "     but stack_start.sh will fail until this is resolved)"
+    echo "     but deploy_sim.sh / stack_start.sh will fail until this is resolved)"
 else
     echo "  ✓ Isaac Sim at $ISAACSIM_BIN_DEFAULT"
 fi
@@ -84,9 +85,15 @@ echo ""
 
 echo "[2/5] Initializing submodules..."
 cd "$REPO_ROOT"
+# sync first: picks up .gitmodules URL changes (e.g. lerobot ssh → https) in
+# clones made before the change.
+git submodule sync --recursive
 git submodule update --init --recursive
 echo "  ✓ lerobot @ $(git -C "$LEROBOT_DIR" rev-parse --short HEAD 2>/dev/null || echo '?')"
-echo "  ✓ isaac-sim-mcp @ $(git -C "$ISAAC_MCP" rev-parse --short HEAD 2>/dev/null || echo '?')"
+echo "  ✓ omni-kit-mcp @ $(git -C "$KIT_MCP_DIR" rev-parse --short HEAD 2>/dev/null || echo '?')"
+# omni-kit-mcp is NOT installed into Isaac's persistent user config (its
+# scripts/install.py): the Isaac 6.1 install can be shared with other projects,
+# so isaacsim_launch.sh enables the bridge + soarm101_tools per launch instead.
 echo ""
 
 # ---------------------------------------------------------------------------
@@ -121,9 +128,9 @@ echo ""
 echo "[5/5] Ready."
 echo ""
 echo "Next steps:"
-echo "  bash $LINUX_ENV_DIR/scripts/stack_start.sh    # Isaac Sim + control stack + RViz + tkinter GUI"
-echo "  bash $LINUX_ENV_DIR/scripts/stack_status.sh   # verify"
-echo "  # … record episodes via control_gui's Record Sim tab …"
-echo "  bash $LINUX_ENV_DIR/scripts/stack_stop.sh"
+echo "  bash $LINUX_ENV_DIR/scripts/deploy_sim.sh up       # Isaac + scene + control stack + SmolVLA policy"
+echo "  bash $LINUX_ENV_DIR/scripts/deploy_sim.sh status   # verify"
+echo "  bash $LINUX_ENV_DIR/scripts/deploy_sim.sh down"
+echo "  (stack_start.sh / stack_stop.sh: same stack without the policy, e.g. for recording)"
 echo ""
 echo "Read $VLA_PKG/docs/ROS2_LINUX_SETUP.md for the full from-zero walkthrough."

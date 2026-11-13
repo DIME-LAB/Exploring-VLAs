@@ -12,12 +12,16 @@ and Mac (RoboStack-Jazzy via pixi).
 
 ## Cross-repo
 
-Isaac Sim digital twin lives at [`../isaac-sim-mcp/`](../isaac-sim-mcp/) (a submodule of this
-repo, branch `so-arm101`). MCP socket on `localhost:8767`. The pick-and-drop
-pipeline spans both — this package plans + executes motion; isaac-sim-mcp
-provides physics, the cup/lego scene, and the `/drop_poses` +
-`/objects_poses_sim` topics. Bring-up sequence and MCP tool inventory live in
-[`../isaac-sim-mcp/CLAUDE.md`](../isaac-sim-mcp/CLAUDE.md).
+Isaac Sim digital twin: the `soarm101-dt` extension, vendored at
+[`../isaac/exts/soarm101-dt/`](../isaac/exts/soarm101-dt/). Its scene commands
+are tools on the omni-kit-mcp bridge (`localhost:8767`), named
+`soarm101.<name>`; this package calls them through the stdlib-only client in
+the [`../omni-kit-mcp/`](../omni-kit-mcp/) submodule (`control_gui._rec_mcp_call`,
+`scripts/sim_reset.sh`). The pick-and-drop pipeline spans both — this package
+plans + executes motion; the extension provides physics, the cup/lego scene,
+and the `/drop_poses` + `/objects_poses_sim` topics. Bring-up:
+[`../README.md`](../README.md); live tool inventory:
+`PYTHONPATH=../omni-kit-mcp python3 -m kit_mcp.client list_tools --port 8767`.
 
 ## Six packages, one role each
 
@@ -43,15 +47,15 @@ The world contains:
 
 The world name in the SDF is **`so_arm101_lego_world`** (the SDF *filename* is `lego_world.sdf`, but `<world name="...">` differs — affects `gz topic` namespacing). When configuring `sim_ground_truth`, use `world_name:=so_arm101_lego_world`.
 
-## isaac-sim-mcp parity
+## Isaac (soarm101-dt) parity
 
-This stack mirrors the **`inbarajaldrin/isaac-sim-mcp@so-arm101` phase 01** topic contract so a single `control_gui` consumes either source:
+This stack mirrors the **`soarm101-dt` extension's** topic contract (originally `inbarajaldrin/isaac-sim-mcp@so-arm101` phase 01) so a single `control_gui` consumes either source:
 
 | Topic | Producer (sim, ours) | Producer (sim, isaac) | Producer (real) |
 | --- | --- | --- | --- |
-| `/objects_poses_sim` (TFMessage) | `sim_ground_truth` | `isaac-sim-mcp` action graph | `aruco_camera_localizer` (with `objects_poses_topic:=/objects_poses_real`) |
-| `/objects_bbox_sim` (String JSON) | `sim_ground_truth` | `isaac-sim-mcp` | `aruco_camera_localizer` (`objects_bbox_topic:=/objects_bbox_real`) |
-| `/drop_poses` (TFMessage) | `sim_ground_truth` | `isaac-sim-mcp` action graph | `aruco_camera_localizer --drop` |
+| `/objects_poses_sim` (TFMessage) | `sim_ground_truth` | `soarm101-dt` action graph | `aruco_camera_localizer` (with `objects_poses_topic:=/objects_poses_real`) |
+| `/objects_bbox_sim` (String JSON) | `sim_ground_truth` | `soarm101-dt` | `aruco_camera_localizer` (`objects_bbox_topic:=/objects_bbox_real`) |
+| `/drop_poses` (TFMessage) | `sim_ground_truth` | `soarm101-dt` action graph | `aruco_camera_localizer --drop` |
 
 `child_frame_id` convention is uniform: object name (`red_lego_2x4`, etc.) for `/objects_poses_*`, `drop_red`/`drop_green`/`drop_blue` for `/drop_poses`. Drop-height offset math (above rim, inward to cup center) lives in the **control package**, not the publisher — same code works on sim or real.
 
@@ -65,6 +69,7 @@ cd vla_SO-ARM101
 colcon build --packages-select so_arm101_control --symlink-install
 source install/setup.bash
 ros2 launch so_arm101_control control.launch.py rviz:=true        # via stack_start.sh in normal use
+ros2 launch so_arm101_control control.launch.py gui:=false rviz:=false  # headless: no control_gui (deploy_sim.sh up --stream)
 ```
 
 **Mac** (pixi env, /tmp workspace):
@@ -79,12 +84,9 @@ ros2 launch so_arm101_control control.launch.py rviz:=true mtc:=true
 **Restart only the control stack** (leaves Isaac Sim alone, Linux only):
 
 ```bash
-../isaac-sim-mcp/scripts/restart-control-stack.sh
+pkill -SIGINT -f "ros2.*launch.*control.launch"   # SIGINT propagates to the launch's children
+bash ../linux-env/scripts/stack_start.sh          # Isaac + scene already live → only the control stack starts
 ```
-
-The restart script lives in the isaac-sim-mcp submodule for historical
-reasons — it predates this CLAUDE.md and is the canonical restart path for
-both repos' work.
 
 ## Conventions
 
@@ -211,10 +213,11 @@ defines which legos cycle per color — currently `[<color>_2x2,
   deterministic planner path. To slow grasp_home, edit `duration_s`
   on the `_joint_space_collision_free_execute` call inside
   `_cmd_grasp_home`.
-- **MCP cup tools live across the repo boundary**: `update_cups`,
-  `randomize_object_poses`, `sort_into_cups` are MCP tools in the
-  isaac-sim-mcp repo, called via socket on localhost:8767. See
-  `scripts/sim_reset.sh` for the call pattern.
+- **Cup/lego scene tools live in the Isaac extension**: `update_cups`,
+  `randomize_object_poses`, `sort_into_cups` are `soarm101.*` tools on the
+  omni-kit-mcp bridge (localhost:8767; override with `SOARM_KIT_MCP_HOST/PORT`).
+  See `scripts/sim_reset.sh` (CLI) and `control_gui._rec_mcp_call` (Python)
+  for the call pattern.
 - **Convention-based debug services**: every `_cmd_*` method on the
   control_gui node auto-registers as a `/so_arm101_control_gui/<name>`
   Trigger service (the leading `_cmd_` is stripped). GUI button
@@ -261,8 +264,8 @@ defines which legos cycle per color — currently `[<color>_2x2,
 
 ## Tracking-lag context
 
-`docs/notes/2026-04-24-forum-findings-tracking-lag.md` (in
-isaac-sim-mcp repo) documents the SO-ARM101 controller tracking-lag
+`docs/notes/2026-04-24-forum-findings-tracking-lag.md` (in the upstream
+isaac-sim-mcp repo; not vendored here) documents the SO-ARM101 controller tracking-lag
 investigation that motivated the deterministic planner + 5% padding
 combination. wrist_flex tracks 10-13° behind commanded position at
 high velocities; shoulder_pan accumulates 22° at peak ref_vel. The

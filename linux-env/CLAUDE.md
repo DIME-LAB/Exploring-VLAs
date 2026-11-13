@@ -3,7 +3,8 @@
 Linux-side counterpart to `mac-env/`. Provides the **pixi-Jazzy environment**
 that runs `lerobot-record` against Isaac Sim's existing `_sim`-suffixed topics,
 plus the Linux-side mirror + drive scripts and the bring-up automation
-(`bootstrap.sh`, `stack_start.sh`, `stack_stop.sh`, `stack_status.sh`).
+(`bootstrap.sh`, `deploy_sim.sh`, `stack_start.sh`, `stack_stop.sh`, `stack_status.sh`).
+Human-facing quick start (incl. watching from a Mac): [`../README.md`](../README.md).
 
 > **Inherits**: see [`../CLAUDE.md`](../CLAUDE.md) for repo topology, doc map, and
 > Linux gotchas; [`../vla_SO-ARM101/CLAUDE.md`](../vla_SO-ARM101/CLAUDE.md) for the control stack
@@ -24,6 +25,12 @@ colcon. Idempotent — safe to re-run.
 ## Each session
 
 ```bash
+# Deploy: Isaac + scene + control stack + SmolVLA async policy (GPU 1)
+bash linux-env/scripts/deploy_sim.sh up [--stream] [--gui|--no-gui] [--rviz|--no-rviz] [--model <preset|hf_id>] [--no-policy]
+bash linux-env/scripts/deploy_sim.sh status
+bash linux-env/scripts/deploy_sim.sh down [--policy]
+
+# Or the stack without the policy (recording sessions)
 bash linux-env/scripts/stack_start.sh        # Isaac Sim + RViz + tkinter GUI
 bash linux-env/scripts/stack_start.sh no-rviz   # without RViz (lighter)
 bash linux-env/scripts/stack_status.sh       # all layers' health
@@ -50,12 +57,13 @@ multicast-on-`lo` config (system default disables multicast).
 |---|---|---|
 | `pixi.toml` / `pixi.lock` | ros-jazzy-ros-base + lerobot deps | (env definition) |
 | `cyclonedds.xml` | Multicast-on-lo for cross-Python DDS discovery (Humble producer ↔ Jazzy consumer) | (DDS config) |
-| `scripts/_lib.sh` | Shared paths + env: `REPO_ROOT`, `ROS2_SETUP`, `SOARM_WS`, `PIXI_MANIFEST`, `ISAAC_LAUNCHER`, `MCP_PORT`, helpers (`stack_preflight`, `stack_source_ros`, `stack_running_count`) | (lib) |
-| `scripts/bootstrap.sh` | One-shot setup: preflight → submodules → pixi install → colcon build | foreground |
-| `scripts/stack_start.sh [no-rviz]` | Bring up Isaac Sim + quick_start scene + ROS2 control stack. Idempotent | foreground |
+| `scripts/_lib.sh` | Shared paths + env (`REPO_ROOT`, `ROS2_SETUP`, `SOARM_WS`, `PIXI_MANIFEST`, `ISAAC_LAUNCHER`, `KIT_MCP_DIR`, `SOARM_KIT_MCP_HOST/PORT` → also exported as `OMNI_KIT_MCP_PORT` for the launcher) and the shared bring-up steps used by stack_start + deploy_sim: `stack_preflight`, `stack_source_ros`, `kit_mcp_call <tool> [json] [timeout]`, `kit_mcp_ready`, `scene_is_live`, `isaac_up`, `scene_up`, `stack_detect_display`, `stack_require_display` (xdpyinfo check, fails with the fix; no Xvfb fallback), `controllers_active`, `control_stack_up <rviz> <gui>` (ready = the three controllers active, + control_gui when asked), `stop_pid` | (lib) |
+| `scripts/bootstrap.sh` | One-shot setup: preflight → `git submodule sync/update` → pixi install → colcon build. Does NOT run omni-kit-mcp's `install.py` (the Isaac 6.1 install is shared; the bridge is enabled per launch) | foreground |
+| `scripts/deploy_sim.sh up\|down\|status` | One command for the twin + policy: Isaac (`--stream` = headless WebRTC) → `soarm101.quick_start` → control stack (`control.launch.py gui:=` — control_gui/RViz opt-in via `--gui`/`--rviz`, default on locally and off with `--stream`) → `inference_async_lerobot.sh` with `CUDA_VISIBLE_DEVICES`=GPU `SOARM_POLICY_GPU` (default 1, pinned by UUID). `--model` takes a preset (`sim`, `mix-75s25r`, `mix-25s75r`, `mix-50s50r`) or an HF id. State + pidfiles in `/tmp/soarm_deploy/`; `down` stops only what `up` started; `down --policy` stops just the policy | detached |
+| `scripts/stack_start.sh [no-rviz] [--stream]` | Bring up Isaac Sim + quick_start scene + ROS2 control stack with control_gui (no policy; fails fast without a usable display). Idempotent; skips quick_start when the scene is already live | foreground |
 | `scripts/stack_stop.sh` | Graceful SIGINT-first tear-down. Doesn't `kill -9` anything that owns an X11 window | foreground |
-| `scripts/stack_status.sh` | Health across Isaac Sim socket, ROS nodes, sim topics, /clock | foreground |
-| `scripts/isaac/isaacsim_launch.sh` | Vendored from the maintainer's `~/.claude/skills/isaac-sim-extension-dev/`. Subcommands: `launch / close / kill / restart / status / wait`. Env overrides: `ISAACSIM_BIN`, `EXT_FOLDER`, `ISAACSIM_LOG`. Default extension: `soarm101-dt` (port 8767) | foreground |
+| `scripts/stack_status.sh` | Health across Isaac (launcher status: process, bridge, stream; scene live?), ROS nodes, sim topics, /clock | foreground |
+| `scripts/isaac/isaacsim_launch.sh` | Isaac Sim 6.1 + `soarm101-dt` + omni-kit-mcp bridge, enabled for this launch only. Subcommands: `launch [ext] [--stream] / wait [timeout] / status / close / kill / restart`; readiness = `soarm101.*` answering on the bridge; `close` only stops the Isaac it started. Extension folder is fixed to `$REPO/isaac/exts` (no `EXT_FOLDER` override). Bridge port: `OMNI_KIT_MCP_PORT` > `SOARM_KIT_MCP_PORT` > 8767. Log `/tmp/isaacsim-soarm101.log`. GPU wedge (no bridge + no Kit log progress for `ISAACSIM_WEDGE_S`=120 s) → exit 3 with a message, no automatic relaunch, Isaac left running for inspection. `wait [idle]` is RTX-shader-compile aware (idle = no-progress limit, cap `ISAACSIM_WAIT_CAP`, default 900 s); the first-run compile usually lands during the first `soarm101.quick_start`, so `scene_up` gives it `SOARM_QUICK_START_TIMEOUT` (default 900 s) then falls back to `wait`. Extension outputs (scene_states, videos) go to `MCP_CLIENT_OUTPUT_DIR` (default `/tmp/soarm101-resources`); `SOARM_BLENDER` is only for rebaking ArUco markers. Other env overrides (`ISAACSIM_BIN`, `ISAACSIM_GPU`, `ISAACSIM_STREAM_IP`, `ISAACSIM_LOG`) in its header | foreground |
 | `scripts/_param_set_string.sh <name> <value> [node]` | Set a string-typed ROS2 param without int-coercion. Workaround for `ros2 param set ... '4'` parsing as integer 4 (breaks STRING-typed params like `widget_value`) | foreground |
 | `scripts/record_sim_isaac.sh` | lerobot-record wrapper. Subscribes to `/wrist_camera_rgb_sim` + `/workspace_camera_sim` @ 640×480, action topic `/joint_commands_lerobot` | pixi-Jazzy (via bash wrapper) |
 | `scripts/joint_states_to_commands.py` | Publishes controller-reference (commanded) positions → `/joint_commands_lerobot` at 30 Hz so lerobot's `action` column genuinely leads `observation.state`. Filename is historical; reads `/{arm,gripper}_controller/controller_state.reference.positions`, not `/joint_states` | system Humble Python 3.10 |
@@ -81,7 +89,7 @@ without first wiring an `enable_external_teleop=False` gate on
 ## Standard recording session (manual)
 
 ```bash
-# 1. Bring up Isaac Sim + control stack first (see ../../isaac-sim-mcp/CLAUDE.md)
+# 1. Bring up Isaac Sim + control stack first: bash scripts/stack_start.sh
 # 2. Start the mirror (system Humble Python 3.10)
 source /opt/ros/humble/setup.bash
 nohup python3 -u scripts/joint_states_to_commands.py > /tmp/jstojc.log 2>&1 &
@@ -134,7 +142,7 @@ ros2 service call /so_arm101_control_gui/rec_stop std_srvs/srv/Trigger
 The Record Sim tab uses `REC_LEGOS_BY_COLOR` (module-level constant in
 `control_gui.py`) — currently 2 of each color × 2x3 only:
 `red_2x3_0/1`, `green_2x3_0/1`, `blue_2x3_0/1`. To add 2x2s back, edit
-the constant AND update the isaac-sim-mcp scene contract together — they
+the constant AND update the soarm101-dt scene contract (`isaac/exts/soarm101-dt`) together — they
 have to stay in sync (the scene must spawn whatever the orchestrator
 expects to grasp).
 

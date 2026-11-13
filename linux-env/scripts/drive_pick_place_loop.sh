@@ -12,7 +12,7 @@
 #
 # Usage:
 #   bash drive_pick_place_loop.sh                    # default 5 legos
-#   bash drive_pick_place_loop.sh red_2x2 blue_2x3
+#   bash drive_pick_place_loop.sh red_2x3_0 blue_2x3_1
 #   bash drive_pick_place_loop.sh --mode sweep       # Mac-equivalent sine sweep
 
 set -o pipefail
@@ -23,7 +23,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # rclpy + message types are wire-compatible with the Jazzy publishers
 # Isaac Sim and lerobot use.
 source /opt/ros/humble/setup.bash
-source ~/Projects/Exploring-VLAs/vla_SO-ARM101/install/setup.bash 2>/dev/null || true
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/../../vla_SO-ARM101/install/setup.bash" 2>/dev/null || true   # in-tree colcon workspace
 
 # DDS config: when this driver runs in the same Humble process tree as the
 # control stack (no cross-boundary), the system default config works fine —

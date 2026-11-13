@@ -62,3 +62,6 @@ frames_*.gv
 hf_*.txt
 **/token
 **/token.json
+
+# Isaac Sim WebRTC streamer trace logs (written to the launch cwd)
+NvStreamer-*.etli

@@ -104,11 +104,12 @@ HOME_POSE = {
     "wrist_roll": 0.0,
 }
 
-# Color → drop_N child_frame_id mapping (per project CLAUDE.md robot facts).
-COLOR_TO_DROP = {"red": "drop_0", "green": "drop_1", "blue": "drop_2"}
+# Color → drop_N child_frame_id: the cup's ArUco id in the soarm101-dt scene
+# (CUP_ARUCO_CONFIG ids: blue 1, green 2, red 3; same as control_gui).
+COLOR_TO_DROP = {"blue": "drop_1", "green": "drop_2", "red": "drop_3"}
 
-# Default lego list — picks one of each color first, matching test_pick_all.sh.
-DEFAULT_LEGOS = ["red_2x2", "green_2x2", "blue_2x2"]
+# Default lego list — one of each color. Scene legos: {red,green,blue}_2x3_{0,1}.
+DEFAULT_LEGOS = ["red_2x3_0", "green_2x3_0", "blue_2x3_0"]
 
 
 @dataclass

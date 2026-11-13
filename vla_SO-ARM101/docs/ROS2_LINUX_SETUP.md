@@ -12,9 +12,10 @@ lerobot consumer side.
 ## Hard requirements
 
 - **Ubuntu 22.04** (the target tested distro). Other distros may work but
-  Isaac Sim 5.x officially supports Ubuntu 22.04 / 24.04.
-- **NVIDIA GPU** with a driver compatible with Isaac Sim 5.x (RTX 30-series
-  or newer; 8 GB+ VRAM; driver ≥ 535).
+  Isaac Sim 6.1 officially supports Ubuntu 22.04 / 24.04.
+- **NVIDIA GPU** with a driver compatible with Isaac Sim 6.1 (tested: RTX A4500,
+  driver 570). Two GPUs by default: Isaac on GPU 0, the SmolVLA policy on GPU 1
+  (`SOARM_POLICY_GPU=0` for a single-GPU box).
 - **ROS2 Humble** at `/opt/ros/humble` (system install, debs).
 - **~50 GB free disk** (Isaac Sim cache + USDs + colcon build + pixi env).
 - **X11 session** (Wayland is untested). The stack opens RViz + tkinter +
@@ -28,7 +29,7 @@ lerobot consumer side.
 | ROS2 Humble (system) | Producer side: Isaac Sim, control_gui, MoveIt, mirror | [Ubuntu Install Debs](https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debs.html) |
 | [`pixi`](https://pixi.sh) | Conda env manager for the Jazzy/lerobot consumer side | `curl -fsSL https://pixi.sh/install.sh \| bash` then `export PATH="$HOME/.pixi/bin:$PATH"` |
 | RoboStack-Jazzy (via pixi) | Provides Python 3.12 + rclpy + ROS2 message types for lerobot | `pixi install --manifest-path linux-env/pixi.toml` (handled by `bootstrap.sh`) |
-| [Isaac Sim 5.x](https://developer.nvidia.com/isaac-sim) | Physics + USD scene + ROS2 publishers | NVIDIA Omniverse Launcher or `pip install isaacsim` (whichever your environment uses). Default expected at `$HOME/env_isaaclab/bin/isaacsim`; override via `ISAACSIM_BIN` env var. |
+| [Isaac Sim 6.1](https://developer.nvidia.com/isaac-sim) | Physics + USD scene + ROS2 publishers | `pip install isaacsim` into a venv ([guide](https://docs.isaacsim.omniverse.nvidia.com/latest/installation/install_python.html)). Default expected at `$HOME/env_isaacsim61/bin/isaacsim`; override via `ISAACSIM_BIN` env var. |
 | `colcon` | ROS2 workspace builder | `sudo apt install python3-colcon-common-extensions` (already pulled in by ros-humble-desktop) |
 
 ## Why two Pythons (don't skip this)
@@ -66,18 +67,30 @@ compiles).
 ### Isaac Sim install notes
 
 The launcher script (`linux-env/scripts/isaac/isaacsim_launch.sh`) defaults
-to `$HOME/env_isaaclab/bin/isaacsim`. If yours lives elsewhere, set the
+to `$HOME/env_isaacsim61/bin/isaacsim`. If yours lives elsewhere, set the
 override before running anything:
 
 ```bash
 export ISAACSIM_BIN=/path/to/your/isaacsim
 ```
 
-The extension folder defaults to the in-repo `isaac-sim-mcp/exts/`; that's
-where the `soarm101-dt` extension lives (the submodule). If you keep
-isaac-sim-mcp checked out elsewhere, set `EXT_FOLDER`.
+The `soarm101-dt` extension is vendored at `isaac/exts/soarm101-dt/`. The
+launcher enables it, plus the omni-kit-mcp bridge from the `omni-kit-mcp/`
+submodule, for that launch only; nothing is written to the Isaac install's
+user config (it may be shared with other projects). Don't run omni-kit-mcp's
+`scripts/install.py` for this repo.
 
 ## Each session
+
+Sim + SmolVLA policy in one command (see [`../../README.md`](../../README.md)
+for model presets and watching from a Mac):
+
+```bash
+bash linux-env/scripts/deploy_sim.sh up      # [--stream] [--model <preset|hf_id>]
+bash linux-env/scripts/deploy_sim.sh down
+```
+
+Sim + control stack only (e.g. for recording):
 
 ```bash
 bash linux-env/scripts/stack_start.sh        # Isaac Sim + RViz + tkinter GUI (default)
@@ -140,14 +153,15 @@ cd ~/Desktop/ros2_ws && colcon build --symlink-install --packages-select aruco_c
 ```
 
 Then in another terminal: `bash scripts/restart_aruco_localizer.sh` (or
-`restart_yoloe.sh` for YOLO mode). See `isaac-sim-mcp/CLAUDE.md` for the
-real-mode topic contract.
+`restart_yoloe.sh` for YOLO mode). See the topic-contract table in
+[`../CLAUDE.md`](../CLAUDE.md) for the real-mode topics.
 
 ## Related docs
 
 - [`../../CLAUDE.md`](../../CLAUDE.md) — repo topology, doc map, source-of-truth bring-up
 - [`../../linux-env/CLAUDE.md`](../../linux-env/CLAUDE.md) — pixi-Jazzy env + recording layer
 - [`../CLAUDE.md`](../CLAUDE.md) — package inventory + planner architecture
-- [`../../isaac-sim-mcp/CLAUDE.md`](../../isaac-sim-mcp/CLAUDE.md) — Isaac Sim extension internals + MCP tool inventory
+- [`../../isaac/exts/soarm101-dt/docs/README.md`](../../isaac/exts/soarm101-dt/docs/README.md) — Isaac Sim extension
+- [`../../omni-kit-mcp/README.md`](../../omni-kit-mcp/README.md) — the bridge + client the scripts use
 - [`AGENT_DEBUG_GUIDE.md`](./AGENT_DEBUG_GUIDE.md) — debugging the sim stack
 - [`GAZEBO_LINUX_LIMITATION.md`](./GAZEBO_LINUX_LIMITATION.md) — why Gazebo isn't the Linux backend

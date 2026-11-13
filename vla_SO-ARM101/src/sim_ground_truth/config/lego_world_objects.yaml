@@ -10,8 +10,8 @@
 # `drop_entities` — drop-pose link names. Match `<link name="...">` inside
 # the cup models in lego_world.sdf. Each listed link's world pose is
 # republished on /drop_poses (TFMessage) with child_frame_id = link name.
-# Mirrors isaac-sim-mcp@so-arm101 phase 01 convention (drop_red / drop_green
-# / drop_blue). No sizes here — the drop contract is pose-only, like
+# Mirrors the soarm101-dt Isaac extension's convention (isaac/exts/soarm101-dt:
+# drop_red / drop_green / drop_blue). No sizes here — the drop contract is pose-only, like
 # aruco_camera_localizer's publish_drop_poses on the real side.
 
 objects:
