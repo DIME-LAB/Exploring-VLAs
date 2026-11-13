@@ -186,6 +186,21 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       by 500 steps. 600k frames x 20 passes = 187,500 updates, ~29-34 h; review held-out at 10 passes (~15-17 h).
       Cameras: keep raw top then wrist, rename_map={}, empty_cameras=0 (3.0b already matched pretraining order).
       Mac: coursework-eee598/roadmap-2026-11/phase3/3.1e-throughput/.
+- [ ] 3.1h Smooth DART noise (decided 2026-11-13): the current per-step noise (30% of 30 Hz steps get an independent
+      ~0.0045 rad kick) makes the arm visibly jerky. Replace with smooth, temporally correlated drift (segments of
+      ~0.3-0.8 s with min-jerk/cosine ramps, or a low-pass/OU process), per-joint amplitude ~0.26-1 deg, no gripper
+      noise during grasp/release; the clean expert correction stays the recorded action. Bar: jerk/acceleration of
+      executed targets vs current noise vs none, exact label recomputation, unchanged yield, side-by-side video.
+      Then targeted review + 5-episode smoke before the full run.
+- [ ] 3.1i Re-grasp recovery episodes (decided 2026-11-13), aimed at the 1.9 failure (closes 26-38 mm off the lego):
+      a fixed share (~15-20%) of full-run episodes where the expert's FIRST grasp is deliberately offset 2-4 cm via
+      injected perturbation (so the miss is never a recorded action), the miss is detected (gripper closes past the
+      empty-jaw width and/or the lego does not move), then the expert opens, re-approaches and grasps correctly.
+      Recorded actions during the miss are the expert's clean corrections, as with DART; label the episode
+      (`recovery: regrasp`) in the dataset. Success gate unchanged (final placement). Bar: offline tests, a smoke with
+      only re-grasp episodes (videos checked by eye), yield, and the share/offset distribution in the data card.
+      Later option: policy-in-the-loop interventions (DAgger/HIL-style), with the scripted expert taking over when
+      the trained policy misses.
 - [ ] 3.2 Fine-tune (more steps/episodes than 10k/100), sim/real mix per the coursework findings.
 - [ ] 3.3 Re-run the Phase 1 evaluation matrix.
 
