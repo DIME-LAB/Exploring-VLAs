@@ -56,3 +56,64 @@ consumption, request immutability, all 51 validity calls concurrent with capture
 and capture-requested emergency abort. The earlier gripper cancellation,
 physical-state, geometry, timing, reset and confinement tests remain in the
 suite. These checks do not replace corrected physical smoke/pilot validation.
+
+## Scene request completion and reset authority
+
+A local wait ending does not cancel an ApplyPlanningScene request already sent
+to MoveIt. `SceneMutationClient` wraps the shared node's scene client for all
+attach/detach, world ADD/REMOVE and ACM requests. It retains pending futures.
+A result is conclusive only after the future completes with a response. A wait
+expiry, missing response or transport exception sets the node's terminal scene
+error and invokes the common collection abort. Typed terminal errors propagate
+through ordinary scene fallback handlers. A subsequent mutation/reset refuses;
+an already completed future may be deliberately drained before further work.
+Completion arriving after a terminal wait does not clear the error or generation
+poison. A false service response is conclusive, but local bookkeeping cannot
+establish which partial effects occurred; reset still queries remote state.
+
+`SceneSafetyMarker` atomically records unresolved requests in the instance's
+confined runtime directory. A new collector refuses the same control process
+(identity uses PID, process start ticks and boot ID). An unknown identity cannot
+prove a restart. Unresolved Kit pose/reset RPCs are also terminal and require
+both the instance's control and Isaac processes to have changed. Restart the
+assigned instance with collect_sim.sh down/up; leave other instances alone.
+The record remains for diagnosis and is never cleared by an ordinary retry.
+
+At startup and every scene reset, `SceneReconciler` queries all planning-scene
+components (mask 1023). It checks pending request completion, removes every
+remote attached object, then queries again because detach can create a world
+object. It removes all remote world objects and replaces ACM policy using the
+checked-in SRDF's disabled robot-link pairs. Base/ground and object/ground rest
+contacts are the only extra pair allowances. Stale default ACM allowances and
+unknown names are removed. Local attached names and collision trackers are
+cleared only after the remote postcondition passes. An unexpected occupancy
+map refuses setup and requires a fresh control stack.
+
+The scene is rebuilt with the shared ground/cup/block geometry methods. A full
+query must then show exactly the expected world IDs, no attached objects,
+matching object/cup poses and physical joints, the expected ground geometry,
+and the complete canonical ACM. Every accepted receipt contains cleanup and
+verification results. This is independent of the node's local attached name or
+collision-name lists. MoveIt's [Humble planning-scene implementation](https://moveit.picknik.ai/humble/api/html/moveit__core_2planning__scene_2src_2planning__scene_8cpp_source.html)
+treats world and attached-object changes separately and replaces an explicitly
+provided ACM; the reset follows those semantics and verifies its service result.
+
+Pose subscribers check the physical-cache bypass flag under their respective
+map lock. Collection enables the physical source before ROS spin; the handover
+also holds both map locks when replacing caches. A callback already waiting on
+a map lock cannot overwrite the physical replacement afterward.
+
+Controller-reference rows include the original source header stamp, callback
+receipt epoch/wall time, inferred source epoch and its inference basis, same-tick
+flag and sim-time age. The raw topic does not carry an epoch: stamps at/before a
+reset or ahead of the recorded tick are marked unknown. This diagnostic never
+supplies physical state, clean action or success. Its callback reads an atomic
+epoch/barrier tuple without waiting for generation ownership, preserving ACK
+callback progress.
+
+Static mesh-loader caches contain only fixed asset geometry, not episode poses
+or targets. Raw GUI action callbacks are outside collection's adapter path;
+only full-trajectory fallback callbacks retain operation guards. Bbox catalog
+input is assumed to describe the fixed scene assets. Native singleton/source
+hashes and command ledger stay on Kit's main thread. Encoder state is owned by
+each attempt's writer and joined before acceptance or another writer is used.

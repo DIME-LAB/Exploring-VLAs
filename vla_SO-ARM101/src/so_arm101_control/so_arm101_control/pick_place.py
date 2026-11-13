@@ -21,6 +21,7 @@ import shutil
 import threading
 import time
 import weakref
+from so_arm101_control.scene_transactions import SceneMutationClient, SceneMutationIncomplete
 from so_arm101_control.motion_operation import MotionOperation
 from pathlib import Path
 
@@ -612,6 +613,8 @@ class PickPlaceNode(Node):
             self._apply_scene_client = self.create_client(
                 ApplyPlanningScene, '/apply_planning_scene',
                 callback_group=self._service_cb_group)
+            self._apply_scene_client = SceneMutationClient(self._apply_scene_client,
+                                                       self._motion_guard, self._scene_unresolved)
             self._get_scene_client = self.create_client(
                 GetPlanningSceneSrv, '/get_planning_scene',
                 callback_group=self._service_cb_group)
@@ -1363,10 +1366,10 @@ class PickPlaceNode(Node):
 
 
     def _objects_callback(self, msg):
-        if getattr(self, '_physical_pose_cache', False):
-            return
         new_any_big_move = False
         with self.objects_lock:
+            if getattr(self, '_physical_pose_cache', False):
+                return
             for tf in msg.transforms:
                 name = tf.child_frame_id
                 prior = self.objects_data.get(name)
@@ -1508,9 +1511,9 @@ class PickPlaceNode(Node):
         on a fixed time delay (matching _cmd_grasp_refresh); no event
         signaling happens here.
         """
-        if getattr(self, '_physical_pose_cache', False):
-            return
         with self._drop_lock:
+            if getattr(self, '_physical_pose_cache', False):
+                return
             for tf in msg.transforms:
                 name = tf.child_frame_id
                 self._drop_data[name] = {
@@ -2130,6 +2133,8 @@ class PickPlaceNode(Node):
             import numpy as np
             try:
                 t = self._tf_buffer.lookup_transform('base', 'tcp_link', rclpy.time.Time())
+            except SceneMutationIncomplete:
+                raise
             except Exception as e:
                 self._append_log(f'Attach failed: TF lookup tcp_link: {e}', 'warn')
                 return False
@@ -2167,6 +2172,8 @@ class PickPlaceNode(Node):
                 try:
                     future = self._apply_scene_client.call_async(req)
                     self._wait_future(future, timeout_sec=5.0)
+                except SceneMutationIncomplete:
+                    raise
                 except Exception as exc:
                     self._append_log(f'{label}: exception: {exc}', 'warn')
                     return False
@@ -2204,6 +2211,8 @@ class PickPlaceNode(Node):
                     fut = self._apply_scene_client.call_async(
                         ApplyPlanningScene.Request(scene=rm_scene))
                     self._wait_future(fut, timeout_sec=3.0)
+                except SceneMutationIncomplete:
+                    raise
                 except Exception:
                     pass  # idempotent — world may have been clean already
 
@@ -2349,6 +2358,8 @@ class PickPlaceNode(Node):
                 observed = self._wait_future(self._get_scene_client.call_async(check), timeout_sec=3.0)
                 if observed is None or any(a.object.id == obj_id for a in observed.scene.robot_state.attached_collision_objects):
                     return False
+            except SceneMutationIncomplete:
+                raise
             except Exception as exc:
                 self._append_log(f'Detach apply exception: {exc}', 'warn')
                 return False
@@ -3292,6 +3303,8 @@ class PickPlaceNode(Node):
             try:
                 if not self._detach_lego_sync():
                     raise RuntimeError('Planning scene did not acknowledge detach')
+            except SceneMutationIncomplete:
+                raise
             except Exception as exc:
                 raise RuntimeError(f'Detach failed: {exc}') from exc
 
@@ -3377,6 +3390,8 @@ class PickPlaceNode(Node):
                 if ok is not False:
                     try:
                         ok = self._attach_lego_to_gripper(obj_name) and self._attached_lego_name == obj_name
+                    except SceneMutationIncomplete:
+                        raise
                     except Exception as exc:
                         ok = False
                         self._append_log(f'Attach step errored: {exc}', 'warn')
@@ -3705,8 +3720,17 @@ class PickPlaceNode(Node):
         self._dispatch_scene_update(_apply)
 
 
+    def _scene_unresolved(self, exc):
+        self._scene_terminal_error = str(exc)
+        handler = getattr(self, '_scene_failure_handler', None)
+        if handler is not None:
+            handler(exc)
+        raise SceneMutationIncomplete(str(exc))
+
     @contextmanager
     def _motion_guard(self, operation=None):
+        if getattr(self,'_scene_terminal_error',None):
+            raise SceneMutationIncomplete(self._scene_terminal_error)
         epoch = self._motion_token() if operation is None else operation.epoch
         guard = getattr(self, '_motion_effect_guard', None)
         if guard is None:

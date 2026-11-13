@@ -111,6 +111,46 @@ class RootFileGrowth:
                     apparent_growth_bytes=sum(f['growth_bytes'] for f in files), files=files)
 
 
+def control_identity(runtime, pidfile='control.pid'):
+    """Identify this instance's launch process across PID reuse and reboots."""
+    try:
+        pid = int((runtime/pidfile).read_text())
+        fields = Path(f'/proc/{pid}/stat').read_text().rsplit(')',1)[1].split()
+        return dict(pid=pid, start_ticks=fields[19],
+                    boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip())
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def scene_stack_ready(previous, current):
+    """Only a demonstrably different control process may follow an unresolved scene request."""
+    return previous is not None and current is not None and previous != current
+
+
+class SceneSafetyMarker:
+    def __init__(self, runtime):
+        self.runtime = confined(runtime)
+        self.path = self.runtime/'scene-unresolved.json'
+
+    def require_fresh_stack(self):
+        if self.path.exists():
+            failure = json.loads(self.path.read_text())
+            identities=failure['identities']
+            if any(not scene_stack_ready(identities[name],control_identity(self.runtime,pidfile))
+                   for name,pidfile in failure['required_restart'].items()):
+                raise RuntimeError('Unresolved scene mutation: restart required instance processes before collecting: '+str(sorted(identities)))
+
+    def record(self, error, source='MoveIt'):
+        required={'control':'control.pid'}
+        if source=='Kit':required['isaac']='isaacsim-soarm101.pid'
+        payload = dict(error=str(error), source=source, required_restart=required,
+                       identities={name:control_identity(self.runtime,pidfile) for name,pidfile in required.items()},
+                       recorded_wall_ns=time.time_ns())
+        temporary = self.path.with_suffix('.json.tmp')
+        temporary.write_text(json.dumps(payload,indent=2))
+        temporary.replace(self.path)
+
+
 if __name__ == '__main__':
     import sys
     for value in sys.argv[1:]:

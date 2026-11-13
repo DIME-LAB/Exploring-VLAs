@@ -340,7 +340,23 @@ Planning/validation runs outside generation ownership. Only short state/command
 commits and scene mutations acquire the guard, then validate the original request.
 Capture, scene and cancellation timeouts share the setter-free emergency abort
 and structured diagnostic. See [operation ownership](docs/notes/collection-operation-ownership.md)
-for the shared-state sweep and concurrency contract. Post-step
+for the shared-state sweep and concurrency contract.
+
+Scene service completion is checked separately from local ownership. An unresolved
+attach/detach, world-object or ACM mutation aborts and poisons collection; late
+completion cannot authorize another reset. A persistent runtime marker requires
+a new instance control process before a later collector starts. A timed-out Kit
+pose/reset RPC requires fresh control and Isaac processes. Use this instance's
+`collect_sim.sh down N` / `up N`; the marker retains the diagnosis.
+
+Every reset queries the full MoveIt scene, removes remote attachments independently
+of local bookkeeping, clears world objects and rebuilds collision allowances from
+the checked-in SRDF. Final verification requires exact expected world IDs/poses,
+no attached objects, the correct ground, measured robot state and canonical ACM.
+The instance must have no unexpected occupancy map. Receipts retain cleanup and
+verification results. Pose-cache subscribers recheck bypass under the map lock;
+controller-reference diagnostics carry source time/epoch validity and are never
+used as expert labels. Post-step
 drive-target read-back checks that the command persisted through the next frame.
 Only this instance's normal ROS follower actuation edges are disconnected during collection. Shared planning, grasp/IK maths,
 attach/detach and drop logic remain the GUI implementation. Planning/service
@@ -365,7 +381,7 @@ do not also set ROS_LOCALHOST_ONLY. World timing is set before scene creation,
 including the 30 Hz frame-rate clamp. Never change World timing on a live scene.
 
 All run/export/runtime paths resolve beneath the canonical
-`/mnt/a4500-backup/exploring-vlas/`; environment overrides cannot escape it.
+`/mnt/a4500-backup/exploring-vlas/`; environment overrides stay within it.
 ROS logs, temp, HF/OptiX caches, portable roots and per-instance grasp traces
 are directed there. The indexed launcher overrides inherited
 `MCP_CLIENT_OUTPUT_DIR` with its confined instance resources directory and validates

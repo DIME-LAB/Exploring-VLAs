@@ -22,6 +22,7 @@ class StepGeneration:
         self.lock = threading.RLock()
         self.epoch = None
         self.floor_ns = -1
+        self.identity = (None, -1)
         self.retirement_timeout = 15.
         self.stalled = None
         self.on_stall = None
@@ -31,6 +32,7 @@ class StepGeneration:
         if not self.lock.acquire(timeout=self.retirement_timeout):
             self.stalled = f'Stalled generation owner during {label}: {self.lock!r}; retirement exceeded {self.retirement_timeout}s; abort required'
             self.epoch = None
+            self.identity = (None, self.floor_ns)
             if self.on_stall is not None:
                 self.on_stall(OwnershipStalled(self.stalled), label)
             raise OwnershipStalled(self.stalled)
@@ -41,10 +43,23 @@ class StepGeneration:
         finally:
             self.lock.release()
 
+    def poison(self, error):
+        if self.stalled is None:
+            self.stalled = str(error)
+        self.epoch = None
+        self.identity = (None, self.floor_ns)
+
+    def fail(self, error, requester):
+        """An unresolved external mutation is terminal, like owner retirement."""
+        self.poison(error)
+        if self.on_stall is not None:
+            self.on_stall(OwnershipStalled(self.stalled), requester)
+
     def install(self, result):
         with self.own('install'):
             self.epoch = result['epoch']
             self.floor_ns = result['invalid_through_ns']
+            self.identity = (self.epoch, self.floor_ns)
 
     def require(self, epoch, stamp=None):
         if self.epoch is None or epoch != self.epoch or (stamp is not None and stamp <= self.floor_ns):
@@ -55,6 +70,7 @@ class StepGeneration:
             # Failure leaves the local generation unusable. The collector's
             # common terminal handler owns setter-free emergency cancellation.
             self.epoch = None
+            self.identity = (None, self.floor_ns)
             retire()
             result = native_cancel()
             self.install(result)

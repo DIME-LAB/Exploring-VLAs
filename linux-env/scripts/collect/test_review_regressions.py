@@ -88,7 +88,7 @@ class ReviewRegressions(unittest.TestCase):
             c.stop.set()  # Consume exactly one real capture-loop iteration.
             return 10**9,entry
         c.sensors=NS(read=read,read_ack=lambda epoch,stamp:acks[(epoch,stamp)],reference=None,
-            condition=threading.Condition(),pending={},acks=acks)
+            condition=threading.Condition(),pending={},acks=acks,reference_at=lambda epoch,stamp:None)
         c.command_pub=NS(publish=r.command_received)
         c.generation.on_stall=c.abort_stalled_owner
         return c,r,entry
@@ -222,9 +222,14 @@ class ReviewRegressions(unittest.TestCase):
                   _remove_cup_collision_objects=lambda:None,_add_cup_collision_objects=lambda **kw:None,
                   _add_lego_collision_objects=lambda **kw:None,_wait_future=lambda *a,**k:response,
                   _get_scene_client=NS(call_async=lambda req:None))
+        c.node._cmd_toggle_ground_plane=lambda:None
+        from contextlib import nullcontext
+        c.node._motion_guard=nullcontext
+        c.scene_reset=NS(clear=lambda:{},set_policy=lambda ids:None,
+            verify=lambda snapshot,joints:dict(passed=False,poses=collision_pose_errors(objects,snapshot)))
         service=NS(Request=lambda:NS(components=NS(components=0)))
         with patch.dict(sys.modules,{'moveit_msgs':NS(),'moveit_msgs.srv':NS(GetPlanningScene=service)}):
-            with self.assertRaisesRegex(TimeoutError,'collision pose mismatch'):c.sync_scene()
+            with self.assertRaisesRegex(TimeoutError,'Full planning scene reset verification'):c.sync_scene()
 
     def test_indexed_launcher_overrides_inherited_mcp_output_escape(self):
         source=(ROOT/'linux-env/scripts/isaac/isaacsim_launch.sh').read_text()

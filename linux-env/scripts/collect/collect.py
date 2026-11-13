@@ -34,9 +34,10 @@ from kit_mcp.client import call as kit_call
 from so_arm101_control.grasp_geometry import JOINT_LIMITS
 from contract import COLORS, JOINTS, EVAL_SEEDS, corrective_action, parameters, timing_audit
 from checkpoint import progress
-from storage import CANONICAL_ROOT, RootFileGrowth, confined, prepare_environment, wait_for_storage
+from storage import CANONICAL_ROOT, RootFileGrowth, SceneSafetyMarker, confined, prepare_environment, wait_for_storage
 from protocol import StepGeneration, CancelledGeneration, OwnershipStalled
 from scene_sync import physical_pose_caches, collision_pose_errors
+from scene_reconcile import SceneReconciler, ros_messages
 from success import SETTLED_TICKS, initial_arm, settled_containment
 
 def ns(stamp):
@@ -60,7 +61,8 @@ def timeline(play):
 
 class Sensors:
     """Exact sim-stamp join: each image pair and state are consumed once, without resampling."""
-    def __init__(self, node):
+    def __init__(self, node, generation):
+        self.generation = generation
         self.condition = threading.Condition()
         self.pending = collections.OrderedDict()
         self.last = -1
@@ -97,8 +99,30 @@ class Sensors:
         return ack
 
     def reference_received(self, msg):
-        self.reference = dict(stamp_ns=ns(msg.header.stamp),
-                              positions=dict(zip(msg.name, msg.position)))
+        stamp = ns(msg.header.stamp)
+        # The raw reference topic has no generation field. Keep receipt epoch
+        # separate and infer source epoch only when its sim stamp is beyond
+        # the current reset barrier; never relabel a delayed diagnostic.
+        epoch, floor = self.generation.identity
+        source_epoch = epoch if epoch is not None and stamp > floor else None
+        reference = dict(source_topic='/joint_states', stamp_ns=stamp,
+            receipt_epoch=epoch, source_epoch=source_epoch, received_wall_ns=time.monotonic_ns(),
+            source_epoch_basis='inferred from sim header and native reset barrier; topic has no epoch field',
+            validity='current_generation' if source_epoch is not None else 'before_reset_or_unknown',
+            positions=dict(zip(msg.name, msg.position)))
+        with self.condition:
+            self.reference = reference
+
+    def reference_at(self, epoch, stamp):
+        with self.condition:
+            reference = dict(self.reference) if self.reference is not None else None
+        if reference is not None:
+            if reference['stamp_ns'] > stamp+1000:
+                reference['source_epoch'] = None
+                reference['validity'] = 'future_stamp_or_unknown'
+            reference['same_tick'] = reference['source_epoch'] == epoch and abs(reference['stamp_ns']-stamp) <= 1000
+            reference['age_sim_ns'] = stamp-reference['stamp_ns']
+        return reference
 
     def put(self, key, msg):
         if key == 'tick':
@@ -344,14 +368,19 @@ class Collector:
     def __init__(self, args):
         from so_arm101_control.pick_place import PickPlaceNode
         self.args = args
+        self.scene_marker = SceneSafetyMarker(os.environ['SOARM_INSTANCE_ROOT'])
+        self.scene_marker.require_fresh_stack()
         self.node = PickPlaceNode(use_sim_time=True, joint_states_topic='/joint_states_measured')
         self.generation = StepGeneration()
         self.node._motion_context = threading.local()
         self.node._motion_generation_provider = lambda: self.generation.epoch
         self.node._motion_effect_guard = self.motion_effect
-        self.sensors = Sensors(self.node)
+        self.node._scene_failure_handler = self.scene_incomplete
+        self.sensors = Sensors(self.node, self.generation)
         # Only joined, generation-validated snapshots update expert state/cache.
         self.node.destroy_subscription(self.node.js_sub)
+        with self.node.objects_lock, self.node._drop_lock:
+            self.node._physical_pose_cache = True
         self.servo = Servo(self.node, self.generation, self.timeline)
         self.command_pub = self.node.create_publisher(String, '/collection_command', 64)
         self.node._trajectory_executor = self.servo.execute
@@ -372,12 +401,15 @@ class Collector:
         self.last_snapshot = None
         self.node._simulation_held = lambda: mcp('run_python', {'code':
             'import collection_runtime as c\nr=c.runtime()\nresult=not r.busy and not r.timeline.is_playing()'})
+        self.scene_reset = SceneReconciler(self.node, ros_messages(),
+            (REPO/'vla_SO-ARM101/src/so_arm101_moveit_config/config/so_arm101.srdf').read_text())
         self.capture_thread = threading.Thread(target=self.capture, daemon=True)
         self.capture_thread.start()
 
     @contextmanager
     def motion_effect(self, epoch):
         try:
+            self.generation.require(epoch)
             with self.generation.own('scene/bookkeeping/status'):
                 self.generation.require(epoch)
                 yield
@@ -414,6 +446,23 @@ class Collector:
             self.sensors.pending.clear()
             self.sensors.acks.clear()
 
+    def scene_incomplete(self, exc, source='MoveIt'):
+        self.node._scene_terminal_error = str(exc)
+        self.generation.poison(exc)
+        self.stop.set()
+        self.node._qs_abort_evt.set()
+        try:
+            self.scene_marker.record(exc, source=source)
+        finally:
+            self.generation.fail(exc, 'unresolved '+source+' scene mutation')
+
+    def mutate_kit(self, tool, params=None):
+        try:
+            return mcp(tool, params)
+        except (TimeoutError, ConnectionError, OSError) as exc:
+            self.scene_incomplete(exc, source='Kit')
+            raise
+
     def abort_stalled_owner(self, exc, requester):
         self.stop.set()
         self.node._qs_abort_evt.set()
@@ -449,7 +498,7 @@ class Collector:
     def restore_physical(self, code):
         # Retirement owns the scene before setters. On a stalled owner, only
         # native cancellation is allowed; never execute the restore callback.
-        return self.cancel_owner(lambda: mcp('run_python', {'code':code}))
+        return self.cancel_owner(lambda: self.mutate_kit('run_python', {'code':code}))
 
     def capture(self):
         while not self.stop.is_set():
@@ -461,8 +510,9 @@ class Collector:
                     if self.servo.plan or self.servo.grip_plan:
                         raise TimeoutError('Motion stalled: no synchronized camera/state tick within 30 wall seconds')
                     continue
+                epoch = entry['tick'][0]['epoch']
+                self.generation.require(epoch, stamp)
                 with self.generation.own('capture/dispatch'):
-                    epoch = entry['tick'][0]['epoch']
                     self.generation.require(epoch, stamp)
                     joint, received = entry['joint']
                     mapped = dict(zip(joint.name, joint.position))
@@ -497,7 +547,7 @@ class Collector:
                         physics_state=snapshot['state'], physics_velocity=snapshot['velocity'],
                         physics_drive_targets=snapshot['drive_targets'],
                         pose_stamp_ns=snapshot['sim_ns'], physics_time_s=snapshot['physics_time_s'],
-                        controller_reference=self.sensors.reference,
+                        controller_reference=self.sensors.reference_at(epoch, stamp),
                         declared_application_stamp_ns=stamp, **ack)
                     selected = self.node._selected_object
                     if selected in snapshot['bodies']:
@@ -581,8 +631,7 @@ class Collector:
 
     def scene(self, params, baseline):
         self.timeline(False)
-        if self.node._attached_lego_name:
-            self.node._detach_lego_sync()
+        self.scene_clear_check = self.scene_reset.clear()
         mcp('run_python', {'code': 'import collection_runtime as c\nc.runtime().require_scene()\nresult=True'})
         if self.args.replay_receipt:
             replay = json.loads(self.args.replay_receipt.read_text())
@@ -608,48 +657,39 @@ class Collector:
         code += 'baseline=' + repr(baseline) + '\n'
         code += "for name, pos in baseline.items():\n    i._set_obj_prim_pose(i._get_prim_path(name), Gf.Vec3d(*pos), (0.,0.,0.))\n    p=__import__('omni.usd', fromlist=['']).get_context().get_stage().GetPrimAtPath(i._get_prim_path(name))\n    from pxr import UsdPhysics\n    rb=UsdPhysics.RigidBodyAPI(p)\n    rb.GetVelocityAttr().Set(Gf.Vec3f(0.,0.,0.))\n    rb.GetAngularVelocityAttr().Set(Gf.Vec3f(0.,0.,0.))\n"
         code += 'random.seed(' + str(params['seed']) + ')\nnp.random.seed(' + str(params['seed'] % 2**32) + ')\nresult=True'
-        mcp('run_python', {'code': code})
-        cups = mcp('soarm101.randomize_cups', dict(seed=params['cup_seed'], **params['cup_sampling']))
-        mcp('run_python', {'code': 'from so_arm101_dt.extension import get_instance\nimport random\nimport numpy as np\nrandom.seed(' + str(params['seed']) + ')\nnp.random.seed(' + str(params['seed'] % 2**32) + ')\nresult=get_instance()._cmd_randomize_object_poses(required_visible_color=' + repr(params['color']) + ', required_visible_count=2)'})
+        self.mutate_kit('run_python', {'code': code})
+        cups = self.mutate_kit('soarm101.randomize_cups', dict(seed=params['cup_seed'], **params['cup_sampling']))
+        self.mutate_kit('run_python', {'code': 'from so_arm101_dt.extension import get_instance\nimport random\nimport numpy as np\nrandom.seed(' + str(params['seed']) + ')\nnp.random.seed(' + str(params['seed'] % 2**32) + ')\nresult=get_instance()._cmd_randomize_object_poses(required_visible_color=' + repr(params['color']) + ', required_visible_count=2)'})
         # Resume only to get the post-teleport poses, then freeze while scene updates/planning run.
-        mcp('run_python', {'code': 'import collection_runtime as c\nresult=c.runtime().reset_velocities()'})
+        self.mutate_kit('run_python', {'code': 'import collection_runtime as c\nresult=c.runtime().reset_velocities()'})
         self.advance_ticks(6)
         self.scene_restore = self.restore_physical('import collection_runtime as c\nr=c.runtime()\ns=r.snapshot()\nresult=r.restore(s,arm=True)')
         return cups
 
     def update_pose_cache(self, snapshot):
         objects, cups = physical_pose_caches(snapshot)
-        self.node._physical_pose_cache = True
-        with self.node.objects_lock:
+        with self.node.objects_lock, self.node._drop_lock:
+            self.node._physical_pose_cache = True
             self.node.objects_data = objects
-        with self.node._drop_lock:
             self.node._drop_data = cups
 
     def sync_scene(self):
         self.update_pose_cache(self.episode_start_physical)
-        self.node._remove_lego_collision_objects()
-        self.node._remove_cup_collision_objects()
+        cleared = self.scene_reset.clear()
+        self.node._cmd_toggle_ground_plane()
         self.node._add_cup_collision_objects(cups_dict=dict(self.node._drop_data))
         self.node._add_lego_collision_objects(legos_dict=dict(self.node.objects_data))
-        # Verify the asynchronous planning-scene updates reached MoveIt before accepting the scene.
-        expected = set(self.node._cup_collision_names + self.node._lego_collision_names)
+        world_ids = ['ground_plane'] + list(self.node._cup_collision_names) + list(self.node._lego_collision_names)
+        with self.node._motion_guard():
+            self.scene_reset.set_policy(world_ids)
         deadline = time.monotonic() + 15
-        from moveit_msgs.srv import GetPlanningScene
         while True:
-            req = GetPlanningScene.Request(); req.components.components = 16 | 2
-            response = self.node._wait_future(self.node._get_scene_client.call_async(req), timeout_sec=3)
-            actual = {c.id for c in response.scene.world.collision_objects} if response else set()
-            state = (dict(zip(response.scene.robot_state.joint_state.name,
-                              response.scene.robot_state.joint_state.position)) if response else {})
-            physical = self.episode_start_physical['state']
-            feedback_matches = all(name in state and abs(state[name]-q) < 1e-5 for name,q in zip(JOINTS,physical))
-            poses = (collision_pose_errors(response.scene.world.collision_objects, self.episode_start_physical)
-                     if response else dict(passed=False))
-            if expected and expected <= actual and feedback_matches and poses['passed']:
-                self.scene_pose_check = poses
-                break
+            check = self.scene_reset.verify(self.episode_start_physical, JOINTS)
+            if check['passed']:
+                self.scene_pose_check = dict(check, cleared=cleared)
+                return
             if time.monotonic() > deadline:
-                raise TimeoutError(f'Planning scene missing {expected - actual}, physical feedback differs, or collision pose mismatch: {poses}')
+                raise TimeoutError(f'Full planning scene reset verification failed: {check}')
             self.stop.wait(.05)
 
     def run(self):
@@ -681,8 +721,8 @@ class Collector:
         # the end of active work; exclude the intervening shutdown/disk wait.
         previous_wall = old_summary.get('wall_seconds', max(0., (root / 'episodes.jsonl').stat().st_mtime - previous['started']) if previous and receipts else 0.)
         disk_wait = old_summary.get('disk_wait_seconds', 0.)
-        clock_config = mcp('run_python', {'code': (REPO / 'linux-env/scripts/collect/configure_clock.py').read_text() + '\nresult=configure(30)'})
-        transport_config = mcp('run_python', {'code': 'import sys\nsys.path.insert(0,' + repr(str(REPO / 'linux-env/scripts/collect')) + ')\nimport collection_runtime as c\nresult=c.install()'})
+        clock_config = self.mutate_kit('run_python', {'code': (REPO / 'linux-env/scripts/collect/configure_clock.py').read_text() + '\nresult=configure(30)'})
+        transport_config = self.mutate_kit('run_python', {'code': 'import sys\nsys.path.insert(0,' + repr(str(REPO / 'linux-env/scripts/collect')) + ')\nimport collection_runtime as c\nresult=c.install()'})
         self.generation.install(transport_config)
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
@@ -694,7 +734,8 @@ class Collector:
             raise TimeoutError('Physical command/feedback ROS graph was not discovered')
         self.advance_ticks(1)
         self.wait_ready()
-        self.node._cmd_toggle_ground_plane()
+        self.episode_start_physical = self.last_snapshot
+        self.sync_scene()
         self.timeline(False)
         if previous:
             baseline = previous['baseline']
@@ -721,11 +762,14 @@ class Collector:
                            'linux-env/scripts/collect/collection_runtime.py',
                            'linux-env/scripts/collect/success.py',
                            'linux-env/scripts/collect/scene_sync.py',
+                           'linux-env/scripts/collect/scene_reconcile.py',
                            'linux-env/scripts/collect/protocol.py',
                            'linux-env/scripts/collect/configure_clock.py',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/pick_place.py',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/grasp_geometry.py',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/motion_operation.py',
+                           'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/scene_transactions.py',
+                           'vla_SO-ARM101/src/so_arm101_moveit_config/config/so_arm101.srdf',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/compute_workspace.py',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/ik_calibration.yaml',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/workspace_bounds.yaml']
@@ -796,6 +840,7 @@ class Collector:
                 receipt['initial_physical'] = self.scene_restore['snapshot']
                 receipt['episode_start_physical'] = self.episode_start_physical
                 receipt['planning_scene_pose_check'] = self.scene_pose_check
+                receipt['planning_scene_clear_check'] = self.scene_clear_check
                 receipt['initial_restore_check'] = {k:v for k,v in self.scene_restore.items() if k != 'snapshot'}
                 receipt['initial_restore_error_m'] = self.scene_restore['max_position_error_m']
                 receipt['initial_expert_reference'] = list(self.servo.reference)
