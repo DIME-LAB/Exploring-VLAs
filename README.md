@@ -149,6 +149,13 @@ yourself is left alone). `down --policy` stops just the policy.
   Workaround: `isaacsim_launch.sh close`, then `deploy_sim.sh up` again (a warm
   launch renders it). Planned fix: de-instance the robot's visual meshes when
   the scene is built.
+- Pose publishers use the Isaac 6.1 external transform arrays for USD Xforms
+  (including cup-center wrappers), avoiding physics-tensor invalid-target warnings.
+  The extension log is capped at 500 model rows and draws visible rows through
+  TreeView; callback errors print at most once per source every five seconds.
+  Unthrottled loaded-box measurements: 57.14 → 50.21 ms/frame and RTF
+  0.2917 → 0.3319; PoseTree warnings 87.5/s → 0. Shared host load varied
+  (17.5 → 12.8), so this is an observed improvement, not an isolated CPU benchmark.
 - **Sim pacing is a ceiling under shared CPU load.** `up --rate-hz 19.4` (default)
   sets and reads back Kit's main run-loop limiter after the World exists;
   physics remains 60 Hz, so the target RTF is 19.4/60 = 0.3233. `--rate-hz 0`

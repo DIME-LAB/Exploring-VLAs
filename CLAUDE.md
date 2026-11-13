@@ -154,3 +154,10 @@ Sim pacing: the launcher's `DEFAULT_SIM_RATE_HZ` is the single default cadence.
 `deploy_sim.sh up --rate-hz HZ` applies Kit pacing after World initialization
 and prints the readback; `0` is unthrottled. At 60 Hz physics, RTF = Hz/60 only
 when the box has enough CPU headroom. Do not change physics dt to tune wall pacing.
+
+Pose graphs feed `ROS2PublishTransformTree` its external arrays: ordinary USD
+Xforms (`/World`, `/World/base`, cup-center wrappers) are not physics tensor
+objects. Preserve `World` / `base` and the `drop_1/2/3` frame names. Strip scale
+with `Gf.Transform(matrix).GetRotation()` when extracting mesh orientations.
+The log UI uses a bounded 500-row model; do not rebuild 500 labels per line.
+Physics callback diagnostics are limited to one per source every five seconds.

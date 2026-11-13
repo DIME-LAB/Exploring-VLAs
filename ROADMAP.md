@@ -20,7 +20,7 @@ cadence (~14 Hz) not matching the camera-bound recording loop.
 - [ ] 1.4 Camera cadence: one frame per sim frame with sim-time stamps — wrist camera via render
       product + ROS2CameraHelper (pixel parity already measured: 49–50 dB, at renderer noise);
       workspace camera publisher stamps + one publish per frame. Re-verify parity vs dataset frames.
-- [ ] 1.5 Per-frame CPU waste: fix the pose graphs' invalid TF targets (~88 PoseTree warnings/s);
+- [x] 1.5 Per-frame CPU waste: fix the pose graphs' invalid TF targets (~88 PoseTree warnings/s);
       make the extension log pane append-only (no 500-label rebuilds); rate-limit prints inside physics
       callbacks (a broken handle once dropped RTF to 0.12).
 - [ ] 1.6 Invisible robot on cold launch (`cannot find protoPath: /__Prototype_*`): de-instance the

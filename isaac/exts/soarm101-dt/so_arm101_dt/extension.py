@@ -15,6 +15,7 @@ import math
 import json
 import traceback
 from typing import Dict, Any
+from collections import deque
 
 from isaacsim.core.api.world import World
 from isaacsim.gui.components.element_wrappers import ScrollingWindow
@@ -879,6 +880,36 @@ class LogRedirector:
         self._original.flush()
 
 
+class _LogItem(ui.AbstractItem):
+    def __init__(self, text):
+        super().__init__()
+        self.text = ui.SimpleStringModel(text)
+
+
+class _LogModel(ui.AbstractItemModel):
+    """Bounded rows; TreeView only creates widgets for the visible rows."""
+    def __init__(self):
+        super().__init__()
+        self.rows = deque(maxlen=500)
+
+    def get_item_children(self, item=None):
+        return list(self.rows) if item is None else []
+
+    def get_item_value_model_count(self, item=None):
+        return 1
+
+    def get_item_value_model(self, item, column_id=0):
+        return item.text
+
+    def append(self, text):
+        self.rows.append(_LogItem(text))
+        self._item_changed(None)
+
+    def clear(self):
+        self.rows.clear()
+        self._item_changed(None)
+
+
 class DigitalTwin(omni.ext.IExt):
     def on_startup(self, ext_id):
         print("[SO-ARM101-DT] Digital Twin startup")
@@ -894,6 +925,8 @@ class DigitalTwin(omni.ext.IExt):
         except Exception as e:
             carb.log_warn(f"[SO-ARM101-DT] could not disable UJITSO collision cooking: {e}")
 
+        self._pose_subscriptions = {}
+        self._callback_log_times = {}
         self._main_loop = asyncio.get_event_loop()
         self._timeline = omni.timeline.get_timeline_interface()
         self._robot_view = None
@@ -1302,7 +1335,11 @@ class DigitalTwin(omni.ext.IExt):
                             style={"background_color": 0xFF24211F},
                         )
                         with self._ext_log_scroll:
-                            self._ext_log_vstack = ui.VStack(spacing=0)
+                            self._ext_log_model = _LogModel()
+                            self._ext_log_view = ui.TreeView(
+                                self._ext_log_model, header_visible=False,
+                                root_visible=False, style={"font_size": 13},
+                            )
                         self._sys_log_scroll = ui.ScrollingFrame(
                             horizontal_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_AS_NEEDED,
                             vertical_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_ALWAYS_ON,
@@ -1310,14 +1347,18 @@ class DigitalTwin(omni.ext.IExt):
                             style={"background_color": 0xFF24211F},
                         )
                         with self._sys_log_scroll:
-                            self._sys_log_vstack = ui.VStack(spacing=0)
+                            self._sys_log_model = _LogModel()
+                            self._sys_log_view = ui.TreeView(
+                                self._sys_log_model, header_visible=False,
+                                root_visible=False, style={"font_size": 13},
+                            )
                     with ui.HStack(spacing=5):
                         ui.Button("Copy Logs", width=120, height=30, clicked_fn=self._copy_logs)
                         ui.Button("Clear Logs", width=120, height=30, clicked_fn=self._clear_logs)
 
         self._active_log_tab = "extension"
-        self._ext_log_lines = []
-        self._sys_log_lines = []
+        self._ext_log_lines = deque(maxlen=500)
+        self._sys_log_lines = deque(maxlen=500)
         self._setup_log_redirect()
 
         # Re-subscribe physics callbacks if action graphs already exist (e.g. after hot-reload)
@@ -1381,21 +1422,6 @@ class DigitalTwin(omni.ext.IExt):
         #     return 0xFFBABABA  # #BABABA - gray
         return 0xFFFFFFFF  # white
 
-    def _add_log_label(self, vstack, scroll, text):
-        with vstack:
-            ui.Label(text, alignment=ui.Alignment.LEFT_TOP, word_wrap=True,
-                     style={"color": self._log_color(text), "font_size": 13, "margin": 0},
-                     height=0)
-        scroll.scroll_y = scroll.scroll_y_max + 100
-
-    def _rebuild_log_vstack(self, vstack, lines):
-        vstack.clear()
-        with vstack:
-            for line in lines:
-                ui.Label(line, alignment=ui.Alignment.LEFT_TOP, word_wrap=True,
-                         style={"color": self._log_color(line), "font_size": 13, "margin": 0},
-                         height=0)
-
     def _run_on_main_thread(self, fn):
         """Schedule fn to run on the main thread, safe from any thread."""
         if threading.current_thread() is threading.main_thread():
@@ -1403,23 +1429,28 @@ class DigitalTwin(omni.ext.IExt):
         else:
             self._main_loop.call_soon_threadsafe(fn)
 
+    def _append_log(self, prefix, text):
+        def append():
+            getattr(self, f"_{prefix}_log_lines").append(text)
+            model = getattr(self, f"_{prefix}_log_model", None)
+            if model is not None:
+                model.append(text)
+                scroll = getattr(self, f"_{prefix}_log_scroll")
+                scroll.scroll_y = scroll.scroll_y_max + 100
+        self._run_on_main_thread(append)
+
     def _append_ext_log(self, text):
-        self._ext_log_lines.append(text)
-        if len(self._ext_log_lines) > 500:
-            self._ext_log_lines = self._ext_log_lines[-500:]
-            self._run_on_main_thread(lambda: self._rebuild_log_vstack(self._ext_log_vstack, self._ext_log_lines))
-            return
-        if hasattr(self, "_ext_log_vstack") and self._ext_log_vstack:
-            self._run_on_main_thread(lambda: self._add_log_label(self._ext_log_vstack, self._ext_log_scroll, text))
+        self._append_log("ext", text)
 
     def _append_sys_log(self, text):
-        self._sys_log_lines.append(text)
-        if len(self._sys_log_lines) > 500:
-            self._sys_log_lines = self._sys_log_lines[-500:]
-            self._run_on_main_thread(lambda: self._rebuild_log_vstack(self._sys_log_vstack, self._sys_log_lines))
-            return
-        if hasattr(self, "_sys_log_vstack") and self._sys_log_vstack:
-            self._run_on_main_thread(lambda: self._add_log_label(self._sys_log_vstack, self._sys_log_scroll, text))
+        self._append_log("sys", text)
+
+    def _log_callback_error(self, key, error):
+        # A failing physics callback must not turn every simulation tick into UI work.
+        now = time.monotonic()
+        if now - self._callback_log_times.get(key, -math.inf) >= 5.0:
+            self._callback_log_times[key] = now
+            print(f"[{key} callback] {error}")
 
     def _switch_log_tab(self, tab):
         self._active_log_tab = tab
@@ -1441,10 +1472,10 @@ class DigitalTwin(omni.ext.IExt):
     def _clear_logs(self):
         if self._active_log_tab == "extension":
             self._ext_log_lines.clear()
-            self._ext_log_vstack.clear()
+            self._ext_log_model.clear()
         else:
             self._sys_log_lines.clear()
-            self._sys_log_vstack.clear()
+            self._sys_log_model.clear()
 
     def _resubscribe_physics_callbacks(self):
         """Re-subscribe physics callbacks for graphs that survived a hot-reload."""
@@ -2204,8 +2235,10 @@ class DigitalTwin(omni.ext.IExt):
                 artic = _AV(prim_paths_expr=prim_path, name=f"{name_prefix}_{int(_t.time()*1000)}")
                 artic.initialize()
                 setattr(self, artic_attr, artic)
-            except Exception:
+            except Exception as e:
                 setattr(self, artic_attr, None)
+                setattr(self, warmup_attr, 30)
+                self._log_callback_error(name_prefix, e)
                 return None
 
         if not artic.is_physics_handle_valid():
@@ -2323,7 +2356,7 @@ class DigitalTwin(omni.ext.IExt):
                 og.Controller.attribute("inputs:wrench:torque:y", node).set(float(wrist[4]))
                 og.Controller.attribute("inputs:wrench:torque:z", node).set(float(wrist[5]))
         except Exception as e:
-            print(f"[Force callback] {e}")
+            self._log_callback_error("Force", e)
 
     def _stop_force_publish(self):
         """Stop the physics-rate force publisher and clean up resources."""
@@ -4735,6 +4768,7 @@ class DigitalTwin(omni.ext.IExt):
         # Remove drop poses action graph FIRST (references container prims)
         drop_graph = stage.GetPrimAtPath("/Graph/ActionGraph_drop_poses")
         if drop_graph and drop_graph.IsValid():
+            self._pose_subscriptions.pop("/Graph/ActionGraph_drop_poses", None)
             stage.RemovePrim("/Graph/ActionGraph_drop_poses")
             print("[delete_cups] Removed /Graph/ActionGraph_drop_poses")
 
@@ -5564,6 +5598,7 @@ class DigitalTwin(omni.ext.IExt):
         pose_graph_path = "/Graph/ActionGraph_objects_poses"
         pose_graph_prim = stage.GetPrimAtPath(pose_graph_path)
         if pose_graph_prim and pose_graph_prim.IsValid():
+            self._pose_subscriptions.pop(pose_graph_path, None)
             stage.RemovePrim(pose_graph_path)
             print(f"Deleted {pose_graph_path}")
 
@@ -5911,31 +5946,8 @@ class DigitalTwin(omni.ext.IExt):
                 },
             )
             
-            # Get the stage to set relationships
-            stage = omni.usd.get_context().get_stage()
-            
-            # Get the ROS2 node prim
-            ros2_node_path = f"{graph_path}/ros2_publish_transform_tree"
-            ros2_prim = stage.GetPrimAtPath(ros2_node_path)
-            
-            if ros2_prim.IsValid():
-                # Set parent prim as a relationship
-                parent_rel = ros2_prim.GetRelationship("inputs:parentPrim")
-                if not parent_rel:
-                    parent_rel = ros2_prim.CreateRelationship("inputs:parentPrim", custom=True)
-                parent_rel.SetTargets([Sdf.Path(parent_prim)])
-                
-                # Set target prims as a relationship
-                target_rel = ros2_prim.GetRelationship("inputs:targetPrims")
-                if not target_rel:
-                    target_rel = ros2_prim.CreateRelationship("inputs:targetPrims", custom=True)
-                target_paths = [Sdf.Path(path) for path in target_prims]
-                target_rel.SetTargets(target_paths)
-                
-                print(f"Action graph created at {graph_path}")
-                print(f"Publishing {len(target_prims)} objects to topic: {topic_name}")
-            else:
-                print(f"Error: Could not find ROS2 node at {ros2_node_path}")
+            self._configure_pose_arrays(graph_path, target_prims, parent_prim)
+            print(f"Publishing {len(target_prims)} objects to topic: {topic_name}")
 
         # Get the current USD stage
         stage = omni.usd.get_context().get_stage()
@@ -6085,7 +6097,7 @@ class DigitalTwin(omni.ext.IExt):
                 json_str
             )
         except Exception as e:
-            print(f"[BBox callback] {e}")
+            self._log_callback_error("BBox", e)
 
     def _stop_bbox_publisher(self):
         """Stop the bbox physics callback."""
@@ -6855,22 +6867,7 @@ class DigitalTwin(omni.ext.IExt):
                 },
             )
 
-            # Wire USD relationships (must be done after graph creation)
-            ros2_node_path = f"{graph_path}/ros2_publish_transform_tree"
-            ros2_prim = stage.GetPrimAtPath(ros2_node_path)
-
-            if not ros2_prim.IsValid():
-                return {"status": "error", "message": f"Could not find ROS2 node at {ros2_node_path}"}
-
-            parent_rel = ros2_prim.GetRelationship("inputs:parentPrim")
-            if not parent_rel:
-                parent_rel = ros2_prim.CreateRelationship("inputs:parentPrim", custom=True)
-            parent_rel.SetTargets([Sdf.Path(parent_prim)])
-
-            target_rel = ros2_prim.GetRelationship("inputs:targetPrims")
-            if not target_rel:
-                target_rel = ros2_prim.CreateRelationship("inputs:targetPrims", custom=True)
-            target_rel.SetTargets([Sdf.Path(p) for p in target_prims])
+            self._configure_pose_arrays(graph_path, target_prims, parent_prim)
 
             print(f"[drop_poses] Action graph created at {graph_path}")
             print(f"[drop_poses] Publishing {len(target_prims)} drop poses to topic: /{topic_name}")
@@ -6892,6 +6889,38 @@ class DigitalTwin(omni.ext.IExt):
         except Exception as e:
             traceback.print_exc()
             return {"status": "error", "message": str(e)}
+
+    def _configure_pose_arrays(self, graph_path, target_prims, parent_prim):
+        """Publish USD Xforms through the 6.1 external-data TF interface.
+
+        Physics tensor views reject identity parents and the cup-center wrappers;
+        USD XformCache handles both while preserving their frame names and poses.
+        """
+        node_path = f"{graph_path}/ros2_publish_transform_tree"
+        attrs = {name: og.Controller.attribute(f"{node_path}.inputs:{name}")
+                 for name in ("parentFrames", "childFrames", "translations", "orientations")}
+        stage = omni.usd.get_context().get_stage()
+        targets = [stage.GetPrimAtPath(path) for path in target_prims]
+        parent = stage.GetPrimAtPath(parent_prim)
+        if not parent or not all(targets):
+            raise ValueError(f"Missing USD pose target in {graph_path}")
+        cache = UsdGeom.XformCache()
+        attrs["parentFrames"].set([parent.GetName()] * len(targets))
+        attrs["childFrames"].set([p.GetName() for p in targets])
+
+        def update(_event):
+            cache.Clear()
+            inverse = cache.GetLocalToWorldTransform(parent).GetInverse()
+            matrices = [cache.GetLocalToWorldTransform(p) * inverse for p in targets]
+            translations = [tuple(m.ExtractTranslation()) for m in matrices]
+            quats = [Gf.Transform(m).GetRotation().GetQuat() for m in matrices]
+            attrs["translations"].set(translations)
+            attrs["orientations"].set([(*q.GetImaginary(), q.GetReal()) for q in quats])
+
+        update(None)  # external arrays must exist before the publisher's first compute
+        self._pose_subscriptions[graph_path] = (
+            omni.kit.app.get_app().get_update_event_stream().create_subscription_to_pop(
+                update, name=f"{graph_path}_poses"))
 
     def _install_drop_pose_live_sync(self):
         """Register a per-frame update callback that syncs each drop_{id}
@@ -7392,6 +7421,8 @@ class DigitalTwin(omni.ext.IExt):
         self._teardown_log_redirect()
         print("[SO-ARM101-DT] Digital Twin shutdown")
 
+        self._pose_subscriptions.clear()
+
         # Stop physics-rate callbacks
         self._stop_force_publish()
         self._stop_bbox_publisher()
@@ -7401,6 +7432,8 @@ class DigitalTwin(omni.ext.IExt):
             _viewport_pub.stop_all()
         except Exception:
             pass
+
+        _replicator_pub.stop_all()
 
         # Finalize any in-flight video recording
         try:
