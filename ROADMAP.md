@@ -79,11 +79,11 @@ cadence (~14 Hz) not matching the camera-bound recording loop.
 
 ## Phase 3 — Retraining (only if 1.10 says so)
 
-Open question (2026-11-13): was the deployed checkpoint trained from scratch? Its `train_config.json` has
-`policy.pretrained_path=None` (weak signal; depends on how the run was launched). The final coursework report says
-"Both paradigms fine-tune the SmolVLA base model". `load_vlm_weights=False` is consistent with either. Settled
-by 3.0's weight comparison against `lerobot/smolvla_base` / SmolVLM2. If it was fine-tuned from smolvla_base,
-3.0b's plain re-run would only reproduce it, so the recipe must change (more steps/data, multi-colour data).
+Resolved (2026-11-13, 3.0 weight comparison): the sim checkpoints `smolvla_sim_100ep_fft__10ksteps_h200` and
+`..._75S_25R_...` were trained from RANDOM INITIALIZATION. Median per-tensor cosine vs both `lerobot/smolvla_base` and
+SmolVLM2 ≈ 0 in every group (vision, text, connector, action expert); all 500 tensor shapes match the base. The
+report's "fine-tune the SmolVLA base model" does not hold for these checkpoints. 3.0b (fine-tune FROM smolvla_base)
+is therefore a genuinely different run, not a reproduction.
 
 - [ ] 3.0 Audit every coursework checkpoint's `train_config.json` (pretrained_path, load_vlm_weights, steps,
       dataset) AND compare weights (per-tensor cosine/rel-L2 vs smolvla_base and SmolVLM2) to decide from-scratch
