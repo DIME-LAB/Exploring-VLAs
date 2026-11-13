@@ -29,7 +29,7 @@ cadence (~14 Hz) not matching the camera-bound recording loop.
 - [x] 1.7 Real RTC: policy server tracks the leftover chunk + measured inference delay and passes
       `prev_chunk_left_over` / `inference_delay` to `predict_action_chunk` (fork, branch `dev`);
       prove guidance is non-zero in logs.
-- [ ] 1.8 Episode harness (interim, before RunTask): home → randomize (blue visible) → start policy →
+- [x] 1.8 Episode harness (interim, before RunTask): home → randomize (blue visible) → start policy →
       success / timeout → stop → record viewport mp4 → score from `/objects_poses_sim`.
 - [ ] 1.9 Evaluation matrix, idle box (no prompt2assembly jobs), 10 episodes each:
       A baseline (30 fps, rgba8 viewport cameras, no RTC) · B timing-matched (1.2–1.4) · C timing + real RTC (1.7).

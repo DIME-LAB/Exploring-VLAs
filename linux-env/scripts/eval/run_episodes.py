@@ -19,7 +19,7 @@ import rclpy
 from builtin_interfaces.msg import Duration
 from control_msgs.action import FollowJointTrajectory
 from rclpy.action import ActionClient
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import SingleThreadedExecutor
 from sensor_msgs.msg import JointState
 from tf2_msgs.msg import TFMessage
 from trajectory_msgs.msg import JointTrajectoryPoint
@@ -113,7 +113,7 @@ class Ros:
             FollowJointTrajectory,
             "/gripper_controller/follow_joint_trajectory",
         )
-        self.ex = MultiThreadedExecutor(num_threads=4)
+        self.ex = SingleThreadedExecutor()
         self.ex.add_node(self.node)
         self.thread = threading.Thread(target=self.ex.spin, daemon=True)
         self.thread.start()
@@ -517,7 +517,14 @@ def main():
                 if running:
                     try:
                         client.send("ABORT")
-                        client.tagged("EPDONE", 30)
+                        stopped_client = client.tagged("EPDONE", 30)
+                        result.update(
+                            time_s=stopped_client["duration_s"],
+                            actions_sent=stopped_client["actions_sent"],
+                            chunks=stopped_client["chunks"],
+                            effective_action_fps=stopped_client["effective_action_fps"],
+                            client=stopped_client,
+                        )
                     except Exception as error:  # noqa: BLE001 -- recording still must stop
                         cleanup_error = error
                         result["failure_note"] += f"; client stop: {error}"

@@ -70,7 +70,8 @@ def main() -> int:
     client.start_barrier = threading.Barrier(
         1
     )  # receiver no longer waits for control_loop
-    threading.Thread(target=client.receive_actions, daemon=True).start()
+    receiver = threading.Thread(target=client.receive_actions, daemon=True)
+    receiver.start()
     emit("READY", {"policy_instructions_s": round(load_s, 2)})
 
     abort = threading.Event()
@@ -155,6 +156,7 @@ def main() -> int:
         )
 
     client.stop()
+    receiver.join(timeout=5)
     emit("BYE")
     return 0
 

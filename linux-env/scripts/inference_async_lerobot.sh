@@ -18,6 +18,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$ENV_DIR/.." && pwd)"
 
+PYTHON_ENTRY="$SCRIPT_DIR/run_async_inference_sim.py"
+if [ "${1:-}" = --episode-harness ]; then
+    PYTHON_ENTRY="$SCRIPT_DIR/eval/run_episodes.py"
+    shift
+fi
+
 # Same scrub as smolvla_inference.sh — see comments there for why.
 unset PYTHONPATH AMENT_PREFIX_PATH CMAKE_PREFIX_PATH COLCON_PREFIX_PATH \
       ROS_DISTRO ROS_VERSION ROS_PYTHON_VERSION ROSCONSOLE_FORMAT \
@@ -52,6 +58,10 @@ echo "[$(basename "$0")] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<all>}" >&
 export CYCLONEDDS_URI="file://$ENV_DIR/cyclonedds.xml"
 export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
 
+PIXI_BIN="$(command -v pixi || true)"
+[ -n "$PIXI_BIN" ] || PIXI_BIN="$HOME/.pixi/bin/pixi"
+[ -x "$PIXI_BIN" ] || { echo "pixi not found; run linux-env/scripts/bootstrap.sh" >&2; exit 1; }
+
 # Idempotent dep top-up. Async inference needs lerobot[async] (grpcio) on
 # top of [smolvla]. Distinct marker from smolvla_inference.sh's so the
 # initial install of [async] happens even on a system where the smolvla
@@ -59,7 +69,7 @@ export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
 DEP_MARKER="$ENV_DIR/.pixi/.async_inference_deps_installed"
 if [ ! -f "$DEP_MARKER" ]; then
     echo "[inference_async] installing SmolVLA + async + peft extras into pixi env (one-time)…" >&2
-    pixi run --manifest-path "$ENV_DIR/pixi.toml" pip install \
+    "$PIXI_BIN" run --manifest-path "$ENV_DIR/pixi.toml" pip install \
         -e "$REPO_ROOT/lerobot[smolvla,async]" \
         "peft>=0.18.0,<1.0.0" \
         || { echo "[inference_async] dep install failed" >&2; exit 1; }
@@ -67,5 +77,5 @@ if [ ! -f "$DEP_MARKER" ]; then
     touch "$DEP_MARKER"
 fi
 
-exec pixi run --manifest-path "$ENV_DIR/pixi.toml" \
-    python3 -u "$SCRIPT_DIR/run_async_inference_sim.py" "$@"
+exec "$PIXI_BIN" run --manifest-path "$ENV_DIR/pixi.toml" \
+    python3 -u "$PYTHON_ENTRY" "$@"
