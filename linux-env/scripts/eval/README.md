@@ -30,7 +30,11 @@ The runner accepts deployment launcher flags, including `--pretrained`, `--task`
 
 Success requires a blue lego centre inside `drop_1` continuously for two wall seconds and still inside when the client acknowledges its stop. The check transforms `/objects_poses_sim` coordinates into the cup-local frame from `/drop_poses`, including cup orientation. It uses a conservative interior radius of 0.033 m (measured outer radius ≈0.039 m) and height 0.0965 m with floor/rim clearance. This is a geometric centre test, not a contact or full-object containment sensor. `grasped-only` means a blue lego centre rose ≥0.024 m from its randomized initial height for at least 0.5 s, without a final success; it is a sustained-lift proxy for grasping. `fail` means neither condition occurred. Missing/stale pose streams or unavailable actions fail visibly; they never become success. Timeout/failure notes distinguish the cause.
 
-The client `RUN`/`ABORT`/`QUIT` protocol is implemented by `episode_client.py`. While paused, it sends no observations or actions and rejects incoming chunks by timestamp. A production `Ready` reset waits for in-flight inference and clears RTC/model state without reloading weights. The wrapper uses the shared inference environment entrance: orchestration, scoring and policy processes all run in pixi-Jazzy, while the existing controllers remain on system Humble. Scoring callbacks run on one executor thread, separately from orchestration. The stock robot action/observation loop still shares one thread: camera blocking can stretch actual action ticks below requested fps.
+The client `RUN`/`ABORT`/`QUIT` protocol is implemented by `episode_client.py`. While paused, it sends no observations or actions and rejects incoming chunks by timestamp. A production `Ready` reset waits for in-flight inference and clears RTC/model state without reloading weights. The wrapper uses the shared inference environment entrance: orchestration, scoring and policy processes all run in pixi-Jazzy, while the existing controllers remain on system Humble. Scoring callbacks run on one executor thread, separately from orchestration. Both the stock client and episode client use the same absolute-deadline action dispatcher, with observation requests on a second thread. Deployment additionally spawns an observation-only robot process: camera reads, RGB decoding, serialization and the full observation RPC stay outside the dispatch process's GIL. Only small capture metadata returns. Atomic nonblocking cursor updates preserve capture-start action indices for RTC. Cancellation joins both threads and suppresses a capture pending at stop; the persistent sensor process closes when the client exits.
+
+Deployment defaults to `--observation-process --dispatch-priority 10`. Only the dispatch native thread receives Linux SCHED_FIFO priority 10; the main, receiver and capture process remain normal priority. This requires permission for `os.sched_setscheduler` or the available `sudo -n chrt -f -p 10 <owned-tid>` path. A permission failure stops visibly. No system settings are changed. Override `--dispatch-priority 0` for best-effort timing or `--no-dispatch-sudo` to forbid escalation; `--no-observation-process` retains the independent-thread capture mode. `deploy_sim.sh` accepts the same flags and `SOARM_DISPATCH_PRIORITY` defaults to 10.
+
+Before each priority-enabled episode, the client collects garbage and freezes its stable imported Torch/ROS baseline so full cyclic collections do not hold the dispatch GIL for hundreds of milliseconds. New cycles still collect during the run. After the workers join, it unfreezes a baseline it owns; a pre-existing caller-owned permanent generation remains frozen and is extended. The client reports GC pauses, actual actuator-call intervals, queue waits, missed slots and scheduler settings. It skips overdue slots without catch-up bursts, and never repeats an action to hide an empty queue.
 
 ## RTC replay
 
@@ -67,3 +71,23 @@ HEAD at run start; `source.patch` and `fork-source.patch` capture the pending
 runtime/shutdown fixes used in that run. Final commit IDs are in the deliverable
 README. Isaac and the control stack were left running; only the harness-owned
 policy processes were stopped. Item 1.9 was not run.
+
+## Verified independent dispatcher (ROADMAP 1.15)
+
+The coordinated 45-second verification on GPU 1 reached **17.3999 Hz**:
+764 distinct actions, 53 chunks, zero missed slots, zero empty slots after
+startup and zero repeated/reversed steps. The initial chunk wait caused
+19 empty startup ticks. p95 absolute interval jitter was 0.677 ms; maximum
+was 25.530 ms. Load at the end was 16.39/16.06/15.98 on 28 logical CPUs.
+Only the dispatcher used FIFO10; main-thread policy remained normal.
+The episode timed out with no sustained blue lift; this verifies timing.
+
+The final offline suite passes 52 async tests, including 40/80/160 ms blocking
+camera reads at 17.4 Hz, a CPU-bound spawned sensor, child-owned gRPC, queue
+races, cancellation during capture/serialization, worker joins and GC
+ownership on actuator error. The full live MP4 decodes and lasts 47.105 s
+versus 47.142 s recording wall time. Own policy processes exited; Isaac
+94191 and control_gui 79380 were left running. Raw traces, failed diagnostic
+attempts, CSV, plots, review and video are in
+`~/w_policy_phase1/1.15/`, copied to the Mac
+`coursework-eee598/roadmap-2026-11/phase1/1.3-1.8-policy/1.15/`.

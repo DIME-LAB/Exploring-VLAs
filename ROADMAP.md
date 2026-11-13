@@ -48,9 +48,11 @@ cadence (~14 Hz) not matching the camera-bound recording loop.
 - [x] 1.14 README: warn that saving files under `isaac/exts/` hot-reloads the extension in a running Isaac
       (stops publishers); edit only with the sim down. Fix `_apply_sim_rate` docstring (physics is 120 Hz;
       60 Hz is the sim-frame/clock rate).
-- [ ] 1.15 (moved from 2.5c) Decouple observation capture from action dispatch in the robot client: one thread
-      today, so a blocking camera read held the 1.8 smoke to 10–12 Hz instead of 17.4. Actions must dispatch at
-      the target rate regardless of camera reads; prove the effective action rate holds 17.4 ± 0.5 Hz under load.
+- [x] 1.15 (moved from 2.5c) Decouple observation capture from action dispatch in the robot client.
+      Persistent sensor/RPC process, absolute-deadline dispatcher at FIFO10, nonblocking cursor and GC baseline.
+      52 async tests; slow-camera dispatch 17.4 Hz. Live 45 s: 17.3999 Hz, zero missed/repeated or
+      empty-after-startup slots; load 16.39 on 28 CPUs. GPU1; video/CSV/report under `1.3-1.8-policy/1.15/`.
+      Defaults require scheduler permission or noninteractive `sudo -n chrt`; priority 0 remains selectable.
 - **Merge gate → main:** 1.1–1.15 done, `deploy_sim.sh up` still one command, README updated.
 
 ## Phase 2 — Own LeRobot ROS 2 packages (architecture; review verdict: build our own from the fork's code)

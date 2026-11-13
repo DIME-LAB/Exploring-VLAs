@@ -138,9 +138,17 @@ with `up --gui --no-policy` so two policies don't drive the arm at once.
 The policy server and robot client default to **17.4 Hz**, selected from the
 recording audit, with a FollowJointTrajectory duration of `1/fps` (57.5 ms).
 `deploy_sim.sh up --fps 19.4 --action-duration-s .1` overrides both. Camera
-capture shares the action loop thread, so blocking reads can lower the actual
-rate. Dataset metadata remains 30 fps; async actions are indexed steps and
-are not resampled from that metadata.
+capture, RGB decoding and observation RPCs run in a persistent child process;
+an independent action thread dispatches against absolute deadlines. Deployment
+defaults to `--observation-process --dispatch-priority 10`: only that native
+thread uses FIFO priority 10 (requires scheduler permission or the enabled
+`sudo -n chrt` fallback). `--dispatch-priority 0` selects best-effort scheduling;
+`--no-dispatch-sudo` forbids sudo. The stable Python heap is frozen before active
+episodes to keep full GC pauses out of the action clock. Dataset metadata remains
+30 fps; async actions are indexed steps and are not resampled from that metadata.
+A 45-second live check reached **17.3999 Hz**, with zero missed/repeated actions
+and no empty slots after startup (load 16.39 on 28 logical CPUs). See the
+[episode harness README](linux-env/scripts/eval/README.md) for timing evidence.
 
 RTC is enabled by default. The server supplies the previous normalized,
 unexecuted chunk tail and measured inference delay to the policy; `--no-rtc`
