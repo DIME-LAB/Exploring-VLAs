@@ -1,0 +1,5 @@
+ROS 2 camera for LeRobot
+Copyright 2026 The HuggingFace Inc. team and Exploring-VLAs contributors.
+Original ROS 2 camera: Yadunund, huggingface/lerobot PR #866.
+CvBridge fallback pattern adapted from fiveages-sim/lerobot_ros2,
+revision f750af764a8539d321d54955fe58441d94f93e73, Apache License 2.0.
