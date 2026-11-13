@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lerobot_ros2_context"
+version = "0.1.0"
+description = "Shared ROS 2 context and executor for LeRobot plugins"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+readme = "README.md"
+
+[tool.setuptools.packages.find]
+where = ["src"]
