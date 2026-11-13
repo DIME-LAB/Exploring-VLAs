@@ -87,6 +87,9 @@ def main():
         'this does not reproduce the removed pre-1.15 synchronous loop. Sim-side Phase 1 fixes (rgb8 cameras, one frame per sim tick, '
         '17.4 Hz cap, CPU fixes and de-instanced robot) remain in both OLD conditions. '
         'For NEW, sim cap and client fps vary together at 17.4 or 19.4 Hz; other Phase 1 settings remain fixed.', '',
+        'OLD versus NEW is a **recipe comparison**, not a pure initialization ablation. The NEW recipe also uses '
+        'batch 64, learning rate 1e-4, a frozen VLM/expert-only update, and 20,000 training steps. '
+        'Both recipes use the same rec_222812 episodes.', '',
         '## Paired comparisons', '', '| Contrast (B minus A) | Shared seeds | Success difference | B-only successes | A-only successes | Exact McNemar p |',
         '|---|---:|---:|---:|---:|---:|']
     pairs = [('old-before','old-after')]

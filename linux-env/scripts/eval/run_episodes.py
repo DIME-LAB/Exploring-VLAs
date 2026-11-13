@@ -225,6 +225,7 @@ def blue_in_cup(objects, drops):
 
 class Client:
     def __init__(self, cmd, env, out):
+        out.mkdir(parents=True, exist_ok=True)
         self.log = (out / "client.log").open("w")
         self.proc = subprocess.Popen(
             cmd,
@@ -313,6 +314,7 @@ def main():
     p.add_argument("--seeds", help="Comma-separated scene seeds, exactly one per episode")
     p.add_argument("--scene-bank", type=Path, help="Shared physical scene bank for paired conditions")
     p.add_argument("--sim-rate-hz", type=float, default=17.4, help="Kit frame ceiling, applied after each reset")
+    p.add_argument("--fresh-client-per-episode", action="store_true", help="Diagnose persistent-client resource accumulation")
     args = parse_args(parser=p)
     args.seeds = [int(s) for s in args.seeds.split(",")] if args.seeds else list(range(900000, 900000 + args.episodes))
     if len(args.seeds) != args.episodes or len(set(args.seeds)) != args.episodes:
@@ -413,6 +415,10 @@ def main():
                     raise
                 time.sleep(0.1)
         for index in range(args.episodes):
+            if index and args.fresh_client_per_episode:
+                client.close()
+                client = Client(client_cmd, env, args.out / f"client-{index:02d}")
+                print("READY", client.tagged("READY", 240), flush=True)
             ep = f"ep{index:02d}"
             epdir = args.out / ep
             epdir.mkdir()

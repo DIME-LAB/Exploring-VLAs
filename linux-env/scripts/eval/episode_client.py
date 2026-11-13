@@ -17,6 +17,7 @@ stdout lines starting with "READY", "EPSTART", "EPDONE" are for the orchestrator
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 import time
@@ -36,6 +37,37 @@ def emit(tag: str, payload: dict | None = None) -> None:
 def main() -> int:
     cfg = draccus.parse(RobotClientConfig, args=sys.argv[1:])
     client = RobotClient(cfg)
+    status_arrays = {}
+    for label in ("arm", "gripper"):
+        action_client = getattr(client.robot, f"_{label}_action_client")
+        status_arrays[label] = {"messages": 0, "latest_size": 0, "max_size": 0}
+        original = action_client.take_data
+        def counted_take(original=original, label=label):
+            data = original()
+            if "status" in data:
+                size = len(data["status"].status_list)
+                stats = status_arrays[label]
+                stats.update(messages=stats["messages"]+1, latest_size=size,
+                             max_size=max(size, stats["max_size"]))
+            return data
+        action_client.take_data = counted_take
+
+    def resources():
+        node = client.robot._node
+        executor = node.executor
+        action_clients = {}
+        for label in ("arm", "gripper"):
+            action_client = getattr(client.robot, f"_{label}_action_client")
+            action_clients[label] = {attr: len(getattr(action_client, attr, {})) for attr in (
+                "_goal_handles", "_pending_goal_requests", "_pending_result_requests",
+                "_pending_cancel_requests", "_feedback_callbacks", "_futures")}
+            action_clients[label]["live_goal_handles"] = sum(ref() is not None for ref in list(action_client._goal_handles.values()))
+        return dict(pid=os.getpid(), python_threads=[t.name for t in threading.enumerate()],
+                    native_threads=len(os.listdir('/proc/self/task')),
+                    observation_pid=client._observation_process.process.pid if client._observation_process else None,
+                    executor_tasks=len(getattr(executor, '_tasks', [])),
+                    action_clients=action_clients,
+                    status_arrays={k: dict(v) for k,v in status_arrays.items()})
     state = {"paused": True, "ep_t0": float("inf"), "chunks": 0, "first_chunk_t": None}
 
     state_lock = threading.Lock()
@@ -98,6 +130,7 @@ def main() -> int:
                 continue
             ep, max_s = parts[1], float(parts[2])
             max_actions = int(parts[3]) if len(parts) > 3 else 10**9
+            resources_before = resources()
             abort.clear()
             # ---- per-episode reset of client + server state (no policy reload) ----
             with client.action_queue_lock:
@@ -135,6 +168,8 @@ def main() -> int:
                     "ep": ep,
                     "duration_s": round(dur, 2),
                     **metrics,
+                    "resources_before": resources_before,
+                    "resources_after": resources(),
                     "chunks": state["chunks"],
                     "first_chunk_s": state["first_chunk_t"],
                     "aborted": abort.is_set(),

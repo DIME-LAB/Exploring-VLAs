@@ -44,6 +44,13 @@ blue block to sustain its lift; success also requires a sustained lift.
 Per-episode JSON additionally retains physical scene receipts, GPU snapshots,
 CPU load, all dispatch measurements and resolved sim timing settings.
 
+`--fresh-client-per-episode` is a diagnostic A/B option: the policy server stays
+alive while each episode gets a new client/sensor process (additional logs are
+under `client-NN/`). Episode client receipts include goal-handle/pending-future
+counts, executor tasks, status-array sizes and thread/process counts before/after
+each episode. Status sizes are observed at the existing ActionClient doorway,
+without adding another subscription or walking every status entry.
+
 `--model PRESET` resolves the same definition as the GUI and `deploy_sim.sh`.
 The shared async launcher applies the preset's camera-key mapping even when
 the GUI/deployer passes its resolved checkpoint path; explicit `--cameras-json`
