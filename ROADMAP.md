@@ -206,6 +206,11 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
 
 ## Ops / optional (decide individually)
 
+- [ ] GUI scene updates are not transactional; harden later. Raw MoveIt requests and ACM
+      read/modify/write operations can overlap or complete after a GUI wait expires.
+      Preserve the live-verified GUI behavior while collector requests use their separate strict policy.
+      Include indexed-attachment cleanup and Tk-safe scene updates in that hardening.
+
 - [ ] NVIDIA driver 570 → ≥580 (fixes cold-launch GPU wedge; reboot — coordinate with prompt2assembly)
 - [ ] Box load: prompt2assembly jobs (18–33 load on 28 threads) and its `sudo reboot` at 20:46 on 2026-11-12
 - [ ] Stream on/off relaunch comparison (est. RTF 0.31 → 0.37)

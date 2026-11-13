@@ -397,28 +397,27 @@ the same cleanup and verification results. Include this file in the smoke report
 CPU serialization tests do not establish the live MoveIt round trip.
 
 Scene policy is immutable and validated at node construction: collection requires
-its effect, scene-failure and callback-failure hooks together. The GUI uses one
-scene worker for each complete world/ACM transaction, attach, detach and attached
-pose refresh; nested helpers execute on that same worker. Grasp validation waits
-for target removal to complete, and Gate C traces retain the actual contact pairs.
+its effect, scene-failure and callback-failure hooks together. The GUI uses raw
+MoveIt scene services and its established background dispatch; it has no scene
+worker, resync mechanism or collector completion barrier. GUI scene updates are
+not transactional (tracked as an Ops item in ROADMAP). Collector scene requests
+remain strictly tracked through completion, including unresolved-request refusal
+and authoritative reset reconciliation. Collector target removal is a completion
+barrier before validation, and its Gate C traces retain native contact pairs.
 
-A GUI response exceeding its ordinary wait marks the scene for resync and keeps
-ownership for up to 30 more wall seconds. A response in that grace period resumes
-the remaining transaction steps. If it remains unanswered, later transactions
-are refused until outstanding responses complete and a full MoveIt query repairs
-and verifies ground-rest permissions and attachment/world bookkeeping. The GUI
-logs this degraded state without poisoning its executor. Collector scene failures
-stay terminal. Every collector callback abort first invalidates the local motion
-generation, then pauses the native instance; existing workers cannot submit new
-effects. Subscription, timer, service and action-result callbacks contain their
-exceptions at the ROS boundary.
+Subscription, timer, service and action-result callbacks contain exceptions at
+the ROS boundary. GUI exceptions are logged without killing the executor. Every
+collector callback abort poisons its local generation before the native emergency
+pause. Capture failures retain the original exception, phase, epoch, measured
+state/reference and cancellation result in the episode receipt; an unrelated
+clock/reset/scene/transport failure keeps its own error.
 
-An offline ROS regression boots the actual GUI node against a delayed fake
-MoveIt service and a display-free UI adapter. Its first ground ADD takes 5.2 s,
-exceeding the real 5 s client wait. It verifies the remaining ACM work and
-subsequent authoritative resync, overlapping cup/direct attach-style ACM updates,
-and continued executor/service liveness after injected callback errors. It
-launches no Isaac instance:
+The CPU GUI parity tests pin 14 scene/wait/dispatch methods to the live-verified
+`6e439ed` implementation and compare service sequences for normal and delayed
+responses. An offline ROS regression boots the actual GUI node against concurrent,
+delayed fake MoveIt services, injects callback failures and checks executor/service
+liveness. It launches no Isaac instance. Add `--tk` with a usable X display to also
+exercise the actual Tk Refresh/detach/log path and event-loop heartbeat:
 
 ```bash
 source /opt/ros/humble/setup.bash

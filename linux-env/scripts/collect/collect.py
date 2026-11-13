@@ -413,6 +413,7 @@ class Collector:
         self.stop = threading.Event()
         self.failure = None
         self.wait_diagnostics = []
+        self.capture_failures = []
         self.node._motion_waiter = MotionWaiter(
             clock=lambda:self.node.get_clock().now().nanoseconds/1e9,
             validate=self.generation.require, emit=self.motion_wait_diagnostic,
@@ -536,6 +537,42 @@ class Collector:
         # native cancellation is allowed; never execute the restore callback.
         return self.cancel_owner(lambda: self.mutate_kit('run_python', {'code':code}))
 
+    def record_capture_failure(self, exc, epoch):
+        # Called while owning this generation, before cancellation retires plans.
+        plan = self.servo.plan or self.servo.grip_plan
+        duration = (ns(plan['trajectory'].points[-1].time_from_start)/1e9
+                    if plan and 'trajectory' in plan else plan.get('duration') if plan else None)
+        record = dict(epoch=epoch, sim_ns=getattr(self.servo, 'last_sim_ns', None),
+            wall_ns=time.monotonic_ns(), phase=getattr(self.servo, 'phase', None),
+            exception_type=type(exc).__name__, error=repr(exc),
+            measured_state=[self.node._actual_positions[name] for name in JOINTS],
+            expert_reference=list(self.servo.reference) if self.servo.reference is not None else None,
+            operation_start_sim_ns=plan.get('start') if plan else None,
+            planned_sim_seconds=duration,
+            convergence_margin_sim_seconds=getattr(getattr(self.node, '_motion_waiter', None), 'sim_margin', 5.),
+            cancellation=dict(cause=repr(exc), invalidated_epoch=epoch, requested=False, completed=False))
+        if not hasattr(self, 'capture_failures'):
+            self.capture_failures = []
+        self.capture_failures.append(record)
+        return record
+
+    @staticmethod
+    def attempt_error(exc, records, motion_epochs, current_epoch):
+        # Only the cleanup cancellation caused by this exact recorded epoch
+        # may refer back to the original error. Unrelated epoch/transport/scene
+        # exceptions remain the primary failure and never become retry hints.
+        result = dict(error=repr(exc))
+        if isinstance(exc, CancelledGeneration):
+            for record in reversed(records):
+                cancel = record['cancellation']
+                response = cancel.get('result') or {}
+                if (record['epoch'] in motion_epochs and cancel.get('completed') and
+                        response.get('epoch') == current_epoch and current_epoch is not None):
+                    result.update(error=record['error'], cleanup_error=repr(exc),
+                                  original_capture_error_preserved=True)
+                    break
+        return result
+
     def capture(self):
         while not self.stop.is_set():
             epoch = None
@@ -614,7 +651,8 @@ class Collector:
                 with self.generation.own('collector motion'):
                     if epoch is not None and epoch != self.generation.epoch:
                         continue
-                    message = repr(exc)
+                    record = self.record_capture_failure(exc, epoch)
+                    message = record['error']
                     self.node._qs_abort_evt.set()
                     self.node._set_motion_status(dict(ok=False, outcome='capture_error', msg=message))
                     if isinstance(exc, TimeoutError):
@@ -623,9 +661,12 @@ class Collector:
                             done = [plan['done'] for plan in (self.servo.plan, self.servo.grip_plan) if plan]
                             self.servo.plan = self.servo.grip_plan = None
                             self.servo.reference = [self.node._actual_positions[name] for name in JOINTS]
+                        record['cancellation']['requested'] = True
                         try:
-                            self.timeline(False)
+                            cancelled = self.timeline(False)
+                            record['cancellation'].update(completed=True, result=cancelled)
                         except Exception as pause_error:
+                            record['cancellation']['error'] = repr(pause_error)
                             self.failure = repr(pause_error)
                         for event in done:
                             event.verdict = dict(ok=False, outcome='capture_error', msg=message)
@@ -878,6 +919,8 @@ class Collector:
             path = root / f'attempt-{trial:04d}'
             receipt = dict(params=params, accepted=False)
             wait_log_start = len(self.wait_diagnostics)
+            failure_log_start = len(self.capture_failures)
+            cycle_result = {}
             motion_epochs = set()
             duplicate_start = dict(self.sensors.duplicate_messages)
             writer = None
@@ -921,7 +964,10 @@ class Collector:
                     cycle_epoch = self.generation.epoch
                     motion_epochs.add(cycle_epoch)
                 def run_cycle(object_name=params['object'], epoch=cycle_epoch):
-                    cycle_result.update(ok=self.motion_call(self.node.run_cycle, object_name, epoch=epoch))
+                    try:
+                        cycle_result.update(ok=self.motion_call(self.node.run_cycle, object_name, epoch=epoch))
+                    except Exception as worker_error:
+                        cycle_result.update(ok=False, worker_error=repr(worker_error))
                 cycle = threading.Thread(target=run_cycle, daemon=True)
                 budget_start = self.servo.execution_budget()
                 def episode_budget():
@@ -952,7 +998,13 @@ class Collector:
                     raise RuntimeError('Whole-block settled containment failed')
                 receipt['accepted'] = True
             except Exception as exc:
-                receipt['error'] = repr(exc)
+                try:
+                    with self.generation.own('failure provenance'):
+                        receipt.update(self.attempt_error(exc, self.capture_failures[failure_log_start:],
+                                                          motion_epochs, self.generation.epoch))
+                except OwnershipStalled as provenance_error:
+                    receipt['error'] = repr(provenance_error)
+                    self.abort_stalled_owner(provenance_error, 'failure provenance')
                 self.timeline(False)
             finally:
                 with self.writer_lock:
@@ -975,6 +1027,10 @@ class Collector:
                         if maximum_z - initial_z < .025:
                             receipt['accepted'] = False
                             receipt['error'] = 'Object did not lift at least 25 mm before placement'
+                receipt['capture_failures'] = [r for r in self.capture_failures[failure_log_start:]
+                                               if r['epoch'] in motion_epochs]
+                if cycle_result.get('worker_error'):
+                    receipt['cycle_worker_error'] = cycle_result['worker_error']
                 receipt['camera_duplicate_messages'] = {key: value - duplicate_start.get(key, 0) for key, value in self.sensors.duplicate_messages.items()}
                 receipt['root_file_growth'] = root_growth.finish()
                 receipt['motion_wait_diagnostics'] = [r for r in self.wait_diagnostics[wait_log_start:]

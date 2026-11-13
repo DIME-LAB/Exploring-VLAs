@@ -1,0 +1,8 @@
+{
+  "commit": "a8fc78b",
+  "classes": {
+    "SceneMutationIncomplete": "6ac45ae03414b4122396c9ec7b388f85c5de82c6ac0a47273fd83fcaa45aa858",
+    "SceneFuture": "28278159f79ec05abfb8eaa8bb06732f449dfee7e74065df899b9413661f7932",
+    "SceneMutationClient": "731718b1bfd1a6135c5f6deb161227e1ef84243a38d534ca296365942a66a251"
+  }
+}
