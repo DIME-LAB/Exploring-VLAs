@@ -1,9 +1,14 @@
 """Exactly-once commands and cancellation ownership for a held sim clock."""
 import threading
+from contextlib import contextmanager
 
 
 class CancelledGeneration(RuntimeError):
     """Work belongs to a retired motion/reset generation."""
+
+
+class OwnershipStalled(TimeoutError):
+    """A transport/scene owner did not retire; the run must abort."""
 
 
 class StepGeneration:
@@ -17,9 +22,24 @@ class StepGeneration:
         self.lock = threading.RLock()
         self.epoch = None
         self.floor_ns = -1
+        self.retirement_timeout = 15.
+        self.stalled = None
+
+    @contextmanager
+    def own(self, label='motion'):
+        if not self.lock.acquire(timeout=self.retirement_timeout):
+            self.stalled = f'Stalled generation owner during {label}: {self.lock!r}; retirement exceeded {self.retirement_timeout}s; abort required'
+            self.epoch = None
+            raise OwnershipStalled(self.stalled)
+        try:
+            if self.stalled:
+                raise OwnershipStalled(self.stalled)
+            yield
+        finally:
+            self.lock.release()
 
     def install(self, result):
-        with self.lock:
+        with self.own('install'):
             self.epoch = result['epoch']
             self.floor_ns = result['invalid_through_ns']
 
@@ -27,14 +47,25 @@ class StepGeneration:
         if self.epoch is None or epoch != self.epoch or (stamp is not None and stamp <= self.floor_ns):
             raise CancelledGeneration('Cancelled motion/observation generation')
 
-    def cancel(self, native_cancel, retire):
-        with self.lock:
-            # Retire even if the native RPC fails: no new command may escape.
+    def cancel(self, native_cancel, retire, emergency_cancel=None):
+        try:
+            with self.own('cancel/reset'):
+                # Retire even if the native RPC fails: no new command may escape.
+                self.epoch = None
+                retire()
+                result = native_cancel()
+                self.install(result)
+                return result
+        except OwnershipStalled as exc:
+            # The publisher may never return. Invalidate the native epoch too,
+            # so a late send cannot execute after the emergency pause. Never
+            # install a new usable generation or proceed with a reset.
             self.epoch = None
-            retire()
-            result = native_cancel()
-            self.install(result)
-            return result
+            try:
+                (emergency_cancel or native_cancel)()
+            except Exception as pause_error:
+                raise OwnershipStalled(f'{exc}; emergency pause failed: {pause_error!r}') from exc
+            raise
 
 
 class CommandLedger:

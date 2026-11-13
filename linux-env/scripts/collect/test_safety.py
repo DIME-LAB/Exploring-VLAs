@@ -1,4 +1,5 @@
 import ast
+from contextlib import contextmanager
 import copy
 import math
 from pathlib import Path
@@ -20,7 +21,7 @@ def method(path, cls, name):
     tree = ast.parse(path.read_text())
     owner = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls)
     node = next(n for n in owner.body if isinstance(n, ast.FunctionDef) and n.name == name)
-    scope = dict(threading=threading, time=time, np=np, json=json,
+    scope = dict(contextmanager=contextmanager, math=math, threading=threading, time=time, np=np, json=json,
                  String=lambda data:SimpleNamespace(data=data))
     exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), 'exec'), scope)
     return scope[name]
@@ -126,6 +127,9 @@ class SafetyTests(unittest.TestCase):
         node = SimpleNamespace(_qs_abort_evt=threading.Event(), _qs_resume_evt=threading.Event(),
                                _append_log=lambda *args:None)
         node._new_motion_event = threading.Event
+        node._require_motion_generation = lambda:None
+        node._set_motion_status = lambda status:setattr(node,'_last_motion_status',status)
+        node._motion_verdict = lambda event:getattr(node,'_last_motion_status',None)
         node._qs_resume_evt.set()
         node._qs_wait_for_step = lambda timeout_s:wait(node,timeout_s)
         for success in (True,False):

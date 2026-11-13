@@ -323,8 +323,14 @@ those targets back, logs the actual native simulation-clock application stamp,
 and advances exactly one frame. A ROS command/acknowledgement protocol applies
 each command once. Physical snapshots and motion workers carry immutable
 cancellation epochs. One ownership lock covers computation, dispatch, ACK,
-recording and completion delivery; cancellation/reset waits for this work to
-retire. Reset invalidates every observation at or before its native sim stamp,
+recording and completion delivery. Each completion event owns its verdict;
+waiting workers revalidate their original epoch after waking. Attach/detach,
+scene updates, carried-object bookkeeping and status writes validate and execute
+under that same ownership lock, so cancelled workers cannot affect a later episode.
+Cancellation/reset waits up to 15 wall seconds for ownership to retire. A stalled
+owner emits a diagnostic and aborts the run; an emergency native cancellation
+invalidates queued commands without running reset setters. Its RPC is separately
+bounded at 30 wall seconds. A poisoned run cannot install another generation. Reset invalidates every observation at or before its native sim stamp,
 even if a delayed message carries the new epoch. The audit requires observation,
 expert and application epochs to agree throughout an episode. Post-step
 drive-target read-back checks that the command persisted through the next frame.

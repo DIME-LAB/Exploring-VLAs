@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """ROS sim-tick collector. Run with system Humble Python; export with pixi separately."""
 import argparse
+from contextlib import contextmanager
 import hashlib
 import collections
 import json
@@ -34,7 +35,7 @@ from so_arm101_control.grasp_geometry import JOINT_LIMITS
 from contract import COLORS, JOINTS, EVAL_SEEDS, corrective_action, parameters, timing_audit
 from checkpoint import progress
 from storage import CANONICAL_ROOT, RootFileGrowth, confined, prepare_environment, wait_for_storage
-from protocol import StepGeneration, CancelledGeneration
+from protocol import StepGeneration, CancelledGeneration, OwnershipStalled
 from scene_sync import physical_pose_caches, collision_pose_errors
 from success import SETTLED_TICKS, initial_arm, settled_containment
 
@@ -228,7 +229,7 @@ class Servo:
 
     def execute(self, trajectory, done):
         epoch = done.motion_epoch
-        with self.generation.lock:
+        with self.generation.own('collector motion'):
             self.generation.require(epoch)
             with self.lock:
                 self.plan = dict(trajectory=trajectory, done=done, start=None, epoch=epoch)
@@ -237,14 +238,13 @@ class Servo:
 
     def gripper(self, position, duration, blocking):
         epoch = self.node._motion_token()
-        with self.generation.lock:
+        with self.generation.own('collector motion'):
             self.generation.require(epoch)
             with self.lock:
                 if abs(self.node._actual_positions['gripper_joint'] - position) < .0005:
                     if self.reference is None:
                         self.reference = [self.node._actual_positions[name] for name in JOINTS]
                     self.reference[5] = position
-                    self.node._last_motion_status = dict(ok=True, outcome='gripper_already_at_target')
                     return True if blocking else None
             done = self.node._new_motion_event()
             with self.lock:
@@ -253,9 +253,14 @@ class Servo:
             self.step(True)
         if not blocking:
             return None
-        if not done.wait(timeout=60):
-            raise TimeoutError('Sim-time gripper execution timed out')
-        return bool(self.node._last_motion_status and self.node._last_motion_status.get('ok'))
+        finished = done.wait(timeout=60)
+        with self.generation.own('gripper wait continuation'):
+            self.generation.require(epoch)
+            if not finished:
+                raise TimeoutError('Sim-time gripper execution timed out')
+            # Verdict belongs to this operation; another home/gripper motion
+            # can never supply success through the node's display status.
+            return bool(done.verdict and done.verdict.get('ok'))
 
     @staticmethod
     def interpolate(trajectory, elapsed):
@@ -340,6 +345,7 @@ class Collector:
         self.generation = StepGeneration()
         self.node._motion_context = threading.local()
         self.node._motion_generation_provider = lambda: self.generation.epoch
+        self.node._motion_effect_guard = self.motion_effect
         self.sensors = Sensors(self.node)
         # Only joined, generation-validated snapshots update expert state/cache.
         self.node.destroy_subscription(self.node.js_sub)
@@ -363,10 +369,16 @@ class Collector:
         self.capture_thread = threading.Thread(target=self.capture, daemon=True)
         self.capture_thread.start()
 
+    @contextmanager
+    def motion_effect(self, epoch):
+        with self.generation.own('scene/bookkeeping/status'):
+            self.generation.require(epoch)
+            yield
+
     def motion_call(self, callback, *args):
         # Planning may block on wall time. Its immutable token survives that
         # wait and is inherited by the shared module's child workers/events.
-        with self.generation.lock:
+        with self.generation.own('collector motion'):
             epoch = self.generation.epoch
             self.generation.require(epoch)
         self.node._motion_context.epoch = epoch
@@ -379,6 +391,7 @@ class Collector:
         with self.servo.lock:
             for plan in (self.servo.plan, self.servo.grip_plan):
                 if plan:
+                    plan['done'].verdict = dict(ok=False, outcome='cancelled', epoch=plan['epoch'])
                     plan['done'].set()
             self.servo.plan = self.servo.grip_plan = None
             self.servo.previous_executed = None
@@ -387,17 +400,29 @@ class Collector:
             self.sensors.pending.clear()
             self.sensors.acks.clear()
 
+    def cancel_owner(self, native_cancel):
+        try:
+            return self.generation.cancel(native_cancel, self.retire_motion,
+                                          emergency_cancel=lambda: timeline(False))
+        except OwnershipStalled as exc:
+            self.failure = str(exc)
+            self.stop.set()
+            self.node._qs_abort_evt.set()
+            print(json.dumps(dict(event='stalled_generation_owner', error=self.failure,
+                                  action='abort; no reset or next episode permitted')), flush=True)
+            raise
+
     def timeline(self, play):
-        with self.generation.lock:
-            if play:
-                self.generation.require(self.generation.epoch)
-                return timeline(True)
-            return self.generation.cancel(lambda: timeline(False), self.retire_motion)
+        if not play:
+            return self.cancel_owner(lambda: timeline(False))
+        with self.generation.own('advance'):
+            self.generation.require(self.generation.epoch)
+            return timeline(True)
 
     def restore_physical(self, code):
-        # Native restore retires its epoch before setters. The same ownership
-        # lock waits for capture/ACK/recording retirement before the RPC starts.
-        return self.generation.cancel(lambda: mcp('run_python', {'code':code}), self.retire_motion)
+        # Retirement owns the scene before setters. On a stalled owner, only
+        # native cancellation is allowed; never execute the restore callback.
+        return self.cancel_owner(lambda: mcp('run_python', {'code':code}))
 
     def capture(self):
         while not self.stop.is_set():
@@ -409,7 +434,7 @@ class Collector:
                     if self.servo.plan or self.servo.grip_plan:
                         raise TimeoutError('Motion stalled: no synchronized camera/state tick within 30 wall seconds')
                     continue
-                with self.generation.lock:
+                with self.generation.own('capture/dispatch'):
                     epoch = entry['tick'][0]['epoch']
                     self.generation.require(epoch, stamp)
                     joint, received = entry['joint']
@@ -429,6 +454,7 @@ class Collector:
                     clean, executed, active, phase, reference, command_clock, completed, advance = self.servo.tick(stamp, state)
                     self.generation.require(epoch, stamp)
                     self.servo.publish_reference(executed)
+                    self.generation.require(epoch, stamp)
                     self.command_pub.publish(String(data=json.dumps(dict(epoch=epoch,
                         observation_stamp_ns=stamp, command=executed, advance=advance))))
                     ack = self.sensors.read_ack(epoch, stamp)
@@ -460,18 +486,26 @@ class Collector:
                         self.last_snapshot = snapshot
                         self.tick_condition.notify_all()
                     if completed:
-                        self.node._last_motion_status = dict(ok=True, outcome='physical_sim_tick_converged')
                         for event in completed:
+                            self.node._set_motion_status(dict(ok=True, outcome='physical_sim_tick_converged', epoch=epoch), event)
                             event.set()
+            except OwnershipStalled as exc:
+                self.failure = str(exc)
+                self.stop.set()
+                return
             except CancelledGeneration:
                 continue
             except Exception as exc:
-                with self.generation.lock:
+                if self.generation.stalled:
+                    self.failure = self.generation.stalled
+                    self.stop.set()
+                    return
+                with self.generation.own('collector motion'):
                     if epoch is not None and epoch != self.generation.epoch:
                         continue
                     message = repr(exc)
                     self.node._qs_abort_evt.set()
-                    self.node._last_motion_status = dict(ok=False, outcome='capture_error', msg=message)
+                    self.node._set_motion_status(dict(ok=False, outcome='capture_error', msg=message))
                     if isinstance(exc, TimeoutError):
                         # A step deadline fails this attempt; the next seed gets a fresh motion plan.
                         with self.servo.lock:
@@ -483,6 +517,7 @@ class Collector:
                         except Exception as pause_error:
                             self.failure = repr(pause_error)
                         for event in done:
+                            event.verdict = dict(ok=False, outcome='capture_error', msg=message)
                             event.set()
                     else:
                         self.failure = message
@@ -714,8 +749,12 @@ class Collector:
             try:
                 # Home with the same shared primitive used by Quickstart, with sim ticks active.
                 self.motion_call(self.node._cmd_grasp_home_data)
-                if not self.node._motion_event.wait(timeout=90) or not self.node._last_motion_status.get('ok'):
-                    raise RuntimeError('Pre-episode home failed')
+                home = self.node._motion_event
+                finished = home.wait(timeout=90)
+                with self.generation.own('home wait continuation'):
+                    self.generation.require(home.motion_epoch)
+                    if not finished or not home.verdict or not home.verdict.get('ok'):
+                        raise RuntimeError('Pre-episode home failed')
                 self.servo.configure(params)
                 measured_home = self.advance_ticks(6)
                 from so_arm101_control.grasp_geometry import _grasp_home_data_target
@@ -817,15 +856,12 @@ class Collector:
 
     def request_stop(self):
         self.stop.set()
-        self.timeline(False)
         self.node._qs_abort_evt.set()
-        self.node._last_motion_status = dict(ok=False, outcome='collection_stopped')
-        with self.servo.lock:
-            for plan in (self.servo.plan, self.servo.grip_plan):
-                if plan:
-                    plan['done'].set()
-        if getattr(self.node, '_motion_event', None):
-            self.node._motion_event.set()
+        self.timeline(False)
+        event = getattr(self.node, '_motion_event', None)
+        if event is not None:
+            event.verdict = dict(ok=False, outcome='collection_stopped')
+            event.set()
 
 
 def main():

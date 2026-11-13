@@ -9,6 +9,7 @@ Source: adapted from RoboSort/JETANK_description/jetank_control_gui.py (3133 lin
 """
 
 import datetime
+from contextlib import contextmanager
 import json
 import math
 import os
@@ -515,7 +516,8 @@ class PickPlaceNode(Node):
         #   'ompl_mode_b', 'ompl_service_unavailable', 'action_server_not_ready',
         #   'goal_rejected', 'send_exception', 'result_exception',
         #   'plan_failed', 'plan_exception'
-        self._last_motion_status = None
+        self._motion_context = threading.local()
+        self._set_motion_status(None)
 
         # --- Gripper topic publisher (works fine via topic) ---
         self.gripper_traj_pub = self.create_publisher(
@@ -949,10 +951,10 @@ class PickPlaceNode(Node):
             # Write status BEFORE on_complete.set() so QS runner's
             # _qs_wait_for_step sees the failure verdict (not a stale None
             # that reads as success).
-            self._last_motion_status = {
+            self._set_motion_status({
                 'ok': False, 'outcome': 'ik_no_solution',
                 'msg': (f'geometric IK returned no solutions for '
-                        f'({x:.3f}, {y:.3f}, {z:.3f})')}
+                        f'({x:.3f}, {y:.3f}, {z:.3f})')})
             if on_complete:
                 on_complete.set()
             return
@@ -969,9 +971,9 @@ class PickPlaceNode(Node):
 
         if chosen is None:
             self._append_log('IK: all solutions collide', 'warn')
-            self._last_motion_status = {
+            self._set_motion_status({
                 'ok': False, 'outcome': 'ik_all_collide',
-                'msg': 'all geometric IK solutions collided with scene'}
+                'msg': 'all geometric IK solutions collided with scene'})
             if on_complete:
                 on_complete.set()
             return
@@ -992,10 +994,10 @@ class PickPlaceNode(Node):
             if not self._check_state_valid(chosen):
                 self._append_log(
                     'IK: pan-locked solution collides', 'warn')
-                self._last_motion_status = {
+                self._set_motion_status({
                     'ok': False, 'outcome': 'ik_pan_lock_collide',
                     'msg': (f'pan-locked IK solution at '
-                            f'{math.degrees(lock_pan):.1f}\u00b0 collides')}
+                            f'{math.degrees(lock_pan):.1f}\u00b0 collides')})
                 if on_complete:
                     on_complete.set()
                 return
@@ -1093,19 +1095,9 @@ class PickPlaceNode(Node):
     def _qs_wait_for_step(self, timeout_s=60.0):
         """Wait for the most recent _cmd_* to complete, gated on pause.
 
-        The existing _cmd_* handlers set self._motion_event when they fire
-        a motion. Event firing means "something finished" — it does NOT mean
-        success. The verdict is in self._last_motion_status (set by
-        _ompl_plan_validate_execute on both the OK path and the Mode B /
-        plan-failed paths). Without consulting it, a Mode B post-check
-        rejection silently propagates as "step passed" and the runner
-        marches into the next step — which is how the cup-knocking plans
-        used to execute anyway after being flagged.
-
-        Returns True only when the event fires AND status.ok is truthy
-        (or status is missing entirely — e.g. for synchronous _cmd_*s that
-        never call _ompl_plan_validate_execute, like gripper_open/close
-        which just clear a wait flag).
+        Completion events carry their operation's verdict. The collector
+        requires that verdict and validates its generation after waits. GUI
+        action callbacks without an adapter retain their display-status fallback.
         """
         evt = getattr(self, '_motion_event', None)
         if evt is None:
@@ -1117,8 +1109,12 @@ class PickPlaceNode(Node):
             # Soft pause: block here until resume
             if not self._qs_resume_evt.wait(timeout=0.2):
                 continue
+            self._require_motion_generation()
             if evt.wait(timeout=0.2):
-                status = getattr(self, '_last_motion_status', None)
+                self._require_motion_generation()
+                status = self._motion_verdict(evt)
+                if status is None and getattr(self, '_motion_effect_guard', None):
+                    return False
                 if status is not None and status.get('ok') is False:
                     # Surface WHY we halted so the log trail reads end-to-end.
                     outcome = status.get('outcome', 'unknown')
@@ -1175,7 +1171,7 @@ class PickPlaceNode(Node):
         # does the same clear on the ROS-service entry path; QS calls
         # handlers directly, so we need to clear here too.
         self._motion_event = self._new_motion_event()
-        self._last_motion_status = None
+        self._set_motion_status(None)
         self._cmd_error = None
         # Tag the next trajectory dump with this step's cmd name.
         if method_name.startswith('_cmd_'):
@@ -1188,13 +1184,14 @@ class PickPlaceNode(Node):
         try:
             handler()
         except Exception as exc:
-            self._last_motion_status = {'ok': False, 'outcome': 'step_exception', 'msg': str(exc)}
+            self._set_motion_status({'ok': False, 'outcome': 'step_exception', 'msg': str(exc)})
             self._append_log(f'Quickstart step {method_name} raised: {exc}', 'err')
             return False
 
         # A rejected planner tier can warn before a fallback succeeds. The
         # motion status is the verdict shared by the GUI and headless adapter.
-        if self._last_motion_status and self._last_motion_status.get('ok') is False:
+        status = self._motion_verdict(self._motion_event)
+        if status and status.get('ok') is False:
             return False
         ok = self._qs_wait_for_step(timeout_s=60.0)
         if not ok and self._qs_abort_evt.is_set():
@@ -1213,6 +1210,7 @@ class PickPlaceNode(Node):
                     self._append_log('Quickstart aborted')
                     return
                 self._qs_resume_evt.wait()  # honor pause
+                self._require_motion_generation()
                 self._qs_set_status('Running', step=f'{i}/{len(self._QS_SEQUENCE)}: {label}')
                 ok = self._qs_execute_step(method_name, kwargs)
                 if not ok:
@@ -1324,7 +1322,10 @@ class PickPlaceNode(Node):
 
                 def _wait_then_descend():
                     finished = approach_done.wait(timeout=60.0)
-                    status = self._last_motion_status
+                    self._require_motion_generation()
+                    status = self._motion_verdict(approach_done)
+                    if status is None and getattr(self, '_motion_effect_guard', None):
+                        return
                     if not finished or (status and not status.get('ok')):
                         if self._grasp_motion_event:
                             self._grasp_motion_event.set()
@@ -1537,67 +1538,68 @@ class PickPlaceNode(Node):
 
         Idempotent: adding an id already allowed is a no-op.
         """
-        if not MOVEIT_AVAILABLE or not hasattr(self, '_get_scene_client'):
-            return
-        if not obj_ids:
-            return
-        if not self._get_scene_client.wait_for_service(timeout_sec=3.0):
-            return
-        if not self._apply_scene_client.wait_for_service(timeout_sec=3.0):
-            return
+        with self._motion_guard():
+            if not MOVEIT_AVAILABLE or not hasattr(self, '_get_scene_client'):
+                return
+            if not obj_ids:
+                return
+            if not self._get_scene_client.wait_for_service(timeout_sec=3.0):
+                return
+            if not self._apply_scene_client.wait_for_service(timeout_sec=3.0):
+                return
 
-        get_req = GetPlanningSceneSrv.Request()
-        get_req.components.components = 128  # ALLOWED_COLLISION_MATRIX
-        future = self._get_scene_client.call_async(get_req)
-        self._wait_future(future, timeout_sec=3.0)
-        if future.result() is None:
-            return
-        acm = future.result().scene.allowed_collision_matrix
+            get_req = GetPlanningSceneSrv.Request()
+            get_req.components.components = 128  # ALLOWED_COLLISION_MATRIX
+            future = self._get_scene_client.call_async(get_req)
+            self._wait_future(future, timeout_sec=3.0)
+            if future.result() is None:
+                return
+            acm = future.result().scene.allowed_collision_matrix
 
-        if 'ground_plane' not in acm.entry_names:
-            # ground_plane row doesn't exist yet — _cmd_toggle_ground_plane
-            # installs it on startup; if it hasn't run we can't wire anything
-            # up yet. Caller will get another chance on the next add.
-            return
-        gp_idx = acm.entry_names.index('ground_plane')
+            if 'ground_plane' not in acm.entry_names:
+                # ground_plane row doesn't exist yet — _cmd_toggle_ground_plane
+                # installs it on startup; if it hasn't run we can't wire anything
+                # up yet. Caller will get another chance on the next add.
+                return
+            gp_idx = acm.entry_names.index('ground_plane')
 
-        changed = False
-        for obj_id in obj_ids:
-            if obj_id in acm.entry_names:
-                idx = acm.entry_names.index(obj_id)
-                if not acm.entry_values[idx].enabled[gp_idx]:
-                    acm.entry_values[idx].enabled[gp_idx] = True
+            changed = False
+            for obj_id in obj_ids:
+                if obj_id in acm.entry_names:
+                    idx = acm.entry_names.index(obj_id)
+                    if not acm.entry_values[idx].enabled[gp_idx]:
+                        acm.entry_values[idx].enabled[gp_idx] = True
+                        changed = True
+                    if not acm.entry_values[gp_idx].enabled[idx]:
+                        acm.entry_values[gp_idx].enabled[idx] = True
+                        changed = True
+                else:
+                    # Extend every existing row with one more column for obj_id,
+                    # defaulting to disallow contact.
+                    for entry in acm.entry_values:
+                        entry.enabled.append(False)
+                    # Flip the ground_plane row's new column to allow contact.
+                    acm.entry_values[gp_idx].enabled[-1] = True
+                    # New row for obj_id: disallow everything except ground_plane
+                    # (allowed) and self (harmless, conventionally true).
+                    row = AllowedCollisionEntry()
+                    row.enabled = [False] * len(acm.entry_names)
+                    row.enabled[gp_idx] = True
+                    row.enabled.append(True)  # self-entry
+                    acm.entry_names.append(obj_id)
+                    acm.entry_values.append(row)
                     changed = True
-                if not acm.entry_values[gp_idx].enabled[idx]:
-                    acm.entry_values[gp_idx].enabled[idx] = True
-                    changed = True
-            else:
-                # Extend every existing row with one more column for obj_id,
-                # defaulting to disallow contact.
-                for entry in acm.entry_values:
-                    entry.enabled.append(False)
-                # Flip the ground_plane row's new column to allow contact.
-                acm.entry_values[gp_idx].enabled[-1] = True
-                # New row for obj_id: disallow everything except ground_plane
-                # (allowed) and self (harmless, conventionally true).
-                row = AllowedCollisionEntry()
-                row.enabled = [False] * len(acm.entry_names)
-                row.enabled[gp_idx] = True
-                row.enabled.append(True)  # self-entry
-                acm.entry_names.append(obj_id)
-                acm.entry_values.append(row)
-                changed = True
 
-        if not changed:
-            return
+            if not changed:
+                return
 
-        acm_scene = PlanningSceneMsg()
-        acm_scene.is_diff = True
-        acm_scene.allowed_collision_matrix = acm
-        req = ApplyPlanningScene.Request()
-        req.scene = acm_scene
-        fut = self._apply_scene_client.call_async(req)
-        self._wait_future(fut, timeout_sec=5.0)
+            acm_scene = PlanningSceneMsg()
+            acm_scene.is_diff = True
+            acm_scene.allowed_collision_matrix = acm
+            req = ApplyPlanningScene.Request()
+            req.scene = acm_scene
+            fut = self._apply_scene_client.call_async(req)
+            self._wait_future(fut, timeout_sec=5.0)
 
 
     def _add_cup_collision_objects(self, cups_dict=None):
@@ -2090,210 +2092,211 @@ class PickPlaceNode(Node):
         Pose is computed as block-in-tcp_link via TF lookup at attach time,
         so MoveIt tracks the carried block via FK thereafter.
         """
-        self._ensure_lego_state()
-        if not obj_name:
-            return False
-        if not MOVEIT_AVAILABLE or not hasattr(self, '_apply_scene_client'):
-            return False
-        bbox = self._lookup_bbox(obj_name)
-        if not bbox:
-            self._append_log(f'Attach skipped: no bbox for {obj_name}', 'warn')
-            return False
-        # Wait for arm to settle so TF (from /joint_states) and block pose
-        # (from /objects_poses_sim) reflect the same static state — prevents
-        # Layer-B-lag from baking a visible offset into the attached
-        # collision object (see _wait_arm_at_rest docstring).
-        settled = self._wait_arm_at_rest(timeout_sec=1.5)
-        if not settled:
-            self._append_log(
-                'Attach: arm still moving after 1.5s wait — offset may be '
-                'inaccurate', 'warn')
-        with self.objects_lock:
-            block = dict(self.objects_data.get(obj_name, {}))
-        if not block:
-            self._append_log(f'Attach skipped: no pose for {obj_name}', 'warn')
-            return False
-
-        # Model: tcp_link is the fixed-jaw tip. After grasp_move + gripper_close,
-        # the block is pinched between the two jaws with:
-        #   - Block side-center (vertical mid-height) at tcp.Z (no vertical offset)
-        #   - Block center XY offset from tcp by the jaw half-width (set by
-        #     _compute_jaw_offset during grasp_move)
-        # We compute the actual block-in-tcp transform via TF — this gives the
-        # correct XY offset AND the block's orientation relative to tcp (which
-        # determines how the BOX collision volume is oriented in tcp's frame).
-        import numpy as np
-        try:
-            t = self._tf_buffer.lookup_transform('base', 'tcp_link', rclpy.time.Time())
-        except Exception as e:
-            self._append_log(f'Attach failed: TF lookup tcp_link: {e}', 'warn')
-            return False
-        tr = t.transform
-        tcp_mat = self._pose7_to_mat(
-            tr.translation.x, tr.translation.y, tr.translation.z,
-            tr.rotation.x, tr.rotation.y, tr.rotation.z, tr.rotation.w)
-        bx = float(block['x']); by = float(block['y'])
-        # Isaac Sim reports the block origin at its CENTER, not its bottom —
-        # verified empirically: all three brick sizes (2x2/2x3/2x4) report
-        # z≈8mm when resting on ground, matching the 12.78mm-tall brick's
-        # center, not half-height above bottom. The previous "+ sz/2"
-        # adjustment baked a 6.4mm upward offset into the stored local
-        # transform, which then propagated as a 6.4mm Z error in the
-        # world-tracked MoveIt projection (Phase 9 verified).
-        bz = float(block['z'])
-        block_mat = self._pose7_to_mat(
-            bx, by, bz,
-            float(block.get('qx', 0.0)), float(block.get('qy', 0.0)),
-            float(block.get('qz', 0.0)), float(block.get('qw', 1.0)))
-        block_in_tcp = np.linalg.inv(tcp_mat) @ block_mat
-        ax, ay, az, aqx, aqy, aqz, aqw = self._mat_to_pose7(block_in_tcp)
-        # Sanity: block should be within one grip-width of tcp. Reject if grasp
-        # clearly failed (e.g., FC-1 rejected grasp_move but close fired anyway).
-        dist_mm = float((ax*ax + ay*ay + az*az) ** 0.5) * 1000.0
-        if dist_mm > 80.0:
-            self._append_log(
-                f'Attach skipped: tcp-to-block {dist_mm:.0f}mm > 80mm '
-                f'(grasp_move likely failed — no object in gripper)', 'warn')
-            return False
-
-        def _apply_scene(scene_msg, label):
-            req = ApplyPlanningScene.Request()
-            req.scene = scene_msg
-            try:
-                future = self._apply_scene_client.call_async(req)
-                self._wait_future(future, timeout_sec=5.0)
-            except Exception as exc:
-                self._append_log(f'{label}: exception: {exc}', 'warn')
+        with self._motion_guard():
+            self._ensure_lego_state()
+            if not obj_name:
                 return False
-            res = future.result() if future else None
-            if res is None:
-                self._append_log(f'{label}: timed out (5s)', 'warn')
+            if not MOVEIT_AVAILABLE or not hasattr(self, '_apply_scene_client'):
                 return False
-            if not res.success:
-                self._append_log(f'{label}: apply returned success=False', 'warn')
+            bbox = self._lookup_bbox(obj_name)
+            if not bbox:
+                self._append_log(f'Attach skipped: no bbox for {obj_name}', 'warn')
                 return False
-            return True
-
-        def _apply():
-            if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
-                self._append_log('apply_planning_scene not available for attach', 'warn')
-                return
-            # Two-phase apply — Humble quirk: any REMOVE of a non-existent id
-            # in the diff returns success=False for the ENTIRE call, even if
-            # every ADD succeeded. _remove_single_lego_from_world ran on a
-            # background thread before us and usually completed, so bundling
-            # a world REMOVE in the same diff as our attach ADD would poison
-            # the response flag.  Split: phase 1 fires the world REMOVE
-            # (ignore result, idempotent), phase 2 does the attached ADD
-            # with explicit block_in_tcp pose — response flag is trustworthy.
-            name_id = f'lego_{obj_name}'
-
-            # Phase 1: world REMOVE (best-effort; ignore the success flag)
-            rm_scene = PlanningSceneMsg()
-            rm_scene.is_diff = True
-            rm = CollisionObject()
-            rm.id = name_id
-            rm.operation = CollisionObject.REMOVE
-            rm_scene.world.collision_objects.append(rm)
-            try:
-                fut = self._apply_scene_client.call_async(
-                    ApplyPlanningScene.Request(scene=rm_scene))
-                self._wait_future(fut, timeout_sec=3.0)
-            except Exception:
-                pass  # idempotent — world may have been clean already
-
-            # Phase 2: attached ADD with explicit link-local pose.
-            # Geometry path matches world-CO path in _add_lego_collision_objects:
-            # mesh-by-size for sim names, primitive box from bbox catalog for
-            # YOLOE-style names where vision can't recover size.
-            kind, geom = self._build_lego_geometry(obj_name)
-            if kind is None:
+            # Wait for arm to settle so TF (from /joint_states) and block pose
+            # (from /objects_poses_sim) reflect the same static state — prevents
+            # Layer-B-lag from baking a visible offset into the attached
+            # collision object (see _wait_arm_at_rest docstring).
+            settled = self._wait_arm_at_rest(timeout_sec=1.5)
+            if not settled:
                 self._append_log(
-                    f'Attach failed: no geometry for {obj_name} '
-                    f'(no mesh, no bbox catalog entry)', 'warn')
-                return
-            add_scene = PlanningSceneMsg()
-            add_scene.is_diff = True
-            add_scene.robot_state.is_diff = True
-            aco = AttachedCollisionObject()
-            aco.link_name = 'tcp_link'
-            aco.object.id = name_id
-            aco.object.header.frame_id = 'tcp_link'
-            aco.object.operation = CollisionObject.ADD
-            block_pose = Pose()
-            block_pose.position.x = float(ax)
-            block_pose.position.y = float(ay)
-            block_pose.position.z = float(az)
-            block_pose.orientation.x = float(aqx)
-            block_pose.orientation.y = float(aqy)
-            block_pose.orientation.z = float(aqz)
-            block_pose.orientation.w = float(aqw)
-            if kind == 'mesh':
-                aco.object.meshes.append(geom)
-                aco.object.mesh_poses.append(block_pose)
-            else:  # 'box'
-                aco.object.primitives.append(geom)
-                aco.object.primitive_poses.append(block_pose)
-            aco.touch_links = ['tcp_link', 'gripper', 'jaw']
-            add_scene.robot_state.attached_collision_objects.append(aco)
+                    'Attach: arm still moving after 1.5s wait — offset may be '
+                    'inaccurate', 'warn')
+            with self.objects_lock:
+                block = dict(self.objects_data.get(obj_name, {}))
+            if not block:
+                self._append_log(f'Attach skipped: no pose for {obj_name}', 'warn')
+                return False
 
-            # Claim attached-state BEFORE the apply so a racing
-            # /objects_poses_sim → _add_lego_collision_objects hop doesn't
-            # re-add the world copy underneath us. Rolled back on failure.
-            prev_attached = self._attached_lego_name
-            prev_offset = self._attached_lego_tcp_offset
-            self._attached_lego_name = obj_name
-            # Snapshot physical grasp offset in tcp_link frame. drop_sweep
-            # reads this to place the block center at the cup target, not
-            # tcp_link — the 1-2 mm delta between measured |ax| and the
-            # theoretical half_gap is exactly what OMPL used to flail on.
-            self._attached_lego_tcp_offset = (float(ax), float(ay), float(az))
-            if not _apply_scene(add_scene, 'attach_lego'):
-                self._attached_lego_name = prev_attached
-                self._attached_lego_tcp_offset = prev_offset
-                return
-            self._append_log(
-                f'Attach OK: {obj_name} → tcp_link at '
-                f'({ax*1000:+.1f}, {ay*1000:+.1f}, {az*1000:+.1f}) mm '
-                f'(magnitude {dist_mm:.1f} mm)', 'info')
+            # Model: tcp_link is the fixed-jaw tip. After grasp_move + gripper_close,
+            # the block is pinched between the two jaws with:
+            #   - Block side-center (vertical mid-height) at tcp.Z (no vertical offset)
+            #   - Block center XY offset from tcp by the jaw half-width (set by
+            #     _compute_jaw_offset during grasp_move)
+            # We compute the actual block-in-tcp transform via TF — this gives the
+            # correct XY offset AND the block's orientation relative to tcp (which
+            # determines how the BOX collision volume is oriented in tcp's frame).
+            import numpy as np
+            try:
+                t = self._tf_buffer.lookup_transform('base', 'tcp_link', rclpy.time.Time())
+            except Exception as e:
+                self._append_log(f'Attach failed: TF lookup tcp_link: {e}', 'warn')
+                return False
+            tr = t.transform
+            tcp_mat = self._pose7_to_mat(
+                tr.translation.x, tr.translation.y, tr.translation.z,
+                tr.rotation.x, tr.rotation.y, tr.rotation.z, tr.rotation.w)
+            bx = float(block['x']); by = float(block['y'])
+            # Isaac Sim reports the block origin at its CENTER, not its bottom —
+            # verified empirically: all three brick sizes (2x2/2x3/2x4) report
+            # z≈8mm when resting on ground, matching the 12.78mm-tall brick's
+            # center, not half-height above bottom. The previous "+ sz/2"
+            # adjustment baked a 6.4mm upward offset into the stored local
+            # transform, which then propagated as a 6.4mm Z error in the
+            # world-tracked MoveIt projection (Phase 9 verified).
+            bz = float(block['z'])
+            block_mat = self._pose7_to_mat(
+                bx, by, bz,
+                float(block.get('qx', 0.0)), float(block.get('qy', 0.0)),
+                float(block.get('qz', 0.0)), float(block.get('qw', 1.0)))
+            block_in_tcp = np.linalg.inv(tcp_mat) @ block_mat
+            ax, ay, az, aqx, aqy, aqz, aqw = self._mat_to_pose7(block_in_tcp)
+            # Sanity: block should be within one grip-width of tcp. Reject if grasp
+            # clearly failed (e.g., FC-1 rejected grasp_move but close fired anyway).
+            dist_mm = float((ax*ax + ay*ay + az*az) ** 0.5) * 1000.0
+            if dist_mm > 80.0:
+                self._append_log(
+                    f'Attach skipped: tcp-to-block {dist_mm:.0f}mm > 80mm '
+                    f'(grasp_move likely failed — no object in gripper)', 'warn')
+                return False
 
-            # A freshly-grasped object inherits the table-level pose from
-            # which it was picked up — its bottom face is at z=0, touching
-            # ground_plane. MoveIt treats attached objects as part of the
-            # robot's collision volume, so attached_lego ↔ ground_plane
-            # becomes a robot-world contact and gets reported unless we
-            # declare it allowed. Same ACM row as the world copy uses; the
-            # id is the same in both cases.
-            self._acm_allow_ground_rest([name_id])
+            def _apply_scene(scene_msg, label):
+                req = ApplyPlanningScene.Request()
+                req.scene = scene_msg
+                try:
+                    future = self._apply_scene_client.call_async(req)
+                    self._wait_future(future, timeout_sec=5.0)
+                except Exception as exc:
+                    self._append_log(f'{label}: exception: {exc}', 'warn')
+                    return False
+                res = future.result() if future else None
+                if res is None:
+                    self._append_log(f'{label}: timed out (5s)', 'warn')
+                    return False
+                if not res.success:
+                    self._append_log(f'{label}: apply returned success=False', 'warn')
+                    return False
+                return True
 
-            if name_id in self._lego_collision_names:
-                self._lego_collision_names.remove(name_id)
-            tracer.event('attach_applied',
-                         obj_name=obj_name,
-                         block_in_tcp=(ax, ay, az),
-                         block_in_tcp_quat=(aqx, aqy, aqz, aqw),
-                         bbox=(float(bbox['sx']), float(bbox['sy']),
-                               float(bbox['sz'])),
-                         dist_mm=dist_mm,
-                         mode='attached_explicit')
-            self._append_log(
-                f'Attached {name_id} to tcp_link '
-                f'({bbox["sx"]*1000:.0f}×{bbox["sy"]*1000:.0f}×{bbox["sz"]*1000:.0f}mm) '
-                f'offset=({ax*1000:+.1f},{ay*1000:+.1f},{az*1000:+.1f})mm')
+            def _apply():
+                if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
+                    self._append_log('apply_planning_scene not available for attach', 'warn')
+                    return
+                # Two-phase apply — Humble quirk: any REMOVE of a non-existent id
+                # in the diff returns success=False for the ENTIRE call, even if
+                # every ADD succeeded. _remove_single_lego_from_world ran on a
+                # background thread before us and usually completed, so bundling
+                # a world REMOVE in the same diff as our attach ADD would poison
+                # the response flag.  Split: phase 1 fires the world REMOVE
+                # (ignore result, idempotent), phase 2 does the attached ADD
+                # with explicit block_in_tcp pose — response flag is trustworthy.
+                name_id = f'lego_{obj_name}'
 
-        # SYNCHRONOUS: attach MUST complete before the caller signals its
-        # motion-done event. Previously this dispatched _apply on a daemon
-        # thread and returned immediately, so _cmd_gripper_close_for_object
-        # fired evt.set() while the attach's phase-1 REMOVE + phase-2 ADD
-        # were still in flight. The QS runner advanced to "Grasp Home",
-        # planned it, and the post-check ran against a scene that still
-        # had the world copy of the lego at its table pose — producing the
-        # classic lego_*↔ground_plane(d=0.0mm) false-positive at wp[0].
-        # Running _apply inline makes the attach a synchronous barrier.
-        # Callers are already on a background thread (_send in
-        # _cmd_gripper_close_for_object), so there's no Tk deadlock risk.
-        _apply()
-        return True
+                # Phase 1: world REMOVE (best-effort; ignore the success flag)
+                rm_scene = PlanningSceneMsg()
+                rm_scene.is_diff = True
+                rm = CollisionObject()
+                rm.id = name_id
+                rm.operation = CollisionObject.REMOVE
+                rm_scene.world.collision_objects.append(rm)
+                try:
+                    fut = self._apply_scene_client.call_async(
+                        ApplyPlanningScene.Request(scene=rm_scene))
+                    self._wait_future(fut, timeout_sec=3.0)
+                except Exception:
+                    pass  # idempotent — world may have been clean already
+
+                # Phase 2: attached ADD with explicit link-local pose.
+                # Geometry path matches world-CO path in _add_lego_collision_objects:
+                # mesh-by-size for sim names, primitive box from bbox catalog for
+                # YOLOE-style names where vision can't recover size.
+                kind, geom = self._build_lego_geometry(obj_name)
+                if kind is None:
+                    self._append_log(
+                        f'Attach failed: no geometry for {obj_name} '
+                        f'(no mesh, no bbox catalog entry)', 'warn')
+                    return
+                add_scene = PlanningSceneMsg()
+                add_scene.is_diff = True
+                add_scene.robot_state.is_diff = True
+                aco = AttachedCollisionObject()
+                aco.link_name = 'tcp_link'
+                aco.object.id = name_id
+                aco.object.header.frame_id = 'tcp_link'
+                aco.object.operation = CollisionObject.ADD
+                block_pose = Pose()
+                block_pose.position.x = float(ax)
+                block_pose.position.y = float(ay)
+                block_pose.position.z = float(az)
+                block_pose.orientation.x = float(aqx)
+                block_pose.orientation.y = float(aqy)
+                block_pose.orientation.z = float(aqz)
+                block_pose.orientation.w = float(aqw)
+                if kind == 'mesh':
+                    aco.object.meshes.append(geom)
+                    aco.object.mesh_poses.append(block_pose)
+                else:  # 'box'
+                    aco.object.primitives.append(geom)
+                    aco.object.primitive_poses.append(block_pose)
+                aco.touch_links = ['tcp_link', 'gripper', 'jaw']
+                add_scene.robot_state.attached_collision_objects.append(aco)
+
+                # Claim attached-state BEFORE the apply so a racing
+                # /objects_poses_sim → _add_lego_collision_objects hop doesn't
+                # re-add the world copy underneath us. Rolled back on failure.
+                prev_attached = self._attached_lego_name
+                prev_offset = self._attached_lego_tcp_offset
+                self._attached_lego_name = obj_name
+                # Snapshot physical grasp offset in tcp_link frame. drop_sweep
+                # reads this to place the block center at the cup target, not
+                # tcp_link — the 1-2 mm delta between measured |ax| and the
+                # theoretical half_gap is exactly what OMPL used to flail on.
+                self._attached_lego_tcp_offset = (float(ax), float(ay), float(az))
+                if not _apply_scene(add_scene, 'attach_lego'):
+                    self._attached_lego_name = prev_attached
+                    self._attached_lego_tcp_offset = prev_offset
+                    return
+                self._append_log(
+                    f'Attach OK: {obj_name} → tcp_link at '
+                    f'({ax*1000:+.1f}, {ay*1000:+.1f}, {az*1000:+.1f}) mm '
+                    f'(magnitude {dist_mm:.1f} mm)', 'info')
+
+                # A freshly-grasped object inherits the table-level pose from
+                # which it was picked up — its bottom face is at z=0, touching
+                # ground_plane. MoveIt treats attached objects as part of the
+                # robot's collision volume, so attached_lego ↔ ground_plane
+                # becomes a robot-world contact and gets reported unless we
+                # declare it allowed. Same ACM row as the world copy uses; the
+                # id is the same in both cases.
+                self._acm_allow_ground_rest([name_id])
+
+                if name_id in self._lego_collision_names:
+                    self._lego_collision_names.remove(name_id)
+                tracer.event('attach_applied',
+                             obj_name=obj_name,
+                             block_in_tcp=(ax, ay, az),
+                             block_in_tcp_quat=(aqx, aqy, aqz, aqw),
+                             bbox=(float(bbox['sx']), float(bbox['sy']),
+                                   float(bbox['sz'])),
+                             dist_mm=dist_mm,
+                             mode='attached_explicit')
+                self._append_log(
+                    f'Attached {name_id} to tcp_link '
+                    f'({bbox["sx"]*1000:.0f}×{bbox["sy"]*1000:.0f}×{bbox["sz"]*1000:.0f}mm) '
+                    f'offset=({ax*1000:+.1f},{ay*1000:+.1f},{az*1000:+.1f})mm')
+
+            # SYNCHRONOUS: attach MUST complete before the caller signals its
+            # motion-done event. Previously this dispatched _apply on a daemon
+            # thread and returned immediately, so _cmd_gripper_close_for_object
+            # fired evt.set() while the attach's phase-1 REMOVE + phase-2 ADD
+            # were still in flight. The QS runner advanced to "Grasp Home",
+            # planned it, and the post-check ran against a scene that still
+            # had the world copy of the lego at its table pose — producing the
+            # classic lego_*↔ground_plane(d=0.0mm) false-positive at wp[0].
+            # Running _apply inline makes the attach a synchronous barrier.
+            # Callers are already on a background thread (_send in
+            # _cmd_gripper_close_for_object), so there's no Tk deadlock risk.
+            _apply()
+            return True
 
 
     def _detach_lego_sync(self):
@@ -2304,54 +2307,55 @@ class PickPlaceNode(Node):
         lego; the next /objects_poses_sim tick refreshes its world pose
         from Isaac Sim truth (wherever it actually landed after release).
         """
-        self._ensure_lego_state()
-        name = self._attached_lego_name
-        if not name:
-            return False
-        if not MOVEIT_AVAILABLE or not hasattr(self, '_apply_scene_client'):
-            return False
-        if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
-            self._append_log('apply_planning_scene not available for detach', 'warn')
-            return False
-        obj_id = f'lego_{name}'
-        scene = PlanningSceneMsg()
-        scene.is_diff = True
-        scene.robot_state.is_diff = True
-        # Detach from gripper
-        aco = AttachedCollisionObject()
-        aco.link_name = 'tcp_link'
-        aco.object.id = obj_id
-        aco.object.operation = CollisionObject.REMOVE
-        scene.robot_state.attached_collision_objects.append(aco)
-        # Remove the world copy MoveIt would put back at detach location —
-        # /objects_poses_sim will re-add at ground truth pose next tick.
-        rm = CollisionObject()
-        rm.id = obj_id
-        rm.operation = CollisionObject.REMOVE
-        scene.world.collision_objects.append(rm)
-        try:
-            req = ApplyPlanningScene.Request()
-            req.scene = scene
-            fut = self._apply_scene_client.call_async(req)
-            response = self._wait_future(fut, timeout_sec=3.0)
-            if response is None:
+        with self._motion_guard():
+            self._ensure_lego_state()
+            name = self._attached_lego_name
+            if not name:
                 return False
-            # Humble may return false for an already-missing world REMOVE. Verify
-            # the attached-object postcondition before allowing the next motion.
-            check = GetPlanningSceneSrv.Request()
-            check.components.components = 4  # ROBOT_STATE_ATTACHED_OBJECTS
-            observed = self._wait_future(self._get_scene_client.call_async(check), timeout_sec=3.0)
-            if observed is None or any(a.object.id == obj_id for a in observed.scene.robot_state.attached_collision_objects):
+            if not MOVEIT_AVAILABLE or not hasattr(self, '_apply_scene_client'):
                 return False
-        except Exception as exc:
-            self._append_log(f'Detach apply exception: {exc}', 'warn')
-            return False
-        self._attached_lego_name = None
-        self._attached_lego_tcp_offset = None
-        self._cycle_detach_seen = True
-        tracer.event('release_applied', obj_name=name)
-        self._append_log(f'Detached {obj_id}')
-        return True
+            if not self._apply_scene_client.wait_for_service(timeout_sec=5.0):
+                self._append_log('apply_planning_scene not available for detach', 'warn')
+                return False
+            obj_id = f'lego_{name}'
+            scene = PlanningSceneMsg()
+            scene.is_diff = True
+            scene.robot_state.is_diff = True
+            # Detach from gripper
+            aco = AttachedCollisionObject()
+            aco.link_name = 'tcp_link'
+            aco.object.id = obj_id
+            aco.object.operation = CollisionObject.REMOVE
+            scene.robot_state.attached_collision_objects.append(aco)
+            # Remove the world copy MoveIt would put back at detach location —
+            # /objects_poses_sim will re-add at ground truth pose next tick.
+            rm = CollisionObject()
+            rm.id = obj_id
+            rm.operation = CollisionObject.REMOVE
+            scene.world.collision_objects.append(rm)
+            try:
+                req = ApplyPlanningScene.Request()
+                req.scene = scene
+                fut = self._apply_scene_client.call_async(req)
+                response = self._wait_future(fut, timeout_sec=3.0)
+                if response is None:
+                    return False
+                # Humble may return false for an already-missing world REMOVE. Verify
+                # the attached-object postcondition before allowing the next motion.
+                check = GetPlanningSceneSrv.Request()
+                check.components.components = 4  # ROBOT_STATE_ATTACHED_OBJECTS
+                observed = self._wait_future(self._get_scene_client.call_async(check), timeout_sec=3.0)
+                if observed is None or any(a.object.id == obj_id for a in observed.scene.robot_state.attached_collision_objects):
+                    return False
+            except Exception as exc:
+                self._append_log(f'Detach apply exception: {exc}', 'warn')
+                return False
+            self._attached_lego_name = None
+            self._attached_lego_tcp_offset = None
+            self._cycle_detach_seen = True
+            tracer.event('release_applied', obj_name=name)
+            self._append_log(f'Detached {obj_id}')
+            return True
 
 
     def _cmd_grasp_home(self):
@@ -2379,10 +2383,11 @@ class PickPlaceNode(Node):
         # at False, so they just event and don't close.
         def _emit_home_done():
             evt.wait(timeout=30.0)
-            tracer.event('grasp_home_done')
-            if getattr(self, '_cycle_detach_seen', False) and tracer.is_active():
-                tracer.close_cycle('completed')
-                self._cycle_detach_seen = False
+            with self._motion_guard():
+                tracer.event('grasp_home_done')
+                if getattr(self, '_cycle_detach_seen', False) and tracer.is_active():
+                    tracer.close_cycle('completed')
+                    self._cycle_detach_seen = False
         self._motion_thread(target=_emit_home_done, daemon=True).start()
         # Speed override: if home_velocity_scale param > 0, temporarily
         # swap velocity_scale_var for this motion's plan, then restore.
@@ -2434,10 +2439,11 @@ class PickPlaceNode(Node):
         self._motion_event = evt
         def _emit_home_done():
             evt.wait(timeout=30.0)
-            tracer.event('grasp_home_done')
-            if getattr(self, '_cycle_detach_seen', False) and tracer.is_active():
-                tracer.close_cycle('completed')
-                self._cycle_detach_seen = False
+            with self._motion_guard():
+                tracer.event('grasp_home_done')
+                if getattr(self, '_cycle_detach_seen', False) and tracer.is_active():
+                    tracer.close_cycle('completed')
+                    self._cycle_detach_seen = False
         self._motion_thread(target=_emit_home_done, daemon=True).start()
         hvs = float(self.get_parameter('home_velocity_scale').value)
         saved_vs = None
@@ -2519,10 +2525,10 @@ class PickPlaceNode(Node):
             tracer.event('tier1_noop',
                          max_delta_deg=math.degrees(max_delta),
                          target=dict(target_full), current=dict(current))
-            self._last_motion_status = {
+            self._set_motion_status({
                 'ok': True, 'outcome': 'already_at_target',
                 'msg': (f'already at target '
-                        f'(max Δ={math.degrees(max_delta):.2f}°)')}
+                        f'(max Δ={math.degrees(max_delta):.2f}°)')})
             on_complete_event.set()
             return True
 
@@ -2555,10 +2561,10 @@ class PickPlaceNode(Node):
             self._append_log(
                 '  REFUSED: tier1 + tier2 both collided; OMPL fallback '
                 'disabled (deterministic-only mode)', 'err')
-            self._last_motion_status = {
+            self._set_motion_status({
                 'ok': False, 'outcome': 'tiered_planner_exhausted',
                 'msg': ('tier1 linear and tier2 retract-pan-settle both '
-                        'collided; OMPL fallback disabled')}
+                        'collided; OMPL fallback disabled')})
             on_complete_event.set()
             return False
 
@@ -2696,9 +2702,9 @@ class PickPlaceNode(Node):
         if not MOVEIT_AVAILABLE or self.plan_client is None \
                 or not self.plan_client.service_is_ready():
             self._append_log('OMPL: service not available', 'warn')
-            self._last_motion_status = {
+            self._set_motion_status({
                 'ok': False, 'outcome': 'ompl_service_unavailable',
-                'msg': 'OMPL plan service not available'}
+                'msg': 'OMPL plan service not available'})
             on_complete_event.set()
             return False
 
@@ -2719,9 +2725,9 @@ class PickPlaceNode(Node):
                          ec_info=repr(ec_info))
             self._append_log(
                 f'  OMPL Mode A: planner returned no plan ({ec_info})', 'warn')
-            self._last_motion_status = {
+            self._set_motion_status({
                 'ok': False, 'outcome': 'ompl_mode_a',
-                'msg': f'OMPL Mode A: no plan ({ec_info})'}
+                'msg': f'OMPL Mode A: no plan ({ec_info})'})
             on_complete_event.set()
             return False
 
@@ -2752,11 +2758,11 @@ class PickPlaceNode(Node):
                 f'  OMPL post-check: {where} invalid '
                 f'(checked {chk.n_wps} wps + {chk.n_sub} sub-states): '
                 f'{contact_summary}', 'warn')
-            self._last_motion_status = {
+            self._set_motion_status({
                 'ok': False, 'outcome': 'ompl_mode_b',
                 'msg': (f'post-check rejected {where}: {contact_summary}'),
                 'bad_wp': chk.bad_wp, 'bad_subidx': chk.bad_subidx,
-                'sub_t': chk.sub_t}
+                'sub_t': chk.sub_t})
             on_complete_event.set()
             return False
 
@@ -2994,9 +3000,9 @@ class PickPlaceNode(Node):
             self._append_log(
                 'arm_controller action server not ready', 'warn')
             tracer.event('execute_done', outcome='action_server_not_ready')
-            self._last_motion_status = {
+            self._set_motion_status({
                 'ok': False, 'outcome': 'action_server_not_ready',
-                'msg': 'arm_controller action server not ready'}
+                'msg': 'arm_controller action server not ready'})
             on_complete_event.set()
             return
 
@@ -3033,18 +3039,18 @@ class PickPlaceNode(Node):
                              error_code=(ec if ec is not None else None))
                 # FollowJointTrajectory.Result.SUCCESSFUL = 0
                 ok = (ec is None) or (ec == 0)
-                self._last_motion_status = {
+                self._set_motion_status({
                     'ok': ok,
                     'outcome': 'completed' if ok else 'trajectory_error',
                     'msg': (f'trajectory complete ({n_wps} wps)' if ok
                             else f'trajectory error_code={ec}'),
-                    'error_code': ec}
+                    'error_code': ec})
             except Exception as e:
                 tracer.event('execute_done', outcome='result_exception',
                              error=repr(e))
-                self._last_motion_status = {
+                self._set_motion_status({
                     'ok': False, 'outcome': 'result_exception',
-                    'msg': f'result callback exception: {e!r}'}
+                    'msg': f'result callback exception: {e!r}'})
             on_complete_event.set()
 
         def _on_accept(send_future):
@@ -3053,16 +3059,16 @@ class PickPlaceNode(Node):
             except Exception as e:
                 tracer.event('execute_done', outcome='send_exception',
                              error=repr(e))
-                self._last_motion_status = {
+                self._set_motion_status({
                     'ok': False, 'outcome': 'send_exception',
-                    'msg': f'action send_goal exception: {e!r}'}
+                    'msg': f'action send_goal exception: {e!r}'})
                 on_complete_event.set()
                 return
             if not gh.accepted:
                 tracer.event('execute_done', outcome='goal_rejected')
-                self._last_motion_status = {
+                self._set_motion_status({
                     'ok': False, 'outcome': 'goal_rejected',
-                    'msg': 'arm action server rejected the goal'}
+                    'msg': 'arm action server rejected the goal'})
                 on_complete_event.set()
                 return
             with self._arm_goal_lock:
@@ -3157,7 +3163,7 @@ class PickPlaceNode(Node):
 
         evt = self._new_motion_event()
         self._motion_event = evt
-        self._last_motion_status = None
+        self._set_motion_status(None)
 
         # Drop target for the BLOCK CENTER at (cup_rim_height + hover).
         # /drop_poses publishes cup BODY-CENTER (z = cup_base + half_height),
@@ -3217,7 +3223,8 @@ class PickPlaceNode(Node):
         tracer.snapshot_scene('drop_sweep_start', self)
         def _close_on_drop_done():
             evt.wait(timeout=30.0)
-            tracer.event('drop_sweep_done')
+            with self._motion_guard():
+                tracer.event('drop_sweep_done')
         self._motion_thread(target=_close_on_drop_done, daemon=True).start()
         self._append_log(
             f'Drop Sweep: gap=({gap_x:.3f},{gap_y:.3f},{gap_z:.3f})m '
@@ -3274,6 +3281,10 @@ class PickPlaceNode(Node):
         if evt is not None:
             if not evt.wait(timeout=10.0):
                 raise TimeoutError('Gripper release timed out')
+            self._require_motion_generation()
+            verdict = self._motion_verdict(evt)
+            if verdict is not None and not verdict.get('ok'):
+                raise RuntimeError('Gripper release operation failed')
         # Synchronously detach the AttachedCollisionObject. Returning from
         # this service guarantees the next grasp_home sees a clean scene.
         self._ensure_lego_state()
@@ -3336,9 +3347,10 @@ class PickPlaceNode(Node):
         self._motion_event = evt
         def _send():
             ok = self._send_gripper_goal(open_angle, duration_s=duration, blocking=True)
-            self._last_motion_status = {'ok': bool(ok), 'outcome': 'gripper_open'}
-            evt.set()
-            self._select_planning_group('arm')
+            with self._motion_guard():
+                self._set_motion_status({'ok': bool(ok), 'outcome': 'gripper_open'})
+                evt.set()
+                self._select_planning_group('arm')
         self._motion_thread(target=_send, daemon=True).start()
 
 
@@ -3361,14 +3373,15 @@ class PickPlaceNode(Node):
         def _send():
             ok = self._send_gripper_goal(close_angle, duration_s=duration, blocking=True)
             # Phase 9: attach to tcp_link after physical closure succeeds
-            if ok is not False:
-                try:
-                    ok = self._attach_lego_to_gripper(obj_name) and self._attached_lego_name == obj_name
-                except Exception as exc:
-                    ok = False
-                    self._append_log(f'Attach step errored: {exc}', 'warn')
-            self._last_motion_status = {'ok': bool(ok), 'outcome': 'gripper_close_attach'}
-            evt.set()
+            with self._motion_guard():
+                if ok is not False:
+                    try:
+                        ok = self._attach_lego_to_gripper(obj_name) and self._attached_lego_name == obj_name
+                    except Exception as exc:
+                        ok = False
+                        self._append_log(f'Attach step errored: {exc}', 'warn')
+                self._set_motion_status({'ok': bool(ok), 'outcome': 'gripper_close_attach'})
+                evt.set()
         self._motion_thread(target=_send, daemon=True).start()
 
 
@@ -3473,10 +3486,10 @@ class PickPlaceNode(Node):
                     tracer.close_cycle('grasp_unreachable_workspace',
                                        stage=stage, reason=reason,
                                        target=(px, py, pz))
-                    self._last_motion_status = {
+                    self._set_motion_status({
                         'ok': False, 'outcome': 'grasp_unreachable_workspace',
                         'msg': (f'Gate A reject @ {stage} '
-                                f'({px:.3f}, {py:.3f}, {pz:.3f}): {reason}')}
+                                f'({px:.3f}, {py:.3f}, {pz:.3f}): {reason}')})
                     evt.set()
                     return
             tracer.event('gate_a_done', per_stage=gate_a_results)
@@ -3500,10 +3513,10 @@ class PickPlaceNode(Node):
                 self._add_lego_collision_objects()
                 tracer.close_cycle('grasp_unreachable_ik',
                                    dbg_lines=list(dbg_lines or []))
-                self._last_motion_status = {
+                self._set_motion_status({
                     'ok': False, 'outcome': 'grasp_unreachable_ik',
                     'msg': (f'Gate B reject: no geometric IK at any yaw for '
-                            f'stages {[s[0] for s in poses_to_check]}')}
+                            f'stages {[s[0] for s in poses_to_check]}')})
                 evt.set()
                 return
             if yaw_used != obj_yaw:
@@ -3544,11 +3557,11 @@ class PickPlaceNode(Node):
                                  validated={k: dict(v) for k, v in validated.items()})
                     tracer.close_cycle('gate_c_all_collide',
                                        stage=stage, target=(px, py, pz))
-                    self._last_motion_status = {
+                    self._set_motion_status({
                         'ok': False, 'outcome': 'gate_c_all_collide',
                         'msg': (f'Gate C reject @ {stage} '
                                 f'({px:.3f}, {py:.3f}, {pz:.3f}): '
-                                f'all IK solutions collide')}
+                                f'all IK solutions collide')})
                     evt.set()
                     return
             tracer.event('gate_c_done',
@@ -3572,10 +3585,10 @@ class PickPlaceNode(Node):
             else:
                 # Validated dict has no 'final' stage — this shouldn't happen
                 # if gate C passed, but guard anyway.
-                self._last_motion_status = {
+                self._set_motion_status({
                     'ok': False, 'outcome': 'no_final_stage',
                     'msg': ('Gate C passed but no final-stage solution '
-                            'recorded — logic bug')}
+                            'recorded — logic bug')})
                 evt.set()  # nothing to execute
 
         self._motion_thread(target=_prevalidate_and_execute, daemon=True).start()
@@ -3691,6 +3704,33 @@ class PickPlaceNode(Node):
         self._dispatch_scene_update(_apply)
 
 
+    @contextmanager
+    def _motion_guard(self):
+        guard = getattr(self, '_motion_effect_guard', None)
+        if guard is None:
+            yield
+        else:
+            with guard(self._motion_token()):
+                yield
+
+    def _require_motion_generation(self):
+        with self._motion_guard():
+            pass
+
+    def _motion_verdict(self, event):
+        with self._motion_guard():
+            verdict = getattr(event, 'verdict', None)
+            if verdict is None and not getattr(self, '_motion_effect_guard', None):
+                return getattr(self, '_last_motion_status', None)
+            return verdict
+
+    def _set_motion_status(self, status, event=None):
+        with self._motion_guard():
+            self._last_motion_status = status
+            event = event if event is not None else getattr(self, '_motion_event', None)
+            if event is not None:
+                event.verdict = dict(status) if status is not None else None
+
     def _motion_token(self):
         context = getattr(self, '_motion_context', None)
         if context is not None and hasattr(context, 'epoch'):
@@ -3701,6 +3741,7 @@ class PickPlaceNode(Node):
     def _new_motion_event(self):
         event = threading.Event()
         event.motion_epoch = self._motion_token()
+        event.verdict = None
         return event
 
     def _motion_thread(self, target, **kwargs):
@@ -3710,17 +3751,28 @@ class PickPlaceNode(Node):
             if not hasattr(self, '_motion_context'):
                 self._motion_context = threading.local()
             self._motion_context.epoch = epoch
-            target()
+            try:
+                target()
+            except Exception:
+                provider = getattr(self, '_motion_generation_provider', None)
+                if provider is None or provider() == epoch:
+                    raise
+                # A retired worker may leave a wait, but cannot claim success
+                # or mutate the scene after its generation was invalidated.
         return threading.Thread(target=run, **kwargs)
 
     def _dispatch_scene_update(self, callback):
+        def apply():
+            with self._motion_guard():
+                callback()
         if self._gui_ready:
-            self._motion_thread(target=callback, daemon=True).start()
+            self._motion_thread(target=apply, daemon=True).start()
         else:
-            callback()
+            apply()
 
     def _dispatch_motion(self, callback):
-        callback()
+        with self._motion_guard():
+            callback()
 
     def _prepare_cycle(self):
         self._cycle_ok = False

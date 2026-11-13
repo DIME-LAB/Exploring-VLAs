@@ -1,5 +1,6 @@
 """CPU fault/interleaving probes at the actual collector/runtime boundaries."""
 import ast
+from contextlib import contextmanager
 import copy
 import json
 import random
@@ -12,7 +13,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import patch
 import numpy as np
 from contract import JOINTS, corrective_action, parameters
-from protocol import CancelledGeneration, CommandLedger, StepGeneration
+from protocol import CancelledGeneration, CommandLedger, StepGeneration, OwnershipStalled
 from scene_sync import physical_pose_caches, collision_pose_errors
 from success import PHYSICAL_FLOOR_M, INTERIOR_FLOOR_M
 import test_safety
@@ -26,7 +27,7 @@ def load_class(filename, name):
     path = HERE/filename
     tree = ast.parse(path.read_text())
     cls = next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name==name)
-    scope = dict(threading=threading,time=time,np=np,json=json,JOINTS=JOINTS,
+    scope = dict(contextmanager=contextmanager, OwnershipStalled=OwnershipStalled, threading=threading,time=time,np=np,json=json,JOINTS=JOINTS,
                  String=lambda data:NS(data=data),StepGeneration=StepGeneration,
                  CancelledGeneration=CancelledGeneration,CommandLedger=CommandLedger,
                  corrective_action=corrective_action,JOINT_LIMITS={k:(-3,3) for k in JOINTS},
@@ -54,6 +55,10 @@ class ReviewRegressions(unittest.TestCase):
         c.tick_condition=threading.Condition();c.last_processed_ns=0;c.last_snapshot=None
         c.node=NS(_qs_abort_evt=threading.Event(),_selected_object=None,
             _actual_positions=dict(zip(JOINTS,[0]*6)),_joint_states_callback=lambda msg:None)
+        def status(value,event=None):
+            c.node._last_motion_status=value
+            if event is not None:event.verdict=dict(value)
+        c.node._set_motion_status=status
         c.update_pose_cache=lambda snapshot:None
         c.events=[];acks={}
         r.epoch=1;r.invalid_through_ns=0;r.failure=None;r.mode='collect';r.busy=False
