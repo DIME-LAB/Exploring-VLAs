@@ -30,3 +30,21 @@ Pitfalls (handbook plan-anything/handbook/isaacsim-operating-handbook.md)
 5. World() resets the run-loop rate to 60: set it after, read it back (l.249).
 6. Arm contact reporting before play (l.154).
 7. No disableWindowOnLoad with cameras; captureOnPlay=1 with Replicator writers.
+
+## In-process IK for the SO-ARM101 (plan47, 2026-11-13, measured on dual ~09:15Z)
+- robo-manipulate (~/Documents/robo-manipulate, branch franka-embodiment @3016a531) is NOT in-process: a legacy
+  verb-substrate MCP server driving Isaac over the bridge. Analytic solvers only (UR5e closed form, FR3 He-Liu);
+  neither transfers to a 5-DOF arm. Treat every robo-manipulate* dir on dual as READ-ONLY
+  (robo-manipulate-published-fr3-20261002 is pinned by published records). Worked example of adding an arm:
+  ~/Documents/robo-manipulate/docs/franka-embodiment.md; survey: ~/prompt2assembly/plan-anything/codebase-survey/
+  robo-manipulate-prismatic-20260814.md.
+- prompt2assembly/DroidStack carry NO planner. Robots join as a ROS 2 contract plus a USD realization
+  (~/platform/plugins/droidstack/skills/onboard-robot/SKILL.md, onboard-end-effector/SKILL.md). No in-process IK there.
+- Options for 3.1f IK:
+  (1) REUSE our own control_gui IK/grasp maths, once 3.1a extracts it into a GUI-free module, if it is plain Python
+      (not MoveIt calls). Demonstrations then stay identical to the verified GUI path; only MoveIt execution and cup
+      avoidance need an in-process replacement.
+  (2) Isaac's Lula kinematics solver with a robot description generated from
+      vla_SO-ARM101/src/so_arm101_description (NVIDIA's documented standalone route; handles the 5-DOF chain;
+      plan47's recommendation).
+  Keep the gripper semantics the same as the ROS controller so collected data matches deployment.
