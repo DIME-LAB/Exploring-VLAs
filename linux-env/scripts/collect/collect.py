@@ -33,7 +33,7 @@ from so_arm101_control.pick_place import PickPlaceNode, JOINT_LIMITS
 from contract import COLORS, JOINTS, EVAL_SEEDS, corrective_action, parameters, timing_audit
 from checkpoint import progress
 from storage import CANONICAL_ROOT, RootFileGrowth, confined, wait_for_storage
-from success import SETTLED_TICKS, settled_containment
+from success import SETTLED_TICKS, initial_arm, settled_containment
 
 
 def ns(stamp):
@@ -586,13 +586,11 @@ class Collector:
                 if not self.node._motion_event.wait(timeout=90) or not self.node._last_motion_status.get('ok'):
                     raise RuntimeError('Pre-episode home failed')
                 self.servo.configure(params)
-                self.advance_ticks(6)
-                measured_home = mcp('run_python', {'code': 'import collection_runtime as c\nresult=c.runtime().snapshot()'})
+                measured_home = self.advance_ticks(6)
                 from so_arm101_control.grasp_geometry import _grasp_home_data_target
-                if max(abs(measured_home['state'][i] - _grasp_home_data_target()[name]) for i,name in enumerate(JOINTS[:5])) > .01:
-                    raise RuntimeError('Measured physical arm did not reach the episode home pose')
-                if max(abs(v) for v in measured_home['velocity'][:5]) > .05:
-                    raise RuntimeError('Measured physical arm is not settled at episode start')
+                receipt['initial_arm_check'] = initial_arm(measured_home, [_grasp_home_data_target()[name] for name in JOINTS[:5]])
+                if not receipt['initial_arm_check']['passed']:
+                    raise RuntimeError('Measured physical arm is not stable at the episode home pose')
                 receipt['cup_randomization'] = self.scene(params, baseline)
                 self.node.approach_offset = params['approach_offset_m']
                 self.node._grasp_approach_height_var.set(params['approach_height_m'])

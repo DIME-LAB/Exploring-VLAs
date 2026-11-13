@@ -9,6 +9,23 @@ INTERIOR_RIM_M = .094
 SETTLED_TICKS = 15
 
 
+def initial_arm(snapshots, target):
+    """Verify measured home/stability, then the transport resets initial velocities.
+
+    PhysX joint velocity samples can include constraint impulses even when
+    sampled positions are stable; retain those samples rather than relabel them.
+    """
+    if len(snapshots) < 6 or any(s.get('state_source') != 'isaac_articulation' for s in snapshots):
+        return dict(passed=False, reason='Six physical home ticks required')
+    states = [s['state'][:5] for s in snapshots]
+    if not all(math.isfinite(v) for row in states for v in row):
+        return dict(passed=False, reason='Non-finite physical home state')
+    error = max(abs(q-r) for q,r in zip(states[-1],target))
+    spread = max(max(row[i] for row in states)-min(row[i] for row in states) for i in range(5))
+    return dict(passed=error <= .01 and spread <= .002, home_error_rad=error,
+                position_spread_rad=spread, sampled_velocity=snapshots[-1]['velocity'])
+
+
 def rotate(q, v):
     w, x, y, z = q
     norm = math.sqrt(w*w+x*x+y*y+z*z)

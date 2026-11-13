@@ -7,7 +7,7 @@ import time
 from types import SimpleNamespace
 import unittest
 from storage import CANONICAL_ROOT, confined
-from success import contained, settled_containment, SETTLED_TICKS
+from success import contained, initial_arm, settled_containment, SETTLED_TICKS
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -22,6 +22,12 @@ def method(path, cls, name):
 
 
 class SafetyTests(unittest.TestCase):
+    def test_initial_arm_uses_measured_position_stability_before_velocity_reset(self):
+        rows=[dict(state_source='isaac_articulation',state=[0]*6,velocity=[.3]*6) for _ in range(6)]
+        self.assertTrue(initial_arm(rows,[0]*5)['passed'])
+        rows[-1]['state'][0]=.004
+        self.assertFalse(initial_arm(rows,[0]*5)['passed'])
+
     def snapshot(self, z=.012):
         corners = [[x,y,z] for x in (-.0155,.0155) for y in (-.0103,.0103) for z in (-.0064,.0064)]
         return dict(sim_ns=1000000000, bodies={
