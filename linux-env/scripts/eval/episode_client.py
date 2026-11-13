@@ -64,6 +64,7 @@ def main() -> int:
     t = time.perf_counter()
     if not client.start():  # Ready + SendPolicyInstructions (server loads policy)
         emit("FATAL", {"msg": "client.start() failed"})
+        client.stop()
         return 1
     load_s = time.perf_counter() - t
     client.start_barrier = threading.Barrier(
@@ -87,59 +88,63 @@ def main() -> int:
 
     threading.Thread(target=stdin_reader, daemon=True).start()
 
-    while True:
-        line = cmds.get()
-        if line == "QUIT":
-            break
-        parts = line.split()
-        if parts[0] != "RUN":
-            continue
-        ep, max_s = parts[1], float(parts[2])
-        max_actions = int(parts[3]) if len(parts) > 3 else 10**9
-        abort.clear()
-        # ---- per-episode reset of client + server state (no policy reload) ----
-        with client.action_queue_lock:
-            client.action_queue = Queue()
-        with client.latest_action_lock:
-            client.latest_action = -1
-        client.action_chunk_size = -1
-        client.must_go.set()
-        client.stub.Ready(
-            services_pb2.Empty()
-        )  # flush server obs queue + predicted timesteps
-        with state_lock:
-            state.update(chunks=0, first_chunk_t=None, ep_t0=time.time(), paused=False)
-        emit("EPSTART", {"ep": ep, "t0": state["ep_t0"]})
-        client.control_loop(
-            task=cfg.task,
-            stop_event=abort,
-            max_duration_s=max_s,
-            max_actions=max_actions,
-        )
-        metrics = client.control_loop_stats
-        with state_lock:
-            state["paused"] = True
-            dur = metrics["duration_s"]
-            state["ep_t0"] = float("inf")
-        with client.action_queue_lock:
-            client.action_queue = Queue()
-        # Wait for in-flight inference and clear RTC/model queues before homing.
-        client.stub.Ready(services_pb2.Empty())
-        emit(
-            "EPDONE",
-            {
-                "ep": ep,
-                "duration_s": round(dur, 2),
-                **metrics,
-                "chunks": state["chunks"],
-                "first_chunk_s": state["first_chunk_t"],
-                "aborted": abort.is_set(),
-                "hit_action_budget": metrics["actions_sent"] >= max_actions,
-            },
-        )
+    try:
+        while True:
+            line = cmds.get()
+            if line == "QUIT":
+                break
+            parts = line.split()
+            if parts[0] != "RUN":
+                continue
+            ep, max_s = parts[1], float(parts[2])
+            max_actions = int(parts[3]) if len(parts) > 3 else 10**9
+            abort.clear()
+            # ---- per-episode reset of client + server state (no policy reload) ----
+            with client.action_queue_lock:
+                client.action_queue = Queue()
+            with client.latest_action_lock:
+                client.latest_action = -1
+            client.action_chunk_size = -1
+            client.must_go.set()
+            client.stub.Ready(
+                services_pb2.Empty()
+            )  # flush server obs queue + predicted timesteps
+            with state_lock:
+                state.update(
+                    chunks=0, first_chunk_t=None, ep_t0=time.time(), paused=False
+                )
+            emit("EPSTART", {"ep": ep, "t0": state["ep_t0"]})
+            client.control_loop(
+                task=cfg.task,
+                stop_event=abort,
+                max_duration_s=max_s,
+                max_actions=max_actions,
+            )
+            metrics = client.control_loop_stats
+            with state_lock:
+                state["paused"] = True
+                dur = metrics["duration_s"]
+                state["ep_t0"] = float("inf")
+            with client.action_queue_lock:
+                client.action_queue = Queue()
+            # Wait for in-flight inference and clear RTC/model queues before homing.
+            client.stub.Ready(services_pb2.Empty())
+            emit(
+                "EPDONE",
+                {
+                    "ep": ep,
+                    "duration_s": round(dur, 2),
+                    **metrics,
+                    "chunks": state["chunks"],
+                    "first_chunk_s": state["first_chunk_t"],
+                    "aborted": abort.is_set(),
+                    "hit_action_budget": metrics["actions_sent"] >= max_actions,
+                },
+            )
 
-    client.stop()
-    receiver.join(timeout=5)
+    finally:
+        client.stop()
+        receiver.join(timeout=5)
     emit("BYE")
     return 0
 

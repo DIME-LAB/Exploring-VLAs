@@ -27,6 +27,10 @@
 # Model presets are shared with the GUI in so_arm101_control/model_presets.py.
 # Run `deploy_sim.sh models` to list them; --model also accepts an HF id or path.
 #
+# Dispatch defaults: isolated observation process + FIFO priority 10 for only
+# the action TID (sudo -n chrt if needed). --dispatch-priority 0 selects best effort;
+# --no-observation-process restores capture in the client process.
+#
 # Env: SOARM_KIT_MCP_PORT (bridge, default 8767) · SOARM_POLICY_GPU (default 1) ·
 #      LOG_DIR (default /tmp) · ISAACSIM_BIN / ISAACSIM_LOG (see isaacsim_launch.sh)
 #
@@ -70,11 +74,11 @@ usage() {
 # ---------------------------------------------------------------------------
 cmd_up() {
     local stream="" rviz="" gui="" model_arg="" task="$DEFAULT_TASK" policy=1 model
-    local policy_args=()
+    local policy_args=(--observation-process --dispatch-priority "${SOARM_DISPATCH_PRIORITY:-10}")
     while [ $# -gt 0 ]; do
         case "$1" in
-            --fps|--action-duration-s) policy_args+=("$1" "${2:?option needs a value}"); shift ;;
-            --fps=*|--action-duration-s=*|--no-rtc) policy_args+=("$1") ;;
+            --fps|--action-duration-s|--dispatch-priority) policy_args+=("$1" "${2:?option needs a value}"); shift ;;
+            --fps=*|--action-duration-s=*|--dispatch-priority=*|--no-observation-process|--observation-process|--no-dispatch-sudo|--no-rtc) policy_args+=("$1") ;;
             --stream)    stream="--stream" ;;
             --rate-hz) export SOARM_SIM_RATE_HZ="${2:?--rate-hz needs a value}"; shift ;;
             --rate-hz=*) export SOARM_SIM_RATE_HZ="${1#--rate-hz=}" ;;

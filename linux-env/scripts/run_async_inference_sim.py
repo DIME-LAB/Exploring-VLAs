@@ -122,6 +122,29 @@ def build_parser():
     p.add_argument("--server-host", default=DEFAULTS["server_host"])
     p.add_argument("--server-port", type=int, default=DEFAULTS["server_port"])
     p.add_argument("--fps", type=float, default=DEFAULTS["fps"])
+    p.add_argument(
+        "--observation-process",
+        dest="observation_process",
+        action="store_true",
+        default=True,
+        help="Keep ROS images and encoding outside the actuator process (SO101 ROS2).",
+    )
+    p.add_argument(
+        "--no-observation-process", dest="observation_process", action="store_false"
+    )
+    p.add_argument(
+        "--dispatch-priority",
+        type=int,
+        default=10,
+        help="Only the dispatch thread uses Linux FIFO priority; 0 selects best effort.",
+    )
+    p.add_argument(
+        "--no-dispatch-sudo",
+        dest="dispatch_sudo",
+        action="store_false",
+        default=True,
+        help="Require direct FIFO permission rather than sudo -n chrt.",
+    )
 
     p.add_argument(
         "--action-duration-s",
@@ -220,6 +243,8 @@ def build_parser():
 def parse_args(argv=None, parser=None):
     p = parser or build_parser()
     args = p.parse_args(argv)
+    if not 0 <= args.dispatch_priority <= 99:
+        p.error("dispatch-priority must be between 0 and 99")
 
     if args.fps <= 0 or (
         args.action_duration_s is not None and args.action_duration_s <= 0
@@ -253,6 +278,9 @@ def build_commands(args, python=None):
         # Sim-specific: actuate ON (drives ros2_control), use_degrees ON
         # (matches recorded dataset's units convention).
         "--robot.actuate=true",
+        f"--observation_process={str(args.observation_process).lower()}",
+        f"--dispatch_fifo_priority={args.dispatch_priority}",
+        f"--dispatch_fifo_sudo={str(args.dispatch_sudo).lower()}",
         f"--fps={args.fps}",
         f"--robot.action_duration_s={action_duration}",
         "--robot.use_degrees=true",
