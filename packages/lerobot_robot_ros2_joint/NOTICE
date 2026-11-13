@@ -1,0 +1,4 @@
+ROS 2 joint robot for LeRobot
+Copyright 2026 The HuggingFace Inc. team and Exploring-VLAs contributors.
+Derived from the SO101ROS2Robot interface and command/state conversion in
+https://github.com/inbarajaldrin/lerobot at e1e20109, Apache License 2.0.

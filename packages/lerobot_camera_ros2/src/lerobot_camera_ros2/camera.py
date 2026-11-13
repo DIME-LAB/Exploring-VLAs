@@ -73,6 +73,11 @@ class ROS2Camera(Camera):
     def is_connected(self):
         return self._lease is not None
 
+    def attach_context(self, *, context=None, executor=None):
+        if self.is_connected:
+            raise DeviceAlreadyConnectedError("Disconnect before attaching another context")
+        self._context, self._executor = context, executor
+
     @property
     def last_header_stamp_ns(self):
         """Stamp paired with the last returned frame; simulation stamps stay in simulation time."""
