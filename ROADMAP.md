@@ -127,6 +127,17 @@ mislabeled (0real_100sim has the real-only set's exact 162,221 frames). No ~1000
       GPU (template: prompt2assembly Type-1 headless batteries; pointers in docs/notes/battery-collector-pointers.md). Reuses the 3.1 episode spec. Validated
       against the ROS pilot on the same seeds: success rate, state/action semantics (joint-position targets as
       deployment sends them) and trajectory statistics. ROS 2 + MoveIt stays the deployment/eval/real-robot stack.
+- [ ] 3.1g Independent review of 3.1a-c (2026-11-13) found 4 P1 + 5 P2. pilot-3.1-v1 is SUPERSEDED (diagnostics only).
+      Fix all, then rerun pilot-3.1-v2:
+      - P1-1: record MEASURED Isaac joint state, not the mock controller reference. Models trained on the new
+        data must deploy with the measured-state topic; 1.9 keeps /joint_states because its models were trained
+        on rec_222812 (mock reference).
+      - P1-2: deterministic command/tick sync with a latency audit.
+      - P1-3: cup-frame containment success gate.
+      - P1-4: GUI Quickstart warning regression.
+      - P2: GPU mapping; consistent disk policy; output confinement; full velocity reset; no rigid-body rebuild
+        beside the live articulation.
+      Review: coursework-eee598/roadmap-2026-11/phase3/3.1-collection/independent-review-3.1a-c.md.
 - [ ] 3.1e Training throughput before the large run (rtx6000, RTX 6000 Ada 48 GB): the 3.0b run is GPU-bound at
       1.33 steps/s with batch 64, fp32 expert (`use_amp=False`), frozen vision encoder, 16/48 GB used. Benchmark
       bf16 AMP, larger batch with scaled LR, and `torch.compile` on 500-step runs; pick the fastest config that
