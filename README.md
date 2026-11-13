@@ -9,7 +9,7 @@ the whole thing on a Linux GPU box:
 | Isaac Sim + `soarm101-dt` extension | Physics, cameras, legos and cups scene, ROS 2 publishers (`isaac/exts/soarm101-dt`) | the box, GPU 0 |
 | omni-kit-mcp bridge | A small TCP server inside Isaac that serves the extension's scene commands as `soarm101.<name>` tools (port 8767), plus a control panel in the Isaac window (`omni-kit-mcp/` submodule) | inside Isaac |
 | ROS 2 control stack | MoveIt + ros2_control, plus the opt-in `control_gui` (Tk window) and RViz (`vla_SO-ARM101/`) | the box |
-| SmolVLA policy | lerobot async policy server + robot client: async action chunking (`lerobot/` submodule). The RTC flag is passed but currently has no effect; see Known issues | the box, GPU 1 |
+| SmolVLA policy | lerobot async policy server + robot client: async action chunking with real RTC prefix guidance (`lerobot/` submodule) | the box, GPU 1 |
 
 A Mac (or any other machine) only *watches* the sim over Isaac's WebRTC
 livestream and, optionally, scripts the bridge through an ssh tunnel.
@@ -123,6 +123,27 @@ To switch models without restarting Isaac: `deploy_sim.sh down --policy`, then
 Inference tab; if you'd rather start inference from there, bring the stack up
 with `up --gui --no-policy` so two policies don't drive the arm at once.
 
+## Policy timing and episodes
+
+The policy server and robot client default to **17.4 Hz**, selected from the
+recording audit, with a FollowJointTrajectory duration of `1/fps` (57.5 ms).
+`deploy_sim.sh up --fps 19.4 --action-duration-s .1` overrides both. Camera
+capture shares the action loop thread, so blocking reads can lower the actual
+rate. Dataset metadata remains 30 fps; async actions are indexed steps and
+are not resampled from that metadata.
+
+RTC is enabled by default. The server supplies the previous normalized,
+unexecuted chunk tail and measured inference delay to the policy; `--no-rtc`
+selects the unguided comparison. A recorded-episode replay at 17.4 Hz reduced
+mean raw boundary jump 9.06→4.77° L2, with nonzero guidance correction. See
+[the RTC/timing report](linux-env/scripts/eval/rtc-report.md) for the method,
+plot data and limits.
+
+With Isaac and controllers already running, use the
+[episode harness](linux-env/scripts/eval/README.md) to home, randomize blue
+visible, run the persistent policy client, score cup placement and save
+viewport MP4s plus CSV/JSONL. The server loads the model once for the run.
+
 ## Windows: `--gui` / `--rviz`
 
 `control_gui` (the Tk control panel) and RViz are opt-in. They are on by
@@ -166,11 +187,6 @@ yourself is left alone). `down --policy` stops just the policy.
   window missed the ±0.02 band. The limiter cannot recover time lost to
   CPU contention. An idempotent `up` reapplies the requested ceiling.
 
-- **RTC (real-time chunking) is not actually applied.** `LEROBOT_RTC_ENABLED=1` logs
-  "RTC enabled", but the fork's `policy_server.py` calls `predict_action_chunk(observation)`
-  without `prev_chunk_left_over` / `inference_delay`, so RTC returns the unguided output
-  (`policies/rtc/modeling_rtc.py`). All runs so far, including April's, were plain async
-  chunking. A real RTC fix is planned.
 - **GPU wedge on NVIDIA driver <580** during cold-cache launches: `up` stops with
   a `GPU wedge (...)` message instead of hanging. See Troubleshooting below.
 

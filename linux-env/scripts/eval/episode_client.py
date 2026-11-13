@@ -38,20 +38,26 @@ def main() -> int:
     client = RobotClient(cfg)
     state = {"paused": True, "ep_t0": float("inf"), "chunks": 0, "first_chunk_t": None}
 
+    state_lock = threading.Lock()
+
     # Drop chunks that belong to a previous episode (or arrive while paused):
     # TimedAction timestamps derive from the observation timestamp.
     orig_aggregate = client._aggregate_action_queues
 
     def gated_aggregate(incoming, aggregate_fn=None):
-        if state["paused"]:
-            return
-        incoming = [a for a in incoming if a.get_timestamp() >= state["ep_t0"]]
-        if not incoming:
-            return
-        state["chunks"] += 1
-        if state["first_chunk_t"] is None:
-            state["first_chunk_t"] = time.time() - state["ep_t0"]
-        orig_aggregate(incoming, aggregate_fn)
+        with state_lock:
+            # Only the FIRST action carries the observation timestamp. Later
+            # action timestamps extend into the future, even for stale chunks.
+            if (
+                state["paused"]
+                or not incoming
+                or incoming[0].get_timestamp() < state["ep_t0"]
+            ):
+                return
+            state["chunks"] += 1
+            if state["first_chunk_t"] is None:
+                state["first_chunk_t"] = time.time() - state["ep_t0"]
+            orig_aggregate(incoming, aggregate_fn)
 
     client._aggregate_action_queues = gated_aggregate
 
@@ -100,7 +106,8 @@ def main() -> int:
         client.stub.Ready(
             services_pb2.Empty()
         )  # flush server obs queue + predicted timesteps
-        state.update(chunks=0, first_chunk_t=None, ep_t0=time.time(), paused=False)
+        with state_lock:
+            state.update(chunks=0, first_chunk_t=None, ep_t0=time.time(), paused=False)
         emit("EPSTART", {"ep": ep, "t0": state["ep_t0"]})
         n_actions, deadline = 0, time.perf_counter() + max_s
         while (
@@ -115,9 +122,10 @@ def main() -> int:
             if client._ready_to_send_observation():
                 client.control_loop_observation(cfg.task, False)
             time.sleep(max(0, cfg.environment_dt - (time.perf_counter() - t_loop)))
-        state["paused"] = True
-        dur = time.time() - state["ep_t0"]
-        state["ep_t0"] = float("inf")
+        with state_lock:
+            state["paused"] = True
+            dur = time.time() - state["ep_t0"]
+            state["ep_t0"] = float("inf")
         with client.action_queue_lock:
             client.action_queue = Queue()
         # Wait for in-flight inference and clear RTC/model queues before homing.
