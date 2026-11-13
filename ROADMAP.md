@@ -100,10 +100,20 @@ blue task); REAL = 440 blue (`arjunsinghyadav2/blue_sort_black_bg_colored_cups_v
 mislabeled (0real_100sim has the real-only set's exact 162,221 frames). No ~1000-episode sim set found; ask Ven/Arjun.
 3.0b deliberately stays on the same 100 sim episodes so only the initialization changes.
 
-- [ ] 3.1 Generate language-contrastive sim data with the automated scripted IK path (control_gui Quickstart via
-      Record Sim, after 1.12): target ~300 episodes per colour (red/green/blue, ~900 total), same scenes,
-      recorded at the pinned 17.4 Hz rate with the 1.4 camera path, task string per colour. Verify a sample
-      loads and matches deployment features before the full collection.
+- [ ] 3.1a Headless collection architecture (prompt2assembly-style): launcher mode with NO window and NO stream;
+      extract control_gui's scripted pick-and-place (Quickstart sequence) into a GUI-free collector module/ROS node
+      that control_gui also calls (no Tk, no virtual display needed for collection).
+- [ ] 3.1b One rate everywhere: sim rate cap = lerobot-record fps = dataset `fps` metadata = deployment fps.
+      Prefer 30 Hz (matches the real datasets for sim+real co-training) if headless Isaac holds it with margin on
+      a quiet box; else 20 Hz. Verify recorded frame timing against wall clock and sim clock (no synthetic
+      timestamps), and that cameras deliver exactly one frame per step.
+- [ ] 3.1c Diversity and recovery: randomize lego poses (as now) AND cup layout, approach offsets/heights and
+      speed; DART-style noise injection (perturb executed motion, record the planner's corrective command as the
+      action label) so the policy learns recovery; balanced colours; hold out a fixed eval seed set.
+- [ ] 3.1d Pilot 50 episodes, validate (load with LeRobotDataset, feature/fps match with deployment, spot-check
+      videos), then full collection ~300 per colour (red/green/blue, ~900) with per-colour task strings, plus a
+      data card. Searched 2026-11-13: no larger existing sim set on HF (3 accounts + global search), ASU Drive,
+      dual-a4500 or rtx6000 (own folders); only teammates' machines unchecked.
 - [ ] 3.2 Fine-tune (more steps/episodes than 10k/100), sim/real mix per the coursework findings.
 - [ ] 3.3 Re-run the Phase 1 evaluation matrix.
 
