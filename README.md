@@ -213,13 +213,18 @@ viewport-publisher list only describes the optional manual capture path.
   (17.5 → 12.8), so this is an observed improvement, not an isolated CPU benchmark.
 - **Sim pacing is a ceiling under shared CPU load.** `up --rate-hz 17.4` (default
   from the recording-rate analysis) sets and reads back Kit's main run-loop
-  limiter after the World exists. Physics remains 60 Hz: target RTF = 0.2900.
+  limiter after the World exists. Each simulation frame advances 1/60 s: target RTF = 0.2900.
   `--rate-hz 19.4` supports the timing sweep; `--rate-hz 0` is unthrottled.
   The launcher disables `syncToPresent`, which otherwise bypasses the main-loop
   limiter. A 65.09 s loaded-box run measured RTF 0.2799, 16.79 Hz and
   59.55 ms/frame (load 23.51); 10 s windows ranged 0.2684–0.2852, so one
   window missed the ±0.02 band. The limiter cannot recover time lost to
-  CPU contention. An idempotent `up` reapplies the requested ceiling.
+  CPU contention. The final 65.19 s GUI handoff run was slower: RTF 0.2672,
+  62.38 ms/frame at load 25.02, below the target band. The adjacent unthrottled
+  profile at load 20.81 reached RTF 0.5363 / 31.08 ms, leaving 26.39 ms of
+  average budget headroom at that measured load. An idempotent `up` reapplies
+  the requested ceiling. Existing physics substeps remain 1/120 s; their rate
+  is distinct from the observed 1/60 s simulation-frame/clock increment.
 
 - **GPU wedge on NVIDIA driver <580** during cold-cache launches: `up` stops with
   a `GPU wedge (...)` message instead of hanging. See Troubleshooting below.

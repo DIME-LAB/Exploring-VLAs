@@ -130,7 +130,7 @@ For real-hardware data collection see [`LEROBOT_ROS2_MAC_SETUP.md`](vla_SO-ARM10
 | Isaac Sim launch fails with `Failed to create any GPU devices` (CUDA 999) | `sudo rmmod nvidia_uvm && sudo modprobe nvidia_uvm` (UVM module reload — safe; doesn't touch display) |
 | Cross-Python DDS discovery silently fails between Humble producers and Jazzy consumers | `linux-env/cyclonedds.xml` enables multicast on `lo`. Sourced automatically by `record_sim_isaac.sh` and the stack_start path |
 | `kill -9` on Isaac Sim / RViz / tkinter cascades KWin BadWindow errors | Always SIGTERM/SIGINT. `stack_stop.sh` handles this; never `pkill -9` X-window-owning procs |
-| Sim timing under shared CPU load | `--rate-hz 17.4` is the default ceiling (RTF 0.29 at 60 Hz physics); use `0` to measure headroom. See README measurements |
+| Sim timing under shared CPU load | `--rate-hz 17.4` is the default ceiling (RTF 0.29 at 60 simulation frames/s); use `0` to measure headroom. See README measurements |
 
 ## macOS gotchas (top 5)
 
@@ -153,7 +153,7 @@ For real-hardware data collection see [`LEROBOT_ROS2_MAC_SETUP.md`](vla_SO-ARM10
 Simulation invariants (details and measurements: [README](README.md#simulation-cameras)):
 
 - `DEFAULT_SIM_RATE_HZ` in the launcher is the single default (17.4 Hz from
-  ROADMAP 1.1). Apply/read pacing after World creation; keep physics at 60 Hz.
+  ROADMAP 1.1). Apply/read pacing after World creation; keep physics dt unchanged (1/120 s here); sim frames advance 1/60 s.
   Kit 110.3 needs `syncToPresent=false` for the main limiter to take effect.
 - Production cameras use ROS2CameraHelper rgb8. Workspace shares the stream
   render product. Keep one publisher per topic and camera/clock/pose reset-on-stop
