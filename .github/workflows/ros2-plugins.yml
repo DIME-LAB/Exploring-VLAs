@@ -7,6 +7,9 @@ on:
     paths: ["packages/**", ".github/workflows/ros2-plugins.yml", "lerobot"]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   packages:
     runs-on: ubuntu-24.04

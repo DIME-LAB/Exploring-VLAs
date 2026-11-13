@@ -7,6 +7,8 @@ import queue
 import time
 import traceback
 import threading
+import os
+from multiprocessing.connection import wait
 
 
 def _replace(queue_, value):
@@ -87,8 +89,8 @@ def _model_worker(config, model, device, command_text, command_generation, resul
                 policy.reset()
                 pre.reset()
                 post.reset()
-            start = next_step.value
             obs = robot.get_observation()
+            start = next_step.value
             prepared = {"observation.state": np.array([obs[key] for key in robot.action_features], dtype=np.float32)}
             prepared.update({f"observation.images.{key}": obs[key] for key in config.cameras})
             with torch.inference_mode():
@@ -106,14 +108,26 @@ def _model_worker(config, model, device, command_text, command_generation, resul
             robot.disconnect()
 
 
+def _run_worker(target, args):
+    parent = mp.parent_process()
+    if parent is not None:
+        def parent_done():
+            wait([parent.sentinel])
+            os._exit(0)
+        threading.Thread(target=parent_done, daemon=True, name="lerobot_task_parent").start()
+    target(*args)
+
+
 class PolicyProcess:
-    def __init__(self, robot_config, *, device="cuda", response_timeout_s=120):
+    def __init__(self, robot_config, *, device="cuda", response_timeout_s=120, worker_target=None, stop_timeout_s=5):
         self.config = robot_config
         self.device = device
         self.response_timeout_s = response_timeout_s
         self.process = None
         self.buffer = ActionBuffer()
         self._lock = threading.RLock()
+        self._worker_target = worker_target or _model_worker
+        self.stop_timeout_s = stop_timeout_s
 
     def start(self, instruction, model):
         if self.process is not None:
@@ -125,9 +139,10 @@ class PolicyProcess:
         self.next_step, self.stop_event = context.Value("q", 0), context.Event()
         self.buffer = ActionBuffer()
         self._write_instruction(instruction)
-        self.process = context.Process(target=_model_worker, args=(
+        worker_args = (
             self.config, model, self.device, self.command_text, self.command_generation,
-            self.results, self.next_step, self.stop_event),
+            self.results, self.next_step, self.stop_event)
+        self.process = context.Process(target=_run_worker, args=(self._worker_target, worker_args),
             name="lerobot_task_observation", daemon=True)
         self.process.start()
         self.last_response = time.monotonic()
@@ -182,10 +197,13 @@ class PolicyProcess:
         if self.process is None:
             return
         self.stop_event.set()
-        self.process.join(timeout=5)
+        self.process.join(timeout=self.stop_timeout_s)
         if self.process.is_alive():
             self.process.terminate()
-            self.process.join(timeout=5)
+            self.process.join(timeout=self.stop_timeout_s)
+        if self.process.is_alive():
+            self.process.kill()
+            self.process.join(timeout=self.stop_timeout_s)
         if self.process.is_alive():
             raise RuntimeError("Policy process did not stop")
         self.process.close()
