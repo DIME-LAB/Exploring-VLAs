@@ -25,6 +25,9 @@ exceed that minimum while its planned budget supports it. Resource starvation
 below the configured RTF floor can still trigger the wall watchdog; the
 structured diagnostic records the floor, planned/elapsed times, epoch and kind.
 Policy is recorded and validated on resume.
+Every incomplete sample is also compared with the previous sample; partial
+backward jumps above the origin raise `clock_reversed` with both samples logged.
+An already-completed valid operation retains readiness-first behavior.
 
 | Wait / window in pick_place.py or collect.py | Collector clock / reason | GUI behavior |
 | --- | --- | --- |
@@ -34,6 +37,7 @@ Policy is recorded and validated on resume.
 | Release outer wait | Gripper event's planned sim duration and convergence margin. | Original 10 s Event wait. |
 | `Servo.gripper` blocking inner wait | Its own gripper budget/verdict; origin validated after wait. | Collector adapter absent. Shared FJT helper retains GUI handling. |
 | Blocking FJT trajectory/gripper result | Sim budget when collector adapter exists; goal acceptance remains wall. Quickstart normally uses Servo instead of this fallback. | Original duration+10 s result wait. |
+| `clock-sanity` FJT result | Installs the same sim-time waiter. Duration verdict logs one clock tick plus the 50 ms wall polling quantum scaled by measured RTF (at least 1), added to the 0.4 sim-second controller/transport allowance. | Separate diagnostic node; GUI unchanged. |
 | `_wait_arm_at_rest` at attach | Requires a proved held physical snapshot after Servo convergence. An unheld snapshot refuses immediately: attach owns the scene transaction, so waiting there would block capture. Collector settling uses the sim-tick checks below. | Original 1.5 s wall window / 0.15 s wall dwell. |
 | `Servo.tick` arm/gripper convergence | Native sim stamps: actual planned duration + the same 5 s sim margin. | Collector-only. |
 | Pre-episode home | Home event sim budget; legacy 90 s becomes a minimum wall watchdog. | Collector-only. |

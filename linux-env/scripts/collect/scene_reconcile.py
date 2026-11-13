@@ -20,8 +20,13 @@ def ros_messages():
 def collision_policy(srdf, world_ids=()):
     pairs = {tuple(sorted((n.attrib['link1'],n.attrib['link2'])))
              for n in ET.fromstring(srdf).findall('disable_collisions')}
-    pairs.add(tuple(sorted(('base','ground_plane'))))
-    pairs.update(tuple(sorted((name,'ground_plane'))) for name in world_ids)
+    world_ids=set(world_ids)
+    # Empty-world reset has only SRDF robot pairs. MoveIt removes an object's
+    # ACM entries on world destruction (including when pushing scene diffs).
+    # Ground exemptions belong to the rebuilt scene that contains the ground.
+    if 'ground_plane' in world_ids:
+        pairs.add(tuple(sorted(('base','ground_plane'))))
+        pairs.update(tuple(sorted((name,'ground_plane'))) for name in world_ids)
     names = sorted({name for pair in pairs for name in pair})
     return dict(names=names, allowed=[(a!=b and tuple(sorted((a,b))) in pairs)
                                     for a in names for b in names])

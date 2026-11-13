@@ -1,5 +1,7 @@
 """Actual shared release path under slow /clock, watchdogs and GUI parity."""
 import math
+import ast
+import json
 import threading
 import unittest
 from contextlib import nullcontext
@@ -72,6 +74,15 @@ class MotionWaitTests(unittest.TestCase):
         with self.assertRaises(MotionWaitTimeout):node._wait_motion_event(event,10.)
         self.assertEqual(records[-1]['kind'],'sim_deadline')
         self.assertGreater(clock.sim,8.);self.assertEqual(effects,[])
+
+    def test_partial_backward_clock_jump_above_origin_is_rejected(self):
+        samples=iter([100.,100.,104.,103.]);records=[]
+        waiter=MotionWaiter(lambda:next(samples),lambda epoch:None,records.append,wall=lambda:0.)
+        with self.assertRaises(MotionWaitTimeout) as raised:
+            waiter.wait_until(lambda:False,lambda dt:None,lambda:(20.,1),7)
+        self.assertEqual(raised.exception.diagnostic['kind'],'clock_reversed')
+        self.assertEqual(records[0]['previous_sim_s'],104.)
+        self.assertEqual(records[0]['current_sim_s'],103.)
 
     def test_cancelled_worker_cannot_finish_or_detach_in_next_epoch(self):
         node,event,clock,records,effects,active=self.setup_release(.15)
@@ -175,5 +186,27 @@ class MotionWaitTests(unittest.TestCase):
         self.assertEqual(reader(runtime)['red_2x3_0'],dict(contact_m=[.0013625],rest_m=[0.]))
         view._physics_view.get_rest_offsets=lambda:np.array([[-math.inf]])
         with self.assertRaisesRegex(RuntimeError,'Unresolved effective shape offsets'):reader(runtime)
+
+    def test_clock_sanity_installs_sim_wait_for_slow_fjt_and_bounds_delivery_tolerance(self):
+        tree=ast.parse(Path(__file__).with_name('clock_sanity.py').read_text())
+        functions=[n for n in tree.body if isinstance(n,ast.FunctionDef) and
+                   n.name in ('install_motion_waiter','trajectory_timing_check')]
+        scope=dict(MotionWaiter=MotionWaiter,json=json)
+        exec(compile(ast.Module(body=functions,type_ignores=[]),'clock_sanity.py','exec'),scope)
+        clock=Clock(.15);records=[]
+        node=NS(get_clock=lambda:NS(now=lambda:NS(nanoseconds=round(clock.sim*1e9))),
+                _require_motion_generation=lambda:None,_qs_abort_evt=threading.Event(),_motion_token=lambda:None)
+        scope['install_motion_waiter'](node,records)
+        node._motion_waiter.wall=lambda:clock.wall
+        future=NS(done=lambda:clock.sim>=2.,result=lambda:NS(status=4))
+        wait=method(SHARED,'PickPlaceNode','_wait_motion_future')
+        wait.__globals__['time']=NS(sleep=clock.advance)
+        self.assertEqual(wait(node,future,2.,12.).status,4)
+        self.assertGreater(clock.wall,12.);self.assertEqual(records,[])
+        row=dict(ok=True,sim_seconds=2.45,measured_rtf=.27,pan_error_rad=.001)
+        self.assertTrue(scope['trajectory_timing_check'](row))
+        self.assertAlmostEqual(row['clock_delivery_tolerance_sim_s'],1/30+.05)
+        for changes in [dict(sim_seconds=3.),dict(ok=False),dict(pan_error_rad=.03)]:
+            self.assertFalse(scope['trajectory_timing_check'](dict(row,**changes)))
 
 if __name__=='__main__':unittest.main()

@@ -1,5 +1,12 @@
 # Motion request ownership during sim collection
 
+An empty-world reset installs only SRDF robot collision permissions. Ground
+allowances are created when the actual rebuilt world contains `ground_plane`.
+MoveIt removes destroyed objects from its ACM, including after copying ACM
+while pushing scene diffs. Reset must not expect a permission for an object it
+just removed. The strict off-diagonal/default comparator is shared by both
+barriers; native reset fixtures and world-removal tests cover clear and rebuild.
+
 Planning and ROS validity checks run on wall time with the simulation held. They
 must not own the generation lock. The lock covers short UI/state commits,
 command dispatch/ACK/recording, and scene mutation transactions. A planning

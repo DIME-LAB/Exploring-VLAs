@@ -1,0 +1,175 @@
+{
+  "source": "Captured MoveIt 2.5.10 scene after smoke-v5 resume failure at frozen 211ec11",
+  "seed": 310000,
+  "stage": "world/attachments removed, empty octomap, canonical robot pairs serialized",
+  "native": {
+    "query_components": 1023,
+    "world_ids": [],
+    "attached_ids": [],
+    "octomap_bytes": 0,
+    "robot_joints": {
+      "names": [
+        "shoulder_pan",
+        "shoulder_lift",
+        "elbow_flex",
+        "wrist_flex",
+        "wrist_roll",
+        "gripper_joint"
+      ],
+      "positions": [
+        0.015279785729944706,
+        -0.253215491771698,
+        0.2603782117366791,
+        1.570871353149414,
+        -1.522091269493103,
+        -9.182022949971724e-06
+      ]
+    },
+    "acm": {
+      "entry_names": [
+        "base",
+        "camera_mount",
+        "gripper",
+        "jaw",
+        "lower_arm",
+        "shoulder",
+        "tcp_link",
+        "upper_arm",
+        "usb_camera",
+        "wrist"
+      ],
+      "entry_values": [
+        [
+          false,
+          false,
+          false,
+          false,
+          false,
+          true,
+          false,
+          true,
+          false,
+          false
+        ],
+        [
+          false,
+          false,
+          true,
+          true,
+          false,
+          false,
+          true,
+          false,
+          true,
+          true
+        ],
+        [
+          false,
+          true,
+          false,
+          true,
+          true,
+          false,
+          true,
+          false,
+          true,
+          true
+        ],
+        [
+          false,
+          true,
+          true,
+          false,
+          true,
+          false,
+          true,
+          false,
+          true,
+          true
+        ],
+        [
+          false,
+          false,
+          true,
+          true,
+          false,
+          false,
+          false,
+          true,
+          true,
+          true
+        ],
+        [
+          true,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          true,
+          false,
+          false
+        ],
+        [
+          false,
+          true,
+          true,
+          true,
+          false,
+          false,
+          false,
+          false,
+          true,
+          true
+        ],
+        [
+          true,
+          false,
+          false,
+          false,
+          true,
+          true,
+          false,
+          false,
+          false,
+          false
+        ],
+        [
+          false,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true,
+          false,
+          false,
+          true
+        ],
+        [
+          false,
+          true,
+          true,
+          true,
+          true,
+          false,
+          true,
+          false,
+          true,
+          false
+        ]
+      ],
+      "default_entry_names": [],
+      "default_entry_values": []
+    }
+  },
+  "previous_mismatch": [
+    {
+      "a": "base",
+      "b": "ground_plane",
+      "expected": true,
+      "observed": false
+    }
+  ]
+}

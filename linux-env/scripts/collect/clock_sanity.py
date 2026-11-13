@@ -17,6 +17,27 @@ sys.path.insert(0, str(REPO / 'omni-kit-mcp'))
 from kit_mcp.client import call
 from so_arm101_control.grasp_geometry import ARM_JOINT_NAMES
 from storage import confined, prepare_environment
+from so_arm101_control.motion_wait import MotionWaiter
+
+
+def install_motion_waiter(node, diagnostics):
+    def emit(record):
+        diagnostics.append(record)
+        print(json.dumps(record), flush=True)
+    node._motion_waiter = MotionWaiter(
+        lambda:node.get_clock().now().nanoseconds/1e9,
+        lambda epoch:node._require_motion_generation(), emit,
+        abort=node._qs_abort_evt.is_set)
+
+
+def trajectory_timing_check(row, duration_s=2.):
+    # One delivered /clock tick plus the waiter's 50 ms wall polling quantum.
+    # The existing 0.4 s allowance covers controller/action transport overhead.
+    delivery = 1/30 + .05*max(1., row['measured_rtf'])
+    row['clock_delivery_tolerance_sim_s'] = delivery
+    row['duration_tolerance_sim_s'] = .4 + delivery
+    return bool(row['ok'] and abs(row['sim_seconds']-duration_s)<=.4+delivery
+                and row['pan_error_rad']<=.02)
 
 
 def kit(code):
@@ -38,7 +59,8 @@ def main():
                                      joint_states_topic='/joint_states_measured')
     ex = MultiThreadedExecutor(num_threads=4); ex.add_node(node)
     thread = threading.Thread(target=ex.spin, daemon=True); thread.start()
-    results = []
+    results, diagnostics = [], []
+    install_motion_waiter(node, diagnostics)
     try:
         deadline = time.monotonic() + 30
         while not node._initial_sync_done:
@@ -61,14 +83,15 @@ def main():
                        pan_error_rad=abs(node._actual_positions['shoulder_pan'] - current['shoulder_pan']),
                        measured_positions=dict(node._actual_positions), goal=current,
                        state_source='isaac_articulation')
-            if not ok or abs(sim - 2.) > .4 or row['pan_error_rad'] > .02:
+            if not trajectory_timing_check(row):
                 raise RuntimeError(f'Controller does not follow sim time: {row}')
             if name == 'slow' and row['measured_rtf'] >= 1:
                 raise RuntimeError(f'Required RTF regime not achieved: {row}')
             results.append(row); print(json.dumps(row), flush=True)
     finally:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(dict(passed=len(results) == 2, regimes=results), indent=2))
+        args.output.write_text(json.dumps(dict(passed=len(results) == 2, regimes=results,
+            motion_wait_diagnostics=diagnostics), indent=2))
         try:
             kit((REPO / 'linux-env/scripts/collect/configure_clock.py').read_text() + '\nresult=configure(30)')
             kit('import collection_runtime as c\nc.runtime().cancel()\nresult=c.install("collect")')

@@ -49,6 +49,7 @@ class MotionWaiter:
 
     def wait_until(self, ready, park, budget, epoch, wall_min=0., label='motion', enabled=lambda:True):
         start_sim, start_wall = self.clock(), self.wall()
+        previous_sim = start_sim
         while True:
             self.validate(epoch)
             aborted = self.abort()
@@ -58,9 +59,10 @@ class MotionWaiter:
             planned, operations = budget()
             sim_limit = planned + self.sim_margin*max(1,operations)
             wall_limit = max(wall_min, sim_limit/self.rtf_floor + self.wall_margin)
-            elapsed_sim, elapsed_wall = self.clock()-start_sim, self.wall()-start_wall
+            now_sim = self.clock()
+            elapsed_sim, elapsed_wall = now_sim-start_sim, self.wall()-start_wall
             kind = ('aborted' if aborted else
-                    'clock_reversed' if elapsed_sim < -1e-6 else
+                    'clock_reversed' if now_sim < previous_sim-1e-6 else
                     'sim_deadline' if elapsed_sim > sim_limit else
                     'wall_watchdog' if elapsed_wall > wall_limit else None)
             if kind:
@@ -68,11 +70,13 @@ class MotionWaiter:
                 record = dict(event='motion_wait_timeout', kind=kind, label=label, epoch=epoch,
                     planned_sim_s=planned, operations=operations, sim_margin_s=self.sim_margin,
                     elapsed_sim_s=elapsed_sim, elapsed_wall_s=elapsed_wall,
+                    previous_sim_s=previous_sim, current_sim_s=now_sim,
                     sim_limit_s=sim_limit, wall_watchdog_s=wall_limit, rtf_floor=self.rtf_floor)
                 try:
                     self.emit(record)
                 finally:
                     raise MotionWaitTimeout(record)
+            previous_sim = now_sim
             park(.05)
             self.validate(epoch)
 

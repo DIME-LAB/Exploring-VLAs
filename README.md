@@ -376,13 +376,17 @@ their targets and retain malformed-marker bytes for diagnosis.
 
 Every reset queries the full MoveIt scene, removes remote attachments independently
 of local bookkeeping, clears world objects and rebuilds collision allowances from
-the checked-in SRDF. Final verification requires exact expected world IDs/poses,
+the checked-in SRDF. At the empty-world barrier the policy contains only robot
+pairs. Base/ground and object/ground allowances are added only when the rebuilt
+world contains `ground_plane`; removed objects cannot retain permissions.
+Final verification requires exact expected world IDs/poses,
 no attached objects, the correct ground, measured robot state and canonical ACM.
 ACM comparison checks off-diagonal pairs: missing names/pairs mean false and
 self-pairs are irrelevant. All robot/world permissions remain strict, including
 rejection of defaults. The CPU service fake models MoveIt 2.5.10's
 [constructor](https://github.com/moveit/moveit2/blob/2.5.10/moveit_core/collision_detection/src/collision_matrix.cpp#L66-L96)
-and [serializer](https://github.com/moveit/moveit2/blob/2.5.10/moveit_core/collision_detection/src/collision_matrix.cpp#L332-L361).
+and [serializer](https://github.com/moveit/moveit2/blob/2.5.10/moveit_core/collision_detection/src/collision_matrix.cpp#L332-L361),
+plus [world-removal pruning after ACM copy](https://github.com/moveit/moveit2/blob/2.5.10/moveit_core/planning_scene/src/planning_scene.cpp#L329-L347).
 Final verification checks each rebuilt primitive's type/dimensions and each
 mesh's vertices/triangle identity against the shared shape builders, with
 1e-7 m numeric tolerance and harmless mesh indexing/order changes accepted.
@@ -434,7 +438,12 @@ budgets grow with dispatched trajectories/gripper moves; `--episode-deadline`
 is the minimum wall watchdog, not a fixed robot-motion deadline. Expiry logs its
 kind, epoch, planned/elapsed sim time and wall limit. RPCs, ACKs, frame joins and
 ownership/retirement retain wall deadlines. Wait policy is logged in `run.json`
-and must match on resume. See the [complete wait sweep](docs/notes/collection-wait-clocks.md).
+and must match on resume. Partial backward clock jumps are detected against the
+previous sample, even if still above the wait origin. `clock-sanity` installs
+the same sim-time waiter for its FJT result; its duration check logs a delivery
+allowance of one 30 Hz clock tick plus the 50 ms wall polling quantum scaled by
+measured RTF, in addition to the 0.4 sim-second controller/transport allowance.
+See the [complete wait sweep](docs/notes/collection-wait-clocks.md).
 
 `deploy-clock` restores the ROS follower, keeps physical feedback publishing,
 and caps the identical simulation/camera profile at 30 app Hz (target RTF 1.0).
@@ -473,11 +482,11 @@ bash linux-env/scripts/collect_sim.sh clock-sanity 0 \
   --output /mnt/a4500-backup/exploring-vlas/runtime/instance-0/clock-sanity.json
 
 bash linux-env/scripts/collect_sim.sh run 0 --episodes 5 --seed 310000 --diagnostic \
-  --output /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-physical-v5
+  --output /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-physical-v6
 bash linux-env/scripts/collect_sim.sh export 0 \
-  /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-physical-v5 \
+  /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-physical-v6 \
   --repo-id local/soarm101_headless_smoke \
-  --report-dir /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-physical-v5/report
+  --report-dir /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-physical-v6/report
 
 # Only after the corrected five-episode smoke passes; accepted colours rotate 17/17/16.
 bash linux-env/scripts/collect_sim.sh run 0 --episodes 50 --seed 320000 \

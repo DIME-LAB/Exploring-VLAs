@@ -98,6 +98,7 @@ def moveit_acm_roundtrip(msg):
 class SceneServer:
     def __init__(self):
         self.scene=Scene();self.pending_kind=None;self.false_kind=None;self.pending=[];self.queries=[];self.calls=[]
+        self.destroyed=set()
     def kind(self,scene):
         attached=scene.robot_state.attached_collision_objects
         if attached:return 'detach' if attached[0].object.operation==Object.REMOVE else 'attach'
@@ -113,10 +114,20 @@ class SceneServer:
             else:
                 attached[obj.object.id]=copy.deepcopy(obj);world.pop(obj.object.id,None)
         for obj in scene.world.collision_objects:
-            if obj.operation==Object.REMOVE:world.pop(obj.id,None)
-            else:world[obj.id]=copy.deepcopy(obj)
+            if obj.operation==Object.REMOVE:
+                world.pop(obj.id,None);self.destroyed.add(obj.id)
+            else:
+                world[obj.id]=copy.deepcopy(obj);self.destroyed.discard(obj.id)
         if scene.allowed_collision_matrix.entry_names:
             self.scene.allowed_collision_matrix=moveit_acm_roundtrip(scene.allowed_collision_matrix)
+        # MoveIt 2.5.10 PlanningScene::pushDiffs copies ACM before pruning
+        # DESTROY world entries, lines 329-347; removal also prunes ACM at
+        # processCollisionObjectRemove, lines 1751-1769. A later ADD replaces
+        # DESTROY, whereas an ACM-only update cannot revive a removed object.
+        matrix=self.scene.allowed_collision_matrix
+        indices=[i for i,name in enumerate(matrix.entry_names) if name not in self.destroyed]
+        matrix.entry_names=[matrix.entry_names[i] for i in indices]
+        matrix.entry_values=[NS(enabled=[matrix.entry_values[i].enabled[j] for j in indices]) for i in indices]
         self.scene.world.collision_objects=list(world.values())
         self.scene.robot_state.attached_collision_objects=list(attached.values())
     def apply(self,request):
@@ -189,7 +200,11 @@ class SceneLifetimeTests(unittest.TestCase):
     def test_pending_mutations_are_terminal_even_when_the_server_completes_later(self):
         for kind in ('attach','world_add','world_remove','acm','detach'):
             with self.subTest(kind=kind):
-                c,r,_,server,markers=self.setup_scene();n=c.node;server.pending_kind=kind
+                c,r,_,server,markers=self.setup_scene();n=c.node
+                if kind=='acm':
+                    ground=Object();ground.id='ground_plane';server.scene.world.collision_objects=[ground]
+                    c.scene_reset.set_policy(['ground_plane'])
+                server.pending_kind=kind
                 if kind=='attach':operation=lambda:n._attach_lego_to_gripper('red_2x3_0')
                 elif kind=='world_add':operation=n._add_lego_collision_objects
                 elif kind=='world_remove':operation=lambda:n._remove_single_lego_from_world('red_2x3_0')
@@ -260,6 +275,25 @@ class SceneLifetimeTests(unittest.TestCase):
         self.assertTrue(check['passed']);self.assertTrue(check['occupancy_empty'])
         self.assertTrue(all(item['passed'] for item in check['geometry'].values()))
         self.assertEqual(check['native_scene']['acm']['entry_names'],server.scene.allowed_collision_matrix.entry_names)
+
+    def test_captured_post_episode_clear_has_canonical_robot_policy_then_rebuilds_ground(self):
+        fixture=json.loads(Path(__file__).with_name('reset_scene_fixture.json').read_text())
+        native=fixture['native'];matrix=native['acm']
+        observed=NS(**dict(matrix,entry_values=[NS(enabled=row) for row in matrix['entry_values']]))
+        self.assertEqual(native['world_ids'],[]);self.assertEqual(native['attached_ids'],[])
+        self.assertEqual(native['octomap_bytes'],0)
+        self.assertTrue(policy_matches(observed,collision_policy(SRDF)))
+        self.assertNotIn('ground_plane',collision_policy(SRDF)['names'])
+        self.assertFalse(policy_matches(observed,collision_policy(SRDF,['ground_plane'])))
+        c,_,_,server,_=self.setup_scene();self.populate(c)
+        cleared=c.scene_reset.clear()
+        self.assertEqual(cleared['native_scene']['world_ids'],[])
+        self.assertEqual(cleared['native_scene']['acm'],matrix)
+        self.assertIn('ground_plane',server.destroyed)
+        self.populate(c)
+        self.assertTrue(c.scene_pose_check['passed'])
+        rebuilt=server.scene.allowed_collision_matrix;names=rebuilt.entry_names
+        self.assertTrue(rebuilt.entry_values[names.index('base')].enabled[names.index('ground_plane')])
 
     def test_off_diagonal_policy_is_strict_but_false_only_names_and_self_pairs_are_irrelevant(self):
         policy=dict(names=['a','b','isolated'],allowed=[True,True,False,True,True,False,False,False,True])
