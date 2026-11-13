@@ -16,7 +16,6 @@ stdout lines starting with "READY", "EPSTART", "EPDONE" are for the orchestrator
 
 from __future__ import annotations
 
-import itertools
 import json
 import sys
 import threading
@@ -111,25 +110,16 @@ def main() -> int:
         with state_lock:
             state.update(chunks=0, first_chunk_t=None, ep_t0=time.time(), paused=False)
         emit("EPSTART", {"ep": ep, "t0": state["ep_t0"]})
-        n_actions, deadline = 0, time.perf_counter() + max_s
-        action_times, action_steps = [], []
-        while (
-            time.perf_counter() < deadline
-            and n_actions < max_actions
-            and not abort.is_set()
-        ):
-            t_loop = time.perf_counter()
-            if client.actions_available():
-                client.control_loop_action(False)
-                n_actions += 1
-                action_times.append(time.perf_counter())
-                action_steps.append(client.latest_action)
-            if client._ready_to_send_observation():
-                client.control_loop_observation(cfg.task, False)
-            time.sleep(max(0, cfg.environment_dt - (time.perf_counter() - t_loop)))
+        client.control_loop(
+            task=cfg.task,
+            stop_event=abort,
+            max_duration_s=max_s,
+            max_actions=max_actions,
+        )
+        metrics = client.control_loop_stats
         with state_lock:
             state["paused"] = True
-            dur = time.time() - state["ep_t0"]
+            dur = metrics["duration_s"]
             state["ep_t0"] = float("inf")
         with client.action_queue_lock:
             client.action_queue = Queue()
@@ -140,18 +130,11 @@ def main() -> int:
             {
                 "ep": ep,
                 "duration_s": round(dur, 2),
-                "actions_sent": n_actions,
-                "effective_action_fps": (n_actions - 1)
-                / (action_times[-1] - action_times[0])
-                if n_actions > 1
-                else 0.0,
-                "nonmonotonic_action_steps": sum(
-                    b <= a for a, b in itertools.pairwise(action_steps)
-                ),
+                **metrics,
                 "chunks": state["chunks"],
                 "first_chunk_s": state["first_chunk_t"],
                 "aborted": abort.is_set(),
-                "hit_action_budget": n_actions >= max_actions,
+                "hit_action_budget": metrics["actions_sent"] >= max_actions,
             },
         )
 

@@ -329,6 +329,8 @@ def main():
     metadata = dict(vars(cfg))
     metadata.update(
         gpu_uuid=env["CUDA_VISIBLE_DEVICES"],
+        host_cpu_count=os.cpu_count(),
+        host_load_start=list(os.getloadavg()),
         started_utc=time.strftime("%FT%TZ", time.gmtime()),
         fork_commit=subprocess.check_output(
             ["git", "-C", str(REPO / "lerobot"), "rev-parse", "HEAD"], text=True
@@ -502,6 +504,7 @@ def main():
                     effective_action_fps=done["effective_action_fps"],
                     max_blue_lift_m=max_lift,
                     final=detail,
+                    host_load_end=list(os.getloadavg()),
                     client=done,
                     failure_note=""
                     if success
