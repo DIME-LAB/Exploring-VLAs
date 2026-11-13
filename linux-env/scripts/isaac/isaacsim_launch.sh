@@ -2,7 +2,7 @@
 # Launch, close and check Isaac Sim 6.1 with the soarm101-dt extension and the omni-kit-mcp bridge.
 #
 # Usage:
-#   isaacsim_launch.sh launch [ext-id] [--stream] [--rate-hz HZ]  # launch, then block until the bridge answers
+#   isaacsim_launch.sh launch [ext-id] [--stream|--headless] [--instance N] [--rate-hz HZ]  # launch, then block until the bridge answers
 #   isaacsim_launch.sh rate [hz]                   # apply/read pacing after World exists; 0 = unlimited
 #   isaacsim_launch.sh wait [window]               # block until the bridge answers; first-run RTX compile extends it
 #   isaacsim_launch.sh quick-start [json]          # soarm101.quick_start while watching Kit (wedge detection, no retry)
@@ -43,6 +43,29 @@
 
 set -u
 
+# An index scopes every resource; default launch/close behavior remains the manual instance.
+INSTANCE_INDEX="${SOARM_INSTANCE_INDEX:-}"
+launch_args=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --instance) INSTANCE_INDEX="${2:?--instance requires an index}"; shift 2 ;;
+        *) launch_args+=("$1"); shift ;;
+    esac
+done
+set -- "${launch_args[@]}"
+if [ -n "$INSTANCE_INDEX" ]; then
+    [[ "$INSTANCE_INDEX" =~ ^[0-9]+$ ]] && [ "$INSTANCE_INDEX" -le 9 ] || {
+        echo '--instance must be an integer from 0 to 9' >&2; exit 2;
+    }
+    export SOARM_INSTANCE_INDEX="$INSTANCE_INDEX"
+    export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-$((90 + INSTANCE_INDEX))}"
+    export OMNI_KIT_MCP_PORT="${OMNI_KIT_MCP_PORT:-$((8777 + 2 * INSTANCE_INDEX))}"
+    export SOARM_KIT_MCP_PORT="$OMNI_KIT_MCP_PORT"
+    INSTANCE_ROOT="${SOARM_INSTANCE_ROOT:-/mnt/a4500-backup/exploring-vlas/runtime/instance-$INSTANCE_INDEX}"
+    mkdir -p "$INSTANCE_ROOT"
+    export ISAACSIM_LOG="${ISAACSIM_LOG:-$INSTANCE_ROOT/isaac.log}"
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
@@ -59,7 +82,7 @@ RATE_HZ="${SOARM_SIM_RATE_HZ:-$DEFAULT_SIM_RATE_HZ}"
 MCP_PORT="${OMNI_KIT_MCP_PORT:-${SOARM_KIT_MCP_PORT:-8767}}"
 STREAM_SIGNAL_PORT=49100
 LOG="${ISAACSIM_LOG:-/tmp/isaacsim-soarm101.log}"
-PIDFILE="/tmp/isaacsim-soarm101.pid"
+PIDFILE="${INSTANCE_ROOT:-/tmp}/isaacsim-soarm101.pid"
 WEDGE_S="${ISAACSIM_WEDGE_S:-120}"
 
 client() {  # client <tool> [json] — the omni-kit-mcp reference client, pinned to our bridge
@@ -231,19 +254,27 @@ PY
 }
 
 do_launch() {
-    local ext="soarm101-dt" stream=0 arg
+    local ext="soarm101-dt" stream=0 headless=0 arg
     while [ $# -gt 0 ]; do
         arg="$1"
         case "$arg" in
             --rate-hz) RATE_HZ="${2:?--rate-hz needs a value}"; shift ;;
             --rate-hz=*) RATE_HZ="${arg#--rate-hz=}" ;;
             --stream) stream=1 ;;
+            --headless) headless=1 ;;
             -*) echo "unknown option: $arg" >&2; return 2 ;;
             *) ext="$arg" ;;
         esac
         shift
     done
     validate_rate || return 2
+    if [ "$stream" = 1 ] && [ "$headless" = 1 ]; then
+        echo '--stream and --headless are mutually exclusive' >&2; return 2
+    fi
+    if [ -n "${INSTANCE_ROOT:-}" ]; then
+        available="$(df --output=avail -B1 / | tail -1)"
+        [ "$available" -ge 96636764160 ] || { echo 'Root disk below 90 GiB free' >&2; return 1; }
+    fi
 
     if [ ! -x "$ISAACSIM_BIN" ]; then
         echo "ERROR: ISAACSIM_BIN not executable: $ISAACSIM_BIN" >&2
@@ -293,13 +324,18 @@ do_launch() {
         # carries no usable address.
         args+=(isaacsim.exp.full.streaming --no-window
                "--/exts/omni.kit.livestream.app/primaryStream/publicIp=$ip")
+    elif [ "$headless" = 1 ]; then
+        args+=(isaacsim.exp.full --no-window
+               --disable omni.kit.livestream.app
+               --disable omni.kit.livestream.webrtc
+               --disable omni.kit.livestream.native)
     else
         args+=(isaacsim.exp.full)
         export DISPLAY="${DISPLAY:-:0}"
     fi
     args+=(--ext-folder "$EXT_FOLDER"
            --ext-folder "$KIT_MCP_ROOT/exts"
-           --enable omni.kit.mcp --enable omni.kit.mcp.panel
+           --enable omni.kit.mcp
            --enable "$ext"
            --/renderer/multiGpu/enabled=false "--/renderer/activeGpu=$GPU" --/physics/cudaDevice=0
            # isaacsim.exp.full turns on the async-rendering toggle (isaacsim.core.throttling); with it,
@@ -311,12 +347,28 @@ do_launch() {
            --/app/runLoops/main/syncToPresent=false
            --/app/runLoops/main/rateLimitUseBusyLoop=false
            # Never save this session's /persistent settings into the shared install's config.
+           --/app/player/useFixedTimeStepping=true
+           --/exts/omni.kit.renderer.core/present/enabled=false
+           --/app/renderer/skipWhileMinimized=false
+           --/app/renderer/sleepMsOnFocus=0
+           --/app/renderer/sleepMsOutOfFocus=0
+           --/persistent/omni/replicator/captureOnPlay=1
            --/app/settings/persistent=false
            "--/soarm101/rateHz=$RATE_HZ")
+    [ "$headless" = 1 ] || args+=(--enable omni.kit.mcp.panel)
+    if [ -n "${INSTANCE_ROOT:-}" ]; then
+        args+=(--portable-root "$INSTANCE_ROOT/portable"
+               "--/exts/omni.services.transport.server.http/port=$((8778 + 2 * INSTANCE_INDEX))"
+               --/exts/omni.services.transport.server.http/allow_port_range=false
+               "--/persistent/physics/numThreads=${SOARM_PHYSICS_THREADS:-4}"
+               --/plugins/carb.tasking.plugin/threadCount=6
+               --/exts/omni.replicator.srtx/enabled=false
+               "--/rtx/shaderDb/shaderCachePath=$HOME/.cache/ov/shaders")
+    fi
     # shellcheck disable=SC2206
     [ -n "${ISAACSIM_EXTRA_ARGS:-}" ] && args+=(${ISAACSIM_EXTRA_ARGS})
 
-    echo "Launching Isaac Sim 6.1: $ext ($([ "$stream" = 1 ] && echo "WebRTC stream on $ip:$STREAM_SIGNAL_PORT" || echo "local window"))"
+    echo "Launching Isaac Sim 6.1: $ext ($([ "$stream" = 1 ] && echo "WebRTC stream on $ip:$STREAM_SIGNAL_PORT" || { [ "$headless" = 1 ] && echo "headless, no stream" || echo "local window"; }))"
     echo "  Bin:    $ISAACSIM_BIN"
     echo "  GPU:    $GPU ($gpu_uuid)"
     echo "  Bridge: localhost:$MCP_PORT, tools $TOOLS_MODULE"
@@ -324,7 +376,7 @@ do_launch() {
     (
         # Isaac-only environment, scoped to this launch.
         unset ROS_VERSION ROS_PYTHON_VERSION AMENT_PREFIX_PATH CMAKE_PREFIX_PATH \
-              COLCON_PREFIX_PATH ROS_PACKAGE_PATH
+              COLCON_PREFIX_PATH ROS_PACKAGE_PATH ROS_LOCALHOST_ONLY
         venv="$(dirname "$(dirname "$ISAACSIM_BIN")")"
         # Isaac's bundled ROS 2 Humble (same distro as the host's /opt/ros/humble) over
         # CycloneDDS. rcutils dlopens the RMW through LD_LIBRARY_PATH, so the bundled lib dir
@@ -338,14 +390,21 @@ do_launch() {
         export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
         export CYCLONEDDS_URI="file://$CYCLONEDDS_XML"
         export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}"
-        export CUDA_VISIBLE_DEVICES="$gpu_uuid"
+        if [ -n "${INSTANCE_ROOT:-}" ]; then
+            unset CUDA_VISIBLE_DEVICES
+        else
+            export CUDA_VISIBLE_DEVICES="$gpu_uuid"
+        fi
         export OMNI_KIT_ACCEPT_EULA=YES
         export PYTHONDONTWRITEBYTECODE=1
+        export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
         export OMNI_KIT_MCP_PORT="$MCP_PORT"
         export KIT_MCP_TOOL_PATHS="$TOOLS_PATH"
         export KIT_MCP_TOOL_MODULES="$TOOLS_MODULE"
         # Runtime outputs (scene_states/, videos/) go outside the source tree, not Isaac's cwd.
-        export MCP_CLIENT_OUTPUT_DIR="${MCP_CLIENT_OUTPUT_DIR:-/tmp/soarm101-resources}"
+        default_output=/tmp/soarm101-resources
+        [ -n "${INSTANCE_ROOT:-}" ] && default_output="$INSTANCE_ROOT/resources"
+        export MCP_CLIENT_OUTPUT_DIR="${MCP_CLIENT_OUTPUT_DIR:-$default_output}"
         mkdir -p "$MCP_CLIENT_OUTPUT_DIR"
         # The ROS 2 bridge's dlopens exhaust glibc's static-TLS surplus on top of Isaac+torch, and
         # torch needs the venv's nvJitLink resolved first. ld.so reads both before Python starts,
@@ -353,7 +412,9 @@ do_launch() {
         export GLIBC_TUNABLES="${GLIBC_TUNABLES:+$GLIBC_TUNABLES:}glibc.rtld.optional_static_tls=2097152"
         nvjitlink="$(ls "$venv"/lib/python3.*/site-packages/nvidia/nvjitlink/lib/libnvJitLink.so.12 2>/dev/null | head -1)"
         [ -f "$nvjitlink" ] && export LD_PRELOAD="$nvjitlink${LD_PRELOAD:+:$LD_PRELOAD}"
-        exec setsid "$ISAACSIM_BIN" "${args[@]}" > "$LOG" 2>&1 < /dev/null
+        launch_nice="${SOARM_SIM_NICE:-0}"
+        [ -n "${INSTANCE_ROOT:-}" ] && launch_nice="${SOARM_SIM_NICE:-10}"
+        exec setsid nice -n "$launch_nice" "$ISAACSIM_BIN" "${args[@]}" > "$LOG" 2>&1 < /dev/null
     ) &
     echo "$!" > "$PIDFILE"
     echo "  PID:    $!"
@@ -425,6 +486,15 @@ do_status() {
 
 case "${1:-help}" in
     launch)  shift; do_launch "$@" ;;
+    collection-rate)
+        fps="${2:?collection-rate requires 20 or 30}"
+        params="$(python3 - "$REPO_ROOT" "$fps" "${3:-collect}" <<'PYCODE'
+import json, pathlib, sys
+source = (pathlib.Path(sys.argv[1]) / 'linux-env/scripts/collect/configure_clock.py').read_text()
+print(json.dumps({'code': source + '\nresult = configure(' + repr(int(sys.argv[2])) + ', preset=' + repr(sys.argv[3]) + ')'}))
+PYCODE
+)"
+        client run_python "$params" --timeout 30 ;;
     rate)    do_rate "${2:-$RATE_HZ}" ;;
     wait)    do_wait "${2:-$WEDGE_S}" ;;
     quick-start) do_quick_start "${2:-}" ;;

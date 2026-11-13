@@ -100,21 +100,24 @@ blue task); REAL = 440 blue (`arjunsinghyadav2/blue_sort_black_bg_colored_cups_v
 mislabeled (0real_100sim has the real-only set's exact 162,221 frames). No ~1000-episode sim set found; ask Ven/Arjun.
 3.0b deliberately stays on the same 100 sim episodes so only the initialization changes.
 
-- [ ] 3.1a Headless collection architecture (prompt2assembly-style): launcher mode with NO window and NO stream;
+- [x] 3.1a Headless collection architecture (prompt2assembly-style): launcher mode with NO window and NO stream;
       extract control_gui's scripted pick-and-place (Quickstart sequence) into a GUI-free collector module/ROS node
       that control_gui also calls (no Tk, no virtual display needed for collection).
-- [ ] 3.1b Clock design (decided 2026-11-13): SIM TIME everywhere for collection (ros2_control, MoveIt, the
+- [x] 3.1b Clock design (decided 2026-11-13): SIM TIME everywhere for collection (ros2_control, MoveIt, the
       scripted module and the collector `use_sim_time`, on Isaac /clock); frames written on sim ticks via the
       LeRobotDataset API (exactly one frame per 1/30 s sim time, dataset fps = 30 = real), not wall-clock
-      lerobot-record. The rate cap becomes a speed knob only: collection uncapped (faster than real time);
+      lerobot-record. The rate cap becomes a speed knob only: collection uncapped (as fast as the box sustains);
       deployment/eval the same stack capped at 1.0x real time so wall-clock clients (policy, real robot) match.
       Presets `collect` and `deploy`; timing audit proves one frame per tick with state/image/action from one tick.
-- [ ] 3.1c Diversity and recovery: randomize lego poses (as now) AND cup layout, approach offsets/heights and
+- [x] 3.1c Diversity and recovery: randomize lego poses (as now) AND cup layout, approach offsets/heights and
       speed; DART-style noise injection (perturb executed motion, record the planner's corrective command as the
       action label) so the policy learns recovery; balanced colours; hold out a fixed eval seed set.
 - [ ] 3.1d Pilot 50 episodes, validate (load with LeRobotDataset, feature/fps match with deployment, spot-check
       videos), then full collection ~300 per colour (red/green/blue, ~900) with per-colour task strings, plus a
-      data card. Searched 2026-11-13: no larger existing sim set on HF (3 accounts + global search), ASU Drive,
+      data card.
+    - [ ] Pilot: 50 accepted episodes, balanced 17/17/16, validated and copied to the Mac (5-episode smoke passed).
+    - [ ] Full collection: ~900 episodes; lead schedules after pilot review.
+      Searched 2026-11-13: no larger existing sim set on HF (3 accounts + global search), ASU Drive,
       dual-a4500 or rtx6000 (own folders); only teammates' machines unchecked.
 - [ ] 3.1f In-process ("battery"-style) collector, if the 3.1d pilot's throughput is too low for ~900+ episodes:
       standalone headless Isaac process, sim stepped only on demand, in-process IK/planning (Lula/RMPflow with cup

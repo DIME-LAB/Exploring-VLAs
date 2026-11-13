@@ -33,7 +33,7 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch_ros.actions import Node
+from launch_ros.actions import Node, SetParameter
 from ament_index_python.packages import get_package_share_directory
 
 
@@ -57,6 +57,11 @@ def generate_launch_description():
     use_gui = LaunchConfiguration('gui')
 
     return LaunchDescription([
+        DeclareLaunchArgument('use_sim_time', default_value='false',
+                              description='Drive controllers, MoveIt and pose publishers from Isaac /clock'),
+        DeclareLaunchArgument('controllers_config', default_value=controllers_yaml,
+                              description='ros2_control controller YAML; collection supplies an isolated 120 Hz preset'),
+        SetParameter(name='use_sim_time', value=LaunchConfiguration('use_sim_time')),
         # Arguments
         DeclareLaunchArgument('real_hardware', default_value='false',
                               description='Use real servo hardware'),
@@ -87,7 +92,7 @@ def generate_launch_description():
             executable='ros2_control_node',
             parameters=[
                 {'robot_description': robot_description},
-                controllers_yaml,
+                LaunchConfiguration('controllers_config'),
             ],
             output='screen',
         ),
