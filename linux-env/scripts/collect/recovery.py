@@ -19,19 +19,24 @@ def recovery_parameters(seed,enabled):
 
 
 def recovery_geometry(pose,bbox,params,**settings):
-    from so_arm101_control.grasp_geometry import make_grasp_plan, find_reachable_grasp_yaw
-    plan=make_grasp_plan(pose,bbox,**settings)
+    from so_arm101_control.grasp_geometry import make_reachable_grasp_plan
     distance=params['signed_offset_m']
     if not .02<=abs(distance)<=.04:raise ValueError('Re-grasp offset must be 2–4 cm')
-    dx,dy=-math.sin(plan['yaw'])*distance,math.cos(plan['yaw'])*distance
-    poses=[]
-    for name,x,y,z in plan['poses']:
-        poses.extend([('true_'+name,x,y,z),('miss_'+name,x+dx,y+dy,z)])
-    final=next(p for p in poses if p[0]=='miss_final')
-    poses.append(('miss_lift',final[1],final[2],final[3]+params['lift_m']))
-    yaw,solutions,debug=find_reachable_grasp_yaw(poses,plan['yaw'])
-    return dict(offset_m=[dx,dy,0.],yaw=yaw,poses=poses,solutions=solutions,debug=debug,
-                true_geometry=plan)
+    def all_poses(plan):
+        direction=plan['yaw']+params.get('direction_offset_rad',0.)
+        dx,dy=-math.sin(direction)*distance,math.cos(direction)*distance
+        poses=[]
+        for name,x,y,z in plan['poses']:
+            poses.extend([('true_'+name,x,y,z),('miss_'+name,x+dx,y+dy,z)])
+        final=next(p for p in poses if p[0]=='miss_final')
+        return poses+[('miss_lift',final[1],final[2],final[3]+params['lift_m'])]
+    selected=make_reachable_grasp_plan(pose,bbox,additional_poses=all_poses,**settings)
+    plan=selected['geometry'];direction=plan['yaw']+params.get('direction_offset_rad',0.)
+    dx,dy=-math.sin(direction)*distance,math.cos(direction)*distance
+    debug=[line for attempt in selected['attempts'] for line in attempt.get('debug',[])]
+    return dict(offset_m=[dx,dy,0.],yaw=selected['chosen_yaw'],poses=selected['checked_poses'],
+                solutions=selected['solutions'],debug=debug,true_geometry=plan,
+                grasp_spec={k:v for k,v in selected.items() if k!='solutions'})
 
 
 def detect_miss(window,object_name,close_target):
@@ -80,7 +85,11 @@ def receipt_error(receipt,rows=None):
             if not any(matches(native_frame(r)['sim_ns'],end) and r['phase']==step['stage'] for r in rows):return 'recovery stage is not in recorded frames'
         distance=math.sqrt(sum(x*x for x in report['geometry']['offset_m']))
         if not .02-1e-12<=distance<=.04+1e-12:return 'recovery offset outside 2–4 cm'
-        if abs(distance-abs(receipt['params']['regrasp']['signed_offset_m']))>1e-12:return 'recovery offset differs from seed'
+        if 'selection' in report:
+            from recovery_search import selection_error
+            error=selection_error(report,receipt['params']['regrasp'])
+            if error:return error
+        elif abs(distance-abs(receipt['params']['regrasp']['signed_offset_m']))>1e-12:return 'recovery offset differs from seed'
         if not report['scene_after_reopen']['passed']:return 'recovery scene was not verified'
     except (KeyError,TypeError,ValueError,IndexError):return 'recovery evidence is incomplete'
     return None

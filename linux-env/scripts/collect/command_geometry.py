@@ -32,7 +32,7 @@ class CommandCollision(RuntimeError):
         super().__init__('Execution geometry refused: '+repr(evidence))
 
 
-def checked_segment(start,target,check,limits,budget=None,spacing=.01):
+def checked_segment(start,target,check,limits,budget=None,spacing=.01,allow_measured_start=None):
     """Both endpoints and every <=0.01 rad joint-space subdivision are queried."""
     if len(start)!=6 or len(target)!=6 or not all(math.isfinite(v) for v in [*start,*target]):
         raise ValueError('Incomplete/non-finite execution segment')
@@ -42,18 +42,25 @@ def checked_segment(start,target,check,limits,budget=None,spacing=.01):
     if count>QUERY_POLICY['max_segment_subdivisions']:raise ValueError('Execution tracking gap too large to validate')
     budget=budget if budget is not None else QueryBudget(count+1)
     if budget.count+count+1>budget.limit:raise RuntimeError('Execution geometry query-count limit exceeded')
+    support=None
     for i in range(count+1):
         u=i/count;q=[a+u*(b-a) for a,b in zip(start,target)]
         valid,contacts=budget.call(check,q)
+        if not valid and i==0 and allow_measured_start is not None:
+            proof=allow_measured_start(contacts)
+            if proof.get('passed'):support=proof;valid=True
         if not valid:
             return dict(passed=False,reason='collision',alpha=u,joints=q,checks=i+1,
                 contacts=[dict(body_1=c.contact_body_1,body_2=c.contact_body_2,depth=c.depth) for c in contacts[:5]])
-    return dict(passed=True,checks=count+1,max_joint_spacing_rad=spacing,target=list(target))
+    result=dict(passed=True,checks=count+1,max_joint_spacing_rad=spacing,target=list(target))
+    if support is not None:result['measured_start_contact']=support
+    return result
 
 
-def final_command(candidate,state,previous,check,limits,max_queries=None):
+def final_command(candidate,state,previous,check,limits,max_queries=None,allow_measured_start=None):
     budget=QueryBudget(QUERY_POLICY['max_final_queries'] if max_queries is None else max_queries)
-    checks=[checked_segment(start,candidate.positions,check,limits,budget) for start in (state,previous)]
+    checks=[checked_segment(start,candidate.positions,check,limits,budget,
+        allow_measured_start=allow_measured_start if index==0 else None) for index,start in enumerate((state,previous))]
     result=dict(passed=all(c['passed'] for c in checks),epoch=candidate.epoch,sim_ns=candidate.stamp_ns,
                 target=list(candidate.positions),paths=checks,query_timing=budget.summary())
     if not result['passed']:raise CommandCollision(result)

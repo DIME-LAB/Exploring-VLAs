@@ -14,6 +14,7 @@ class MotionOperation:
     tag: str
     velocity_scale: float = .5
     planning_attempts: int = 50
+    grasp_spec_json: str = ''
 
     def __post_init__(self):
         if self.event.motion_epoch != self.epoch:

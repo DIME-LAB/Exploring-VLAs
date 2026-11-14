@@ -58,7 +58,8 @@ def main():
         if 'result=c.install()' in code:
             offsets={name:{key+'_m':[PROFILE['expected_offsets_m']['cup_'+key]]*len(PROFILE['primitives']) for key in ('contact','rest')}
                      for name in ('cup_red','cup_green','cup_blue')}
-            return dict(epoch=1,invalid_through_ns=1000000000,local_corners={},effective_shape_offsets=offsets)
+            return dict(epoch=1,invalid_through_ns=1000000000,local_corners={},effective_shape_offsets=offsets,
+                        articulation_audit=dict(fixed_base=True,root_dof_count=0,joint_dof_count=6,link_count=11))
         if 'count_subscribers' in code:return [2,1,1]
         if 'rateLimitFrequency' in code:return True
         raise AssertionError('Unexpected fake Kit request: '+code)

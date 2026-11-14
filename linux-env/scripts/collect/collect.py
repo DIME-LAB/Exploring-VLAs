@@ -45,7 +45,7 @@ from frame_join import SensorAmbiguity,identity as frame_identity,exact_duplicat
 from image_transport import publisher_executor_type
 from comparisons import comparison,matches,interval,native_frame,TOLERANCES
 from contract import COLORS, JOINTS, EVAL_SEEDS, corrective_action, parameters, timing_audit
-from checkpoint import progress, episode_regrasp, require_recovery_mode
+from checkpoint import progress, episode_regrasp, require_recovery_mode, require_episode_mode
 from storage import atomic_json,CANONICAL_ROOT, RootFileGrowth, SceneSafetyMarker, confined, prepare_environment, wait_for_storage
 from protocol import StepGeneration, CancelledGeneration, OwnershipStalled
 from scene_sync import physical_pose_caches, collision_pose_errors
@@ -55,8 +55,11 @@ from cup_geometry import PROFILE,CUP,PRIMITIVES,primitive_world_poses
 from diagnostics import final_stills
 from query_service import StrictQueryClient
 from recovery import REGRASP_POLICY, recovery_geometry, detect_miss
-from dart import DEFAULT_NOISE, SmoothDart, TargetCandidate, PlannerSchedule
+from recovery_search import SEARCH_POLICY,PlanningWallBudget,choose as choose_recovery_plan
+from dart import DEFAULT_NOISE, SmoothDart, ClearanceDart, TargetCandidate, PlannerSchedule
 from command_geometry import choose_noise_scale, final_command, QUERY_POLICY, frame_capacity_seconds
+import support_contact
+from base_drift import summary as base_drift_summary
 from tick_contract import TickContract, TickContractError, require_snapshots, digest, verify_proof, CLOCK_POLICY, STEP_NS
 from episode_policy import (POLICY, QualityReject, ConvergenceFailure, WorkerRegistry,
                             PLANNER_REJECTIONS, FailureStreak, disposition)
@@ -500,6 +503,13 @@ class Servo:
             raise ValueError('Clean and executed planner time laws must have the same duration')
         duration=schedule.duration
         noise=SmoothDart(duration,seed,config,enabled=tag not in ('grasp_home','grasp_home_data','home') and not tag.startswith('regrasp_miss'))
+        grasp_spec=json.loads(operation.grasp_spec_json) if operation is not None and operation.grasp_spec_json else None
+        if grasp_spec is not None:
+            from so_arm101_control.compute_workspace import forward_kinematics
+            with self.node.objects_lock:pose=dict(self.node.objects_data[self.params['object']])
+            bbox=self.node._lookup_bbox(self.params['object'])
+            noise=ClearanceDart(noise,executed_schedule,forward_kinematics,pose['z']+bbox['sz']/2,
+                grasp_spec['geometry']['tcp'][2],self.node._tcp_clearance_var.get()/1000)
         def check(q):
             self.generation.require(epoch)
             return self.node._check_state_valid_with_contacts(dict(zip(JOINTS,q)))
@@ -514,7 +524,8 @@ class Servo:
                     duration=duration,hold_executed=hold_executed,done=done,start=None,epoch=epoch,noise=noise,noise_scale=scale)
                 self.executed_hold=None;self.phase=tag
                 self.noise_specs.append(dict(index=index,phase=tag,**noise.spec,scale=scale,
-                    execution_geometry=preflight,expert_schedule=schedule.spec,executed_schedule=executed_schedule.spec))
+                    execution_geometry=preflight,expert_schedule=schedule.spec,executed_schedule=executed_schedule.spec,
+                    grasp_geometry=grasp_spec,phase_amplitude=noise.phase_statistics(scale) if isinstance(noise,ClearanceDart) else None))
             self.step(True)
 
     def gripper(self, position, duration, blocking, phase='gripper'):
@@ -659,8 +670,10 @@ class Collector:
         finally:
             self._constructing_thread = None  # Revoke before either collector thread starts.
         self.ros_context=self.node.context
+        self.planner_refusals=[]
+        self.planner_refusal_lock=threading.Lock()
         self.node.validity_client=StrictQueryClient(self.node.validity_client,'MoveIt state validity',
-            on_failure=lambda exc:self.abort_stalled_owner(exc,'MoveIt validity query'))
+            on_failure=lambda exc:self.abort_stalled_owner(exc,'MoveIt validity query'),observer=self.observe_validity_request)
         self.node._motion_context = threading.local()
         self.node._motion_generation_provider = lambda: self.generation.epoch
         self.sensors = Sensors(self.node, self.generation)
@@ -934,17 +947,45 @@ class Collector:
             if time.monotonic()>=deadline:raise TickContractError(['ROS clock did not join the held physical tick'])
             if self.stop.wait(.002):raise CancelledGeneration('Collector stopped during clock join')
 
-    def validate_command(self,candidate,state,previous):
+    def validate_command(self,candidate,state,previous,snapshot=None):
         timing=dict(validity_queries=0,validity_query_ms=0.)
         def check(q):
             self.generation.require(candidate.epoch,candidate.stamp_ns)
             start=time.monotonic_ns();timing['validity_queries']+=1
             try:return self.node._check_state_valid_with_contacts(dict(zip(JOINTS,q)))
             finally:timing['validity_query_ms']+=milliseconds(start,time.monotonic_ns())
-        try:return final_command(candidate,state,previous,check,[JOINT_LIMITS[n] for n in JOINTS])
+        allow=None
+        if snapshot is not None:
+            def allow(contacts):
+                rows=support_contact.contact_rows(contacts)
+                if not any(c[k]=='ground_plane' or c[k].startswith('cup_drop_') for c in rows for k in ('body_1','body_2')):
+                    return dict(passed=False)
+                ctx=support_contact.context(snapshot,self.node._ground_z_var.get(),getattr(self.node,'_attached_lego_name',None))
+                return support_contact.classify(rows,ctx)
+        try:return final_command(candidate,state,previous,check,[JOINT_LIMITS[n] for n in JOINTS],allow_measured_start=allow)
         except Exception as exc:
             exc.wall_profile_geometry=timing
             raise
+
+    def observe_validity_request(self,request):
+        # Diagnostic metadata never grants an operation permission to execute.
+        with self.generation.observe_identity() as identity:
+            state=request.robot_state.joint_state
+            record=dict(episode_id=getattr(self,'current_episode_id',None),
+                active_epoch_at_request=identity[0],worker_epoch=getattr(getattr(self.node,'_motion_context',None),'epoch',None),
+                request_wall_ns=time.monotonic_ns(),phase=getattr(self.node,'_last_motion_tag',None),
+                joint_names=list(state.name),joint_positions=list(state.position))
+        def completed(answer):
+            if answer.valid:return
+            evidence=dict(record,response_wall_ns=time.monotonic_ns(),contacts=support_contact.contact_rows(answer.contacts))
+            if not evidence['contacts']:evidence['contact_note']='MoveIt returned no contact pairs'
+            with self.planner_refusal_lock:self.planner_refusals.append(evidence)
+        return completed
+
+    def planner_evidence(self,receipt):
+        lock=getattr(self,'planner_refusal_lock',None)
+        if lock is None:return []
+        with lock:return [copy.deepcopy(q) for q in self.planner_refusals if q['episode_id']==receipt.get('episode_id')]
 
     def reject_quality(self,kind,evidence,snapshots=None):
         if snapshots is None:snapshots=[self.held_snapshot(self.generation.epoch)]
@@ -986,6 +1027,8 @@ class Collector:
                         episode_id=getattr(self,'current_episode_id',None),
                         camera_identity={key:copy.deepcopy(entry[key][2]) for key in ('wrist','top')},
                         camera_layout={k:dict(encoding=entry[k][0].encoding,width=entry[k][0].width,height=entry[k][0].height,step=entry[k][0].step,bytes=len(entry[k][0].data)) for k in ('wrist','top')})
+                    if 'robot_base_world_pose' in snapshot:
+                        row.update(robot_base_world_pose=copy.deepcopy(snapshot['robot_base_world_pose']),robot_base_pose_source=snapshot['robot_base_pose_source'])
                     if not hasattr(self,'tick_audit'):self.tick_audit=TickContract()
                     contract_start=time.monotonic_ns()
                     self.tick_audit.observe(row)
@@ -1009,7 +1052,7 @@ class Collector:
                             tuple(e-c for e,c in zip(executed,clean)),(0.,)*6,tuple(executed),planner_reference=tuple(executed))
                     profile['expert_dart_compute_ms']=milliseconds(compute_start,time.monotonic_ns())
                     profile['stage']='execution_geometry'
-                    geometry=self.validate_command(candidate,state,snapshot['drive_targets'])
+                    geometry=self.validate_command(candidate,state,snapshot['drive_targets'],snapshot)
                     profile['validity_queries']=geometry['query_timing']['queries']
                     profile['validity_query_ms']=geometry['query_timing']['total_query_wall_s']*1000
                     self.generation.require(epoch,stamp)
@@ -1140,30 +1183,34 @@ class Collector:
         snapshot=self.advance_ticks(1)[0]
         self.sync_scene(snapshot=snapshot)
 
-    def regrasp_prefix(self, params, epoch, result):
+    def regrasp_prefix(self, params, epoch, result,planning_budget=None):
         """Execute the miss while labels follow the separate true-target plan."""
         self.generation.require(epoch)
         before=self.held_snapshot(epoch)
         name=params['object'];bbox=self.node._lookup_bbox(name)
         if not bbox:raise ValueError('Re-grasp target has no dimensions')
         with self.node.objects_lock:pose=dict(self.node.objects_data[name])
-        geometry=recovery_geometry(pose,bbox,params['regrasp'],
-            current_wrist_roll=before['state'][4],tcp_clearance=self.node._tcp_clearance_var.get()/1000,
+        settings=dict(current_wrist_roll=before['state'][4],tcp_clearance=self.node._tcp_clearance_var.get()/1000,
             approach_height=params['approach_height_m'],approach_offset=params['approach_offset_m'])
-        report=dict(epoch=epoch,episode_id=self.current_episode_id,kind='regrasp',miss_confirmed=False,geometry=geometry,steps=[])
+        report=dict(epoch=epoch,episode_id=self.current_episode_id,kind='regrasp',miss_confirmed=False,
+            request=dict(pose=pose,bbox=bbox,params=params['regrasp'],settings=settings),candidate_attempts=[],steps=[])
         result['recovery_report']=report
-        if geometry['yaw'] is None:self.reject_quality('planner_reject',dict(stage='regrasp_ik',geometry=geometry))
         # The same target-removal barrier and shared collision validator used
         # by Quickstart; both clean and executed paths are checked separately.
         self.node._remove_single_lego_from_world(name)
-        selected={}
-        for stage,solutions in geometry['solutions'].items():
-            for target in solutions:
-                self.generation.require(epoch)
-                valid,contacts=self.node._check_state_valid_with_contacts(target)
-                if valid:selected[stage]=dict(target);break
-            if stage not in selected:
-                self.reject_quality('planner_reject',dict(stage=stage,reason='all regrasp IK candidates collide'))
+        opening,closing=self.node._gripper_angle_for_object(name)
+        planning_budget=planning_budget or PlanningWallBudget()
+        capacity=SEARCH_POLICY['max_queries']*(QUERY_POLICY['per_query_timeout_s']+QUERY_POLICY['delivery_margin_s'])+5.
+        started=time.monotonic()
+        try:
+            with planning_budget.reserve(capacity):
+                selection=choose_recovery_plan(pose,bbox,params['regrasp'],before['state'],opening,closing,
+                    lambda q:self.node._check_state_valid_with_contacts(dict(zip(JOINTS,q))),
+                    [JOINT_LIMITS[n] for n in JOINTS],lambda:self.generation.require(epoch),settings,report['candidate_attempts'])
+        finally:report['planning_wall']=dict(capacity_s=capacity,elapsed_s=time.monotonic()-started)
+        if selection is None:self.reject_quality('planner_reject',dict(stage='miss_search',reason='all recovery candidates refused',attempts=report['candidate_attempts']))
+        report.update(geometry=selection['geometry'],selection={k:v for k,v in selection.items() if k not in ('geometry','targets')})
+        selected=selection['targets']
         duration=2.5
         def tag(value):
             with self.node._motion_guard():self.node._last_motion_tag=value
@@ -1412,6 +1459,7 @@ class Collector:
             disposition=dict(kind='terminal',reason='attempt_finalization'),motion_epochs=sorted(motion_epochs))
         receipt.setdefault('finalization_errors',[]).append(dict(error=repr(error),exception_type=type(error).__name__,proofs=getattr(error,'proofs',None)))
         receipt['wall_tick_profile']=dict(failed=True,ticks=profiles,async_writes=writes)
+        receipt['planner_refusals']=self.planner_evidence(receipt)
         if isinstance(original,SensorAmbiguity):
             receipt.update(exception_type='SensorAmbiguity',original_sensor_error_preserved=True,sensor_join_failure=original.evidence)
         receipt.update(self.sensors.camera_diagnostics(motion_epochs,duplicate_start,rerender_start,stale_camera_start))
@@ -1468,6 +1516,8 @@ class Collector:
         clock_config = self.mutate_kit('run_python', {'code': (REPO / 'linux-env/scripts/collect/configure_clock.py').read_text() + '\nresult=configure(30)'})
         transport_config = self.mutate_kit('run_python', {'code': 'import sys\nsys.path.insert(0,' + repr(str(REPO / 'linux-env/scripts/collect')) + ')\nimport collection_runtime as c\nresult=c.install()'})
         self.generation.install(transport_config)
+        if transport_config.get('articulation_audit',{}).get('fixed_base') is not True:
+            raise RuntimeError('Unverified/floating articulation; fresh fixed-base scene is required')
         expected_bodies = set(transport_config['local_corners']) | {'cup_red','cup_green','cup_blue'}
         offsets = transport_config['effective_shape_offsets']
         if set(offsets) != expected_bodies:
@@ -1575,7 +1625,7 @@ class Collector:
             atomic_json(root / 'run.json',dict(instance=args.instance, host=socket.gethostname(), gpu_index=int(os.getenv('ISAACSIM_GPU', '0')),
             wall_profile_policy=PROFILE_POLICY,recording_version=6,camera_selection_policy=CAMERA_SELECTION_POLICY,image_transport=self.executor.image_take.metadata, gpu_isolation_initial=initial_gpu_footprint,transport_config=transport_config, observation_state_topic='/joint_states_measured',
             diagnostic=args.diagnostic, success_profile=PROFILE,
-            motion_wait_policy=wait_policy, tick_clock_policy=CLOCK_POLICY,geometry_query_policy=QUERY_POLICY,quality_policy=POLICY,regrasp_policy=REGRASP_POLICY,regrasp_only=args.regrasp_only,normal_only=args.normal_only,recovery_mode=mode,
+            motion_wait_policy=wait_policy, tick_clock_policy=CLOCK_POLICY,geometry_query_policy=QUERY_POLICY,quality_policy=POLICY,regrasp_policy=REGRASP_POLICY,regrasp_search_policy=SEARCH_POLICY,regrasp_only=args.regrasp_only,normal_only=args.normal_only,recovery_mode=mode,
             application_contract='Held at observation tick; read-back verified PhysX targets before one-frame advance; maximum one sim tick latency',
             clock_config=clock_config, domain=90 + args.instance,
             bridge_port=8777 + 2 * args.instance, fps=30, baseline=baseline, baseline_cup_layout=self.baseline_cup_layout, eval_seeds=EVAL_SEEDS,
@@ -1593,9 +1643,10 @@ class Collector:
             color = COLORS[accepted % 3]
             params = (json.loads(args.replay_receipt.read_text())['params'] if args.replay_receipt
                       else parameters(args.seed+trial,color,regrasp=episode_regrasp(accepted,args.regrasp_only,args.normal_only)))
+            require_episode_mode(params,args.regrasp_only,args.normal_only)
             params['trial'] = trial
             path = root / f'attempt-{trial:04d}'
-            receipt = dict(physics=transport_config['physics_config'],params=params,accepted=False,episode_id=hashlib.sha256((str(root)+':'+str(trial)+':'+str(params['seed'])).encode()).hexdigest())
+            receipt = dict(physics=transport_config['physics_config'],articulation_audit=transport_config['articulation_audit'],params=params,accepted=False,episode_id=hashlib.sha256((str(root)+':'+str(trial)+':'+str(params['seed'])).encode()).hexdigest())
             wait_log_start = len(self.wait_diagnostics)
             failure_log_start = len(self.capture_failures)
             cycle_result = {}
@@ -1672,11 +1723,12 @@ class Collector:
                 with self.generation.own('cycle request'):
                     cycle_epoch = self.generation.epoch
                     motion_epochs.add(cycle_epoch)
-                def run_cycle(object_name=params['object'], epoch=cycle_epoch):
+                planning_budget=PlanningWallBudget()
+                def run_cycle(object_name=params['object'], epoch=cycle_epoch,planning_budget=planning_budget):
                     try:
                         def run_and_verdict():
                             if params.get('recovery')=='regrasp':
-                                self.regrasp_prefix(params,epoch,cycle_result)
+                                self.regrasp_prefix(params,epoch,cycle_result,planning_budget)
                             ok=self.node.run_cycle(object_name)
                             event=self.node._current_motion_event()
                             return dict(ok=ok, verdict=self.node._motion_verdict(event),
@@ -1692,7 +1744,7 @@ class Collector:
                     return current[0]-budget_start[0], current[1]-budget_start[1]
                 cycle.start()
                 try:
-                    self.node._motion_waiter.wait_thread(cycle, episode_budget, cycle_epoch, args.episode_deadline)
+                    self.node._motion_waiter.wait_thread(cycle, episode_budget, cycle_epoch, args.episode_deadline,wall_allowance=planning_budget.allowance)
                 finally:
                     if cycle.is_alive():
                         self.node._qs_abort_evt.set()
@@ -1773,6 +1825,10 @@ class Collector:
                                 receipt['error'] = 'Object did not lift at least 25 mm before placement'
                                 receipt['quality_reject'] = dict(kind='insufficient_lift',evidence=dict(lift_m=maximum_z-initial_z),contract=require_snapshots(snapshots))
                     receipt['capture_failures'] = list(self.capture_failures[failure_log_start:])
+                    receipt['base_drift']=base_drift_summary(receipt.get('initial_physical'),writer.rows if writer else [])
+                    receipt['measured_support_contacts']=[dict(epoch=r['epoch'],sim_ns=r['sim_ns'],proof=p['measured_start_contact'])
+                        for r in (writer.rows if writer else []) for p in r.get('execution_geometry',{}).get('paths',[]) if 'measured_start_contact' in p]
+                    receipt['planner_refusals']=self.planner_evidence(receipt)
                     sensor_failure=getattr(self.sensors,'failure',None)
                     if isinstance(sensor_failure,SensorAmbiguity):
                         if receipt.get('error'):receipt['secondary_error']=receipt['error']
@@ -1914,6 +1970,8 @@ def main():
     if args.replay_receipt:
         if args.resume:
             parser.error('Replay and resume are separate operations')
+        try:require_episode_mode(json.loads(args.replay_receipt.read_text())['params'],args.regrasp_only,args.normal_only)
+        except ValueError as exc:parser.error(str(exc))
         args.episodes, args.max_attempts = 1, 1
     if args.episodes < 1 or args.episodes > 50:
         parser.error('This collector is limited to the validated 50-episode pilot')

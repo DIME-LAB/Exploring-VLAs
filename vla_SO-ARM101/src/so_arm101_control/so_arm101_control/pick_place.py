@@ -135,7 +135,7 @@ from so_arm101_control.grasp_geometry import (
     ARM_JOINT_NAMES,
     GRIPPER_JOINT_NAME,
     ALL_JOINT_NAMES,
-    object_grip_width, jaw_offset, gripper_angles, make_grasp_plan,
+    object_grip_width, jaw_offset, gripper_angles, make_grasp_plan,make_reachable_grasp_plan,
     JOINT_LIMITS,
     _grasp_home_data_target,
     BASELINE_JAW_GAP,
@@ -3918,8 +3918,8 @@ class PickPlaceNode(Node):
         approach_h = self._grasp_approach_height_var.get()
         with self.joint_lock:
             current_wr = self._actual_positions.get('wrist_roll')
-        geometry = make_grasp_plan(
-            pos, self._lookup_bbox(obj_name), cross=cross,
+        grasp_bbox=self._lookup_bbox(obj_name)
+        grasp_settings=dict(cross=cross,
             current_wrist_roll=current_wr,
             tcp_clearance=self._tcp_clearance_var.get() / 1000,
             bbox_enabled=self._bbox_enabled_var.get(),
@@ -3927,6 +3927,7 @@ class PickPlaceNode(Node):
             approach_height=approach_h,
             approach_offset=getattr(self, 'approach_offset', (0.0, 0.0)),
             drop=topic == '/drop_poses')
+        geometry = make_grasp_plan(pos,grasp_bbox,**grasp_settings)
         tx, ty, target_z = geometry['tcp']
         obj_yaw = geometry['yaw']
         jaw_dx, jaw_dy = geometry['jaw_offset']
@@ -3960,6 +3961,10 @@ class PickPlaceNode(Node):
         # Pre-validate ALL stages before moving the arm
         def _prevalidate_and_execute():
             self._require_operation(operation)
+            selected_grasp=make_reachable_grasp_plan(pos,grasp_bbox,
+                open_clearance=self._jaw_open_clearance_var.get()/1000,
+                close_clearance=self._jaw_close_clearance_var.get()/1000,**grasp_settings)
+            poses_to_check=tuple(tuple(p) for p in selected_grasp['geometry']['poses'])
 
             # Workspace bbox check first — fast reject for clearly-out-of-reach.
             gate_a_results = []
@@ -3989,8 +3994,8 @@ class PickPlaceNode(Node):
 
             # Find a yaw where geometric_ik returns solutions for BOTH stages.
             # Using a single yaw across stages avoids mid-grasp wrist twists.
-            yaw_used, stage_sols, dbg_lines = find_reachable_grasp_yaw(
-                poses_to_check, obj_yaw)
+            yaw_used=selected_grasp['chosen_yaw'];stage_sols=selected_grasp['solutions']
+            dbg_lines=[line for attempt in selected_grasp['attempts'] for line in attempt.get('debug',[])]
             self._trace('event', 'gate_b_done',
                          yaw_requested=obj_yaw,
                          yaw_used=yaw_used,
@@ -4070,14 +4075,16 @@ class PickPlaceNode(Node):
 
             # Publish only immutable operation-owned results after planning.
             self._require_operation(operation)
+            validated_operation=operation.with_planning(grasp_spec_json=json.dumps(
+                {k:v for k,v in selected_grasp.items() if k!='solutions'},sort_keys=True))
             if approach_h > 0 and 'approach' in validated and 'final' in validated:
-                final = operation.retarget(validated['final'])
-                approach = operation.retarget(validated['approach'],
+                final = validated_operation.retarget(validated['final'])
+                approach = validated_operation.retarget(validated['approach'],
                     self._new_motion_event(origin=operation.epoch, parent=operation.event))
                 self._ik_apply_and_act(approach.joints(), 'grasp_approach',
                                        operation=approach, descent=final)
             elif 'final' in validated:
-                final = operation.retarget(validated['final'])
+                final = validated_operation.retarget(validated['final'])
                 self._ik_apply_and_act(final.joints(), 'grasp_execute', operation=final)
             else:
                 # Validated dict has no 'final' stage — this shouldn't happen

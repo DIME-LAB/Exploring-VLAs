@@ -7,6 +7,7 @@ frame advances. Deployment restores the ROS follower and keeps measured feedback
 """
 import json
 import hashlib
+import importlib.util
 import math
 import os
 from pathlib import Path
@@ -56,6 +57,9 @@ class Runtime:
         self.art.initialize()
         self.indices = [self.art.dof_names.index(name) for name in JOINTS]
         self.stage = omni.usd.get_context().get_stage()
+        self.robot_base=RigidPrim('/World/SO_ARM101/base_link',name='collection_robot_base_readback',
+            reset_xform_properties=False,prepare_contact_sensors=False)
+        self.robot_base.initialize()
         self.body_paths = {}
         for root in ('/World/Objects', '/World/Containers'):
             parent = self.stage.GetPrimAtPath(root)
@@ -173,7 +177,11 @@ class Runtime:
         rotation = base.ExtractRotationQuat()
         base_pose = dict(position=list(base.ExtractTranslation()),
                          orientation=[rotation.GetReal()]+list(rotation.GetImaginary()))
-        return dict(wall_profile_native=dict(state_read_ms=(time.monotonic_ns()-state_read_start)/1e6),base_world_pose=base_pose, epoch=self.epoch, sim_ns=self.stamp(), physics_time_s=self.world.current_time,
+        base_pos,base_quat=self.robot_base.get_world_poses()
+        if not all(np.all(np.isfinite(v)) for v in (base_pos,base_quat)):raise RuntimeError('Non-finite native robot base pose')
+        robot_base=dict(position=list(map(float,base_pos[0])),orientation=list(map(float,base_quat[0])))
+        return dict(wall_profile_native=dict(state_read_ms=(time.monotonic_ns()-state_read_start)/1e6),base_world_pose=base_pose,
+                    robot_base_world_pose=robot_base,robot_base_pose_source='physx_rigid_body',epoch=self.epoch, sim_ns=self.stamp(), physics_time_s=self.world.current_time,
                     state=list(map(float, positions)), velocity=list(map(float, velocities)),
                     drive_targets=list(map(float, targets)),
                     bodies=bodies, local_corners=self.local_corners, state_source='isaac_articulation')
@@ -338,7 +346,14 @@ def install(mode='collect'):
     import torch
     import carb
     physics=physics_mode(_RUNTIME.stage)
-    return dict(mode=mode, physics_config=physics,joint_names=_RUNTIME.art.dof_names,
+    helper=Path(__file__).resolve().parent.parent/'collect_inproc/articulation_audit.py'
+    spec=importlib.util.spec_from_file_location('collection_articulation_audit',helper)
+    audit_module=importlib.util.module_from_spec(spec);spec.loader.exec_module(audit_module)
+    articulation=audit_module.readback(_RUNTIME.stage,_RUNTIME.art)
+    articulation['helper_sha256']=hashlib.sha256(helper.read_bytes()).hexdigest()
+    if mode=='collect' and articulation['fixed_base'] is not True:raise RuntimeError('Collection requires verified fixed_base=true: '+repr(articulation))
+    return dict(mode=mode, physics_config=physics,joint_names=_RUNTIME.art.dof_names,articulation_audit=articulation,
+                joint_index_mapping=dict(zip(JOINTS,_RUNTIME.indices)),
                 epoch=_RUNTIME.epoch, invalid_through_ns=_RUNTIME.invalid_through_ns,
                 loaded_sha256=_LOADED_SHA256,
                 loaded_dependencies=_LOADED_DEPENDENCIES,

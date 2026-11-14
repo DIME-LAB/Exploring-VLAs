@@ -1,5 +1,6 @@
 """Pipeline checks for every physical tick, including unrecorded verdict ticks."""
 import copy,hashlib,json,math,struct
+from support_contact import row_errors as support_contact_errors
 from comparisons import comparison,matches,interval,bound_comparison,TOLERANCES
 
 STEP_NS=round(1e9/30)
@@ -108,6 +109,10 @@ def observation_errors(row,previous=None):
 
 def row_errors(row,previous=None):
     errors=observation_errors(row,previous)
+    if 'robot_base_world_pose' in row:
+        base=row['robot_base_world_pose']
+        if (row.get('robot_base_pose_source')!='physx_rigid_body' or not vector(base.get('position'),3) or
+                not vector(base.get('orientation'),4)):errors.append('Invalid measured robot base pose')
     stamp=row.get('sim_ns',0)
     for key in ('action','executed_action','expert_reference','applied_command'):
         if not vector(row.get(key),6):errors.append('Invalid '+key)
@@ -132,6 +137,7 @@ def row_errors(row,previous=None):
     geometry=row.get('execution_geometry',{})
     if not geometry.get('passed') or geometry.get('epoch')!=row.get('epoch') or not matches(geometry.get('sim_ns'),stamp) or not matches(geometry.get('target'),row.get('executed_action')):
         errors.append('Final command geometry identity differs')
+    errors.extend(support_contact_errors(row))
     return errors
 
 
@@ -251,6 +257,8 @@ def snapshot_contracts(snapshots):
                 ('state','state','state_rad'),('velocity','physics_velocity','copy'),
                 ('velocity','velocity','state_rad'),('state_source','state_source','copy'),
                 ('physics_time_s','physics_time_s','copy'),('bodies','physical_bodies','copy'))
+        if 'robot_base_world_pose' in row:
+            fields+=tuple((k,k,'copy') for k in ('robot_base_world_pose','robot_base_pose_source'))
         for source,target,rule in fields:
             record=comparison('snapshot.'+source+' vs row.'+target,snapshot.get(source),row.get(target),rule)
             if not record['passed']:

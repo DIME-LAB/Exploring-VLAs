@@ -47,7 +47,7 @@ class MotionWaiter:
         self.clock, self.validate, self.emit, self.abort = clock, validate, emit, abort
         self.sim_margin, self.rtf_floor, self.wall_margin, self.wall = sim_margin, rtf_floor, wall_margin, wall
 
-    def wait_until(self, ready, park, budget, epoch, wall_min=0., label='motion', enabled=lambda:True):
+    def wait_until(self, ready, park, budget, epoch, wall_min=0., label='motion', enabled=lambda:True,wall_allowance=lambda:0.):
         start_sim, start_wall = self.clock(), self.wall()
         previous_sim = start_sim
         while True:
@@ -58,7 +58,9 @@ class MotionWaiter:
                 return True
             planned, operations = budget()
             sim_limit = planned + self.sim_margin*max(1,operations)
-            wall_limit = max(wall_min, sim_limit/self.rtf_floor + self.wall_margin)
+            allowance=wall_allowance()
+            if not math.isfinite(allowance) or allowance<0:raise ValueError('Invalid planning wall allowance')
+            wall_limit = max(wall_min, sim_limit/self.rtf_floor + self.wall_margin+allowance)
             now_sim = self.clock()
             elapsed_sim, elapsed_wall = now_sim-start_sim, self.wall()-start_wall
             kind = ('aborted' if aborted else
@@ -71,7 +73,7 @@ class MotionWaiter:
                     planned_sim_s=planned, operations=operations, sim_margin_s=self.sim_margin,
                     elapsed_sim_s=elapsed_sim, elapsed_wall_s=elapsed_wall,
                     previous_sim_s=previous_sim, current_sim_s=now_sim,
-                    sim_limit_s=sim_limit, wall_watchdog_s=wall_limit, rtf_floor=self.rtf_floor)
+                    sim_limit_s=sim_limit, wall_watchdog_s=wall_limit, planning_wall_allowance_s=allowance,rtf_floor=self.rtf_floor)
                 try:
                     self.emit(record)
                 finally:
@@ -87,6 +89,6 @@ class MotionWaiter:
             event.motion_budget.total, event.motion_epoch, wall_min,
             getattr(event,'motion_tag','motion'), enabled)
 
-    def wait_thread(self, thread, budget, epoch, wall_min):
+    def wait_thread(self, thread, budget, epoch, wall_min,wall_allowance=lambda:0.):
         return self.wait_until(lambda:not thread.is_alive(), lambda dt:thread.join(timeout=dt),
-                               budget, epoch, wall_min, 'episode')
+                               budget, epoch, wall_min, 'episode',wall_allowance=wall_allowance)

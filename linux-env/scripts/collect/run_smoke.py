@@ -14,7 +14,8 @@ from storage import atomic_json,CANONICAL_ROOT,confined
 
 REPO=Path(__file__).resolve().parents[3]
 SCOPES=('linux-env/scripts/collect','linux-env/scripts/collect_sim.sh','linux-env/scripts/isaac/isaacsim_launch.sh',
-        'vla_SO-ARM101/src/so_arm101_control','vla_SO-ARM101/src/so_arm101_moveit_config','vla_SO-ARM101/src/so_arm101_description','isaac/exts')
+        'vla_SO-ARM101/src/so_arm101_control','vla_SO-ARM101/src/so_arm101_moveit_config','vla_SO-ARM101/src/so_arm101_description','isaac/exts',
+        'linux-env/scripts/collect_inproc/articulation_audit.py')
 
 
 def identity(pid):

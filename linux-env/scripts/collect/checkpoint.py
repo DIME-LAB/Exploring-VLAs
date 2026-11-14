@@ -22,6 +22,15 @@ def episode_regrasp(accepted,regrasp_only=False,normal_only=False):
     return mode=='regrasp_only' or (mode=='mixed' and regrasp_slot(accepted))
 
 
+def require_episode_mode(params,regrasp_only=False,normal_only=False):
+    mode=recovery_mode(regrasp_only,normal_only)
+    kind=params.get('recovery','none')
+    if kind not in ('none','regrasp'):raise ValueError('Unknown episode recovery kind')
+    if (mode=='normal_only' and kind!='none') or (mode=='regrasp_only' and kind!='regrasp'):
+        raise ValueError('Episode recovery differs from declared collection mode')
+    return mode
+
+
 def progress(receipts, seed, regrasp_only=False, row_loader=lambda r:None,normal_only=False):
     accepted = 0
     for trial, receipt in enumerate(receipts):

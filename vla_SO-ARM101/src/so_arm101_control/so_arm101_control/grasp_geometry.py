@@ -216,7 +216,7 @@ _GRASP_YAW_FALLBACK_OFFSETS = (
 )
 
 
-def find_reachable_grasp_yaw(poses, requested_yaw, debug=False):
+def find_reachable_grasp_yaw(poses, requested_yaw, debug=False,*,yaw_offsets=_GRASP_YAW_FALLBACK_OFFSETS):
     """Find a yaw for which geometric_ik returns solutions at EVERY pose.
 
     poses: iterable of (stage_name, x, y, z) tuples — all stages must be
@@ -231,7 +231,7 @@ def find_reachable_grasp_yaw(poses, requested_yaw, debug=False):
     debug_lines.append(
         f'find_reachable_grasp_yaw: requested_yaw={math.degrees(requested_yaw):+.1f}° '
         f'poses={[(s, round(x,3), round(y,3), round(z,3)) for s,x,y,z in poses]}')
-    for offset in _GRASP_YAW_FALLBACK_OFFSETS:
+    for offset in yaw_offsets:
         candidate = requested_yaw + offset
         stage_sols = {}
         stage_status = []
@@ -282,7 +282,7 @@ def gripper_angles(width, tcp_clearance=TCP_CLEARANCE_M,
 def make_grasp_plan(pose, bbox, *, cross=False, current_wrist_roll=None,
                     tcp_clearance=TCP_CLEARANCE_M, bbox_enabled=True,
                     object_z_override=0.0, approach_height=0.020,
-                    approach_offset=(0.0, 0.0), drop=False):
+                    approach_offset=(0.0, 0.0), drop=False,yaw_override=None):
     """Pure grasp geometry shared by GUI, ROS collection and in-process motion transports.
 
     Poses use bbox-centre coordinates in the robot base frame. The approach
@@ -294,7 +294,12 @@ def make_grasp_plan(pose, bbox, *, cross=False, current_wrist_roll=None,
         yaw += math.pi / 2
     pan = math.atan2(pose['y'], pose['x']) if abs(pose['x']) + abs(pose['y']) > .001 else 0.0
     yaw = _normalize_grasp_yaw(yaw, pan, current_wrist_roll)
-    dx, dy = jaw_offset(object_grip_width(bbox, cross), yaw, tcp_clearance, bbox_enabled)
+    width=object_grip_width(bbox,cross)
+    if yaw_override is not None:
+        yaw=float(yaw_override)
+        object_yaw=math.atan2(2*qw*qz,1-2*qz*qz)
+        if bbox:width=abs(bbox['sx']*math.sin(yaw-object_yaw))+abs(bbox['sy']*math.cos(yaw-object_yaw))
+    dx, dy = jaw_offset(width, yaw, tcp_clearance, bbox_enabled)
     x, y = pose['x'] + dx, pose['y'] + dy
     height = float((bbox or {}).get('sz', 0.0))
     if abs(object_z_override) > 1e-4:
@@ -309,3 +314,45 @@ def make_grasp_plan(pose, bbox, *, cross=False, current_wrist_roll=None,
         poses.append(('approach', x + approach_offset[0], y + approach_offset[1], z + approach_height))
     poses.append(('final', x, y, z))
     return dict(tcp=(x, y, z), yaw=yaw, jaw_offset=(dx, dy), poses=poses)
+
+
+def make_reachable_grasp_plan(pose,bbox,*,open_clearance=JAW_OPEN_CLEARANCE_M,
+                              close_clearance=JAW_CLOSE_CLEARANCE_M,additional_poses=None,**settings):
+    """Keep narrow-face grasps aligned and recompute centering for each yaw.
+
+    Oblique yaw changes are not admissible substitutes for a narrow-face grasp.
+    Equivalent +/-pi grasps may change TCP position because one jaw is fixed.
+    """
+    requested=make_grasp_plan(pose,bbox,**settings)
+    requested_yaw=requested['yaw'];attempts=[]
+    object_yaw=math.atan2(2*pose.get('qw',1.)*pose.get('qz',0.),1-2*pose.get('qz',0.)**2)
+    for offset in (0.,math.pi,-math.pi):
+        yaw=requested_yaw+offset
+        width=(abs(bbox['sx']*math.sin(yaw-object_yaw))+abs(bbox['sy']*math.cos(yaw-object_yaw))) if bbox else None
+        tcp=settings.get('tcp_clearance',TCP_CLEARANCE_M)
+        opening,closing=gripper_angles(width,tcp,open_clearance,close_clearance)
+        margin=BASELINE_JAW_GAP+JAW_GAP_RATE*opening-width if width is not None else None
+        candidate_settings=dict(settings,yaw_override=yaw)
+        raw_offset=settings.get('approach_offset',(0.,0.));normal=(-math.sin(yaw),math.cos(yaw));along=raw_offset[0]*normal[0]+raw_offset[1]*normal[1]
+        # Keep fixed- and moving-jaw clearance while approaching from above.
+        safe_along=max(0.,min(along,max(0.,open_clearance)))
+        effective=[raw_offset[i]+(safe_along-along)*normal[i] for i in range(2)]
+        if settings.get('approach_height',.020)>0:
+            candidate_settings['approach_height']=max(.025,settings.get('approach_height',.020))
+            candidate_settings['approach_offset']=effective
+        geometry=make_grasp_plan(pose,bbox,**candidate_settings)
+        attempt=dict(yaw=yaw,projected_width_m=width,opening_rad=opening,closing_rad=closing,
+            opening_margin_m=margin,tcp=geometry['tcp'],approach_offset_m=effective,
+            requested_approach_offset_m=list(raw_offset),approach_height_m=candidate_settings.get('approach_height',.020))
+        attempts.append(attempt)
+        if margin is not None and margin<2*tcp+open_clearance-1e-9:
+            attempt['reason']='mechanical opening cannot provide clearance';continue
+        checked_poses=additional_poses(geometry) if additional_poses else geometry['poses']
+        chosen,solutions,debug=find_reachable_grasp_yaw(checked_poses,yaw,yaw_offsets=(0.,))
+        attempt.update(reachable=chosen is not None,debug=debug)
+        if chosen is not None:
+            return dict(geometry=geometry,checked_poses=checked_poses,solutions=solutions,requested_yaw=requested_yaw,chosen_yaw=chosen,
+                        projected_width_m=width,opening_rad=opening,closing_rad=closing,opening_margin_m=margin,
+                        attempts=attempts,policy='narrow-face equivalents; yaw-specific TCP and jaw clearance')
+    return dict(geometry=requested,checked_poses=[],solutions={},requested_yaw=requested_yaw,chosen_yaw=None,
+                attempts=attempts,policy='no admissible narrow-face grasp')

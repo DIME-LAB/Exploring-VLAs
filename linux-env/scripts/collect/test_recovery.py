@@ -8,6 +8,7 @@ import numpy as np
 from contract import COLORS,JOINTS,parameters,corrective_action
 from checkpoint import progress
 from recovery import REGRASP_POLICY,regrasp_slot,recovery_parameters,recovery_geometry,detect_miss,receipt_error,recovery_summary
+from recovery_search import SEARCH_POLICY,PlanningWallBudget,choose as choose_recovery_plan
 from query_service import StrictQueryClient
 from protocol import CancelledGeneration
 from episode_policy import disposition,QualityReject
@@ -71,14 +72,14 @@ class RecoveryTests(unittest.TestCase):
             with self.subTest(kind=kind):self.assertIsNotNone(receipt_error(bad,rows))
 
     def test_offset_is_seeded_and_true_geometry_is_exactly_shared(self):
-        from so_arm101_control.grasp_geometry import make_grasp_plan
+        from so_arm101_control.grasp_geometry import make_reachable_grasp_plan
         pose=dict(x=.20,y=0.,z=.0064,qz=0.,qw=1.)
         bbox=dict(sx=.031,sy=.0206,sz=.0128)
         for seed in range(12):
             params=recovery_parameters(seed,True)
             self.assertEqual(params,recovery_parameters(seed,True))
             geometry=recovery_geometry(pose,bbox,params,approach_height=.02,current_wrist_roll=0.)
-            self.assertEqual(geometry['true_geometry'],make_grasp_plan(pose,bbox,approach_height=.02,current_wrist_roll=0.))
+            self.assertEqual(geometry['true_geometry'],make_reachable_grasp_plan(pose,bbox,approach_height=.02,current_wrist_roll=0.)['geometry'])
             self.assertAlmostEqual(math.hypot(*geometry['offset_m'][:2]),abs(params['signed_offset_m']))
             self.assertTrue(.02<=abs(params['signed_offset_m'])<=.04)
             json.dumps(geometry)
@@ -193,7 +194,7 @@ class RecoveryTests(unittest.TestCase):
 
     def driver(self,followed=False,cancel_at=None,params=None):
         c,r,_,_,_=motions.MotionOperationTests().setup_motion();node=c.node
-        scope=c.regrasp_prefix.__func__.__globals__;scope.update(recovery_geometry=recovery_geometry,detect_miss=detect_miss)
+        scope=c.regrasp_prefix.__func__.__globals__;scope.update(recovery_geometry=recovery_geometry,detect_miss=detect_miss,SEARCH_POLICY=SEARCH_POLICY,PlanningWallBudget=PlanningWallBudget,choose_recovery_plan=choose_recovery_plan)
         params=parameters(1,'red',regrasp=True) if params is None else params
         c.current_episode_id='recovery-test';c.test_rows=[];c.episode_snapshots=[];audit=TickContract()
         name=params['object'];now=[snapshot(10**9)];now[0]['bodies'][name]=dict(position=[.20,0.,.0064])

@@ -9,6 +9,7 @@ import subprocess
 from contract import JOINTS, timing_audit
 from tick_contract import camera_tick_errors
 from collection_status import require_finalized
+from checkpoint import require_recovery_mode,require_episode_mode
 from recovery import receipt_error, recovery_summary
 from storage import atomic_json,confined, prepare_environment
 
@@ -29,6 +30,10 @@ def main():
         raise ValueError('Collection is incomplete; refusing to export a partial run')
     report.mkdir(parents=True, exist_ok=True)
     config = json.loads((run / 'run.json').read_text())
+    require_recovery_mode(config,config.get('regrasp_only',False),config.get('normal_only',False))
+    for path in sorted(run.glob('attempt-*/receipt.json')):
+        receipt=json.loads(path.read_text())
+        require_episode_mode(receipt['params'],config.get('regrasp_only',False),config.get('normal_only',False))
     prepare_environment(config['instance'])
     import cv2
     import torch

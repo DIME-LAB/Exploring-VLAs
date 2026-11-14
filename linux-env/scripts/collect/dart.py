@@ -59,6 +59,53 @@ class SmoothDart:
         return [0.]*6
 
 
+class ClearanceDart:
+    """Smooth drift inside the open-jaw corridor; quiet only at final contact.
+
+    Conservative joint-pivot-to-pad radii bound every pad-point displacement.
+    This changes the noise offset only; the planner time law stays untouched.
+    """
+    POLICY=dict(version=1,near_budget_max_m=.0002,corridor_fraction=.2,
+        above_block_fraction=.4,contact_fade_m=.003,pad_below_tcp_m=.0081,
+        lever_bounds_m=[.50,.50,.35,.25,.15],derivative_check_hz=120)
+    def __init__(self,base,schedule,fk,block_top_m,final_tcp_z_m,tcp_clearance_m):
+        self.base,self.schedule,self.fk=base,schedule,fk
+        self.duration,self.segments=base.duration,base.segments
+        self.block_top,self.final_z=block_top_m,final_tcp_z_m
+        self.near_budget=min(self.POLICY['near_budget_max_m'],max(0.,tcp_clearance_m)*self.POLICY['corridor_fraction'])
+        self.derivative_scale=1.
+        hz=self.POLICY['derivative_check_hz'];values=[self.raw(i/hz) for i in range(math.ceil(self.duration*hz)+1)]
+        velocities=[[(b[j]-a[j])*hz for j in range(5)] for a,b in zip(values,values[1:])]
+        accelerations=[[(b[j]-a[j])*hz for j in range(5)] for a,b in zip(velocities,velocities[1:])]
+        vmax=max((abs(v) for q in velocities for v in q),default=0.);amax=max((abs(v) for q in accelerations for v in q),default=0.)
+        self.derivative_scale=min(1.,base.config['noise_velocity_rad_s']/max(vmax,1e-12),base.config['noise_acceleration_rad_s2']/max(amax,1e-12))
+        self.spec=dict(base.spec,clearance_policy=self.POLICY,near_budget_m=self.near_budget,
+            block_top_m=block_top_m,final_tcp_z_m=final_tcp_z_m,derivative_scale=self.derivative_scale,
+            raw_noise_velocity_max_rad_s=vmax,raw_noise_acceleration_max_rad_s2=amax)
+    def height(self,t):return float(self.fk(self.schedule.sample(t))[2])
+    def raw(self,t):
+        noise=self.base.sample(t);z=self.height(t)
+        above=z-self.POLICY['pad_below_tcp_m']-self.block_top
+        # Smooth positive-part avoids a kink at the block's upper surface.
+        positive=.5*(above+math.sqrt(above*above+1e-12))
+        budget=self.near_budget+self.POLICY['above_block_fraction']*positive
+        norm=math.sqrt(5*sum((r*q)**2 for r,q in zip(self.POLICY['lever_bounds_m'],noise[:5])))
+        gain=1./math.sqrt(1.+(norm/max(budget,1e-15))**2)
+        gain*=min_jerk((z-self.final_z)/self.POLICY['contact_fade_m'])
+        return [v*gain for v in noise[:5]]+[0.]
+    def sample(self,t):return [self.derivative_scale*v for v in self.raw(t)]
+    def phase_statistics(self,scale=1.):
+        result={}
+        for tick in range(math.ceil(self.duration*30)+1):
+            t=min(self.duration,tick/30);z=self.height(t)
+            phase='contact' if z-self.final_z<=self.POLICY['contact_fade_m'] else 'near_block' if z-self.POLICY['pad_below_tcp_m']-self.block_top<=.010 else 'high_approach'
+            q=[v*scale for v in self.sample(t)];s=result.setdefault(phase,dict(ticks=0,nonzero_ticks=0,max_joint_offset_rad=0.,max_pad_displacement_bound_m=0.))
+            s['ticks']+=1;s['nonzero_ticks']+=int(any(abs(v)>1e-12 for v in q))
+            s['max_joint_offset_rad']=max(s['max_joint_offset_rad'],max(abs(v) for v in q))
+            s['max_pad_displacement_bound_m']=max(s['max_pad_displacement_bound_m'],sum(r*abs(v) for r,v in zip(self.POLICY['lever_bounds_m'],q)))
+        return result
+
+
 @dataclass(frozen=True)
 class TargetCandidate:
     epoch: int

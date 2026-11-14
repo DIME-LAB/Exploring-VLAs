@@ -308,6 +308,16 @@ directly (tailnet or LAN); an ssh tunnel can't carry it. One viewer at a time.
 
 ## Collecting sim data
 
+Grasp execution uses a yaw-consistent narrow-face plan: TCP centering, projected
+width and opening margin are recomputed for each admissible +/-180-degree
+orientation. It approaches from above inside the open-jaw corridor. Near-block
+DART remains nonzero with a smaller clearance-bounded budget and fades for final
+contact; receipts report amplitude by phase. Only micrometre support contact at a
+**measured start** can be tolerated: targets and swept paths stay strict. Native
+fixed-base mode is required, and measured base-link drift is logged separately
+from the ROS reference frame. See [descent and support-contact contracts](docs/notes/collection-descent-clearance.md).
+
+
 The unattended collector shares `PickPlaceNode` with control_gui Quickstart.
 `grasp_geometry.py` and the calibrated five-DOF solver in `compute_workspace.py`
 are pure Python/numpy, independent of ROS, MoveIt and Tk. Collection uses no
@@ -563,7 +573,9 @@ come from the new epoch; samples are never mixed across a reset.
 
 Re-grasp recovery occupies 18% of **accepted slots**, evenly spread through
 colour rotation (9/50; 162/900, or 54 per colour). Retrying a rejected slot keeps
-its recovery type and colour but logs a new seed. `--regrasp-only` makes every
+its recovery type and colour but logs a new seed. Recovery selects the first of up to
+sixteen direction/magnitude candidates passing complete clean/executed segment
+preflight, retaining refusal contacts. `--regrasp-only` makes every
 slot a recovery for the dedicated smoke. A seeded 2–4 cm displacement affects
 only the executed first approach/descent. Both clean and displaced paths use the
 shared calibrated IK and waypoint collision checks. Their time laws share a
@@ -590,7 +602,7 @@ changing deployment features. Acceptance, resume and export recheck the measured
 miss and completed reopen/scene-refresh evidence against the raw episode ID,
 epoch, stage stamps, physical states/poses and close/lift row hashes. Export reports the achieved
 share/offset distribution and prefers recovery episodes for sample videos.
-Smooth DART and re-grasp are implemented offline; their physical yield and
+Smooth DART and re-grasp require a validated smoke at the current scene/cut; their physical yield and
 side-by-side/recovery videos require targeted review and a newly authorized
 smoke before a fresh pilot. The stopped pilot-v2 ledger remains diagnostic.
 
@@ -828,11 +840,11 @@ bash linux-env/scripts/collect_sim.sh export 0 \
 # Normal-only pilot: explicit mode disables the mixed recovery quota; resume requires the same mode.
 # Accepted colours rotate 17/17/16. Recovery smoke and later recovery collection are separate.
 bash linux-env/scripts/collect_sim.sh run 0 --episodes 50 --seed 350000 --normal-only \
-  --output /mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1-v3
+  --output /mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1-v4
 bash linux-env/scripts/collect_sim.sh export 0 \
-  /mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1-v3 \
+  /mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1-v4 \
   --repo-id local/soarm101_headless_pilot \
-  --report-dir /mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1-v3/report
+  --report-dir /mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1-v4/report
 
 # Optional: policy deployment using the same measured state and 30 Hz preset.
 bash linux-env/scripts/collect_sim.sh deploy 0 --pretrained /path/to/model

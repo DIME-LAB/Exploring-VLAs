@@ -63,8 +63,12 @@ class MotionOperationTests(unittest.TestCase):
         fn=next(n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name=='_prevalidate_and_execute')
         poses=(('approach',.2,0.,.04),('final',.2,0.,.02))
         joints={name:value for name in ARM}
+        node._jaw_open_clearance_var=NS(get=lambda:5.);node._jaw_close_clearance_var=NS(get=lambda:0.)
         scope=dict(self=node,operation=operation,evt=operation.event,poses_to_check=poses,
                    ground_z=0.,obj_yaw=0.,approach_h=.02,math=math,
+                   json=__import__('json'),pos={},grasp_bbox={},grasp_settings={},
+                   make_reachable_grasp_plan=lambda *a,**k:dict(geometry=dict(poses=poses),chosen_yaw=0.,
+                       solutions={stage:[dict(joints)] for stage,*_ in poses},attempts=[dict(debug=[])]),
                    check_grasp_reachable=lambda *a,**k:(True,''),
                    find_reachable_grasp_yaw=lambda *a:(0.,{stage:[dict(joints)] for stage,*_ in poses},[]))
         exec(compile(ast.Module(body=[fn],type_ignores=[]),str(SHARED),'exec'),scope)
@@ -88,7 +92,9 @@ class MotionOperationTests(unittest.TestCase):
             trajectory=Trajectory();trajectory.joint_names=ARM
             point=Point();point.positions=[target[n] for n in ARM];point.time_from_start.sec=1
             trajectory.points=[point]
-            c.servo.execute(trajectory,event,operation=operation)
+            # This interleaving fixture checks target/event ownership. Physical
+            # grasp metadata is covered by the retained native-box suite.
+            c.servo.execute(trajectory,event,operation=operation.with_planning(grasp_spec_json=''))
         node._joint_space_collision_free_execute=plan
         # Deliberately retain old-style decoy fields. The production prevalidator
         # must never write/read them or use the UI inventory event as an input.
