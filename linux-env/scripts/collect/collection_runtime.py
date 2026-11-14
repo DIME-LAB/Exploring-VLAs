@@ -36,6 +36,7 @@ from contract import JOINTS
 from protocol import CommandLedger
 from finger_geometry import read_model
 from miss_clearance import POLICY as MISS_POLICY,velocity_cap
+from recovery_start import ProtectedSettle
 
 _RUNTIME = None
 _LOADED_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
@@ -107,6 +108,8 @@ class Runtime:
                             world = box.GetMatrix().Transform(Gf.Vec3d(x, y, z))
                             corners.append(list(inverse.TransformDir(world - Gf.Vec3d(*map(float, pos[0])))))
                 self.local_corners[name] = corners
+        self._protected_settle=None;self._protected_frame=None
+        self.world.add_physics_callback('collection_protected_settle',self.check_protected_substep)
         self.context = Context()
         rclpy.init(args=[], context=self.context)
         self.node = rclpy.create_node('collection_physical_feedback', context=self.context,
@@ -191,6 +194,36 @@ class Runtime:
         if fingers!=expected_fingers or block!=expected_block:raise RuntimeError('Native guarded-episode offsets changed after startup')
         return dict(epoch=epoch,sim_ns=self.stamp(),finger_offsets=fingers,block_offsets=block,source='fresh PhysX shape tensors')
 
+    def start_protected_settle(self,anchor,epoch,stamp):
+        if self.failure or self.busy or self.timeline.is_playing() or epoch!=self.epoch or not matches(stamp,self.stamp(),'native_ns'):
+            raise RuntimeError('Protected settle requires this epoch held after restore')
+        if getattr(self,'_protected_settle',None) is not None:raise RuntimeError('Protected settle is already installed')
+        monitor=ProtectedSettle(anchor,self.snapshot())
+        self._protected_settle=monitor;self._protected_frame=None
+        return dict(epoch=epoch,sim_ns=self.stamp(),anchor_sha256=monitor.anchor_sha256)
+
+    def check_protected_substep(self,step):
+        monitor=getattr(self,'_protected_settle',None)
+        if monitor is None:return
+        try:monitor.before_substep(step,self.snapshot())
+        except Exception as exc:raise self.fail_miss_motion(exc) from exc
+
+    def finish_protected_frame(self):
+        monitor=getattr(self,'_protected_settle',None)
+        if monitor is None:return
+        try:self._protected_frame=monitor.finish_frame(self.snapshot())
+        except Exception as exc:raise self.fail_miss_motion(exc) from exc
+
+    def finish_protected_settle(self,epoch,stamp):
+        monitor=getattr(self,'_protected_settle',None)
+        if self.failure or self.busy or self.timeline.is_playing() or epoch!=self.epoch or not matches(stamp,self.stamp(),'native_ns'):
+            raise RuntimeError('Protected settle retirement requires its held epoch')
+        if monitor is None:raise RuntimeError('Protected settle evidence is missing')
+        proof=monitor.certificate()
+        if not proof['passed']:raise RuntimeError('Protected settle did not certify all physics substeps')
+        self._protected_settle=None;self._protected_frame=None
+        return proof
+
     def publish_miss_fault(self):
         path=getattr(self,'native_miss_fault_path',None);fault=getattr(self,'_miss_motion_fault',None)
         if fault is None:raise RuntimeError('Native fault publication has no evidence')
@@ -255,6 +288,8 @@ class Runtime:
                 cap=getattr(self,'_miss_cap',None),requested_cap=getattr(self,'_miss_requested_cap',None),
                 saved_original_limits_rad_s=getattr(self,'_miss_saved_limits',None),
                 dirty=getattr(self,'_miss_limits_dirty',False),samples=list(getattr(self,'_miss_samples',[])))
+            monitor=getattr(self,'_protected_settle',None)
+            if monitor is not None:self._miss_motion_fault['protected_settle']=monitor.evidence()
         try:pause_committed(self.timeline);self.busy=False
         except Exception as pause_error:
             self.failure=original+'; native pause failed: '+repr(pause_error)
@@ -395,6 +430,11 @@ class Runtime:
 
     def publish(self):
         snapshot = self.snapshot()
+        if getattr(self,'_protected_settle',None) is not None:
+            frame=getattr(self,'_protected_frame',None)
+            if frame is None or frame['epoch']!=snapshot['epoch'] or not matches(frame['final']['snapshot']['sim_ns'],snapshot['sim_ns'],'native_ns'):
+                raise RuntimeError('Protected frame cannot be published without its substep coverage')
+            snapshot['protected_settle']=frame
         snapshot['wall_profile_native'].update(step_start_ns=getattr(self,'step_start_ns',None),
             step_end_ns=getattr(self,'step_end_ns',None),snapshot_ready_ns=time.monotonic_ns())
         msg = JointState()
@@ -453,12 +493,15 @@ class Runtime:
             pause_committed(self.timeline)
             self.busy = False
             self.set_miss_velocity_cap(None)
+            monitor=getattr(self,'_protected_settle',None)
+            protected=monitor.evidence() if monitor is not None else None
+            self._protected_settle=None;self._protected_frame=None
             self.epoch += 1
             self.invalid_through_ns = self.stamp()
             self.ledger = CommandLedger()
             return dict(held=True,failure=self.failure,epoch=self.epoch,invalid_through_ns=self.invalid_through_ns,
                         clock_baseline=dict(epoch=self.epoch,sim_ns=self.invalid_through_ns,physics_time_s=self.world.current_time),
-                        miss_motion_fault=getattr(self,'_miss_motion_fault',None))
+                        miss_motion_fault=getattr(self,'_miss_motion_fault',None),retired_protected_settle=protected)
         except Exception as exc:
             if self.failure:raise
             raise self.fail_miss_motion(exc) from exc
@@ -496,6 +539,7 @@ class Runtime:
                     self.busy = False
                     if world_step_errors(self.world.current_time,self.start_time):
                         raise RuntimeError(f'One-frame step advanced {delta} sim seconds')
+                    self.finish_protected_frame()
                     self.publish()
                 # Drain clock/command callbacks in the same held frame. A short
                 # wall deadline lets the expert respond without another render.

@@ -232,10 +232,18 @@ def run_full(args):
                 wake.clear()
                 with lock:
                     if not r.busy:continue
-                    for _ in range(4):
+                    for substep in range(4):
                         if args.inject_moving_target and collector is not None and getattr(collector.node,'_last_motion_tag',None)=='synthetic_start_settle':
                             body_data[fixture['params']['object']]['velocity']=[.0002,0.,0.,0.,0.,0.]
+                        if collector is not None and getattr(collector.node,'_last_motion_tag',None)=='synthetic_start_settle':
+                            neighbour=next(n for n in body_data if n!=fixture['params']['object'] and not n.startswith('cup_'))
+                            if args.inject_moving_cup and substep==1:body_data['cup_red']['position'][0]+=.002
+                            if args.inject_moving_neighbour and substep==1:body_data[neighbour]['position'][0]+=.002
+                            if args.inject_transient_neighbour:
+                                if substep==1:body_data[neighbour]['position'][0]+=.002
+                                if substep==2:body_data[neighbour]['position'][0]-=.002
                         r.check_miss_substep(1/120)
+                        r.check_protected_substep(1/120)
                         delta=np.clip(targets-q,-limits/120,limits/120);q[:]=q+delta;v[:]=delta*120
                         r.world.current_time+=1/120
                         if attached[0] is not None and collector is not None:
@@ -312,18 +320,18 @@ def run_full(args):
         report=receipt['recovery_report']
         if args.inject_replay_bounds:assert not result.get('static_validated_before_native_write'),'Invalid replay wrote native joints'
         else:assert result['static_validated_before_native_write']
-        if source_receipt is not None:
+        if source_receipt is not None and not args.inject_replay_bounds:
             assert report['selection']['joints']==source_receipt['recovery_report']['selection']['joints']
             assert report['replay_source_sha256']==hashlib.sha256(replay.read_bytes()).hexdigest()
-            if args.inject_replay_bounds:result['replay_refused_before_native_write']=True
-            else:
-                for field in ('state','drive_targets','velocity'):
-                    assert report['restore']['snapshot'][field]==source_receipt['recovery_report']['restore']['snapshot'][field]
-                result['replayed_joints_exact']=True
-        setup_failure=args.inject_restore_failure or args.inject_moving_target or args.inject_replay_bounds
+            for field in ('state','drive_targets','velocity','bodies','base_world_pose','robot_base_world_pose'):
+                assert report['restore']['snapshot'][field]==source_receipt['recovery_report']['restore']['snapshot'][field]
+            result['replayed_world_and_joints_exact']=True
+        if args.inject_replay_bounds:result['replay_refused_before_native_write']=True
+        setup_failure=(args.inject_restore_failure or args.inject_moving_target or args.inject_replay_bounds or
+            args.inject_moving_cup or args.inject_moving_neighbour or args.inject_transient_neighbour)
         if setup_failure:
             assert receipt['accepted'] is False and receipt['native_miss_faults'],receipt
-            assert not report['passed'] and 'original_setup_error' in report
+            assert not report.get('passed',False) and 'original_setup_error' in report
             frames_path=receipt_path.parent/'frames.jsonl'
             assert not frames_path.exists() or frames_path.stat().st_size==0,'Setup failure recorded training frames'
             assert 'corrective_handover' not in result,'Corrective cycle ran after invalid setup'

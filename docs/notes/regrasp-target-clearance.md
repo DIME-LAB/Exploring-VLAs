@@ -6,11 +6,13 @@ established single-observation policy; history-conditioned models need a
 separate evaluation of that approximation.
 
 The seeded policy requests 50% closed jaws, 30% partly closed jaws and 20% open
-hover starts. TCP displacement from the true grasp is 26–38 mm, yaw jitter is
+hover starts. Lateral TCP offset from the true grasp is 26–38 mm, yaw jitter is
 at most 12 degrees, and hover ranges are 3–15 mm for closed/partly-closed or
 18–35 mm for open starts. Up to 24 deterministic direction/magnitude candidates
 retain the requested phenotype. Rejections and MoveIt contact pairs are logged;
 accepted distributions are measured, rather than assumed to match the weights.
+The separately sampled hover contributes to the 3-D distance, which can exceed
+38 mm.
 
 Each candidate uses the shared calibrated 5-DOF IK and jaw-width convention.
 All six joint limits, full-scene MoveIt validity with the target still present,
@@ -28,20 +30,52 @@ joint mapping, installs matching drive targets and zero actual/target velocity,
 and reads back the result immediately. The collector rebases epoch and command
 history and installs the restored target as its idle hold. It then advances six
 unrecorded normal-dynamics ticks. Every tick must pass the same clock/state/image/
-command contract, fresh geometry/scene checks and the stationary-target gate:
+command contract and fresh geometry/scene checks. A native protected-scene guard
+anchors every cup and block (target and neighbours) to the pre-restore world:
 linear speed <=0.1 mm/s, angular speed <=0.005 rad/s and maximum corner motion
-<=0.2 mm. The writer opens only after successful settle and scene synchronization.
+<=0.2 mm. Block corners use measured body-local geometry; cup corners use all
+thirteen authored primitive boxes. Both fixed base frames must remain within
+the shared 1 um float32-readback rule (quaternions compared up to sign).
+
+The guard reads native poses and velocities in every 120 Hz pre-physics callback
+and again after the final solve of every 30 Hz frame. Four callback samples plus
+the last solved boundary cover each solve-to-solve excursion; a transient motion
+cannot disappear in the end-of-frame pose. Raw World clocks, callback order/dt,
+body/base state and held drive targets are retained; no substep timestamps are
+fabricated. The installed Isaac 6.1 SimulationContext registers user callbacks
+with `pre_step=True` (simulation_context.py:1053), and advances its World clock
+in the post-step timer (:1464, :1494). Thus pre-step World deltas are 0, 1/120,
+2/120, 3/120 and the final boundary is 4/120, checked with the shared 1 us clock
+rule. Native frame progression keeps the 10 ns native-clock rule. Physics gaps,
+missing/extra callbacks, moved bodies, excessive velocities or changed bases
+are terminal and retain the complete native guard evidence in the durable fault
+journal. Independent receipt reconstruction verifies all 24 callback samples,
+six final samples, original anchor hash and final certificate **before** the
+writer opens. These are sampled no-disturbance bounds; no claim is made about
+unobservable sub-substep contact that produces no above-tolerance motion.
+
+The writer opens only after successful settle and scene synchronization.
 Reset or settle verification failures publish the original native error durably
 and terminate the run; a failure before the writer produces zero training rows.
 Exhausting statically valid candidates is a planner quality refusal.
 
 Receipt validation reconstructs the seeded candidates and IK, static proofs,
-native reset/readback and checked settle snapshots. It binds episode/epoch,
-recording boundary and first corrective tick to the setup contract. Replays use
-the recorded selected pose and revalidate it without resampling. Export rejects
+native reset/readback and checked settle snapshots. It binds every restored body
+and both bases to the saved anchor, restore epoch/clock/drive baseline to the
+first settle proof, every later substep/frame, and the recording boundary to the
+first corrective tick. Replays use the saved synthetic world anchor (all body
+poses and geometry) and selected joints, rather than adopting the current scene.
+An observed neighbour shift is deliberately reset to the saved pose; a different
+fixed world/robot base or body geometry is refused before any native write. No
+fixed base is teleported. Zero velocity and matching drives are read back after
+the reset. Export rejects
 setup rows and requires synthetic certificates for the current strategy. Normal
 and GUI code remain on the shared expert path; normal batch qualification is
 specific to its frozen source cut.
+Relative to `bf7336d`, NORMAL exports also add `collection_phase=0` and runtime
+pause behaviour uses the committed-pause barrier. An unchanged shared motion
+module does not qualify these runtime/schema changes: NORMAL batches on the
+current cut require their own startup/clock and end-to-end qualification.
 
 The CPU integration probe constructs the actual Collector and PickPlaceNode,
 uses real ROS/image transport with fake physics/MoveIt, executes synthetic reset

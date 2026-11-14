@@ -39,6 +39,7 @@ from success import PHYSICAL_FLOOR_M, INTERIOR_FLOOR_M, initial_arm
 import test_safety
 from test_safety import method
 from so_arm101_control.motion_wait import MotionWaitTimeout
+from recovery_start import ProtectedSettle
 
 HERE = Path(__file__).parent
 ROOT = HERE.parents[2]
@@ -53,6 +54,7 @@ def load_class(filename, name):
                  CancelledGeneration=CancelledGeneration,CommandLedger=CommandLedger,
                  corrective_action=corrective_action,JOINT_LIMITS={k:(-3,3) for k in JOINTS},
                  ns=lambda s:s.sec*1000000000+s.nanosec)
+    scope['ProtectedSettle']=ProtectedSettle
     exec(compile(ast.Module(body=[cls],type_ignores=[]),str(path),'exec'),scope)
     return scope[name], scope
 

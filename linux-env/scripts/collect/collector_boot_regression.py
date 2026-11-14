@@ -17,6 +17,9 @@ def main():
     faults.add_argument('--inject-native-fault',action='store_true')
     faults.add_argument('--inject-restore-failure',action='store_true')
     faults.add_argument('--inject-moving-target',action='store_true')
+    faults.add_argument('--inject-moving-cup',action='store_true')
+    faults.add_argument('--inject-moving-neighbour',action='store_true')
+    faults.add_argument('--inject-transient-neighbour',action='store_true')
     faults.add_argument('--inject-replay-bounds',action='store_true')
     args=parser.parse_args()
     if not 0<=args.instance<=9:raise ValueError('Test instance must be 0–9')
@@ -25,7 +28,9 @@ def main():
     if args.full_regrasp:
         from offline_regrasp import run_full
         return run_full(args)
-    if args.inject_native_fault or args.inject_restore_failure or args.inject_moving_target or args.inject_replay_bounds or args.replay_synthetic_receipt:raise ValueError('Fault injection requires --full-regrasp')
+    if (args.inject_native_fault or args.inject_restore_failure or args.inject_moving_target or args.inject_replay_bounds or
+            args.inject_moving_cup or args.inject_moving_neighbour or args.inject_transient_neighbour or args.replay_synthetic_receipt):
+        raise ValueError('Fault injection requires --full-regrasp')
     runtime=prepare_environment(args.instance)
     from run_smoke import InstanceClaim
     instance_claim=InstanceClaim(runtime)

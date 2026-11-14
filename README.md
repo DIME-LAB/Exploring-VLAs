@@ -592,7 +592,7 @@ its recovery type and colour but logs a new seed. `--regrasp-only` makes every
 slot a recovery for the dedicated smoke.
 
 Recovery starts from a **synthetic post-miss reset**. Seeded requests sample
-26–38 mm TCP offsets around the true grasp, small yaw deviations (up to 12°),
+26–38 mm lateral TCP offsets around the true grasp, small yaw deviations (up to 12°),
 and three jaw phenotypes: 50% closed, 30% partly closed, 20% open with a higher
 hover. The sampler retains its phenotype while trying up to 24 reachable poses.
 Receipts record the requested distribution, selected pose/jaw, every refused
@@ -611,13 +611,22 @@ Finger/block effective offsets are freshly read and verified per episode.
 The existing held native restore sets all six named joint positions, matching
 drive targets and zero velocity, with immediate readback and epoch/command-history
 rebasing. Six unrecorded normal-dynamics hold ticks then verify the complete
-pipeline contract, static geometry, and an undisturbed target (corner movement
-<=0.2 mm, linear speed <=0.1 mm/s, angular speed <=0.005 rad/s). The writer starts
-only after these checks and scene synchronization. The shared Quickstart then
+pipeline contract and static geometry. A native guard measures **every cup and
+block**, including neighbours and the target, against the pre-restore world
+anchor: corner motion <=0.2 mm, linear speed <=0.1 mm/s, angular speed <=0.005
+rad/s. It samples all four 120 Hz pre-physics callbacks plus the final post-solve
+boundary in each tick; a transient excursion or missing sample is terminal.
+Both physical base frames must retain their held float32-readback poses. The
+writer starts only after all 24 callback samples, six final boundaries, scene
+synchronization and independent certificate reconstruction pass. The shared Quickstart then
 performs the correction at normal speed and dynamics. Setup failures are terminal
 with durable native evidence; exhausted collision-clear candidates are planner
-quality refusals. Receipt replay restores the recorded selected joints and
-refuses a pose that is no longer clear.
+quality refusals. Receipt replay restores the saved synthetic world anchor
+(all body poses) and selected joints, with zero velocities and matching drives;
+it refuses changed fixed bases or body geometry before writing. Its certificate
+binds world/base readback, clocks, drive baselines, all substeps and the first
+corrective tick. The lateral offset excludes the separately sampled hover, so
+the 3-D displacement can exceed 38 mm.
 
 Every exported frame carries int64 `collection_phase` (shape `[1]`): **0 normal,
 1 miss_prefix, 2 corrective**. All frames from synthetic-reset recovery are
@@ -640,6 +649,14 @@ per-episode request, geometry, restore and checked settle evidence in
 `meta/collection_episodes.json`. Acceptance, resume and export revalidate the
 synthetic-start certificate against the corrective rows and phase boundary.
 No native velocity limits or gravity settings change during synthetic setup.
+
+This source cut also changes NORMAL collection relative to the frozen
+`bf7336d`: NORMAL exports gain `collection_phase=0`, and runtime startup,
+cancellation and per-frame pauses use a committed-pause barrier. The shared
+GUI/expert motion module is unchanged; runtime and export qualification does
+not transfer from that byte identity. NORMAL batches on this cut need their
+own startup/clock and end-to-end qualification; production remains on its
+separately validated frozen cut.
 
 Smooth DART and re-grasp require a validated smoke at the current scene/cut; their physical yield and
 side-by-side/recovery videos require targeted review and a newly authorized
@@ -871,6 +888,8 @@ construction, provenance, episode and finalization paths, while physical
 clearance, solver residual and visual recovery still require the live smoke:
 
 ```bash
+# Cyclone XML already selects lo; do not also ask the RMW to add it.
+unset ROS_LOCALHOST_ONLY
 ROS_DOMAIN_ID=99 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
   CYCLONEDDS_URI="file://$PWD/linux-env/cyclonedds.xml" CUDA_VISIBLE_DEVICES='' \
   python3 -B linux-env/scripts/collect/collector_boot_regression.py --instance 9 \
@@ -883,8 +902,11 @@ ROS_DOMAIN_ID=99 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
   OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
   python3 -B linux-env/scripts/collect/collector_boot_regression.py --instance 9 \
   --full-regrasp --output /mnt/a4500-backup/exploring-vlas/runtime/instance-9/regrasp-check
-# Repeat separately with --inject-native-fault, --inject-restore-failure or
-# --inject-moving-target and fresh output paths to test terminal cleanup.
+# Repeat separately with --inject-native-fault, --inject-restore-failure,
+# --inject-moving-target, --inject-moving-cup, --inject-moving-neighbour or
+# --inject-transient-neighbour and fresh output paths to test terminal cleanup.
+# --replay-synthetic-receipt <successful-run>/attempt-0000/receipt.json checks
+# exact saved-world/joint replay through the same complete attempt.
 python3 -B linux-env/scripts/collect/process_ownership_regression.py \
   --output /mnt/a4500-backup/exploring-vlas/runtime/instance-0/process-ownership-check
 ```

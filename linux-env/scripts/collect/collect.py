@@ -1294,10 +1294,15 @@ class Collector:
 
     def _prepare_regrasp_start(self,params,result):
         """Create an unrecorded synthetic miss state, then hand over normal dynamics."""
-        from recovery_start import POLICY as START_POLICY,STRATEGY,StaticClearance,choose
+        from recovery_start import POLICY as START_POLICY,STRATEGY,StaticClearance,choose,protected_state,world_anchor,replay_baseline,setup_error
         if self.writer is not None:raise RuntimeError('Synthetic reset cannot run while recording')
         epoch=self.generation.epoch;self.generation.require(epoch)
-        before=self.held_snapshot(epoch);name=params['object'];bbox=self.node._lookup_bbox(name)
+        observed=self.held_snapshot(epoch);before=observed;previous=None
+        if self.args.replay_receipt:
+            replay=json.loads(self.args.replay_receipt.read_text());previous=replay.get('recovery_report',{})
+            if setup_error(replay):raise ValueError('Replay requires a certified complete synthetic world anchor')
+            before=replay_baseline(observed,world_anchor(previous['baseline']))
+        name=params['object'];bbox=self.node._lookup_bbox(name)
         if not bbox:raise ValueError('Synthetic recovery target has no dimensions')
         with self.node.objects_lock:pose=dict(self.node.objects_data[name])
         settings=dict(cross=self.node._grasp_cross_var.get() if hasattr(self.node,'_grasp_cross_var') else False,
@@ -1305,7 +1310,9 @@ class Collector:
             approach_height=params['approach_height_m'],approach_offset=params['approach_offset_m'])
         report=dict(strategy=STRATEGY,origin=START_POLICY['origin'],policy=START_POLICY,
             episode_id=self.current_episode_id,epoch=epoch,passed=False,baseline=copy.deepcopy(before),
+            pre_restore_observed=copy.deepcopy(observed),world_anchor_sha256=digest(world_anchor(before)),
             request=dict(pose=pose,bbox=bbox,settings=settings))
+        if previous is not None:report['replay_world_anchor']=world_anchor(previous['baseline'])
         result['recovery_report']=report
         # Keep the target and every other obstacle in the synchronized planning scene.
         self.sync_scene(snapshot=before,epoch=epoch)
@@ -1316,17 +1323,13 @@ class Collector:
         if fresh['finger_offsets']!=model['effective_finger_offsets'] or fresh['block_offsets']!=self.native_shape_offsets[name]:raise RuntimeError('Synthetic start effective offsets differ')
         report.update(model=model,fresh_offsets=fresh)
         oracle=StaticClearance(model,before,name)
-        if not oracle.target_state(before)['passed']:raise RuntimeError('Synthetic start requires a stationary target')
+        if not protected_state(before,before)['passed']:raise RuntimeError('Synthetic start requires every protected body stationary')
         def check(q):
             self.generation.require(epoch)
             answer=self.node._check_state_valid_with_contacts(dict(zip(JOINTS,q)))
             self.generation.require(epoch)
             return answer
         if self.args.replay_receipt:
-            replay=json.loads(self.args.replay_receipt.read_text())
-            previous=replay.get('recovery_report',{})
-            if previous.get('strategy')!=STRATEGY or not previous.get('passed') or previous.get('policy')!=START_POLICY:
-                raise ValueError('Replay requires a certified synthetic-start receipt')
             selection=copy.deepcopy(previous['selection'])
             report['selection']=selection
             report['request']=copy.deepcopy(previous['request'])
@@ -1350,6 +1353,7 @@ class Collector:
         report['restore']=restored;epoch=restored['epoch'];report['epoch']=epoch
         with self.generation.own('synthetic restored hold'):
             self.generation.require(epoch)
+            report['protected_start']=self.mutate_kit('run_python',{'code':'import collection_runtime as c\nresult=c.runtime().start_protected_settle(*'+repr((world_anchor(before),epoch,restored['snapshot']['sim_ns']))+')'})
             with self.servo.lock:
                 self.servo.reference=list(restored['snapshot']['drive_targets']);self.servo.reference_epoch=epoch
                 self.servo.executed_hold=None;self.servo.previous_executed=None
@@ -1358,23 +1362,34 @@ class Collector:
         for _ in range(START_POLICY['settle_ticks']):
             snapshot=self.advance_ticks(1)[0];require_snapshots([snapshot]);snapshots.append(snapshot)
             self.generation.require(epoch,snapshot['sim_ns'])
-            static=oracle.state(snapshot['state'],snapshot);target=oracle.target_state(snapshot)
+            static=oracle.state(snapshot['state'],snapshot);target=oracle.target_state(snapshot);protected=protected_state(before,snapshot)
+            frame=snapshot.get('protected_settle',{})
+            if not frame.get('passed') or frame.get('epoch')!=epoch or frame.get('anchor_sha256')!=report['world_anchor_sha256'] or frame.get('frame_index')!=len(snapshots)-1:
+                raise RuntimeError('Synthetic settle is missing protected-body substep evidence')
             valid,contacts=self.node._check_state_valid_with_contacts(dict(zip(JOINTS,snapshot['state'])))
             self.generation.require(epoch,snapshot['sim_ns'])
-            proof=dict(static=static,target=target,scene_valid=valid,
+            proof=dict(static=static,target=target,protected=protected,scene_valid=valid,
                 contacts=[dict(body_1=c.contact_body_1,body_2=c.contact_body_2,depth=c.depth) for c in contacts])
             checks.append(proof)
-            if not static['passed'] or not target['passed'] or not valid:
+            if not static['passed'] or not protected['passed'] or not valid:
                 error=RuntimeError('Synthetic reset settle verification failed: '+repr(proof))
                 raise error
         require_snapshots(snapshots)
         current=snapshots[-1];self.sync_scene(snapshot=current,epoch=epoch)
         with self.generation.own('synthetic corrective handover'):
             self.generation.require(epoch,current['sim_ns'])
+            report['protected_finish']=self.mutate_kit('run_python',{'code':'import collection_runtime as c\nresult=c.runtime().finish_protected_settle(*'+repr((epoch,current['sim_ns']))+')'})
+            if not report['protected_finish'].get('passed'):raise RuntimeError('Synthetic substep guard did not retire successfully')
+        report.update(record_after_sim_ns=current['sim_ns'],scene_after_reset=self.scene_pose_check,
+            corrective_attempt='shared Quickstart; normal dynamics and speed; synthetic setup unrecorded')
+        candidate=copy.deepcopy(report);candidate['passed']=True
+        error=setup_error(dict(episode_id=self.current_episode_id,params=params,recovery_report=candidate))
+        if error:raise RuntimeError('Synthetic setup certificate failed before writer: '+error)
+        with self.generation.own('synthetic verified handover'):
+            self.generation.require(epoch,current['sim_ns'])
             self.recovery_prefix_done_epoch=epoch
             self.episode_start_physical=current
-            report.update(passed=True,record_after_sim_ns=current['sim_ns'],scene_after_reset=self.scene_pose_check,
-                corrective_attempt='shared Quickstart; normal dynamics and speed; synthetic setup unrecorded')
+            report['passed']=True
         return report
 
     def regrasp_prefix(self, params, epoch, result,planning_budget=None):
