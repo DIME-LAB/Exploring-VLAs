@@ -235,7 +235,16 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       record child pids) and verify none survive before reporting down.
 - [ ] `deploy_sim.sh status` reports "Up" while control_gui's ROS executor has died (seen 2026-11-13 in the
       pre-merge GUI check): status should probe a GUI/control service, not just the process, and fail when it hangs.
-- [ ] Check the Mac's offloaded Exploring-VLAs copy (G-DRIVE: unknown commit `5586bab` + 1 uncommitted file)
+- [x] Check the Mac's offloaded Exploring-VLAs copy (G-DRIVE: unknown commit `5586bab` + 1 uncommitted file).
+      Done 2026-11-14: /Volumes/G-DRIVE/vault/ros2/repos/Exploring-VLAs held 40 commits never pushed (Apr-May 2026
+      real-hardware work: trajectory_shim, gravity compensation, backend_real/stack launches, control_gui real-mode,
+      joint_state_reader/arm_trim, mac-env EpisodeBrowser; ~11.6k lines) and lerobot fork ae8768ce. Preserved as
+      branches archive/real-hw-phase6-gdrive on DIME-LAB/Exploring-VLAs (5586bab) and inbarajaldrin/lerobot (ae8768ce);
+      the only uncommitted file (lerobot/.planning/phases/06-real-hardware-unification/.continue-here-arm-tuning.md)
+      stays on G-DRIVE. Not merged: dev has diverged heavily (control_gui/pick_place/srdf).
+- [ ] Real-hardware reintegration: port the archived real-hw work (archive/real-hw-phase6-gdrive) onto current dev
+      when the real arm is back in scope (Phase 2.7 deploy switch / real-robot eval); reconcile with the sim/GUI
+      split, the new grasp height and the primitive scene.
 - [ ] Housekeeping outside the repo: discard the unsent WhatsApp zip draft (us account); commit the
       Career repo's lerobot keep-edit; decide whether `coursework-eee598/` is git-ignored; fix the Mac
       isaacsim state file's stale viewer path (`Isaac Connect.app`).
