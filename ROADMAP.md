@@ -230,6 +230,11 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       cap, so a velocity cap cannot bound per-substep reach. Direction (B): kinematic arm through the masked
       miss prefix (positions + drive targets set per substep, exact by construction), normal dynamics for the
       corrective cycle; w_collect investigating a supported native route first.
+      Decided (C): no physical miss motion. Each re-grasp episode starts from a native held reset into a sampled
+      post-miss pose (closed/partly closed jaw 26-38 mm off the lego, plus open-jaw hovers), static clearance
+      check before the write, settle + stationary-target gate, then the normal-speed corrective cycle is recorded
+      (all frames phase 2). Valid for the one-observation policy; labelled synthetic post-miss resets.
+      Fallback (B) gravity-off position-set experiment documented, not built.
 - [ ] 3.1j Simpler physics and a deeper grasp (Aldrin, 2026-11-14): the gripper barely grips the lego. Lego -> box
       collider (now SDF); cup -> compound of native primitives (now a 16-piece convex decomposition with a floor
       1.7 mm too high and asymmetric walls); robot/gripper colliders -> few primitives with accurate finger pads;
