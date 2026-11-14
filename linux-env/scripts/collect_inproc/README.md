@@ -46,6 +46,10 @@ the shared sim. Stop the ROS instance only through its owner before standalone w
 
 Inspect a launch first; `preflight` never boots Isaac:
 
+With a real prior Kit log, it can report GPU mapping before scene export, but
+`inputs_ready` remains false until the exported scene, manifest and matching seed
+fixtures exist. A missing-input preflight is not clearance to start collection.
+
 ```bash
 python3 linux-env/scripts/collect_inproc/launch.py preflight \
   --runtime /mnt/a4500-backup/exploring-vlas/runtime/inproc-31 \
