@@ -5,7 +5,8 @@ from types import SimpleNamespace as NS
 from episode_policy import (ConvergenceFailure, QualityReject, WorkerRegistry, FailureStreak, disposition, POLICY)
 from protocol import CancelledGeneration, StepGeneration
 from contract import JOINTS,timing_audit
-from dart import TargetLimiter
+from test_tick_contract import checked_window
+from tick_contract import require_snapshots
 import test_review_regressions as probes
 from so_arm101_control.grasp_geometry import _grasp_home_data_target
 import test_motion_operations as motions
@@ -62,7 +63,7 @@ class HomeHoldTests(unittest.TestCase):
             i=len(samples);delta=.012 if i<5 else .002
             row=dict(state_source='isaac_articulation',state=[goal[n]+delta for n in JOINTS[:5]]+[0.],
                      velocity=[.1]*6,sim_ns=10**9+round(i*1e9/30))
-            samples.append(row);return [row]
+            samples.append(row);return [checked_window(samples)[-1]]
         c.advance_ticks=advance
         result=c.settle_home('after_reset')
         self.assertTrue(result['passed']);self.assertEqual(len(samples),11)
@@ -71,8 +72,8 @@ class HomeHoldTests(unittest.TestCase):
         samples.clear()
         def never_stable(count):
             samples.append(1)
-            return [dict(state_source='isaac_articulation',state=[goal[n]+.012 for n in JOINTS[:5]]+[0.],
-                         velocity=[0.]*6,sim_ns=10**9+round(len(samples)*1e9/30))]
+            return checked_window([dict(state_source='isaac_articulation',state=[goal[n]+.012 for n in JOINTS[:5]]+[0.],
+                         velocity=[0.]*6,sim_ns=10**9+round(len(samples)*1e9/30))])
         c.advance_ticks=never_stable
         with self.assertRaises(QualityReject) as failed:c.settle_home('after_reset')
         self.assertEqual(failed.exception.kind,'home_unstable');self.assertEqual(len(samples),150)
@@ -90,9 +91,6 @@ class QualityPolicyTests(unittest.TestCase):
         v.plan=dict(epoch=fixture['epoch'],start=fixture['operation_start_sim_ns'],done=threading.Event(),
                     trajectory=NS(joint_names=JOINTS[:5],points=[point]))
         v.phase=fixture['phase']
-        v.limiter=TargetLimiter([(-3.,3.)]*5)
-        prior=v.limiter.propose(fixture['reference'],[0.]*6,fixture['reference'],fixture['epoch'],fixture['last_recorded_sim_ns'])
-        v.limiter.commit(prior,fixture['epoch'],fixture['last_recorded_sim_ns'])
         with self.assertRaises(ConvergenceFailure) as failed:v.tick(fixture['failure_sim_ns'],fixture['state'])
         evidence=failed.exception.evidence
         self.assertEqual(evidence['kind'],'arm_nonconvergence')
@@ -134,7 +132,7 @@ class QualityPolicyTests(unittest.TestCase):
     def test_recorded_convergence_cancel_must_be_complete_and_validated(self):
         r=dict(accepted=False,end_cancel=dict(held=True,failure=None),original_capture_error_preserved=True,retirement=dict(passed=True),
             timing=dict(passed=False,contract_passed=True),capture_failures=[dict(epoch=3,validated_sim_tick=True,
-                physical_convergence=dict(kind='arm_nonconvergence',epoch=3),cancellation=dict(completed=True,result=dict(held=True,failure=None)))])
+                failing_tick_contract=checked_window([dict(epoch=3)])[0]['tick_contract'],physical_convergence=dict(kind='arm_nonconvergence',epoch=3),cancellation=dict(completed=True,result=dict(held=True,failure=None)))])
         self.assertEqual(disposition(r),dict(kind='quality_reject',reason='arm_nonconvergence'))
         r['capture_failures'][0]['validated_sim_tick']=False
         self.assertEqual(disposition(r)['kind'],'terminal')

@@ -133,9 +133,12 @@ class MotionOperationTests(unittest.TestCase):
         c.generation.retirement_timeout=.05 if delay is None else 15.
         entered=threading.Event();release=threading.Event();checks=[];failures=[]
         def valid(target):
+            if threading.current_thread().name!='planner-path-checks':return True,[]
             checks.append(target);entered.set()
-            if delay is None:self.assertTrue(release.wait(3))
-            else:threading.Event().wait(delay)
+            self.assertFalse(c.generation.lock._is_owned())
+            if len(checks)<=51:
+                if delay is None:self.assertTrue(release.wait(3))
+                else:threading.Event().wait(delay)
             return True,[]
         node._check_state_valid_with_contacts=valid
         event=node._begin_motion(node._new_motion_event())
@@ -144,6 +147,7 @@ class MotionOperationTests(unittest.TestCase):
             try:node._joint_space_collision_free_execute(operation.joints(),event,operation=operation)
             except Exception as exc:failures.append(repr(exc))
         planner=node._motion_thread(target=planning)
+        planner.name='planner-path-checks'
         started=time.monotonic();planner.start();self.assertTrue(entered.wait(2))
         capture=threading.Thread(target=c.capture);capture.start();capture.join(2)
         self.assertFalse(capture.is_alive());self.assertIsNone(c.failure)
@@ -152,7 +156,7 @@ class MotionOperationTests(unittest.TestCase):
         capture_wall=time.monotonic()-started
         release.set();planner.join(25)
         self.assertFalse(planner.is_alive());self.assertFalse(failures)
-        self.assertEqual(len(checks),51)
+        self.assertGreaterEqual(len(checks),51)
         self.assertIs(c.servo.plan['done'],event)
         return dict(passed=True,retirement_timeout=c.generation.retirement_timeout,
                     validity_calls=len(checks),capture_wall_seconds=capture_wall,

@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 from cup_profile import PROFILE,radial_limit,radius_at_height,verify_shell
 from success import contained,settled_containment
+from test_tick_contract import checked_window
 from diagnostics import final_stills, png_dimensions
 import test_safety
 
@@ -18,7 +19,7 @@ class CupProfileTests(unittest.TestCase):
 
     def test_exact_rejected_live_pose_passes_height_dependent_profile(self):
         data=self.fixture()
-        result=settled_containment(data['snapshots'],data['object'],data['color'])
+        result=settled_containment(checked_window(data['snapshots']),data['object'],data['color'])
         self.assertTrue(result['passed'])
         check=result['checks'][-1]
         self.assertAlmostEqual(check['max_corner_radius_m'],.02524526772523616,delta=1e-12)

@@ -1,105 +1,104 @@
-"""Smooth perturbation continuity, seeded replay, bounds and ACK ownership."""
-import math,random,unittest
-from dataclasses import FrozenInstanceError
-from pathlib import Path
-import yaml
-from dart import DEFAULT_NOISE,SmoothDart,TargetLimiter,ExpertSchedule
+"""Smooth noise, original planner geometry and final swept-command checks."""
+import math,unittest,threading
 from types import SimpleNamespace as NS
+from dataclasses import FrozenInstanceError
+from dart import DEFAULT_NOISE,SmoothDart,PlannerSchedule,TargetCandidate
+from command_geometry import checked_segment,choose_noise_scale,final_command,CommandCollision
+import time
+
+
+def path(points,duration=2.):
+    return NS(joint_names=('shoulder_pan','shoulder_lift','elbow_flex','wrist_flex','wrist_roll'),points=[NS(positions=q,time_from_start=NS(sec=int(t),nanosec=round(t%1*1e9))) for t,q in points])
 
 
 class DartTests(unittest.TestCase):
     def test_seeded_segments_have_smooth_zero_endpoints_and_no_gripper_noise(self):
         config=dict(DEFAULT_NOISE,on_probability=1.)
         for seed in range(20):
-            p=SmoothDart(3.,seed,config)
-            self.assertEqual(p.spec,SmoothDart(3.,seed,config).spec)
+            p=SmoothDart(3.,seed,config);self.assertEqual(p.spec,SmoothDart(3.,seed,config).spec)
             self.assertEqual(p.sample(0.),[0.]*6);self.assertEqual(p.sample(2.4),[0.]*6)
-            dt=1/300;values=[p.sample(i*dt) for i in range(901)]
-            velocity=[[(b[j]-a[j])/dt for j in range(5)] for a,b in zip(values,values[1:])]
-            accel=[[(b[j]-a[j])/dt for j in range(5)] for a,b in zip(velocity,velocity[1:])]
-            self.assertLessEqual(max(abs(v) for row in velocity for v in row),.050001)
-            self.assertLessEqual(max(abs(v) for row in accel for v in row),.30001)
+            values=[p.sample(i/300) for i in range(901)]
+            v=[[(b[j]-a[j])*300 for j in range(5)] for a,b in zip(values,values[1:])]
+            a=[[(b[j]-a[j])*300 for j in range(5)] for a,b in zip(v,v[1:])]
+            self.assertLessEqual(max(abs(x) for row in v for x in row),.050001)
+            self.assertLessEqual(max(abs(x) for row in a for x in row),.30001)
             self.assertTrue(all(row[5]==0. for row in values))
-            self.assertLessEqual(max(abs(v) for row in values for v in row),math.radians(1.))
 
-    def test_short_operations_scale_or_skip_instead_of_an_abrupt_truncated_segment(self):
-        for duration in (.2,.7,1.,1.5):
-            p=SmoothDart(duration,7,dict(DEFAULT_NOISE,on_probability=1.))
-            self.assertEqual(p.sample(duration*.8),[0.]*6)
-            self.assertEqual(p.sample(duration),[0.]*6)
-        self.assertEqual(SmoothDart(2.,7,DEFAULT_NOISE,enabled=False).segments,[])
+    def test_every_short_segment_preserves_minimum_hold_and_ramp_or_skips(self):
+        for duration in (.2,.7,.8,1.,1.3,1.5,2.,3.):
+            for seed in range(30):
+                p=SmoothDart(duration,seed,dict(DEFAULT_NOISE,on_probability=1.))
+                for s in p.segments:
+                    self.assertGreaterEqual(s['hold_s'],.3);self.assertGreaterEqual(s['ramp_s'],.35-1e-12)
+                self.assertEqual(p.sample(duration*.8),[0.]*6)
+        self.assertEqual(SmoothDart(.8,7,dict(DEFAULT_NOISE,on_probability=1.)).segments,[])
 
-    def test_target_derivatives_and_joint_braking_room_are_bounded(self):
-        limiter=TargetLimiter([(-.15,.15)]*5)
-        previous=[0.]*6;velocity=[0.]*5;rng=random.Random(17)
-        for tick in range(1000):
-            goal=[rng.uniform(-.3,.3) for _ in range(5)]+[.2]
-            candidate=limiter.propose(goal,[0.]*6,previous,3,tick)
-            self.assertEqual(candidate.positions[5],.2)
-            next_velocity=[(candidate.positions[j]-previous[j])*30 for j in range(5)]
-            self.assertLessEqual(max(abs(v) for v in next_velocity),10.+1e-6)
-            self.assertLessEqual(max(abs(v-a)*30 for v,a in zip(next_velocity,velocity)),2.+1e-5)
-            self.assertTrue(all(-.150001<=v<=.150001 for v in candidate.positions[:5]))
-            limiter.commit(candidate,3,tick);previous=list(candidate.positions);velocity=next_velocity
-        for tick in range(1000,1300):
-            c=limiter.propose([0.]*6,[0.]*6,previous,3,tick);limiter.commit(c,3,tick);previous=list(c.positions)
-        self.assertLess(max(abs(v) for v in previous[:5]),1e-6)
-        self.assertLess(max(abs(v) for v in c.velocities),1e-6)
+    def test_planner_time_and_corner_polyline_are_unchanged(self):
+        p=path([(0.,[0.]*5),(1.,[.5,0.,0.,0.,0.]),(2.,[.5,.5,0.,0.,0.])])
+        schedule=PlannerSchedule(p);self.assertEqual(schedule.duration,2.)
+        for i in range(61):
+            q=schedule.sample(i/30);self.assertTrue(abs(q[1])<1e-12 or abs(q[0]-.5)<1e-12)
+        self.assertEqual(schedule.sample(.5),[.25,0.,0.,0.,0.])
 
-    def test_candidate_history_changes_only_after_matching_ack_and_can_cross_idle_epoch(self):
-        limiter=TargetLimiter([(-2.,2.)]*5)
-        candidate=limiter.propose([.1]*6,[0.]*6,[0.]*6,1,100)
-        self.assertIsNone(limiter.state)
-        with self.assertRaises(ValueError):limiter.commit(candidate,2,100)
-        with self.assertRaises(FrozenInstanceError):candidate.epoch=2
-        limiter.commit(candidate,1,100);limiter.handover(2)
-        self.assertEqual(limiter.state.positions,candidate.positions)
-        self.assertEqual(limiter.state.epoch,2)
-        with self.assertRaises(ValueError):limiter.propose([.1]*6,[0.]*6,[0.]*6,1,133)
-
-    def test_expert_retiming_preserves_path_and_obeys_its_lower_derivative_budget(self):
-        points=[NS(positions=[i/20]*5,time_from_start=NS(sec=(i//20),nanosec=round((i%20)/20*1e9))) for i in range(21)]
-        schedule=ExpertSchedule(NS(points=points),DEFAULT_NOISE)
-        self.assertGreater(schedule.duration,1.)
-        self.assertEqual(schedule.sample(0.),[0.]*5);self.assertEqual(schedule.sample(schedule.duration),[1.]*5)
-        values=[schedule.sample(0.)]*2+[schedule.sample(min(schedule.duration,i/30)) for i in range(1,math.ceil(schedule.duration*30)+1)]
-        values+=[values[-1]]*2
-        velocity=[(b[0]-a[0])*30 for a,b in zip(values,values[1:])]
-        accel=[(b-a)*30 for a,b in zip(velocity,velocity[1:])]
-        self.assertLessEqual(max(abs(v) for v in velocity),1.000001)
-        self.assertLessEqual(max(abs(v) for v in accel),1.400001)
-        self.assertTrue(all(abs(row[0]-row[4])<1e-12 for row in values))
-
-    def test_corner_retiming_keeps_the_original_polyline_without_shortcuts(self):
-        points=[NS(positions=q,time_from_start=NS(sec=0,nanosec=t)) for t,q in
-                [(0,[0.]*5),(300000000,[.5,0.,0.,0.,0.]),(600000000,[.5,.5,0.,0.,0.])]]
-        schedule=ExpertSchedule(NS(points=points),DEFAULT_NOISE)
-        self.assertFalse(schedule.original);self.assertEqual(len(schedule.segments),2)
-        positions=[schedule.sample(i*schedule.duration/200) for i in range(201)]
-        self.assertTrue(all(abs(q[1])<1e-12 or abs(q[0]-.5)<1e-12 for q in positions))
-        sources=[schedule.source_time(i*schedule.duration/200) for i in range(201)]
-        self.assertEqual(sources,sorted(sources))
-
-    def test_cancel_can_retire_while_expert_retiming_is_in_progress(self):
-        import threading
+    def test_real_servo_zero_noise_corner_and_native_ack_stay_on_planned_polyline_with_lag(self):
+        import json
+        import numpy as np
         import test_motion_operations as motions
-        c,r,_,_,_=motions.MotionOperationTests().setup_motion();v=c.servo;v.plan=None
-        event=c.node._new_motion_event();trajectory=NS(joint_names=list(('shoulder_pan','shoulder_lift','elbow_flex','wrist_flex','wrist_roll')),
-            points=[NS(positions=[0.]*5,time_from_start=NS(sec=1,nanosec=0))])
-        entered=threading.Event();release=threading.Event();scope=v.execute.__func__.__globals__;original=scope['ExpertSchedule']
-        def slow(*args):entered.set();release.wait(2);return original(*args)
-        scope['ExpertSchedule']=slow
-        try:
-            worker=c.node._motion_thread(target=lambda:v.execute(trajectory,event));worker.start();self.assertTrue(entered.wait(1))
-            self.assertEqual(c.timeline(False)['epoch'],2)
-            release.set();worker.join(2);self.assertFalse(worker.is_alive());self.assertIsNone(v.plan)
-        finally:release.set();scope['ExpertSchedule']=original
+        from contract import JOINTS,corrective_action
+        c,r,_,_,_=motions.MotionOperationTests().setup_motion();v=c.servo
+        v.params['dart']=dict(DEFAULT_NOISE,on_probability=0.)
+        event=c.node._new_motion_event();event.motion_tag='grasp_move'
+        v.execute(path([(0.,[0.]*5),(1.,[.5,0.,0.,0.,0.]),(2.,[.5,.5,0.,0.,0.])]),event)
+        self.assertEqual(v.plan['noise'].segments,[])
+        q=[0.]*6;previous=[0.]*6;acks=[];measured_departure=[]
+        r.ack_pub=NS(publish=lambda msg:acks.append(json.loads(msg.data)))
+        for i in range(90):
+            stamp=10**9+round(i/30*1e9);r.stamp=lambda:stamp;r.busy=False
+            c.node.get_clock=lambda:NS(now=lambda:NS(nanoseconds=stamp))
+            clean,command,_,_,reference,_,_,advance,candidate=v.tick(stamp,q,previous)
+            self.assertEqual(clean,corrective_action(q,reference))
+            self.assertTrue(abs(command[1])<1e-12 or abs(command[0]-.5)<1e-12)
+            self.assertTrue(c.validate_command(candidate,q,previous)['passed'])
+            r.command_received(NS(data=json.dumps(dict(epoch=1,observation_stamp_ns=stamp,command=command,advance=advance))))
+            self.assertNotIn('error',acks[-1]);np.testing.assert_allclose(acks[-1]['applied_command'],command,atol=1e-7)
+            v.commit_command(candidate,1,stamp)
+            q=[x+.15*(u-x) for x,u in zip(q,command)];previous=command
+            measured_departure.append(min(abs(q[1]),abs(q[0]-.5)))
+        self.assertGreater(max(measured_departure),.001)  # Measured lag leaves the line; every applied target stays on it.
+        self.assertEqual(v.previous_command.planner_reference,tuple(reference))
 
-    def test_limits_do_not_exceed_the_deployment_yaml(self):
-        root=Path(__file__).resolve().parents[3]
-        cfg=yaml.safe_load((root/'vla_SO-ARM101/src/so_arm101_moveit_config/config/joint_limits.yaml').read_text())
-        for joint in ('shoulder_pan','shoulder_lift','elbow_flex','wrist_flex','wrist_roll'):
-            self.assertLessEqual(DEFAULT_NOISE['arm_velocity_rad_s'],cfg['joint_limits'][joint]['max_velocity'])
-            self.assertLessEqual(DEFAULT_NOISE['arm_acceleration_rad_s2'],cfg['joint_limits'][joint]['max_acceleration'])
-        with self.assertRaises(ValueError):SmoothDart(3.,1,dict(DEFAULT_NOISE,arm_acceleration_rad_s2=3.))
+    def test_lagging_gripper_receives_exact_clean_command_without_noise(self):
+        import test_motion_operations as motions
+        c,r,_,_,_=motions.MotionOperationTests().setup_motion();v=c.servo
+        c.node._actual_positions['gripper_joint']=.5
+        v.reference=[0.]*5+[.5];v.reference_epoch=1
+        v.gripper(.1,.01,False)
+        clean,executed,*_=v.tick(10**9,[0.]*5+[.5])
+        self.assertAlmostEqual(clean[5],.465)
+        self.assertEqual(executed[5],clean[5])
+
+    def test_complete_noise_operation_scales_before_dispatch_when_corridor_is_narrow(self):
+        schedule=PlannerSchedule(path([(0.,[0.]*5),(3.,[.1,0.,0.,0.,0.])]))
+        program=SmoothDart(3.,7,dict(DEFAULT_NOISE,on_probability=1.))
+        check=lambda q:(max(abs(v) for v in q[1:5])<.003,[])
+        scale,report=choose_noise_scale(schedule,program,0.,check,[(-3.,3.)]*6,lambda:None)
+        self.assertLess(scale,1.);self.assertTrue(report['attempts'][-1]['passed'])
+        self.assertTrue(any(not a['passed'] for a in report['attempts']))
+
+    def test_final_measured_to_command_segment_refuses_obstacle_on_lag_shortcut(self):
+        candidate=TargetCandidate(1,10**9,(.5,.15,0.,0.,0.,0.),(0.,)*5,(0.,)*6,(0.,)*6,(.5,.15,0.,0.,0.,0.))
+        check=lambda q:(not (.30<q[0]<.48 and .02<q[1]<.14),[])
+        with self.assertRaises(CommandCollision):final_command(candidate,[.35,0.,0.,0.,0.,0.],[.5,.13,0.,0.,0.,0.],check,[(-3.,3.)]*6)
+        self.assertTrue(final_command(candidate,[.5,.13,0.,0.,0.,0.],[.5,.13,0.,0.,0.,0.],check,[(-3.,3.)]*6)['passed'])
+
+    def test_cancel_can_retire_while_preflight_query_is_in_progress(self):
+        import test_motion_operations as motions
+        c,r,_,_,_=motions.MotionOperationTests().setup_motion();v=c.servo;v.plan=None;v.noise_index=0;v.noise_specs=[]
+        event=c.node._new_motion_event();entered=threading.Event();release=threading.Event()
+        def slow(target):entered.set();release.wait(2);return True,[]
+        c.node._check_state_valid_with_contacts=slow
+        worker=c.node._motion_thread(target=lambda:v.execute(path([(0.,[0.]*5),(1.,[.1]*5)]),event));worker.start()
+        self.assertTrue(entered.wait(1));self.assertEqual(c.timeline(False)['epoch'],2)
+        release.set();worker.join(3);self.assertFalse(worker.is_alive());self.assertIsNone(v.plan)
+
 if __name__=='__main__':unittest.main()

@@ -3,6 +3,7 @@ import math
 import random
 from dart import DEFAULT_NOISE
 from recovery import recovery_parameters
+from tick_contract import row_errors
 
 COLORS = ('red', 'green', 'blue')
 JOINTS = ('shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll', 'gripper_joint')
@@ -97,24 +98,17 @@ def timing_audit(rows, fps):
         errors.append('Post-step physical drive targets are missing')
     elif any(any(abs(x-y) > 1e-6 for x,y in zip(a['applied_command'],b['physics_drive_targets'])) for a,b in zip(rows,rows[1:])):
         errors.append('Applied targets did not persist through the next physical frame')
-    if any('planned_noise_offset' in row for row in rows):
-        complete=all(len(row.get('planned_noise_offset',[]))==6 and
-                     len(row.get('command_filter_delta',[]))==6 and len(row.get('command_velocity',[]))==5 and
-                     all(math.isfinite(v) for key in ('planned_noise_offset','command_filter_delta','command_velocity') for v in row[key]) for row in rows)
-        if not complete:
-            errors.append('Bounded command provenance is incomplete')
-        else:
-            if any(row['planned_noise_offset'][5]!=0. or abs(row['executed_action'][5]-row['action'][5])>1e-9 for row in rows):
-                errors.append('Gripper command was perturbed')
-            if any(abs(e-a-n-d)>1e-9 for row in rows for e,a,n,d in zip(row['executed_action'],row['action'],row['planned_noise_offset'],row['command_filter_delta'])):
-                errors.append('Executed perturbation differs from its recorded components')
-            previous=[rows[0]['physics_drive_targets']]+[row['executed_action'] for row in rows[:-1]]
-            velocities=[[(row['executed_action'][j]-prior[j])*fps for j in range(5)] for prior,row in zip(previous,rows)]
-            acceleration=[[(b[j]-a[j])*fps for j in range(5)] for a,b in zip(velocities,velocities[1:])]
-            if any(abs(v)>10.001 for velocity in velocities for v in velocity) or any(abs(v)>2.001 for a in acceleration for v in a):
-                errors.append('Executed arm targets exceed deployment derivative bounds')
-            if any(abs(a-b)>1e-4 for row,velocity in zip(rows,velocities) for a,b in zip(row['command_velocity'],velocity)):
-                errors.append('Executed target velocity differs from command provenance')
+    if any(r.get('tick_contract_version') for r in rows):
+        for i,row in enumerate(rows):
+            errors.extend(row_errors(row,rows[i-1] if i else None))
+            geometry=row.get('execution_geometry',{})
+            if not geometry.get('passed') or geometry.get('target')!=row['executed_action'] or geometry.get('epoch')!=row['epoch'] or geometry.get('sim_ns')!=row['sim_ns']:
+                errors.append('Final command geometry proof differs')
+            if row.get('planner_execution_reference') and any(abs(e-r-n)>1e-9 for e,r,n in zip(row['executed_action'],row['planner_execution_reference'],row['dart_offset'])):
+                errors.append('Executed target differs from planner plus DART offset')
+            if row.get('command_filter_delta')!=[0.]*6:errors.append('Execution reshaped the expert path')
+            if row.get('dart_offset',[1.]*6)[5]!=0.:errors.append('Gripper was perturbed')
+    errors=list(dict.fromkeys(errors))
     planning_idle = sum(not r.get('executing', True) for r in rows) / len(rows)
     stationary = sum(max(abs(x - y) for x, y in zip(a['state'], b['state'])) < 1e-4
                      for a, b in zip(rows, rows[1:])) / max(1, len(rows) - 1)

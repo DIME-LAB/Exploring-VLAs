@@ -15,7 +15,9 @@ from unittest.mock import patch
 import numpy as np
 from contract import JOINTS, corrective_action, parameters
 from protocol import CancelledGeneration, CommandLedger, StepGeneration, OwnershipStalled
-from dart import DEFAULT_NOISE, SmoothDart, TargetLimiter, ExpertSchedule
+from dart import DEFAULT_NOISE, SmoothDart, TargetCandidate, PlannerSchedule
+from command_geometry import choose_noise_scale,final_command
+from tick_contract import TickContract,TickContractError,require_snapshots,digest,verify_proof
 from episode_policy import ConvergenceFailure, QualityReject, POLICY, WorkerRegistry, FailureStreak, disposition
 from scene_sync import physical_pose_caches, collision_pose_errors
 from success import PHYSICAL_FLOOR_M, INTERIOR_FLOOR_M, initial_arm
@@ -31,7 +33,7 @@ def load_class(filename, name):
     path = HERE/filename
     tree = ast.parse(path.read_text())
     cls = next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name==name)
-    scope = dict(random=random,replace=replace,copy=copy,ExpertSchedule=ExpertSchedule, DEFAULT_NOISE=DEFAULT_NOISE, SmoothDart=SmoothDart, TargetLimiter=TargetLimiter, initial_arm=initial_arm, ConvergenceFailure=ConvergenceFailure, QualityReject=QualityReject, POLICY=POLICY, WorkerRegistry=WorkerRegistry, FailureStreak=FailureStreak, disposition=disposition, MotionWaitTimeout=MotionWaitTimeout, contextmanager=contextmanager, OwnershipStalled=OwnershipStalled, threading=threading,time=time,np=np,json=json,JOINTS=JOINTS,
+    scope = dict(random=random,replace=replace,copy=copy,PlannerSchedule=PlannerSchedule,TargetCandidate=TargetCandidate,choose_noise_scale=choose_noise_scale,final_command=final_command,TickContract=TickContract,TickContractError=TickContractError,require_snapshots=require_snapshots,digest=digest,verify_proof=verify_proof, DEFAULT_NOISE=DEFAULT_NOISE, SmoothDart=SmoothDart, initial_arm=initial_arm, ConvergenceFailure=ConvergenceFailure, QualityReject=QualityReject, POLICY=POLICY, WorkerRegistry=WorkerRegistry, FailureStreak=FailureStreak, disposition=disposition, MotionWaitTimeout=MotionWaitTimeout, contextmanager=contextmanager, OwnershipStalled=OwnershipStalled, threading=threading,time=time,np=np,json=json,JOINTS=JOINTS,
                  String=lambda data:NS(data=data),StepGeneration=StepGeneration,
                  CancelledGeneration=CancelledGeneration,CommandLedger=CommandLedger,
                  corrective_action=corrective_action,JOINT_LIMITS={k:(-3,3) for k in JOINTS},
@@ -45,7 +47,8 @@ def frame(epoch=1):
     joint=NS(name=JOINTS,position=[0.]*6,velocity=[0.]*6,header=NS(stamp=stamp))
     snapshot=dict(epoch=epoch,sim_ns=10**9,physics_time_s=1.,state=[0.]*6,velocity=[0.]*6,
                   drive_targets=[0.]*6,bodies={},state_source='isaac_articulation')
-    return {k:(v,1) for k,v in dict(joint=joint,tick=snapshot,wrist=joint,top=joint).items()}
+    def camera():return NS(header=NS(stamp=NS(sec=1,nanosec=0)),encoding='rgb8',width=640,height=480,step=1920,data=bytes(921600))
+    return {k:(v,1) for k,v in dict(joint=joint,tick=snapshot,wrist=camera(),top=camera()).items()}
 
 
 class ReviewRegressions(unittest.TestCase):
@@ -54,7 +57,7 @@ class ReviewRegressions(unittest.TestCase):
         Servo, _ = load_class('collect.py','Servo')
         Runtime, _ = load_class('collection_runtime.py','Runtime')
         c=object.__new__(Collector);r=object.__new__(Runtime);v=object.__new__(Servo)
-        c.generation=StepGeneration();c.generation.install(dict(epoch=1,invalid_through_ns=0))
+        c.generation=StepGeneration();c.generation.install(dict(epoch=1,invalid_through_ns=966666667))
         c.stalled_abort_lock=threading.Lock();c.stalled_abort_started=False
         c.stop=threading.Event();c.failure=None;c.writer=None;c.writer_lock=threading.Lock()
         c.tick_condition=threading.Condition();c.last_processed_ns=0;c.last_snapshot=None
@@ -64,9 +67,11 @@ class ReviewRegressions(unittest.TestCase):
             c.node._last_motion_status=value
             if event is not None:event.verdict=dict(value)
         c.node._set_motion_status=status
+        c.node._check_state_valid_with_contacts=lambda target:(True,[])
+        c.episode_snapshots=[]
         c.update_pose_cache=lambda snapshot:None
         c.events=[];acks={}
-        r.epoch=1;r.invalid_through_ns=0;r.failure=None;r.mode='collect';r.busy=False
+        r.epoch=1;r.invalid_through_ns=966666667;r.failure=None;r.mode='collect';r.busy=False
         r.stamp=lambda:10**9;r.world=NS(current_time=1.)
         r.timeline=NS(pause=lambda:c.events.append('pause'),is_playing=lambda:False,
                       play=lambda:c.events.append('advance'))
@@ -81,7 +86,7 @@ class ReviewRegressions(unittest.TestCase):
         v.node=c.node;v.generation=c.generation;v.lock=threading.RLock();v.plan=dict(trajectory=NS(points=[NS(time_from_start=NS(sec=2,nanosec=0),positions=[.1]*5)],joint_names=JOINTS[:5]),done=threading.Event(),start=10**9,epoch=1)
         v.grip_plan=None;v.reference_epoch=1;v.reference=[.1]*5+[0.];v.rng=random.Random(1);v.params=parameters(1,'red')
         v.phase='move';v.previous_executed=None
-        v.planned_sim_seconds=0.;v.planned_operations=0
+        v.planned_sim_seconds=0.;v.planned_operations=0;v.noise_index=0;v.noise_specs=[];v.previous_command=None
         def now():
             clock_hook(c,r)
             return NS(nanoseconds=10**9)

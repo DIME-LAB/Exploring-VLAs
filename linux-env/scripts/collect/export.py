@@ -51,9 +51,9 @@ def main():
         receipt = json.loads((path / 'receipt.json').read_text())
         if not receipt['accepted']:
             continue
-        recovery_error=receipt_error(receipt)
-        if recovery_error:raise ValueError(f'{path}: {recovery_error}')
         rows = [json.loads(line) for line in (path / 'frames.jsonl').read_text().splitlines()]
+        recovery_error=receipt_error(receipt,rows)
+        if recovery_error:raise ValueError(f'{path}: {recovery_error}')
         audit = timing_audit(rows, fps)
         if not audit['passed']:
             raise ValueError(f'{path}: {audit}')

@@ -4,8 +4,9 @@ import threading
 import time
 from protocol import CancelledGeneration
 from recovery import receipt_error
+from tick_contract import verdict_contract_valid,verify_proof
 
-POLICY = dict(version=1, consecutive_same_reason_limit=3,
+POLICY = dict(version=2, consecutive_same_reason_limit=3,
               convergence_tolerance_rad=.008, home_tolerance_rad=.01,
               home_spread_rad=.002, home_settle_sim_seconds=5.)
 QUALITY_KINDS = frozenset(('arm_nonconvergence', 'gripper_nonconvergence', 'home_unstable',
@@ -16,10 +17,10 @@ PLANNER_REJECTIONS = frozenset(('grasp_unreachable_workspace','grasp_unreachable
 
 
 class QualityReject(RuntimeError):
-    def __init__(self, kind, evidence):
+    def __init__(self, kind, evidence, contract=None):
         if kind not in QUALITY_KINDS:
             raise ValueError('Unknown physical quality rejection')
-        self.kind, self.evidence = kind, evidence
+        self.kind, self.evidence, self.contract = kind, evidence, contract
         super().__init__(kind+': '+repr(evidence))
 
 
@@ -82,7 +83,7 @@ class WorkerRegistry:
             threading.Event().wait(.002)
 
 
-def disposition(receipt, fatal=None):
+def disposition(receipt, fatal=None, rows=None):
     """Only positive physical evidence admits another attempt; other faults stop."""
     if fatal:
         return dict(kind='terminal',reason='pipeline_fault',error=str(fatal))
@@ -95,6 +96,8 @@ def disposition(receipt, fatal=None):
     if timing and not timing.get('contract_passed', timing.get('passed',False)):
         return dict(kind='terminal',reason='audit_contract',errors=timing.get('contract_errors',timing.get('errors')))
     quality = receipt.get('quality_reject')
+    if quality and not verdict_contract_valid(quality.get('contract')):
+        return dict(kind='terminal',reason='quality_verification_contract')
     if quality and quality.get('kind') in QUALITY_KINDS:
         return dict(kind='quality_reject',reason=quality['kind'])
     if receipt.get('original_capture_error_preserved'):
@@ -105,10 +108,11 @@ def disposition(receipt, fatal=None):
                     record['cancellation'].get('result',{}).get('held') and
                     not record['cancellation'].get('result',{}).get('failure') and
                     record['epoch']==physical['epoch'] and
-                    record.get('validated_sim_tick') is True):
+                    record.get('validated_sim_tick') is True and record.get('failing_tick_contract') and
+                    not verify_proof(record['failing_tick_contract'])):
                 return dict(kind='quality_reject',reason=physical['kind'])
-    if receipt.get('accepted') and receipt_error(receipt):
-        return dict(kind='terminal',reason='missing_regrasp_evidence',error=receipt_error(receipt))
+    if receipt.get('accepted') and receipt_error(receipt,rows):
+        return dict(kind='terminal',reason='missing_regrasp_evidence',error=receipt_error(receipt,rows))
     if receipt.get('accepted') and timing and timing.get('passed'):
         return dict(kind='accepted',reason='success')
     if receipt.get('script_completed') and receipt.get('score',{}).get('passed') and timing:

@@ -191,8 +191,8 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       ~0.3-0.8 s with min-jerk/cosine ramps, or a low-pass/OU process), per-joint amplitude ~0.26-1 deg, no gripper
       noise during grasp/release; the clean expert correction stays the recorded action. Bar: jerk/acceleration of
       executed targets vs current noise vs none, exact label recomputation, unchanged yield, side-by-side video.
-      Offline implementation: seeded minimum-jerk segments, shared-path retiming and ACK-owned target limits;
-      CPU derivative/label checks and retained-trace benchmark pass. Targeted review, live yield/video and
+      Offline implementation: seeded minimum-jerk segments, original planner timing, operation-wide noise scaling and final MoveIt command checks;
+      CPU noise-derivative/label checks and retained-trace benchmark pass. Targeted review, live yield/video and
       5-episode smoke remain required before the full run.
 - [ ] 3.1i Re-grasp recovery episodes (decided 2026-11-13), aimed at the 1.9 failure (closes 26-38 mm off the lego):
       a fixed share (~15-20%) of full-run episodes where the expert's FIRST grasp is deliberately offset 2-4 cm via

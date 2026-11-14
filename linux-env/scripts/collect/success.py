@@ -1,6 +1,7 @@
 """Whole-block containment in the cup frame, using synchronized physical poses."""
 import math
 from cup_profile import radial_limit
+from tick_contract import snapshot_contracts
 
 # Cup body coordinates have their origin at the base; rim height is 96.52 mm.
 # Authored floor is 1.2 mm. The 0.6 mm floor allowance is geometric;
@@ -18,14 +19,16 @@ def initial_arm(snapshots, target):
     PhysX joint velocity samples can include constraint impulses even when
     sampled positions are stable; retain those samples rather than relabel them.
     """
+    contract=snapshot_contracts(snapshots)
+    if not contract['passed']:return dict(passed=False,contract_passed=False,contract=contract,reason='Home verification contract failed')
     if len(snapshots) < 6 or any(s.get('state_source') != 'isaac_articulation' for s in snapshots):
-        return dict(passed=False, reason='Six physical home ticks required')
+        return dict(passed=False,contract_passed=True,contract=contract, reason='Six physical home ticks required')
     states = [s['state'][:5] for s in snapshots]
     if not all(math.isfinite(v) for row in states for v in row):
-        return dict(passed=False, reason='Non-finite physical home state')
+        return dict(passed=False,contract_passed=True,contract=contract, reason='Non-finite physical home state')
     error = max(abs(q-r) for q,r in zip(states[-1],target))
     spread = max(max(row[i] for row in states)-min(row[i] for row in states) for i in range(5))
-    return dict(passed=error <= .01 and spread <= .002, home_error_rad=error,
+    return dict(contract_passed=True,contract=contract,passed=error <= .01 and spread <= .002, home_error_rad=error,
                 position_spread_rad=spread, sampled_velocity=snapshots[-1]['velocity'])
 
 
@@ -44,6 +47,9 @@ def contained(snapshot, object_name, color):
     block = snapshot['bodies'][object_name]
     cup = snapshot['bodies']['cup_' + color]
     inverse = [cup['orientation'][0]] + [-v for v in cup['orientation'][1:]]
+    local=snapshot['local_corners'][object_name]
+    if len(local)!=8 or any(len(c)!=3 or not all(math.isfinite(v) for v in c) for c in local):
+        raise ValueError('Invalid physical block corners')
     corners = []
     for corner in snapshot['local_corners'][object_name]:
         offset = rotate(block['orientation'], corner)
@@ -66,10 +72,10 @@ def contained(snapshot, object_name, color):
                 radial_checks=radial_checks)
 
 
-def settled_containment(snapshots, object_name, color):
-    checks = [contained(s, object_name, color) for s in snapshots]
-    gaps = [b['sim_ns']-a['sim_ns'] for a,b in zip(snapshots, snapshots[1:])]
-    passed = (len(checks) >= SETTLED_TICKS and all(c['passed'] for c in checks)
-              and all(abs(dt-round(1e9/30)) <= 10 for dt in gaps))
-    return dict(passed=passed, required_ticks=SETTLED_TICKS, checks=checks,
-                sim_stamps_ns=[s['sim_ns'] for s in snapshots])
+def settled_containment(snapshots,object_name,color):
+    contract=snapshot_contracts(snapshots)
+    if not contract['passed']:return dict(passed=False,contract_passed=False,contract=contract,checks=[])
+    checks=[contained(s,object_name,color) for s in snapshots]
+    physical=len(checks)>=SETTLED_TICKS and all(c['passed'] for c in checks)
+    return dict(passed=physical,physical_passed=physical,contract_passed=True,contract=contract,
+                required_ticks=SETTLED_TICKS,checks=checks,sim_stamps_ns=[s['sim_ns'] for s in snapshots])

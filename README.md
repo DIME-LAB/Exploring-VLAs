@@ -321,8 +321,9 @@ mock controller reference and is logged separately. It is never the observation.
 MoveIt and robot TF also subscribe to physical feedback in the collection preset.
 
 The collector holds the timeline between frames. Given the synchronized image,
-physical state and pose snapshot at tick t, it computes a clean corrective
-setpoint, independently adds seeded DART noise to the execution array, and writes
+physical state and pose snapshot at tick t, it records the clean corrective
+label, samples the original planner target for execution, adds seeded DART
+offset to that separate array, collision-checks the final motion, and writes
 the execution targets into the existing PhysX drives while paused. It reads
 those targets back, logs the actual native simulation-clock application stamp,
 and advances exactly one frame. A ROS command/acknowledgement protocol applies
@@ -431,21 +432,49 @@ an older pilot ledger. Failed episodes remain excluded from export.
 
 Smooth DART uses seeded minimum-jerk ramps with 0.3–0.8 s holds, nominal
 0.26–1 degree per-joint amplitudes and a 65% per-arm-operation on probability.
-Short motions scale the amplitude or skip it; the last 20% is quiet. Home and
-gripper motions receive no injected noise. The expert keeps the planner's
-collision-checked joint-space path. An already bounded time law is retained;
-otherwise minimum-jerk timing at path corners reserves velocity/acceleration
-budget for drift. The planned duration and all noise segments are logged.
+The last 20% is quiet. Short operations scale amplitude only when both the
+0.3 s minimum hold and 0.35 s minimum ramps fit; otherwise noise is skipped.
+Home and gripper motions receive no injected noise. The original planner time
+law and waypoints are sampled directly. Execution adds an offset to that
+reference; it never filters, independently clips or retimes the expert path.
+The clean recorded label remains exactly
+`corrective_action(measured_state, expert_reference)`.
 
-A final arm-target limiter enforces 10 rad/s and 2 rad/s², including braking room
-at joint bounds. Its state commits only after the matching physical ACK and
-carries across an idle barrier only with the validated clean hold. Gripper
-commands pass through unchanged. Frame logs separate planned noise, limiter delta
-and target velocity; the timing audit checks those components and actual target
-derivatives (0.001 tolerance for float32 read-back). `action` remains exactly
-`corrective_action(measured_state, expert_reference)`. Offline metrics can be
-reproduced with `dart_benchmark.py --input <retained-run> --output <confined-dir>`;
-its retimed fixed-observation replay is not a physical yield or throughput test.
+Before an arm operation starts, native MoveIt checks its complete execution
+path with the proposed noise. It chooses a fixed scale (1, 0.5, 0.25 or 0) for
+that whole operation, preserving smooth ramps, and logs rejected candidates and
+contacts. Zero-noise failure refuses the operation. This planning work runs
+outside generation ownership. Immediately before every dispatch, MoveIt checks
+the final six-joint target and both short continuations (measured state to target
+and previously applied target to target), including gripper and native attached
+geometry. Both endpoints and subdivisions at most 0.01 rad apart are checked.
+Final checks have a five-wall-second budget under dispatch ownership; individual
+validity service waits are bounded separately. An unexpected invalid continuation
+or query fault aborts while physics is held, before publication/advancement. It
+never jumps to a differently filtered expert command to avoid a collision.
+
+Frames log `planner_execution_reference`, scaled `dart_offset`, geometry checks
+and actual target velocity. `planned_noise_offset` is the total execution-minus-
+label difference; `command_filter_delta` is zero. The audit independently checks
+planner-plus-offset identity, clean labels and geometry proof identity. The
+noise itself is bounded at 0.05 rad/s and 0.30 rad/s². Overall target derivatives
+inherit the original planner profile and are reported rather than reshaped;
+legacy linear profiles can have sampled acceleration spikes at motion boundaries.
+Reproduce the offline command comparison with
+`dart_benchmark.py --input <retained-run> --output <confined-dir>`.
+It preserves original frame timestamps; it is not a physical yield test.
+
+Every joined physical tick, including unrecorded home/settling ticks and a failing
+convergence tick, passes the same source/shape/finiteness, camera layout, clock,
+epoch, one-frame progression and previous-ACK persistence contract. The collector
+waits up to two wall seconds for ROS `/clock` to join the held native tick.
+Application/ACK and clean-label checks finish the tick's receipt. A convergence
+failure first obtains a no-advance hold ACK and saves that failing tick's own
+verified receipt before cancellation. Physical verification snapshots carry
+row hashes and their checked provenance. Contract failures are terminal;
+physical home/containment failures are separate verdicts and may be quality
+rejects only with valid tick evidence. The six post-velocity-reset home samples
+come from the new epoch; samples are never mixed across a reset.
 
 Re-grasp recovery occupies 18% of **accepted slots**, evenly spread through
 colour rotation (9/50; 162/900, or 54 per colour). Retrying a rejected slot keeps
@@ -454,9 +483,10 @@ slot a recovery for the dedicated smoke. A seeded 2–4 cm displacement affects
 only the executed first approach/descent. Both clean and displaced paths use the
 shared calibrated IK and waypoint collision checks. Their time laws share a
 common duration; the clean teacher reference stays independent of execution.
-The final target limiter also bounds this deliberate displacement. The first
-close has no synthetic MoveIt attachment. After a 3 cm verification lift,
-measured same-epoch snapshots must show no lego moving more than 3 mm and the
+The final-command geometry checks also cover this deliberate displacement. The first
+close has no synthetic MoveIt attachment. Across every tick of the close and 3 cm verification-lift window,
+measured same-epoch snapshots must show no lego moving more than 3 mm, including
+transient lifts that return to their initial position, and the
 jaw reaching its close command within 0.008 rad. This is an object-motion miss
 check, not a claim about an analytical empty-jaw width. An accidentally held
 object is released and the episode rejected.
@@ -471,8 +501,9 @@ response poisons collection; it cannot become a planner quality refusal.
 
 Frames and receipts carry `recovery: regrasp`; exported datasets retain full
 per-episode recovery/seed evidence in `meta/collection_episodes.json` without
-changing deployment features. Acceptance and export both recheck the measured
-miss and completed reopen/scene-refresh evidence. Export reports the achieved
+changing deployment features. Acceptance, resume and export recheck the measured
+miss and completed reopen/scene-refresh evidence against the raw episode ID,
+epoch, stage stamps, physical states/poses and close/lift row hashes. Export reports the achieved
 share/offset distribution and prefers recovery episodes for sample videos.
 Smooth DART and re-grasp are implemented offline; their physical yield and
 side-by-side/recovery videos require targeted review and a newly authorized

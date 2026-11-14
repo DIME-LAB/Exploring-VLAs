@@ -12,6 +12,7 @@ import json
 import numpy as np
 from storage import CANONICAL_ROOT, confined, prepare_environment
 from protocol import CommandLedger
+from test_tick_contract import checked_window
 from success import (contained, initial_arm, settled_containment, SETTLED_TICKS,
                      INTERIOR_FLOOR_M, INTERIOR_RIM_M)
 
@@ -72,6 +73,7 @@ class SafetyTests(unittest.TestCase):
 
     def test_initial_arm_uses_measured_position_stability_before_velocity_reset(self):
         rows=[dict(state_source='isaac_articulation',state=[0]*6,velocity=[.3]*6) for _ in range(6)]
+        rows=checked_window(rows)
         self.assertTrue(initial_arm(rows,[0]*5)['passed'])
         rows[-1]['state'][0]=.004
         self.assertFalse(initial_arm(rows,[0]*5)['passed'])
@@ -105,6 +107,7 @@ class SafetyTests(unittest.TestCase):
         for bottom in (PHYSICAL_FLOOR_M, PHYSICAL_FLOOR_M-.0005):
             rows=[self.snapshot(bottom+.0064) for _ in range(SETTLED_TICKS)]
             for index,row in enumerate(rows):row['sim_ns']+=round(index*1e9/30)
+            rows=checked_window(rows)
             self.assertTrue(settled_containment(rows,'red_2x3_0','red')['passed'])
         self.assertFalse(contained(self.snapshot(INTERIOR_FLOOR_M+.0064-.0001),'red_2x3_0','red')['passed'])
         self.assertFalse(contained(self.snapshot(-.0064),'red_2x3_0','red')['passed'])
@@ -120,6 +123,7 @@ class SafetyTests(unittest.TestCase):
             for body in row['bodies'].values():
                 body['position'][0] += .31;body['position'][1] -= .15
                 body['orientation'] = [math.sqrt(.5),0,0,math.sqrt(.5)]
+        rows=checked_window(rows)
         self.assertTrue(settled_containment(rows,'red_2x3_0','red')['passed'])
         rows[-1]['bodies']['red_2x3_0']['velocity'][0] = .1
         self.assertFalse(settled_containment(rows,'red_2x3_0','red')['passed'])
