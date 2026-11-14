@@ -53,7 +53,7 @@ class SafetyTests(unittest.TestCase):
     def test_cancelled_epoch_cannot_apply_or_advance(self):
         received=[]
         callback=method(Path(__file__).with_name('collection_runtime.py'),'Runtime','command_received')
-        fake=SimpleNamespace(epoch=2,ack_pub=SimpleNamespace(publish=lambda msg:received.append(json.loads(msg.data))))
+        fake=SimpleNamespace(failure=None,epoch=2,ack_pub=SimpleNamespace(publish=lambda msg:received.append(json.loads(msg.data))))
         payload=dict(epoch=1,observation_stamp_ns=100,command=[0]*6,advance=True)
         callback(fake,SimpleNamespace(data=json.dumps(payload)))
         self.assertIn('Cancelled command epoch',received[0]['error'])

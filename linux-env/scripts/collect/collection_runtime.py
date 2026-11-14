@@ -12,6 +12,8 @@ import math
 import os
 from pathlib import Path
 import time
+import uuid
+from storage import atomic_json,confined
 import numpy as np
 import omni.graph.core as og
 import omni.kit.app
@@ -62,7 +64,10 @@ class Runtime:
         self.robot_base=RigidPrim('/World/SO_ARM101/base_link',name='collection_robot_base_readback',
             reset_xform_properties=False,prepare_contact_sensors=False)
         self.robot_base.initialize()
+        fault_dir=confined(Path(os.environ['SOARM_INSTANCE_ROOT'])/'native-motion-faults');fault_dir.mkdir(parents=True,exist_ok=True)
+        self.native_miss_fault_path=str(fault_dir/(uuid.uuid4().hex+'.json'))
         self._miss_cap=None;self._miss_saved_limits=None;self._miss_last_position=None
+        self._miss_limits_dirty=False;self._miss_requested_cap=None;self._miss_motion_fault=None
         self._miss_substeps=0;self._miss_max_velocity=0.;self._miss_max_displacement=0.
         self.world.add_physics_callback('collection_miss_velocity_check',self.check_miss_substep)
         self.finger_views={}
@@ -172,59 +177,163 @@ class Runtime:
             result[name]=dict(contact_m=contact[0],rest_m=rest[0])
         return result
 
-    def set_miss_velocity_cap(self,cap):
-        if self.busy or self.timeline.is_playing():raise RuntimeError('Velocity-cap handover requires a held simulation')
-        active=getattr(self,'_miss_cap',None)
-        if cap is None:
-            if active is not None:
-                saved=self._miss_saved_limits
-                self.art.set_max_joint_velocities(np.asarray([saved],dtype=np.float32),joint_indices=self.indices)
-                actual=self.art.get_joint_max_velocities(joint_indices=self.indices)[0]
-                if not matches(actual.tolist(),saved,'float32_readback'):raise RuntimeError('Miss velocity limit restore failed')
-                self._miss_cap=None;self._miss_saved_limits=None;self._miss_last_position=None
-            return dict(on=False,values_rad_s=None)
-        if cap!=velocity_cap(cap.get('phase')):raise ValueError('Unknown miss velocity-cap policy')
-        measured=self.art.get_joint_velocities()[0,self.indices]
-        if not np.isfinite(measured).all() or np.any(abs(measured)>np.asarray(cap['values_rad_s'])+MISS_POLICY['joint_numeric_allowance_rad']):
-            raise RuntimeError('Measured velocity exceeds requested miss cap before advance')
-        if active is None:
-            saved=self.art.get_joint_max_velocities(joint_indices=self.indices)[0]
-            if saved.shape!=(6,) or not np.isfinite(saved).all() or np.any(saved<=0):raise RuntimeError('Original joint velocity limits are unverified')
-            self._miss_saved_limits=saved.tolist()
-        self.art.set_max_joint_velocities(np.asarray([cap['values_rad_s']],dtype=np.float32),joint_indices=self.indices)
-        actual=self.art.get_joint_max_velocities(joint_indices=self.indices)[0]
-        if not matches(actual.tolist(),cap['values_rad_s'],'float32_readback'):raise RuntimeError('Native miss velocity limit readback failed')
-        self._miss_cap=dict(cap);self._miss_last_position=self.art.get_joint_positions()[0,self.indices].copy()
-        self._miss_substeps=0;self._miss_max_velocity=0.;self._miss_max_displacement=0.
-        return dict(cap)
+    def guarded_episode_offsets(self,name,epoch,stamp,expected_fingers,expected_block):
+        if self.failure or getattr(self,'_miss_limits_dirty',False) or getattr(self,'_miss_cap',None) is not None:
+            raise RuntimeError('Guarded episode requires restored, healthy native limits')
+        if self.busy or self.timeline.is_playing() or epoch!=self.epoch or not matches(stamp,self.stamp(),'stamp_ns'):
+            raise RuntimeError('Offset readback requires this epoch held at its anchor')
+        fingers=self.effective_finger_offsets()
+        view=self.bodies[name];contact=view._physics_view.get_contact_offsets().tolist();rest=view._physics_view.get_rest_offsets().tolist()
+        if len(contact)!=1 or len(rest)!=1 or len(contact[0])!=1 or len(rest[0])!=1 or not np.isfinite(contact[0]+rest[0]).all():
+            raise RuntimeError('Unverified guarded target offsets')
+        block=dict(contact_m=contact[0],rest_m=rest[0])
+        if fingers!=expected_fingers or block!=expected_block:raise RuntimeError('Native guarded-episode offsets changed after startup')
+        return dict(epoch=epoch,sim_ns=self.stamp(),finger_offsets=fingers,block_offsets=block,source='fresh PhysX shape tensors')
 
-    def check_miss_substep(self,step):
+    def publish_miss_fault(self):
+        path=getattr(self,'native_miss_fault_path',None);fault=getattr(self,'_miss_motion_fault',None)
+        if path and fault:
+            try:atomic_json(Path(path),fault)
+            except Exception as exc:
+                fault['publication_error']=repr(exc)
+                self.failure=(self.failure or '')+'; native fault publication failed: '+repr(exc)
+
+    def restore_miss_limits(self):
+        saved=getattr(self,'_miss_saved_limits',None)
+        dirty=getattr(self,'_miss_limits_dirty',False)
+        if saved is None and not dirty:
+            if getattr(self,'_miss_cap',None) is not None:raise RuntimeError('Native cap has no saved original limits')
+            self._miss_requested_cap=None
+            return dict(on=False,values_rad_s=None)
+        self._miss_limits_dirty=True;self._miss_cap=None
+        try:
+            if saved is None:raise RuntimeError('Dirty native limits have no saved originals')
+            self.art.set_max_joint_velocities(np.asarray([saved],dtype=np.float32),joint_indices=self.indices)
+            actual=self.art.get_joint_max_velocities(joint_indices=self.indices)[0]
+            if not matches(actual.tolist(),saved,'float32_readback'):raise RuntimeError('Miss velocity limit restore readback failed')
+        except Exception as exc:
+            if getattr(self,'_miss_motion_fault',None) is None:
+                try:stamp=self.stamp()
+                except Exception:stamp=None
+                self._miss_motion_fault=dict(epoch=getattr(self,'epoch',None),sim_ns=stamp,error=repr(exc),source='limit rollback',
+                    saved_original_limits_rad_s=saved,dirty=True,samples=list(getattr(self,'_miss_samples',[])))
+            self._miss_motion_fault['rollback_error']=repr(exc);self._miss_motion_fault['terminal']=True
+            self.failure='Native miss-limit rollback failed: '+repr(exc)
+            self.publish_miss_fault()
+            raise RuntimeError(self.failure) from exc
+        self._miss_cap=None;self._miss_saved_limits=None;self._miss_limits_dirty=False;self._miss_last_position=None;self._miss_requested_cap=None
+        if getattr(self,'_miss_motion_fault',None) is not None:
+            self._miss_motion_fault['rollback_verified']=True;self.publish_miss_fault()
+        return dict(on=False,values_rad_s=None)
+
+    def fail_miss_motion(self,exc):
+        original=repr(exc);self.failure=self.failure or original
+        if getattr(self,'_miss_motion_fault',None) is None:
+            try:stamp=self.stamp()
+            except Exception:stamp=None
+            self._miss_motion_fault=dict(epoch=getattr(self,'epoch',None),sim_ns=stamp,error=original,terminal=True,
+                cap=getattr(self,'_miss_cap',None),requested_cap=getattr(self,'_miss_requested_cap',None),
+                saved_original_limits_rad_s=getattr(self,'_miss_saved_limits',None),
+                dirty=getattr(self,'_miss_limits_dirty',False),samples=list(getattr(self,'_miss_samples',[])))
+        self.publish_miss_fault()
+        try:self.timeline.pause();self.busy=False
+        except Exception as pause_error:
+            self.failure=original+'; native pause failed: '+repr(pause_error)
+            if getattr(self,'_miss_saved_limits',None) is not None:self._miss_limits_dirty=True;self._miss_cap=None
+            self._miss_motion_fault['pause_error']=repr(pause_error);self.publish_miss_fault()
+            return RuntimeError(self.failure)
+        try:self.restore_miss_limits()
+        except Exception as rollback:self.failure=original+'; '+repr(rollback)
+        else:self.failure=original
+        self.publish_miss_fault()
+        return RuntimeError(self.failure)
+
+    def stationary_target(self,cap,check=True):
+        name=cap.get('stationary_target')
+        if not name or name not in self.bodies:raise RuntimeError('Native stationary-target identity is required')
+        velocity=np.asarray(self.bodies[name].get_velocities()[0],dtype=float)
+        if velocity.shape!=(6,) or not np.isfinite(velocity).all():raise RuntimeError('Native target velocity is unverified')
+        linear=float(np.linalg.norm(velocity[:3]));angular=float(np.linalg.norm(velocity[3:]))
+        passed=linear<=MISS_POLICY['stationary_linear_m_s'] and angular<=MISS_POLICY['stationary_angular_rad_s']
+        result=dict(passed=passed,target=name,linear_m_s=linear,angular_rad_s=angular,velocity=velocity.tolist(),
+            linear_limit_m_s=MISS_POLICY['stationary_linear_m_s'],angular_limit_rad_s=MISS_POLICY['stationary_angular_rad_s'])
+        if check and not passed:raise RuntimeError('Guarded target is moving: '+repr(result))
+        return result
+
+    def set_miss_velocity_cap(self,cap):
+        if self.busy or self.timeline.is_playing():raise self.fail_miss_motion(RuntimeError('Velocity-cap handover requires a held simulation'))
+        if cap is None:return self.restore_miss_limits()
+        if self.failure:raise RuntimeError('Native runtime is terminal: '+str(self.failure))
+        try:
+            self._miss_requested_cap=dict(cap)
+            if cap!=velocity_cap(cap.get('phase'),cap.get('stationary_target')):raise ValueError('Unknown miss velocity-cap policy')
+            self.stationary_target(cap)
+            measured=self.art.get_joint_velocities()[0,self.indices]
+            if not np.isfinite(measured).all() or np.any(abs(measured)>np.asarray(cap['values_rad_s'])+MISS_POLICY['joint_numeric_allowance_rad']):
+                raise RuntimeError('Measured velocity exceeds requested miss cap before advance')
+            saved=getattr(self,'_miss_saved_limits',None)
+            if saved is not None and getattr(self,'_miss_limits_dirty',False) and getattr(self,'_miss_cap',None) is None:
+                raise RuntimeError('Unresolved partial native cap installation')
+            if saved is None:
+                if getattr(self,'_miss_limits_dirty',False):raise RuntimeError('Unresolved dirty native limits')
+                saved=self.art.get_joint_max_velocities(joint_indices=self.indices)[0]
+                if saved.shape!=(6,) or not np.isfinite(saved).all() or np.any(saved<=0):raise RuntimeError('Original joint velocity limits are unverified')
+                self._miss_saved_limits=saved.tolist()
+            # Save and mark dirty BEFORE the first native write can partly succeed.
+            # Never replace saved originals while any install/rollback is unresolved.
+            self._miss_limits_dirty=True;self._miss_cap=None;self._miss_requested_cap=dict(cap)
+            self.art.set_max_joint_velocities(np.asarray([cap['values_rad_s']],dtype=np.float32),joint_indices=self.indices)
+            actual=self.art.get_joint_max_velocities(joint_indices=self.indices)[0]
+            if not matches(actual.tolist(),cap['values_rad_s'],'float32_readback'):raise RuntimeError('Native miss velocity limit readback failed')
+            self._miss_cap=dict(cap);self._miss_last_position=self.art.get_joint_positions()[0,self.indices].copy()
+            self._miss_frame_start=self._miss_last_position.copy();self._miss_samples=[]
+            self._miss_substeps=0;self._miss_max_velocity=0.;self._miss_max_displacement=0.
+            return dict(cap)
+        except Exception as exc:raise self.fail_miss_motion(exc) from exc
+
+    def check_miss_substep(self,step,source='pre_physics_callback'):
         try:
             cap=getattr(self,'_miss_cap',None)
-            if cap is None:return
+            if cap is None:
+                if getattr(self,'_miss_limits_dirty',False):raise RuntimeError('Cannot advance with unverified dirty native limits')
+                return
             limits=self.art.get_joint_max_velocities(joint_indices=self.indices)[0]
             velocity=self.art.get_joint_velocities()[0,self.indices]
             position=self.art.get_joint_positions()[0,self.indices]
+            try:target=self.stationary_target(cap,check=False)
+            except Exception as error:target=dict(passed=False,error=repr(error))
             bound=np.asarray(cap['values_rad_s']);eps=MISS_POLICY['joint_numeric_allowance_rad']
+            delta=abs(position-self._miss_last_position);frame_delta=abs(position-self._miss_frame_start)
+            local_excess=delta-bound*float(step)
+            frame_excess=frame_delta-bound*MISS_POLICY['step_s']
+            values=lambda array:[float(v) if math.isfinite(float(v)) else None for v in array]
+            sample=dict(index=self._miss_substeps,source=source,step_s=float(step),joint_names=list(JOINTS),positions_rad=values(position),
+                measured_velocity_rad_s=values(velocity),native_limits_rad_s=values(limits),
+                local_excess_rad=values(local_excess),frame_excess_over_cap_rad=values(frame_excess),
+                certificate_excess_rad=values(frame_excess-MISS_POLICY['reachable_numeric_allowance_rad']),
+                certificate_pad_rad=MISS_POLICY['reachable_numeric_allowance_rad'],local_budget_rad=eps,stationary_target=target)
+            self._miss_samples.append(sample)
+            if not target['passed']:raise RuntimeError('Guarded target is not stationary: '+repr(target))
             if not matches(limits.tolist(),cap['values_rad_s'],'float32_readback') or not np.isfinite([velocity,position]).all() or np.any(abs(velocity)>bound+eps):
                 raise RuntimeError('Native recovery velocity constraint failed')
-            delta=abs(position-self._miss_last_position)
-            if np.any(delta>bound*float(step)+eps):raise RuntimeError('Native recovery substep displacement exceeded velocity envelope')
+            if np.any(local_excess>eps):raise RuntimeError('Native recovery substep residual exceeded its 1 urad budget')
+            if np.any(frame_excess>MISS_POLICY['reachable_numeric_allowance_rad']):raise RuntimeError('Native recovery displacement exceeded the 5 urad certificate pad')
             self._miss_last_position=position.copy();self._miss_substeps+=1
             self._miss_max_velocity=max(self._miss_max_velocity,float(max(abs(velocity))))
             self._miss_max_displacement=max(self._miss_max_displacement,float(max(delta)))
         except Exception as exc:
-            self.failure=repr(exc);self.timeline.pause();self.busy=False
-            raise
+            raise self.fail_miss_motion(exc) from exc
 
     def miss_cap_state(self):
         cap=getattr(self,'_miss_cap',None)
+        if cap is None and getattr(self,'_miss_limits_dirty',False):
+            return dict(on=None,values_rad_s=None,status='dirty_unverified',saved_original_limits_rad_s=self._miss_saved_limits,failure=self.failure)
         return dict(cap,substep_checks=self._miss_substeps,max_measured_velocity_rad_s=self._miss_max_velocity,
-                    max_substep_displacement_rad=self._miss_max_displacement) if cap else dict(on=False,values_rad_s=None)
+                    max_substep_displacement_rad=self._miss_max_displacement,substep_samples=list(self._miss_samples)) if cap else dict(on=False,values_rad_s=None)
 
     def snapshot(self):
         state_read_start=time.monotonic_ns()
-        if getattr(self,'_miss_cap',None):self.check_miss_substep(1/120)
+        if getattr(self,'_miss_cap',None):self.check_miss_substep(1/120,source='final_snapshot')
         self.require_scene()
         positions = self.art.get_joint_positions()[0, self.indices]
         velocities = self.art.get_joint_velocities()[0, self.indices]
@@ -283,22 +392,26 @@ class Runtime:
         return dict(application_stamp_ns=self.stamp(), applied_command=list(map(float, applied)))
 
     def start_miss_hold(self,epoch,stamp,cap,state,drive_targets):
-        if epoch!=self.epoch or stamp<=self.invalid_through_ns or not matches(stamp,self.stamp(),'stamp_ns'):
-            raise RuntimeError('Stale miss kickoff identity')
-        actual=self.art.get_joint_positions()[0,self.indices]
-        drives=self.art.get_applied_actions().joint_positions[0,self.indices]
-        if not matches(actual.tolist(),state,'target_rad') or not matches(drives.tolist(),drive_targets,'target_rad'):
-            raise RuntimeError('Miss kickoff state/drive baseline differs')
-        applied=self.set_miss_velocity_cap(cap)
-        result=self.advance()
-        return dict(epoch=epoch,observation_stamp_ns=stamp,command_miss_velocity_cap=applied,advance=result)
+        try:
+            if epoch!=self.epoch or stamp<=self.invalid_through_ns or not matches(stamp,self.stamp(),'stamp_ns'):
+                raise RuntimeError('Stale miss kickoff identity')
+            actual=self.art.get_joint_positions()[0,self.indices]
+            drives=self.art.get_applied_actions().joint_positions[0,self.indices]
+            if not matches(actual.tolist(),state,'target_rad') or not matches(drives.tolist(),drive_targets,'target_rad'):
+                raise RuntimeError('Miss kickoff state/drive baseline differs')
+            applied=self.set_miss_velocity_cap(cap)
+            result=self.advance()
+            return dict(epoch=epoch,observation_stamp_ns=stamp,command_miss_velocity_cap=applied,advance=result)
+        except Exception as exc:
+            if self.failure:raise
+            raise self.fail_miss_motion(exc) from exc
 
     def advance(self):
         if self.failure:
             raise RuntimeError(self.failure)
         if self.mode != 'collect' or self.busy:
             raise RuntimeError('An advancing frame is already pending or mode is not collect')
-        if getattr(self,'_miss_cap',None):self.check_miss_substep(1/120)
+        if getattr(self,'_miss_cap',None) or getattr(self,'_miss_limits_dirty',False):self.check_miss_substep(1/120,source='before_advance')
         self.start_time = self.world.current_time
         self.busy = True
         self.step_start_ns=time.monotonic_ns()
@@ -306,18 +419,24 @@ class Runtime:
         return dict(start_ns=round(self.start_time * 1e9), target_ns=round((self.start_time + 1/30) * 1e9))
 
     def cancel(self):
-        self.timeline.pause()
-        self.busy = False
-        self.set_miss_velocity_cap(None)
-        self.epoch += 1
-        self.invalid_through_ns = self.stamp()
-        self.ledger = CommandLedger()
-        return dict(held=True,failure=self.failure,epoch=self.epoch,invalid_through_ns=self.invalid_through_ns,
-                    clock_baseline=dict(epoch=self.epoch,sim_ns=self.invalid_through_ns,physics_time_s=self.world.current_time))
+        try:
+            self.timeline.pause()
+            self.busy = False
+            self.set_miss_velocity_cap(None)
+            self.epoch += 1
+            self.invalid_through_ns = self.stamp()
+            self.ledger = CommandLedger()
+            return dict(held=True,failure=self.failure,epoch=self.epoch,invalid_through_ns=self.invalid_through_ns,
+                        clock_baseline=dict(epoch=self.epoch,sim_ns=self.invalid_through_ns,physics_time_s=self.world.current_time),
+                        miss_motion_fault=getattr(self,'_miss_motion_fault',None))
+        except Exception as exc:
+            if self.failure:raise
+            raise self.fail_miss_motion(exc) from exc
 
     def command_received(self, message):
         payload = json.loads(message.data)
         try:
+            if self.failure:raise RuntimeError('Native runtime is terminal: '+str(self.failure))
             if payload['epoch'] != self.epoch:
                 raise ValueError('Cancelled command epoch')
             if payload['observation_stamp_ns'] <= self.invalid_through_ns:
@@ -333,8 +452,8 @@ class Runtime:
         except Exception as exc:
             ack = dict(epoch=payload.get('epoch'), observation_stamp_ns=payload.get('observation_stamp_ns'), error=repr(exc))
             if payload.get('epoch') == self.epoch:
-                self.failure = repr(exc)
-                self.timeline.pause();self.busy = False
+                if self.failure is None:self.fail_miss_motion(exc)
+                else:self.timeline.pause();self.busy=False
         self.ack_pub.publish(String(data=json.dumps(ack)))
 
     def after_update(self, event):
@@ -369,6 +488,7 @@ class Runtime:
         if self.busy or self.timeline.is_playing():
             raise RuntimeError('Restore requires a held simulation')
         self.cancel()
+        if self.failure:raise RuntimeError('Fresh instance required after native failure: '+str(self.failure))
         self.require_scene()
         for name, body in snapshot['bodies'].items():
             view = self.bodies[name]
@@ -439,7 +559,7 @@ def install(mode='collect'):
     articulation=audit_module.readback(_RUNTIME.stage,_RUNTIME.art)
     articulation['helper_sha256']=hashlib.sha256(helper.read_bytes()).hexdigest()
     if mode=='collect' and articulation['fixed_base'] is not True:raise RuntimeError('Collection requires verified fixed_base=true: '+repr(articulation))
-    return dict(mode=mode, physics_config=physics,joint_names=_RUNTIME.art.dof_names,articulation_audit=articulation,
+    return dict(native_miss_fault_path=_RUNTIME.native_miss_fault_path,mode=mode, physics_config=physics,joint_names=_RUNTIME.art.dof_names,articulation_audit=articulation,
                 joint_index_mapping=dict(zip(JOINTS,_RUNTIME.indices)),finger_model=read_model(_RUNTIME.stage,effective_finger_offsets=_RUNTIME.effective_finger_offsets()),
                 epoch=_RUNTIME.epoch, invalid_through_ns=_RUNTIME.invalid_through_ns,
                 loaded_sha256=_LOADED_SHA256,

@@ -15,7 +15,7 @@ MODEL=dict(effective_finger_offsets={name:dict(contact_m=[.0001]*4,rest_m=[0.]*4
 
 def context(seed):
     p=seed['pose'];b=seed['bbox'];name=seed['object']
-    body=dict(position=[p[k] for k in ('x','y','z')],orientation=[p[k] for k in ('qw','qx','qy','qz')])
+    body=dict(velocity=[0.]*6,position=[p[k] for k in ('x','y','z')],orientation=[p[k] for k in ('qw','qx','qy','qz')])
     corners=list(map(list,itertools.product(*[(-b[k]/2,b[k]/2) for k in ('sx','sy','sz')])))
     return dict(epoch=1,sim_ns=10**9,velocity=[0.]*6,bodies={name:body},local_corners={name:corners},
         robot_base_world_pose=dict(position=[0.,0.,0.],orientation=[1.,0.,0.,0.]))
@@ -154,3 +154,17 @@ class IndependentProgressTests(unittest.TestCase):
         self.assertNotEqual(a['sha256'],b['sha256']);MissClearance(b,snapshot,name)
         b['effective_finger_offsets']['gripper_link']['rest_m'][0]=.001
         with self.assertRaisesRegex(ValueError,'identity differs'):MissClearance(b,snapshot,name)
+
+    def test_review_moving_target_hold_is_refused_before_any_advance(self):
+        guard,snapshot=self.guard()
+        q=[-.6070024369513172,.24181999068270854,.33139967015764416,1.1475766659545439,-2.15291677513403,.07824639501352214]
+        snapshot=copy.deepcopy(snapshot)
+        snapshot['bodies'][guard.name]['velocity']=[-.2081410487926152,.0459153582818124,.4027715096285998,0.,0.,0.]
+        from test_review_regressions import ReviewRegressions
+        from dart import TargetCandidate
+        from command_geometry import CommandCollision
+        c,_,_=ReviewRegressions().collector();c.active_miss_clearance=(1,guard,'regrasp_reopen')
+        c.node._check_state_valid_with_contacts=lambda q:(True,[])
+        candidate=TargetCandidate(1,10**9,tuple(q),(0.,)*5,(0.,)*6,(0.,)*6,tuple(q))
+        with self.assertRaises(CommandCollision) as failure:c.validate_command(candidate,q,q,snapshot)
+        self.assertIn('not stationary',str(failure.exception));self.assertEqual(c.events,[])

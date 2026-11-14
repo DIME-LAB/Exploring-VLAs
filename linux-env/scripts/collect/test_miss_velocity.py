@@ -3,17 +3,21 @@ import copy,json,unittest
 from types import SimpleNamespace as NS
 import numpy as np
 from contract import JOINTS
-from miss_clearance import velocity_cap,POLICY
+from miss_clearance import velocity_cap as base_cap,POLICY
+def velocity_cap(phase):return base_cap(phase,'block')
 from test_review_regressions import load_class
 
 
 class NativeMissVelocityTests(unittest.TestCase):
     def runtime(self):
         Runtime,scope=load_class('collection_runtime.py','Runtime');r=object.__new__(Runtime)
+        r.epoch=1;r.stamp=lambda:10**9
         r.busy=False;r.timeline=NS(is_playing=lambda:False,pause=lambda:None);r.failure=None
         r.indices=[4,1,5,0,2,3]  # All reads/writes use named-joint mapping.
         r._miss_cap=None;r._miss_saved_limits=None;r._miss_last_position=None
         data=dict(limits=np.asarray([[4.,5.,6.,7.,8.,9.]],dtype=np.float32),q=np.zeros((1,6),dtype=np.float32),v=np.zeros((1,6),dtype=np.float32))
+        data['body_velocity']=np.zeros((1,6))
+        r.bodies={'block':NS(get_velocities=lambda:data['body_velocity'].copy())}
         original=data['limits'][:,r.indices].copy()
         writes=[]
         def set_limits(value,joint_indices):
@@ -67,8 +71,6 @@ class NativeMissVelocityTests(unittest.TestCase):
         def advance():
             self.assertTrue(r.miss_cap_state()['on']);np.testing.assert_allclose(d['limits'][:,r.indices],[[.1]*6]);seen.append('advance');return dict(target_ns=1033333333)
         r.advance=advance;cap=velocity_cap('regrasp_miss_approach')
-        with self.assertRaisesRegex(RuntimeError,'identity'):r.start_miss_hold(0,10**9,cap,[0.]*6,[0.]*6)
-        with self.assertRaisesRegex(RuntimeError,'baseline'):r.start_miss_hold(1,10**9,cap,[.1]*6,[0.]*6)
         self.assertEqual(writes,[]);self.assertEqual(seen,[])
         ack=r.start_miss_hold(1,10**9,cap,[0.]*6,[0.]*6)
         self.assertEqual(ack['command_miss_velocity_cap'],cap);self.assertEqual(seen,['advance'])
@@ -101,3 +103,140 @@ class NativeMissVelocityTests(unittest.TestCase):
         measured=r.effective_finger_offsets();self.assertEqual(len(measured),2)
         r.finger_views['gripper_link']=view(5)
         with self.assertRaisesRegex(RuntimeError,'effective finger'):r.effective_finger_offsets()
+
+    def test_partial_install_kickoff_cancel_reset_and_fresh_attempt_preserve_original_limits(self):
+        for failure in ('first_write_before','first_write','first_readback','kickoff','rollback_write','rollback_readback','normal_restore'):
+            with self.subTest(failure=failure):
+                r,d,original,writes=self.runtime();r.world=NS(current_time=1.);r.invalid_through_ns=0
+                real_set=r.art.set_max_joint_velocities;real_get=r.art.get_joint_max_velocities
+                counts=dict(writes=0,reads=0)
+                def setter(value,joint_indices):
+                    counts['writes']+=1
+                    if failure in ('rollback_write','normal_restore') and counts['writes']==2:raise RuntimeError('rollback write failed')
+                    if failure=='first_write_before' and counts['writes']==1:raise RuntimeError('first write refused')
+                    real_set(value,joint_indices)
+                    if failure=='first_write' and counts['writes']==1:raise RuntimeError('first write partly applied')
+                def reader(joint_indices):
+                    counts['reads']+=1;value=real_get(joint_indices)
+                    if counts['reads']==2 and failure in ('first_readback','rollback_write','rollback_readback'):value=value+.01
+                    if counts['reads']==3 and failure=='rollback_readback':value=value+.02
+                    return value
+                r.art.set_max_joint_velocities=setter;r.art.get_joint_max_velocities=reader
+                r.art.get_applied_actions=lambda:NS(joint_positions=np.zeros((1,6)))
+                def advance():raise RuntimeError('kickoff advance failed')
+                r.advance=advance
+                if failure=='normal_restore':
+                    r.set_miss_velocity_cap(velocity_cap('regrasp_reopen'))
+                    with self.assertRaises(RuntimeError):r.set_miss_velocity_cap(None)
+                elif failure=='kickoff':
+                    with self.assertRaises(RuntimeError):r.start_miss_hold(1,10**9,velocity_cap('regrasp_reopen'),[0.]*6,[0.]*6)
+                else:
+                    with self.assertRaises(RuntimeError):r.start_miss_hold(1,10**9,velocity_cap('regrasp_reopen'),[0.]*6,[0.]*6)
+                self.assertIsNotNone(r.failure)
+                if failure.startswith('rollback_') or failure=='normal_restore':
+                    self.assertIsNone(r.miss_cap_state()['on']);self.assertTrue(r._miss_limits_dirty)
+                    self.assertEqual(r._miss_saved_limits,original[0].tolist())
+                    with self.assertRaisesRegex(RuntimeError,'terminal'):r.set_miss_velocity_cap(velocity_cap('regrasp_miss_open'))
+                    self.assertEqual(r._miss_saved_limits,original[0].tolist())
+                # Make transport healthy again, then run actual cancel/reset barriers.
+                r.art.set_max_joint_velocities=real_set;r.art.get_joint_max_velocities=real_get
+                if failure.startswith('rollback_'):
+                    with self.assertRaisesRegex(RuntimeError,'Fresh instance required'):r.restore(dict(bodies={}),arm=True)
+                cancelled=r.cancel();self.assertTrue(cancelled['failure']);self.assertFalse(r.miss_cap_state()['on'])
+                np.testing.assert_array_equal(d['limits'][:,r.indices],original)
+                self.assertFalse(r._miss_limits_dirty)
+                with self.assertRaisesRegex(RuntimeError,'Fresh instance required'):r.restore(dict(bodies={}),arm=True)
+                np.testing.assert_array_equal(d['limits'][:,r.indices],original)
+                # A fresh runtime, representing the required restart, sees original
+                # native limits, not the previous 0.05 cap, as its new baseline.
+                next_runtime,_,_,_=self.runtime();next_runtime.art=r.art
+                next_runtime.set_miss_velocity_cap(velocity_cap('regrasp_miss_descent'))
+                next_runtime.set_miss_velocity_cap(None)
+                np.testing.assert_array_equal(d['limits'][:,r.indices],original)
+
+    def test_native_moving_target_refuses_before_limit_write_or_advance(self):
+        r,d,_,writes=self.runtime();d['body_velocity'][0,:3]=[-.2081410487926152,.0459153582818124,.4027715096285998]
+        with self.assertRaisesRegex(RuntimeError,'target is moving'):r.set_miss_velocity_cap(velocity_cap('regrasp_reopen'))
+        self.assertEqual(writes,[])
+        r,d,_,_=self.runtime();r.mode='collect';r.world=NS(current_time=1.);plays=[];r.timeline.play=lambda:plays.append(True)
+        r.set_miss_velocity_cap(velocity_cap('regrasp_reopen'));d['body_velocity'][0,0]=.2
+        with self.assertRaisesRegex(RuntimeError,'not stationary'):r.advance()
+        self.assertEqual(plays,[])
+        sample=r._miss_motion_fault['samples'][-1]
+        self.assertFalse(sample['stationary_target']['passed']);self.assertEqual(len(sample['positions_rad']),6)
+
+    def test_substep_excess_vectors_survive_terminal_rollback_and_cancellation(self):
+        r,d,original,_=self.runtime();r.world=NS(current_time=1.);r.set_miss_velocity_cap(velocity_cap('regrasp_miss_close'))
+        d['q'][0,r.indices[2]]=.05*POLICY['step_s']+6e-6
+        with self.assertRaises(RuntimeError):r.check_miss_substep(1/120)
+        sample=r._miss_motion_fault['samples'][-1]
+        self.assertEqual(sample['joint_names'],list(JOINTS));self.assertEqual(len(sample['local_excess_rad']),6)
+        self.assertEqual(sample['certificate_pad_rad'],5e-6);self.assertGreater(sample['certificate_excess_rad'][2],0.)
+        self.assertGreater(sample['frame_excess_over_cap_rad'][2],5e-6)
+        cancelled=r.cancel();self.assertEqual(cancelled['miss_motion_fault']['samples'][-1],sample)
+        from miss_clearance import residual_summary
+        summary=residual_summary([], [cancelled['miss_motion_fault']])
+        self.assertTrue(summary['observed_certificate_violation']);self.assertEqual(summary['certificate_pad_rad'],5e-6)
+        self.assertGreater(summary['max_frame_excess_over_cap_rad'][2],5e-6)
+        np.testing.assert_array_equal(d['limits'][:,r.indices],original)
+
+    def test_guarded_episode_start_freshly_refuses_changed_finger_or_block_offsets(self):
+        r,d,_,writes=self.runtime();finger=np.full((1,4),.0001);block=np.full((1,1),.0001)
+        def shape(contact):return NS(_physics_view=NS(get_contact_offsets=lambda:contact.copy(),get_rest_offsets=lambda:np.zeros_like(contact)))
+        r.finger_views={name:shape(finger) for name in ('gripper_link','moving_jaw_so101_v1_link')}
+        r.bodies['block']._physics_view=shape(block)._physics_view
+        expected_fingers=r.effective_finger_offsets();expected_block=dict(contact_m=[.0001],rest_m=[0.])
+        read=r.guarded_episode_offsets('block',1,10**9,expected_fingers,expected_block)
+        self.assertEqual(read['finger_offsets'],expected_fingers)
+        for changed in ('finger','block'):
+            finger[:]=.0001;block[:]=.0001
+            if changed=='finger':finger[0,0]=.01
+            else:block[0,0]=.01
+            with self.subTest(changed=changed),self.assertRaisesRegex(RuntimeError,'offsets changed'):
+                r.guarded_episode_offsets('block',1,10**9,expected_fingers,expected_block)
+        self.assertEqual(writes,[])
+
+    def test_pause_failure_cannot_leave_a_resumable_native_runtime(self):
+        r,d,original,_=self.runtime();r.set_miss_velocity_cap(velocity_cap('regrasp_reopen'))
+        count=[0]
+        def pause():
+            count[0]+=1
+            if count[0]==1:raise RuntimeError('pause failed')
+        r.timeline.pause=pause
+        with self.assertRaises(RuntimeError):r.cancel()
+        self.assertIsNotNone(r.failure)
+        with self.assertRaises(RuntimeError):r.advance()
+        r.set_miss_velocity_cap(None)
+        np.testing.assert_array_equal(d['limits'][:,r.indices],original)
+
+    def test_failing_substep_is_durable_even_when_native_rollback_and_cancel_fail(self):
+        r,d,original,_=self.runtime();r.world=NS(current_time=1.)
+        published=[];scope=r.publish_miss_fault.__func__.__globals__
+        scope['atomic_json']=lambda path,value:published.append(copy.deepcopy(value))
+        r.native_miss_fault_path='/unit-test/native-motion-fault.json'
+        r.set_miss_velocity_cap(velocity_cap('regrasp_miss_close'))
+        def unavailable(*a,**k):raise RuntimeError('native restore unavailable')
+        r.art.set_max_joint_velocities=unavailable
+        d['q'][0,r.indices[0]]=.05*POLICY['step_s']+8e-6
+        with self.assertRaises(RuntimeError):r.check_miss_substep(1/120)
+        self.assertTrue(published);self.assertTrue(published[0]['terminal'])
+        self.assertGreater(published[0]['samples'][-1]['frame_excess_over_cap_rad'][0],5e-6)
+        self.assertIn('rollback_error',published[-1]);self.assertIsNone(r.miss_cap_state()['on'])
+        with self.assertRaises(RuntimeError):r.cancel()
+        self.assertGreater(published[-1]['samples'][-1]['frame_excess_over_cap_rad'][0],5e-6)
+        self.assertEqual(r._miss_saved_limits,original[0].tolist())
+
+    def test_invalid_kickoff_restores_prior_cap_and_cannot_resume(self):
+        for fault in ('epoch','stamp','state','drive'):
+            r,d,original,writes=self.runtime();r.invalid_through_ns=0
+            r.art.get_applied_actions=lambda:NS(joint_positions=np.zeros((1,6)))
+            r.set_miss_velocity_cap(velocity_cap('regrasp_miss_close'))
+            args=[1,10**9,velocity_cap('regrasp_reopen'),[0.]*6,[0.]*6]
+            if fault=='epoch':args[0]=0
+            if fault=='stamp':args[1]=0
+            if fault=='state':args[3]=[.1]*6
+            if fault=='drive':args[4]=[.1]*6
+            with self.subTest(fault=fault),self.assertRaises(RuntimeError):r.start_miss_hold(*args)
+            np.testing.assert_array_equal(d['limits'][:,r.indices],original)
+            self.assertIsNotNone(r.failure)
+            with self.assertRaises(RuntimeError):r.advance()

@@ -9,10 +9,11 @@ import numpy as np
 from finger_geometry import FingerModel,body_box,separation,rotation
 from tick_contract import digest,frame_digest,snapshot_contracts,STEP_NS
 from comparisons import comparison
+from contract import JOINTS
 
-POLICY=dict(version=2,executed_margin_m=.001,clean_open_margin_m=.0002,
+POLICY=dict(version=3,executed_margin_m=.001,clean_open_margin_m=.0002,
     geometric_error_m=.00002,refinement_floor_motion_m=.00025,max_segment_checks=50000,
-    target_corner_motion_max_m=.0002,
+    target_corner_motion_max_m=.0002,stationary_linear_m_s=.0001,stationary_angular_rad_s=.005,
     step_s=1/30+1e-6,joint_numeric_allowance_rad=1e-6,reachable_numeric_allowance_rad=5e-6,settled_velocity_rad_s=.0125,
     velocity_caps_rad_s=dict(regrasp_miss_open=.5,regrasp_miss_approach=.1,
         regrasp_miss_descent=.05,regrasp_miss_close=.05,regrasp_miss_lift=.05,regrasp_reopen=.05),
@@ -34,9 +35,11 @@ def planning_margin(stage):
     return POLICY['executed_margin_m']+sum(r*(v*POLICY['step_s']+POLICY['reachable_numeric_allowance_rad']) for r,v in zip(POLICY['joint_point_radius_bounds_m'],cap['values_rad_s']))
 
 
-def velocity_cap(phase):
+def velocity_cap(phase,stationary_target=None):
     if phase not in POLICY['velocity_caps_rad_s']:raise ValueError('Unknown deliberate-miss phase: '+str(phase))
-    return dict(on=True,phase=phase,values_rad_s=[POLICY['velocity_caps_rad_s'][phase]]*6,policy_version=POLICY['version'])
+    result=dict(on=True,phase=phase,values_rad_s=[POLICY['velocity_caps_rad_s'][phase]]*6,policy_version=POLICY['version'])
+    if stationary_target is not None:result['stationary_target']=stationary_target
+    return result
 
 
 class MissClearance:
@@ -153,6 +156,13 @@ class MissClearance:
     def command(self,state,previous,target,snapshot,require_epoch=lambda:None):
         if snapshot['epoch']!=self.baseline['epoch'] or snapshot['sim_ns']<self.baseline['sim_ns']:
             raise ValueError('Miss observation belongs to another epoch or predates its anchor')
+        body_velocity=snapshot['bodies'][self.name].get('velocity')
+        if body_velocity is None or len(body_velocity)!=6 or not np.isfinite(body_velocity).all():
+            return dict(passed=False,reason='native measured target velocity is required',target=self.name)
+        stationary=dict(linear_m_s=float(np.linalg.norm(body_velocity[:3])),angular_rad_s=float(np.linalg.norm(body_velocity[3:])),
+            linear_limit_m_s=POLICY['stationary_linear_m_s'],angular_limit_rad_s=POLICY['stationary_angular_rad_s'])
+        if stationary['linear_m_s']>POLICY['stationary_linear_m_s'] or stationary['angular_rad_s']>POLICY['stationary_angular_rad_s']:
+            return dict(passed=False,reason='guarded target is not stationary',target=self.name,stationary_target=stationary)
         movement=self.displacement(snapshot)
         body=snapshot['bodies'][self.name];base=snapshot['robot_base_world_pose'];paths=[]
         identity=dict(epoch=snapshot['epoch'],sim_ns=snapshot['sim_ns'],target=list(target),model_sha256=self.model_sha256,
@@ -160,15 +170,16 @@ class MissClearance:
         if not movement['passed']:return dict(identity,passed=False,reason='target moved during deliberate miss',motion=movement)
         velocity=snapshot.get('velocity')
         phase=snapshot.get('miss_phase','regrasp_miss_descent')
-        cap=velocity_cap(phase)
-        identity['velocity_cap']=cap
+        cap=velocity_cap(phase,self.name)
+        identity['velocity_cap']=cap;identity['stationary_target']=stationary
         if velocity is None or len(velocity)!=6 or not np.isfinite(velocity).all():
             return dict(identity,passed=False,reason='native measured velocity is required',motion=movement)
         if any(abs(v)>lim+POLICY['joint_numeric_allowance_rad'] for v,lim in zip(velocity,cap['values_rad_s'])):
             return dict(identity,passed=False,reason='measured velocity exceeds recovery cap before application',measured_velocity_rad_s=list(velocity),motion=movement)
-        # Native max-joint-velocity constraints, verified before advancing, bound
-        # arbitrary progress and overshoot during the entire next simulated tick.
-        # Position completion tolerance is not a tracking/zero-velocity assumption.
+        # This geometric box is conditional on a native displacement bound.
+        # The live smoke must measure solver residuals; parameter readback and
+        # CPU geometry alone do not establish the physical bound. Native
+        # substep monitoring rejects any observed constraint/box violation.
         half=np.asarray(cap['values_rad_s'])*POLICY['step_s']+POLICY['reachable_numeric_allowance_rad']
         reach=self.joint_box(np.asarray(state)-half,np.asarray(state)+half,require_epoch=require_epoch,body=body,base=base)
         identity['reachable_box']=reach;identity['measured_velocity_rad_s']=list(velocity)
@@ -203,6 +214,9 @@ def receipt_error(receipt,rows):
         from comparisons import matches,native_frame
         initial=receipt['episode_start_physical']
         if any(not matches(baseline[k],initial[k]) for k in ('epoch','sim_ns','state','bodies','robot_base_world_pose')):return 'miss anchor differs from initial episode snapshot'
+        fresh=report['fresh_offsets']
+        if fresh['epoch']!=baseline['epoch'] or not matches(fresh['sim_ns'],baseline['sim_ns'],'native_ns') or fresh['finger_offsets']!=spec['model']['effective_finger_offsets'] or fresh['block_offsets']!=spec['model']['effective_block_offsets']:
+            return 'guarded episode fresh native offsets differ'
         guard=MissClearance(spec['model'],baseline,spec['target'])
         if report.get('velocity_cap_restore')!=dict(on=False,values_rad_s=None):return 'miss velocity cap was not restored before corrective recovery'
         kickoffs=report['kickoffs']
@@ -231,3 +245,19 @@ def receipt_error(receipt,rows):
             if differences:return 'recorded miss target-clearance proof differs: '+json.dumps(differences[:3])
     except (KeyError,TypeError,ValueError,IndexError):return 'miss target-clearance evidence is incomplete'
     return None
+
+
+def residual_summary(rows,faults=()):
+    """Measured excess, not an offline proof of the coupled native solver."""
+    samples=[s for row in rows for s in row.get('measured_miss_velocity_cap',{}).get('substep_samples',[])]
+    samples.extend(s for fault in faults for s in fault.get('samples',[]))
+    result=dict(sample_count=len(samples),joint_names=list(JOINTS),certificate_pad_rad=POLICY['reachable_numeric_allowance_rad'],
+        interpretation='per-substep samples; pre-step callbacks observe the preceding integration, final_snapshot closes the frame',
+        physical_qualification='requires owned live smoke; any violation is terminal')
+    for field in ('local_excess_rad','frame_excess_over_cap_rad','certificate_excess_rad'):
+        values=[s[field] for s in samples if len(s.get(field,[]))==6 and all(isinstance(v,(int,float)) and math.isfinite(v) for v in s[field])]
+        result['max_'+field]=[max(v[i] for v in values) for i in range(6)] if values else None
+    result['local_budget_rad']=POLICY['joint_numeric_allowance_rad']
+    result['observed_local_budget_violation']=any(v>POLICY['joint_numeric_allowance_rad'] for v in result['max_local_excess_rad'] or [])
+    result['observed_certificate_violation']=any(v>0 for v in result['max_certificate_excess_rad'] or [])
+    return result

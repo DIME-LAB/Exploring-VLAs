@@ -619,8 +619,16 @@ certify it. Kickoff advances get the same check. Effective native finger/block
 contact/rest offsets are bound into the model hash and margin verification.
 Caps apply only to the miss prefix (0.5 rad/s open, 0.1 high approach, 0.05 near
 block), are logged on/off with values per tick, and are restored/read-verified
-before the normal-speed corrective grasp. Receipts quantify the temporary
-operation retiming. All miss stages require measured velocity <=0.0125 rad/s
+before the normal-speed corrective grasp. Partial native writes are marked
+dirty before dispatch and restore/read-verify the original limits on failure;
+failed rollback stays terminal and cannot report off. Finger/block offsets are
+freshly compared at every guarded episode start. The target's measured linear
+and angular speeds must remain below 0.1 mm/s and 0.005 rad/s at each guarded
+advance. Per-joint substep excess is logged against the declared 5 urad pad;
+**the owned live smoke, not CPU tests or limit readback, must qualify the solver
+residual**. Any observed violation rejects the episode and stops the run. Native
+fault samples are written before rollback and copied into attempt receipts even
+if cancellation fails. Receipts quantify the temporary operation retiming. All miss stages require measured velocity <=0.0125 rad/s
 before completion; ordinary collector/GUI completion is unchanged.
 See [target-clearance and evidence contracts](docs/notes/regrasp-target-clearance.md).
 

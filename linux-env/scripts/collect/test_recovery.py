@@ -238,6 +238,10 @@ class RecoveryTests(unittest.TestCase):
         name=params['object'];now=[snapshot(10**9)];now[0]['bodies'][name]=dict(position=[.20,0.,.0064])
         c.native_finger_model=MODEL;c.native_shape_offsets={name:MODEL['effective_block_offsets']}
         def bridge(tool,params):
+            if 'guarded_episode_offsets' in params['code']:
+                import ast
+                name,epoch,stamp,fingers,block=ast.literal_eval(params['code'].split('guarded_episode_offsets(*',1)[1][:-1])
+                return dict(epoch=epoch,sim_ns=stamp,finger_offsets=fingers,block_offsets=block,source='fresh PhysX shape tensors')
             if 'start_miss_hold' not in params['code']:return dict(on=False,values_rad_s=None)
             import ast
             args=ast.literal_eval(params['code'].split('start_miss_hold(*',1)[1][:-1])

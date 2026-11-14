@@ -58,7 +58,7 @@ from recovery import REGRASP_POLICY, recovery_geometry, detect_miss
 from recovery_search import SEARCH_POLICY,PlanningWallBudget,choose as choose_recovery_plan
 from dart import DEFAULT_NOISE, SmoothDart, ClearanceDart, TargetCandidate, PlannerSchedule
 from command_geometry import choose_noise_scale, final_command, QUERY_POLICY, frame_capacity_seconds,CommandCollision
-from miss_clearance import MissClearance,velocity_cap,bind_target_offsets,POLICY as MISS_POLICY
+from miss_clearance import MissClearance,velocity_cap,bind_target_offsets,residual_summary,POLICY as MISS_POLICY
 from dataset_phase import observed_phase,POLICY as PHASE_POLICY
 import support_contact
 from base_drift import summary as base_drift_summary
@@ -839,7 +839,10 @@ class Collector:
         # No generation lock: its owner may be stuck in publication forever.
         # Native cancellation only pauses and invalidates queued commands.
         try:
-            timeline(False)
+            native=timeline(False)
+            if native.get('miss_motion_fault'):
+                if not hasattr(self,'native_miss_faults'):self.native_miss_faults=[]
+                self.native_miss_faults.append(copy.deepcopy(native['miss_motion_fault']))
         except Exception as pause_error:
             self.failure += '; emergency pause failed: '+repr(pause_error)
         finally:
@@ -858,6 +861,9 @@ class Collector:
                     raise RuntimeError('Cannot hand over a stale executed hold')
                 result = self.generation.cancel(native_cancel,
                     lambda:handover.append(self.retire_motion(epoch)))
+                if result.get('miss_motion_fault'):
+                    if not hasattr(self,'native_miss_faults'):self.native_miss_faults=[]
+                    self.native_miss_faults.append(copy.deepcopy(result['miss_motion_fault']))
                 rebase=rebase or 'arm_restored' in result or 'command_baseline' in result
                 if not hasattr(self,'tick_audit'):self.tick_audit=TickContract()
                 baseline=self.tick_audit.install_boundary(result,restore=rebase,
@@ -1238,7 +1244,12 @@ class Collector:
         # The expert aims at the true target, so MoveIt omits intended grasp
         # contact. The independent native-box oracle keeps the executed miss
         # clear of that target throughout approach, close, lift and reopen.
-        clearance=MissClearance(bind_target_offsets(self.native_finger_model,self.native_shape_offsets[name]),before,name)
+        with self.generation.own('guarded episode offset readback'):
+            self.generation.require(epoch,before['sim_ns'])
+            fresh=self.mutate_kit('run_python',{'code':'import collection_runtime as c\nresult=c.runtime().guarded_episode_offsets(*'+repr((name,epoch,before['sim_ns'],self.native_finger_model['effective_finger_offsets'],self.native_shape_offsets[name]))+')'})
+            if fresh['finger_offsets']!=self.native_finger_model['effective_finger_offsets'] or fresh['block_offsets']!=self.native_shape_offsets[name]:raise RuntimeError('Guarded episode native offset mismatch')
+            report['fresh_offsets']=fresh
+            clearance=MissClearance(bind_target_offsets(self.native_finger_model,fresh['block_offsets']),before,name)
         report['clearance']=copy.deepcopy(clearance.spec)
         self.node._remove_single_lego_from_world(name)
         planning_budget=planning_budget or PlanningWallBudget()
@@ -1587,6 +1598,9 @@ class Collector:
         if transport_config.get('articulation_audit',{}).get('fixed_base') is not True:
             raise RuntimeError('Unverified/floating articulation; fresh fixed-base scene is required')
         self.native_finger_model=transport_config.get('finger_model')
+        self.native_miss_fault_path=confined(transport_config['native_miss_fault_path']) if transport_config.get('native_miss_fault_path') else None
+        if self.native_miss_fault_path and self.native_miss_fault_path.parent!=confined(Path(os.environ['SOARM_INSTANCE_ROOT'])/'native-motion-faults'):
+            raise RuntimeError('Native motion-fault output belongs to another instance')
         expected_bodies = set(transport_config['local_corners']) | {'cup_red','cup_green','cup_blue'}
         offsets = transport_config['effective_shape_offsets']
         self.native_shape_offsets=copy.deepcopy(offsets)
@@ -1899,6 +1913,13 @@ class Collector:
                     receipt['measured_support_contacts']=[dict(epoch=r['epoch'],sim_ns=r['sim_ns'],proof=p['measured_start_contact'])
                         for r in (writer.rows if writer else []) for p in r.get('execution_geometry',{}).get('paths',[]) if 'measured_start_contact' in p]
                     receipt['planner_refusals']=self.planner_evidence(receipt)
+                    faults=list(getattr(self,'native_miss_faults',[]));fault_path=getattr(self,'native_miss_fault_path',None)
+                    if fault_path and fault_path.exists():
+                        fd=os.open(fault_path,os.O_RDONLY|os.O_NOFOLLOW)
+                        with os.fdopen(fd) as stream:faults.append(json.load(stream))
+                        receipt['native_miss_fault_file']=str(fault_path)
+                    receipt['native_miss_faults']=list({digest(f):copy.deepcopy(f) for f in faults if f.get('epoch') in motion_epochs}.values())
+                    if params.get('recovery')=='regrasp':receipt['miss_solver_residuals']=residual_summary(writer.rows if writer else [],receipt['native_miss_faults'])
                     sensor_failure=getattr(self.sensors,'failure',None)
                     if isinstance(sensor_failure,SensorAmbiguity):
                         if receipt.get('error'):receipt['secondary_error']=receipt['error']
