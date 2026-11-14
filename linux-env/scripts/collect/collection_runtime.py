@@ -215,7 +215,8 @@ class Runtime:
         self.epoch += 1
         self.invalid_through_ns = self.stamp()
         self.ledger = CommandLedger()
-        return dict(held=True, failure=self.failure, epoch=self.epoch, invalid_through_ns=self.invalid_through_ns)
+        return dict(held=True,failure=self.failure,epoch=self.epoch,invalid_through_ns=self.invalid_through_ns,
+                    clock_baseline=dict(epoch=self.epoch,sim_ns=self.invalid_through_ns,physics_time_s=self.world.current_time))
 
     def command_received(self, message):
         payload = json.loads(message.data)
@@ -295,7 +296,8 @@ class Runtime:
             # impulses from a subsequent physics tick can affect velocity.
             if not np.isfinite(arm_error + velocity_error) or arm_error > 1e-6 or velocity_error > 1e-6:
                 raise RuntimeError(f'Initial arm position/zero velocity restore failed: {arm_error} rad, {velocity_error} rad/s')
-        return dict(epoch=self.epoch, invalid_through_ns=self.invalid_through_ns,
+        return dict(epoch=self.epoch, invalid_through_ns=self.invalid_through_ns,arm_restored=bool(arm),
+                    command_baseline=dict(epoch=self.epoch,sim_ns=actual['sim_ns'],physics_time_s=actual['physics_time_s'],drive_targets=list(actual['drive_targets'])),
                     max_position_error_m=error, max_orientation_error=orientation_error,
                     max_arm_position_error_rad=arm_error, max_arm_velocity_rad_s=velocity_error, snapshot=actual)
 

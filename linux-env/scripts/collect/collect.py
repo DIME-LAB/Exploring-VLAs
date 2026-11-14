@@ -47,8 +47,8 @@ from diagnostics import final_stills
 from query_service import StrictQueryClient
 from recovery import REGRASP_POLICY, regrasp_slot, recovery_geometry, detect_miss
 from dart import DEFAULT_NOISE, SmoothDart, TargetCandidate, PlannerSchedule
-from command_geometry import choose_noise_scale, final_command
-from tick_contract import TickContract, TickContractError, require_snapshots, digest, verify_proof
+from command_geometry import choose_noise_scale, final_command, QUERY_POLICY
+from tick_contract import TickContract, TickContractError, require_snapshots, digest, verify_proof, CLOCK_POLICY
 from episode_policy import (POLICY, QualityReject, ConvergenceFailure, WorkerRegistry,
                             PLANNER_REJECTIONS, FailureStreak, disposition)
 
@@ -417,7 +417,7 @@ class Servo:
             desired=[q+n for q,n in zip(execution_reference,noise)]
             previous=getattr(self,'previous_command',None)
             if previous is not None and previous.epoch!=self.generation.epoch:raise RuntimeError('Previous execution belongs to a retired epoch')
-            anchor=previous.positions if previous is not None else (drive_targets if drive_targets is not None else state)
+            anchor=drive_targets if drive_targets is not None else (previous.positions if previous is not None else state)
             velocities=tuple((q-p)*30 for q,p in zip(desired[:5],anchor[:5]))
             if self.plan:
                 if arm_ready:
@@ -598,16 +598,22 @@ class Collector:
             print(json.dumps(dict(event='stalled_generation_owner', requester=requester,
                 error=self.failure, action='abort; no reset or next episode permitted')), flush=True)
 
-    def cancel_owner(self, native_cancel):
+    def cancel_owner(self, native_cancel, rebase=False):
         try:
             with self.generation.own('cancel/hold handover'):
                 epoch = self.generation.epoch
                 handover = []
+                previous_command=getattr(self.servo,'previous_command',None)
+                if previous_command is not None and previous_command.epoch!=epoch:raise RuntimeError('Cannot hand over stale command history')
                 executed_hold=getattr(self.servo,'executed_hold',None)
                 if executed_hold is not None and executed_hold[0]!=epoch:
                     raise RuntimeError('Cannot hand over a stale executed hold')
                 result = self.generation.cancel(native_cancel,
                     lambda:handover.append(self.retire_motion(epoch)))
+                rebase=rebase or 'arm_restored' in result or 'command_baseline' in result
+                if not hasattr(self,'tick_audit'):self.tick_audit=TickContract()
+                baseline=self.tick_audit.install_boundary(result,restore=rebase,
+                    pause_targets=previous_command.positions if previous_command is not None else None)
                 # Only an idle clean reference crosses this barrier. Active
                 # motion is retired and will freeze at fresh measured state.
                 with self.servo.lock:
@@ -617,10 +623,18 @@ class Collector:
                         self.servo.executed_hold=(result['epoch'],executed_hold[1]) if executed_hold is not None else None
                         if getattr(self.servo,'previous_command',None) is not None:
                             self.servo.previous_command=replace(self.servo.previous_command,epoch=result['epoch'])
+                    if rebase:
+                        targets=tuple(baseline['drive_targets'])
+                        self.servo.previous_command=TargetCandidate(result['epoch'],baseline['sim_ns'],targets,
+                            (0.,)*5,(0.,)*6,(0.,)*6,targets,planner_reference=targets,noise_scale=0.)
+                        if result['arm_restored']:self.servo.executed_hold=None
                 return result
         except OwnershipStalled as exc:
             self.abort_stalled_owner(exc, 'cancel/reset')
             raise OwnershipStalled(self.failure) from exc
+        except Exception as exc:
+            self.abort_stalled_owner(exc,'cancel/restore baseline')
+            raise
 
     def timeline(self, play):
         if not play:
@@ -632,7 +646,7 @@ class Collector:
     def restore_physical(self, code):
         # Retirement owns the scene before setters. On a stalled owner, only
         # native cancellation is allowed; never execute the restore callback.
-        return self.cancel_owner(lambda: self.mutate_kit('run_python', {'code':code}))
+        return self.cancel_owner(lambda: self.mutate_kit('run_python', {'code':code}),rebase=True)
 
     def record_capture_failure(self, exc, epoch, failure_tick=None):
         # Called while owning this generation, before cancellation retires plans.
@@ -1172,7 +1186,7 @@ class Collector:
             (root / 'run.json').write_text(json.dumps(dict(instance=args.instance, host=socket.gethostname(), gpu_index=int(os.getenv('ISAACSIM_GPU', '0')),
             recording_version=3, transport_config=transport_config, observation_state_topic='/joint_states_measured',
             diagnostic=args.diagnostic, success_profile=PROFILE,
-            motion_wait_policy=wait_policy, quality_policy=POLICY,regrasp_policy=REGRASP_POLICY,regrasp_only=args.regrasp_only,
+            motion_wait_policy=wait_policy, tick_clock_policy=CLOCK_POLICY,geometry_query_policy=QUERY_POLICY,quality_policy=POLICY,regrasp_policy=REGRASP_POLICY,regrasp_only=args.regrasp_only,
             application_contract='Held at observation tick; read-back verified PhysX targets before one-frame advance; maximum one sim tick latency',
             clock_config=clock_config, domain=90 + args.instance,
             bridge_port=8777 + 2 * args.instance, fps=30, baseline=baseline, baseline_cup_layout=self.baseline_cup_layout, eval_seeds=EVAL_SEEDS,

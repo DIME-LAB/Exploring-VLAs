@@ -79,6 +79,7 @@ class WorkerRetirementTests(unittest.TestCase):
         if home:native['drive_targets']=list(positions)
         for k in ('joint','wrist','top'):entry[k][0].header.stamp.sec,entry[k][0].header.stamp.nanosec=divmod(stamp,10**9)
         r.stamp=lambda:stamp
+        r.world.current_time=stamp/1e9
         c.node._actual_positions.update(zip(probes.JOINTS,positions))
         c.node.get_clock=lambda:NS(now=lambda:NS(nanoseconds=stamp))
         r.ack_pub=NS(publish=lambda msg:c.sensors.acks.update({(epoch,stamp):json.loads(msg.data)}))

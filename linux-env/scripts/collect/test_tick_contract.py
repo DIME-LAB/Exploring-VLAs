@@ -9,7 +9,7 @@ def checked_window(snapshots):
     for i,source in enumerate(snapshots):
         s=copy.deepcopy(source);s.setdefault('epoch',1);s.setdefault('sim_ns',10**9+round(i*1e9/30))
         s.setdefault('state',[0.]*6);s.setdefault('velocity',[0.]*6);s.setdefault('state_source','isaac_articulation');s.setdefault('bodies',{})
-        s['physics_time_s']=s['sim_ns']/1e9
+        s.setdefault('physics_time_s',s['sim_ns']/1e9)
         for body in s['bodies'].values():body.setdefault('orientation',[1.,0.,0.,0.]);body.setdefault('velocity',[0.]*6)
         stamp=s['sim_ns'];state=s['state'];previous=audit.previous
         row=dict(camera_layout={k:dict(encoding='rgb8',width=640,height=480,step=1920,bytes=921600) for k in ('wrist','top')},execution_geometry=dict(passed=True,epoch=s['epoch'],sim_ns=stamp,target=state),tick_contract_version=1,epoch=s['epoch'],observation_epoch=s['epoch'],expert_epoch=s['epoch'],
@@ -78,6 +78,7 @@ class CaptureContractTests(unittest.TestCase):
         c.servo.plan=dict(epoch=1,start=10**9,done=threading.Event(),trajectory=NS(joint_names=probes.JOINTS[:5],points=[NS(positions=[.1]*5,time_from_start=NS(sec=2,nanosec=0))]))
         c.servo.reference=[.1]*5+[0.];c.servo.phase='grasp_move';c.servo.params['dart']['on_probability']=0.
         c.node.get_clock=lambda:NS(now=lambda:NS(nanoseconds=stamp));r.stamp=lambda:stamp
+        r.world.current_time=snapshot['physics_time_s']
         if defect=='first_gap':c.tick_audit.previous=None
         if defect=='camera_layout':entry['wrist'][0].encoding='rgba8'
         if defect=='clock_gap':c.tick_audit.previous['sim_ns']-=STEP_NS

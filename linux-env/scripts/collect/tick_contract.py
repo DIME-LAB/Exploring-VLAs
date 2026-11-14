@@ -1,7 +1,28 @@
 """Pipeline checks for every physical tick, including unrecorded verdict ticks."""
-import copy,hashlib,json,math
+import copy,hashlib,json,math,struct
 
 STEP_NS=round(1e9/30)
+PHYSICS_DT=1/120
+PHYSICS_STEPS=4
+FLOAT32_DT=struct.unpack('f',struct.pack('f',PHYSICS_DT))[0]
+CLOCK_POLICY=dict(version=2,native_step_ns=STEP_NS,physics_dt=PHYSICS_DT,
+    physics_steps_per_frame=PHYSICS_STEPS,world_delta_min_tolerance_s=1e-6,
+    world_delta_ulp_factor=8,absolute_world_native_equality=False)
+
+
+def world_step_errors(current,previous):
+    if not all(isinstance(v,(int,float)) and math.isfinite(v) for v in (current,previous)):
+        return ['World clock is missing or non-finite']
+    # World accumulates the PhysX callback step_size; graph/camera stamps use
+    # Isaac Read Simulation Time. Four float32 steps plus double accumulation
+    # need not have the same absolute origin/value as the native graph clock.
+    tolerance=max(1e-6,8*math.ulp(max(abs(current),abs(previous),1.))+
+                  PHYSICS_STEPS*abs(FLOAT32_DT-PHYSICS_DT))
+    if tolerance>=PHYSICS_DT/4:return ['World clock precision cannot resolve a physics substep']
+    delta=current-previous
+    if delta<=0:return ['World clock is frozen or rewound']
+    if abs(delta-PHYSICS_STEPS*PHYSICS_DT)>tolerance:return ['World clock did not advance one frame']
+    return []
 
 
 class TickContractError(RuntimeError):
@@ -35,8 +56,8 @@ def observation_errors(row,previous=None):
         layout=row.get('camera_layout',{}).get(camera,{})
         if (layout.get('encoding'),layout.get('width'),layout.get('height'))!=('rgb8',640,480) or layout.get('step',0)<1920 or layout.get('bytes')!=480*layout.get('step',0):errors.append('Invalid camera layout '+camera)
     physical=row.get('physics_time_s')
-    if not isinstance(physical,(int,float)) or not math.isfinite(physical) or abs(physical*1e9-stamp)>1000:
-        errors.append('Native physics time differs from camera tick')
+    if not isinstance(physical,(int,float)) or not math.isfinite(physical):
+        errors.append('World clock is missing or non-finite')
     for name,body in row.get('physical_bodies',{}).items():
         if not all(vector(body.get(k),size) for k,size in (('position',3),('orientation',4),('velocity',6))):
             errors.append('Invalid physical body '+name)
@@ -45,13 +66,21 @@ def observation_errors(row,previous=None):
         if not isinstance(row.get(key),int) or row[key]<=0:errors.append('Missing wall receipt '+key)
     if previous and previous.get('epoch')==epoch:
         if abs(stamp-previous['sim_ns']-STEP_NS)>10:errors.append('Repeated or skipped physical tick')
-        if isinstance(physical,(int,float)) and abs((physical-previous['physics_time_s'])*1e9-STEP_NS)>1000:
-            errors.append('Physics did not advance one frame')
+        errors.extend(world_step_errors(physical,previous.get('physics_time_s')))
         for key in ('wall_ns','wrist_receive_ns','top_receive_ns'):
             if row.get(key,0)<=previous.get(key,0):errors.append('Non-monotonic '+key)
         if vector(row.get('physics_drive_targets'),6) and vector(previous.get('applied_command'),6):
             if max(abs(x-y) for x,y in zip(row['physics_drive_targets'],previous['applied_command']))>1e-6:
                 errors.append('Previously ACKed targets did not persist')
+    elif row.get('drive_baseline') is not None:
+        baseline=row['drive_baseline']
+        if baseline.get('epoch')!=epoch or baseline.get('sim_ns')!=row.get('invalid_through_ns'):
+            errors.append('Drive baseline belongs to another restore/pause boundary')
+        if not vector(baseline.get('drive_targets'),6):errors.append('Drive baseline is incomplete')
+        elif vector(row.get('physics_drive_targets'),6) and max(abs(a-b) for a,b in zip(row['physics_drive_targets'],baseline['drive_targets']))>1e-6:
+            errors.append('Physical targets differ from the boundary baseline')
+        if abs(stamp-baseline.get('sim_ns',stamp)-STEP_NS)>1000:errors.append('First frame skipped the drive baseline')
+        if baseline.get('physics_time_s') is not None:errors.extend(world_step_errors(physical,baseline['physics_time_s']))
     return errors
 
 
@@ -85,8 +114,36 @@ def row_errors(row,previous=None):
 
 
 class TickContract:
-    def __init__(self):self.previous=None
+    def __init__(self):self.previous=None;self.boundary=None
+    def install_boundary(self,result,restore=False,pause_targets=None):
+        epoch=result['epoch'];stamp=result['invalid_through_ns'];previous=self.previous
+        if previous and (epoch<=previous['epoch'] or stamp<previous['sim_ns']-1000):
+            raise TickContractError(['Cancellation/restore rewound the native clock or epoch'])
+        if restore:
+            baseline=copy.deepcopy(result['command_baseline']);snapshot=result['snapshot']
+            if (baseline.get('epoch')!=epoch or snapshot.get('epoch')!=epoch or baseline.get('sim_ns')!=stamp or
+                snapshot.get('sim_ns')!=stamp or baseline.get('drive_targets')!=snapshot.get('drive_targets') or
+                baseline.get('physics_time_s')!=snapshot.get('physics_time_s') or not vector(baseline.get('drive_targets'),6) or
+                not isinstance(result.get('arm_restored'),bool)):
+                raise TickContractError(['Restore did not supply its native epoch-stamped target baseline'])
+            world=baseline.get('physics_time_s')
+            if not isinstance(world,(int,float)) or not math.isfinite(world):raise TickContractError(['Restore World clock is invalid'])
+            if previous and world<previous['physics_time_s']:raise TickContractError(['Restore rewound the World clock'])
+            baseline['kind']='restore'
+        else:
+            targets=previous['applied_command'] if previous else pause_targets
+            world=(previous['physics_time_s'] if previous and abs(stamp-previous['sim_ns'])<=1000 else None)
+            clock=result.get('clock_baseline')
+            if clock is not None:
+                world=clock.get('physics_time_s')
+                if clock.get('epoch')!=epoch or clock.get('sim_ns')!=stamp or not isinstance(world,(int,float)) or not math.isfinite(world):
+                    raise TickContractError(['Pause did not supply a valid native clock boundary'])
+                if previous and world<previous['physics_time_s']:raise TickContractError(['Pause rewound the World clock'])
+            baseline=(dict(epoch=epoch,sim_ns=stamp,physics_time_s=world,drive_targets=list(targets),kind='pause') if targets is not None else None)
+        self.previous=None;self.boundary=baseline
+        return copy.deepcopy(baseline)
     def observe(self,row):
+        if not self.previous and self.boundary is not None:row['drive_baseline']=copy.deepcopy(self.boundary)
         errors=observation_errors(row,self.previous)
         if (not self.previous or self.previous['epoch']!=row['epoch']) and abs(row['sim_ns']-row['invalid_through_ns']-STEP_NS)>1000:
             errors.append('First physical tick skipped its reset boundary')

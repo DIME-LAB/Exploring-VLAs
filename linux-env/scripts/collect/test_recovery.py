@@ -198,6 +198,7 @@ class RecoveryTests(unittest.TestCase):
         c.current_episode_id='recovery-test';c.test_rows=[];c.episode_snapshots=[];audit=TickContract()
         name=params['object'];now=[snapshot(10**9)];now[0]['bodies'][name]=dict(position=[.20,0.,.0064])
         def record_tick():
+            now[0]['physics_time_s']=now[0]['sim_ns']/1e9
             s=checked_window([dict(now[0],episode_id=c.current_episode_id,phase=getattr(node,'_last_motion_tag','fixture'))])[0]
             row=s['tick_contract']['row']
             if audit.previous:row['physics_drive_targets']=list(audit.previous['applied_command'])

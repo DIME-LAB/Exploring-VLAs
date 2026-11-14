@@ -448,8 +448,10 @@ outside generation ownership. Immediately before every dispatch, MoveIt checks
 the final six-joint target and both short continuations (measured state to target
 and previously applied target to target), including gripper and native attached
 geometry. Both endpoints and subdivisions at most 0.01 rad apart are checked.
-Final checks have a five-wall-second budget under dispatch ownership; individual
-validity service waits are bounded separately. An unexpected invalid continuation
+Final checks bound individual validity requests at 1 s (50 ms polling/delivery
+allowance) and cap a continuation at 256 queries; operation preflight caps total
+queries at 50,000. There is no aggregate five-second deadline on valid answers.
+Actual per-tick query counts, total time and maximum request time are logged. An unexpected invalid continuation
 or query fault aborts while physics is held, before publication/advancement. It
 never jumps to a differently filtered expert command to avoid a collision.
 
@@ -471,7 +473,22 @@ waits up to two wall seconds for ROS `/clock` to join the held native tick.
 Application/ACK and clean-label checks finish the tick's receipt. A convergence
 failure first obtains a no-advance hold ACK and saves that failing tick's own
 verified receipt before cancellation. Physical verification snapshots carry
-row hashes and their checked provenance. Contract failures are terminal;
+row hashes and their checked provenance. Native camera/joint/ROS stamps keep
+strict same-tick joins. `World.current_time` independently accumulates PhysX
+callback step sizes; it is retained as measured, without requiring absolute
+equality to the graph/camera clock. Each clock must advance one frame. World
+increments use a tolerance of max(1 microsecond, four float32 timestep errors
+plus eight double-precision ULPs), bounded below a quarter physics substep;
+native stamp progression remains within 10 ns. This accepts accumulated clock
+drift while rejecting frozen, rewound or skipped physics frames.
+
+Target-preserving pauses and physical restores have explicit epoch-stamped
+baselines. Restore reads back all six physical drive targets and the native/World
+clock pair; Servo history and the tick audit adopt that verified baseline while
+preserving the clean home reference. The next tick must match restored targets
+before dispatch. Command velocity provenance uses current physical target
+read-back. Missing/mismatched restore identity, target overwrite or clock rewind
+is terminal. Contract failures are terminal;
 physical home/containment failures are separate verdicts and may be quality
 rejects only with valid tick evidence. The six post-velocity-reset home samples
 come from the new epoch; samples are never mixed across a reset.
@@ -603,6 +620,21 @@ launcher startup: the earlier 90 GiB rule protected root writes, while collectio
 bulk data lives on another filesystem. Never alter the sibling backup archive.
 Receipts measure growth of writable root files in this instance's process trees,
 identifying shared caches. This is space growth, not in-place rewrite traffic.
+
+The combined smoke runner uses the same launcher, collector and export entrypoints.
+It first inspects one attempt in each mode, then resumes to five accepted normal
+and five dedicated re-grasp episodes, retaining failed videos with `--diagnostic`.
+It saves first-reset/restore receipts, stage/attempt wall times, dataset-load
+validation and exact-PID cleanup evidence. `--plan` starts no processes. `--go`
+requires the lead's explicit window; independent review can run concurrently,
+and its verdict can supersede the smoke data. Visual review and pilot approval
+remain separate from collection completion:
+
+```bash
+python3 -B linux-env/scripts/collect/run_smoke.py --cut <full-commit> \
+  --output /mnt/a4500-backup/exploring-vlas/datasets/smoke-clock-restore-v1 --plan
+# In the granted window, use the identical command with --go instead of --plan.
+```
 
 ```bash
 # Live commands require the lead's explicit smoke/pilot window.
