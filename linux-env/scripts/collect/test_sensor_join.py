@@ -13,8 +13,12 @@ from tick_contract import FLOAT32_DT
 def sensors():
     Sensors,scope=probes.load_class('collect.py','Sensors');scope['collections']=collections
     s=object.__new__(Sensors);s.condition=threading.Condition();s.pending=collections.OrderedDict()
-    s.last=-1;s.failure=None;s.duplicate_messages=collections.Counter();s.generation=StepGeneration()
+    s.last=-1;s.failure=None;s.duplicate_messages=collections.Counter();s.generation=StepGeneration();s.generation.install(dict(epoch=1,invalid_through_ns=-1))
+    s.camera_publishers={};s.camera_first_frame={};s.rerender_messages=collections.Counter();s.stale_camera_messages=collections.Counter();s.rerender_log={}
     return s
+
+
+def publisher_info(number=1):return dict(publisher_gid=[number]+[0]*23,implementation_identifier='rmw_cyclonedds_cpp',publication_sequence_number=number,source_timestamp=0,received_timestamp=0)
 
 
 def message(stamp):return NS(header=NS(stamp=NS(sec=stamp//10**9,nanosec=stamp%10**9)))
@@ -22,7 +26,7 @@ def message(stamp):return NS(header=NS(stamp=NS(sec=stamp//10**9,nanosec=stamp%1
 
 def feed(s,native,offset):
     for key in ('wrist','joint','top','tick'):
-        s.put(key,NS(data=json.dumps(dict(sim_ns=native,epoch=1))) if key=='tick' else message(native+(offset if key in ('wrist','top') else 0)))
+        s.put(key,NS(data=json.dumps(dict(sim_ns=native,epoch=1))) if key=='tick' else message(native+(offset if key in ('wrist','top') else 0)),publisher_info(1 if key=='wrist' else 2) if key in ('wrist','top') else None)
 
 
 class SensorJoinTests(unittest.TestCase):
@@ -33,7 +37,7 @@ class SensorJoinTests(unittest.TestCase):
                 s=sensors();feed(s,native,offset);stamp,entry=s.read(timeout=0)
                 self.assertEqual(stamp,native+offset);self.assertEqual(entry['tick'][0]['sim_ns'],native)
                 self.assertEqual(entry['joint'][0].header.stamp.nanosec,native%10**9)
-                s.put('wrist',message(native+offset));self.assertEqual(s.duplicate_messages['wrist'],1)
+                s.put('wrist',message(native+offset),publisher_info());self.assertEqual(s.duplicate_messages['wrist'],1)
                 with self.assertRaises(TimeoutError):s.read(timeout=0)
                 feed(s,native+33333333,offset);self.assertEqual(s.read(timeout=0)[0],native+33333333+offset)
 
@@ -45,8 +49,8 @@ class SensorJoinTests(unittest.TestCase):
 
     def test_ambiguous_nearby_candidates_fail_instead_of_arbitrarily_joining(self):
         s=sensors();stamp=1033333333
-        s.put('joint',message(stamp));s.put('top',message(stamp+1500))
-        with self.assertRaisesRegex(RuntimeError,'Ambiguous'):s.put('wrist',message(stamp+750))
+        s.put('joint',message(stamp));s.put('top',message(stamp+1500),publisher_info(2))
+        with self.assertRaisesRegex(RuntimeError,'Ambiguous'):s.put('wrist',message(stamp+750),publisher_info())
         with self.assertRaisesRegex(RuntimeError,'Ambiguous'):s.read(timeout=0)
 
 

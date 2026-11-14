@@ -22,3 +22,24 @@ def identity(key,message,stamp):
 
 def exact_duplicate(left,right):
     return left['stamp_ns']==right['stamp_ns'] and left['content_sha256']==right['content_sha256']
+
+
+def publisher_identity(info):
+    def get(key):return info.get(key) if isinstance(info,dict) else getattr(info,key,None)
+    raw=get('publisher_gid');implementation=get('implementation_identifier')
+    try:gid=bytes(raw)
+    except (TypeError,ValueError):gid=b''
+    if len(gid)!=24 or not any(gid) or not isinstance(implementation,str) or not implementation:
+        raise SensorAmbiguity(dict(reason='packet publisher identity unavailable',publisher_gid=gid.hex(),implementation=implementation))
+    return dict(scope='receiving subscription/context-local RMW identity',gid=gid.hex(),implementation=implementation,
+        publication_sequence_number=(None if get('publication_sequence_number')==2**64-1 else get('publication_sequence_number')),source_timestamp=get('source_timestamp'),
+        received_timestamp=(get('received_timestamp') or None),transport_take_decode_ms=get('transport_take_decode_ms'))
+
+
+def publisher_key(publisher):return publisher['implementation']+':'+publisher['gid']
+
+
+CAMERA_SELECTION_POLICY=dict(version=2,selection='first taken packet per exact stamp and publisher GID',
+    rerender='same GID + stamp + layout: retain first pixels; count later renders',
+    ambiguity='different GID, changed layout or different nearby stamp is terminal',
+    boundary='discard stamps at/below cancellation floor plus 1 us producer tolerance')

@@ -40,7 +40,8 @@ from so_arm101_control.grasp_geometry import JOINT_LIMITS
 from so_arm101_control.motion_wait import MotionWaiter, MotionWaitTimeout
 from gpu_device import owned_gpu_audit,gpu_uuid,GpuIsolationError
 from safe_home import make_baseline,validate_baseline
-from frame_join import SensorAmbiguity,identity as frame_identity,exact_duplicate
+from frame_join import SensorAmbiguity,identity as frame_identity,exact_duplicate,publisher_identity,publisher_key,CAMERA_SELECTION_POLICY
+from image_transport import publisher_executor_type
 from comparisons import comparison,matches,interval,native_frame
 from contract import COLORS, JOINTS, EVAL_SEEDS, corrective_action, parameters, timing_audit
 from checkpoint import progress
@@ -89,18 +90,29 @@ class Sensors:
         self.duplicate_messages = collections.Counter()
         self.consumed = collections.OrderedDict()
         self.seen_camera_frames = {'wrist':{},'top':{}}
+        self.camera_publishers={}
+        self.camera_first_frame={}
+        self.rerender_messages=collections.Counter()
+        self.stale_camera_messages=collections.Counter()
+        self.rerender_log={}
         self.reference = None
         self.acks = {}
         self.subs = []
         for key, topic in [('wrist', '/wrist_camera_rgb_sim'), ('top', '/workspace_camera_sim')]:
-            self.subs.append(node.create_subscription(Image, topic,
-                lambda msg, key=key: self.put(key, msg), QoSProfile(depth=64, reliability=ReliabilityPolicy.RELIABLE)))
+            subscription=node.create_subscription(Image, topic,self.camera_callback(key),
+                QoSProfile(depth=64,reliability=ReliabilityPolicy.RELIABLE))
+            subscription.collection_publisher_info=True
+            self.subs.append(subscription)
         self.subs.append(node.create_subscription(JointState, '/joint_states_measured',
                                                 lambda msg: self.put('joint', msg), 100))
         self.subs.append(node.create_subscription(String, '/collection_tick',
                                                 lambda msg: self.put('tick', msg), 64))
         self.subs.append(node.create_subscription(JointState, '/joint_states', self.reference_received, 100))
         self.subs.append(node.create_subscription(String, '/collection_command_ack', self.ack_received, 64))
+
+    def camera_callback(self,key):
+        def receive(message,info=None):self.put(key,message,info)
+        return receive
 
     def ack_received(self, msg):
         ack = json.loads(msg.data)
@@ -145,7 +157,11 @@ class Sensors:
             reference['age_sim_ns'] = stamp-reference['stamp_ns']
         return reference
 
-    def put(self, key, msg):
+    def put(self, key, msg,info=None):
+        if isinstance(msg,BaseException):
+            with self.condition:
+                self.failure=self.failure or msg;self.condition.notify_all()
+                raise self.failure
         receive_ns=time.monotonic_ns()
         if key == 'tick':
             msg = json.loads(msg.data)
@@ -153,22 +169,49 @@ class Sensors:
         else:
             raw_stamp = ns(msg.header.stamp)
         if raw_stamp<=0:return
+        if key in ('wrist','top') and (self.generation.epoch is None or raw_stamp<=self.generation.floor_ns+1000):
+            with self.condition:self.stale_camera_messages[key]+=1
+            return
         incoming=frame_identity(key,msg,raw_stamp)
         incoming['receipt_epoch']=self.generation.epoch
         with self.condition:
             if self.failure:return
+            if key in ('wrist','top'):
+                if self.generation.epoch is None or raw_stamp<=self.generation.floor_ns+1000:
+                    self.stale_camera_messages[key]+=1;return
+                incoming['receipt_epoch']=self.generation.epoch
+                try:incoming['publisher']=publisher_identity(info)
+                except SensorAmbiguity as exc:
+                    self.failure=exc;self.condition.notify_all();raise
             if not hasattr(self,'consumed'):self.consumed=collections.OrderedDict()
             if not hasattr(self,'seen_camera_frames'):self.seen_camera_frames={'wrist':{},'top':{}}
             if key in self.seen_camera_frames:
-                # Buckets are only a lookup index. Search adjacent buckets and
-                # retain original stamps/content; distinct candidates are fatal.
+                publisher=incoming['publisher'];bound=self.camera_publishers.get(key)
+                if bound is not None and publisher_key(bound)!=publisher_key(publisher):
+                    self.failure=SensorAmbiguity(dict(stream=key,reason='camera publisher changed or duplicated',
+                        candidates=[self.camera_first_frame[key],incoming],owner_epoch=self.generation.epoch))
+                    self.condition.notify_all();raise self.failure
+                self.camera_publishers[key]=bound or publisher
+                if bound is None:self.camera_first_frame[key]=incoming
                 seen=self.seen_camera_frames[key];bucket=raw_stamp//1000
                 candidates=[seen[b] for b in (bucket-1,bucket,bucket+1)
                             if b in seen and matches(seen[b]['stamp_ns'],raw_stamp,'stamp_ns')]
                 if candidates:
-                    if len(candidates)==1 and exact_duplicate(candidates[0],incoming):
-                        self.duplicate_messages[key]+=1;return
-                    self.failure=SensorAmbiguity(dict(stream=key,reason='distinct same-camera candidates',
+                    previous=candidates[0]
+                    same=(len(candidates)==1 and previous['stamp_ns']==raw_stamp and
+                        previous['layout']==incoming['layout'] and
+                        publisher_key(previous['publisher'])==publisher_key(publisher))
+                    if same:
+                        if exact_duplicate(previous,incoming):self.duplicate_messages[key]+=1
+                        else:
+                            self.rerender_messages[key]+=1
+                            token=key+':'+str(raw_stamp)
+                            event=self.rerender_log.setdefault(token,dict(stream=key,stamp_ns=raw_stamp,epoch=previous['receipt_epoch'],
+                                publisher=previous['publisher'],selected_content_sha256=previous['content_sha256'],count=0))
+                            event.update(count=event['count']+1,last_content_sha256=incoming['content_sha256'],
+                                last_publication_sequence_number=publisher.get('publication_sequence_number'))
+                        return  # Never replace the first pending OR consumed image.
+                    self.failure=SensorAmbiguity(dict(stream=key,reason='distinct same-camera tick/layout candidates',
                         candidates=[*candidates,incoming],owner_epoch=self.generation.epoch))
                     self.condition.notify_all();raise self.failure
                 seen[bucket]=incoming
@@ -184,7 +227,7 @@ class Sensors:
                 if all(matches(raw_stamp,stamp,'stamp_ns') for stamp in stamps):candidates.append(anchor)
             if len(candidates)>1:
                 self.failure=SensorAmbiguity(dict(stream=key,reason='multiple compatible groups',
-                    candidates=[frame_identity(name,value[0],value[0]['sim_ns'] if name=='tick' else ns(value[0].header.stamp))
+                    candidates=[(value[2] if name in ('wrist','top') else frame_identity(name,value[0],value[0]['sim_ns'] if name=='tick' else ns(value[0].header.stamp)))
                                 for anchor in candidates for name,value in self.pending[anchor].items()]+[incoming],
                     owner_epoch=self.generation.epoch))
                 self.condition.notify_all();raise self.failure
@@ -198,7 +241,7 @@ class Sensors:
                 self.failure=SensorAmbiguity(dict(stream=key,reason='distinct candidates for one pending tick',
                     candidates=[previous,incoming],owner_epoch=self.generation.epoch))
                 self.condition.notify_all();raise self.failure
-            entry[key]=(msg,receive_ns)
+            entry[key]=(msg,receive_ns,incoming) if key in ('wrist','top') else (msg,receive_ns)
             while len(self.pending)>240:self.pending.popitem(last=False)
             self.condition.notify_all()
 
@@ -215,7 +258,7 @@ class Sensors:
                     stamp = ready[0]
                     entry = self.pending.pop(stamp)
                     self.last = ns(entry['wrist'][0].header.stamp)
-                    self.consumed[self.last]={key:frame_identity(key,value[0],value[0]['sim_ns'] if key=='tick' else ns(value[0].header.stamp)) for key,value in entry.items()}
+                    self.consumed[self.last]={key:(value[2] if key in ('wrist','top') else frame_identity(key,value[0],value[0]['sim_ns'] if key=='tick' else ns(value[0].header.stamp))) for key,value in entry.items()}
                     while len(self.consumed)>240:self.consumed.popitem(last=False)
                     for old in list(self.pending):
                         if old <= self.last+1000:
@@ -532,7 +575,7 @@ class Collector:
         self.command_pub = self.node.create_publisher(String, '/collection_command', 64)
         self.node._trajectory_executor = self.servo.execute
         self.node._gripper_executor = self.servo.gripper
-        self.executor = MultiThreadedExecutor(num_threads=4)
+        self.executor = publisher_executor_type()(num_threads=4)
         self.executor.add_node(self.node)
         self.ros_thread = threading.Thread(target=self.executor.spin, daemon=True)
         self.writer = None
@@ -844,7 +887,7 @@ class Collector:
                         physics_drive_targets=snapshot['drive_targets'],pose_stamp_ns=snapshot['sim_ns'],
                         physics_time_s=snapshot['physics_time_s'],physical_bodies=copy.deepcopy(snapshot['bodies']),
                         episode_id=getattr(self,'current_episode_id',None),
-                        camera_identity={key:frame_identity(key,entry[key][0],ns(entry[key][0].header.stamp)) for key in ('wrist','top')},
+                        camera_identity={key:copy.deepcopy(entry[key][2]) for key in ('wrist','top')},
                         camera_layout={k:dict(encoding=entry[k][0].encoding,width=entry[k][0].width,height=entry[k][0].height,step=entry[k][0].step,bytes=len(entry[k][0].data)) for k in ('wrist','top')})
                     if not hasattr(self,'tick_audit'):self.tick_audit=TickContract()
                     contract_start=time.monotonic_ns()
@@ -1152,6 +1195,18 @@ class Collector:
                                 settled_sim_seconds=(len(checks)+5)/30,snapshots=samples)
         self.reject_quality('home_unstable',dict(label=label,target=target,checks=checks),samples)
 
+    def camera_graph(self):
+        result={}
+        for key,topic in (('wrist','/wrist_camera_rgb_sim'),('top','/workspace_camera_sim')):
+            endpoints=self.node.get_publishers_info_by_topic(topic)
+            if len(endpoints)!=1:raise RuntimeError('Camera topic requires exactly one publisher: '+topic+' count='+str(len(endpoints)))
+            endpoint=endpoints[0];gid=bytes(endpoint.endpoint_gid)
+            if len(gid)!=24 or not any(gid):raise RuntimeError('Camera graph identity is unverified: '+topic)
+            result[key]=dict(topic=topic,endpoint_gid=gid.hex(),node_name=endpoint.node_name,
+                node_namespace=endpoint.node_namespace,topic_type=endpoint.topic_type,
+                qos=dict(depth=endpoint.qos_profile.depth,reliability=int(endpoint.qos_profile.reliability),durability=int(endpoint.qos_profile.durability)))
+        return dict(passed=True,endpoints=result,scope='graph endpoint GUIDs; separate namespace from packet RMW IDs')
+
     def wait_ready(self):
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
@@ -1161,6 +1216,7 @@ class Collector:
                 for client in (self.node.plan_client, self.node.validity_client, self.node._apply_scene_client):
                     if not client.wait_for_service(timeout_sec=5):
                         raise RuntimeError('MoveIt service unavailable')
+                self.camera_graph()
                 return
             self.stop.wait(.1)
         raise TimeoutError('Collection ROS graph did not become ready')
@@ -1349,7 +1405,7 @@ class Collector:
                     raise ValueError(f'Missing dimensions for baseline object {name}')
                 position[2] = self.node._ground_z_var.get() + float(bbox['sz']) / 2
             self.baseline_cup_layout = initial['cup_layout']
-        tracked_sources = ['isaac/exts/soarm101-dt/so_arm101_dt/extension.py','isaac/exts/soarm101-dt/so_arm101_dt/primitive_colliders.py','linux-env/scripts/collect/cup_geometry.py','linux-env/scripts/collect/pose_math.py','linux-env/scripts/collect/collection_status.py','linux-env/scripts/collect/nvml_processes.py','linux-env/scripts/collect/renderer_device.py','linux-env/scripts/collect/wall_profile.py','linux-env/scripts/collect/gpu_device.py','linux-env/scripts/collect/safe_home.py','linux-env/scripts/collect/frame_join.py','linux-env/scripts/collect/comparisons.py','linux-env/scripts/collect/collect.py', 'linux-env/scripts/collect/contract.py',
+        tracked_sources = ['linux-env/scripts/collect/image_take.c','linux-env/scripts/collect/image_transport.py','isaac/exts/soarm101-dt/so_arm101_dt/extension.py','isaac/exts/soarm101-dt/so_arm101_dt/primitive_colliders.py','linux-env/scripts/collect/cup_geometry.py','linux-env/scripts/collect/pose_math.py','linux-env/scripts/collect/collection_status.py','linux-env/scripts/collect/nvml_processes.py','linux-env/scripts/collect/renderer_device.py','linux-env/scripts/collect/wall_profile.py','linux-env/scripts/collect/gpu_device.py','linux-env/scripts/collect/safe_home.py','linux-env/scripts/collect/frame_join.py','linux-env/scripts/collect/comparisons.py','linux-env/scripts/collect/collect.py', 'linux-env/scripts/collect/contract.py',
                            'linux-env/scripts/collect/checkpoint.py',
                            'linux-env/scripts/collect/episode_policy.py',
                            'linux-env/scripts/collect/dart.py',
@@ -1378,6 +1434,10 @@ class Collector:
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/workspace_bounds.yaml']
         tracked_sources.append(PROFILE['source'])
         source_hashes = {name: hashlib.sha256((REPO / name).read_bytes()).hexdigest() for name in tracked_sources}
+        image_source=self.executor.image_take.metadata
+        if (image_source['source_sha256']!=source_hashes['linux-env/scripts/collect/image_take.c'] or
+                image_source['python_source_sha256']!=source_hashes['linux-env/scripts/collect/image_transport.py']):
+            raise RuntimeError('Loaded image adapter differs from the recording provenance')
         if source_hashes[PROFILE['source']] != PROFILE['source_sha256']:
             raise RuntimeError('Primitive cup asset differs from the loaded geometry contract')
         if transport_config['loaded_sha256'] != source_hashes['linux-env/scripts/collect/collection_runtime.py']:
@@ -1404,7 +1464,7 @@ class Collector:
             atomic_json(root / 'run.json',previous)
         else:
             atomic_json(root / 'run.json',dict(instance=args.instance, host=socket.gethostname(), gpu_index=int(os.getenv('ISAACSIM_GPU', '0')),
-            wall_profile_policy=PROFILE_POLICY,recording_version=4, gpu_isolation_initial=initial_gpu_footprint,transport_config=transport_config, observation_state_topic='/joint_states_measured',
+            wall_profile_policy=PROFILE_POLICY,recording_version=5,camera_selection_policy=CAMERA_SELECTION_POLICY,image_transport=self.executor.image_take.metadata, gpu_isolation_initial=initial_gpu_footprint,transport_config=transport_config, observation_state_topic='/joint_states_measured',
             diagnostic=args.diagnostic, success_profile=PROFILE,
             motion_wait_policy=wait_policy, tick_clock_policy=CLOCK_POLICY,geometry_query_policy=QUERY_POLICY,quality_policy=POLICY,regrasp_policy=REGRASP_POLICY,regrasp_only=args.regrasp_only,
             application_contract='Held at observation tick; read-back verified PhysX targets before one-frame advance; maximum one sim tick latency',
@@ -1432,6 +1492,8 @@ class Collector:
             cycle_result = {}
             motion_epochs = set()
             duplicate_start = dict(self.sensors.duplicate_messages)
+            rerender_start=dict(self.sensors.rerender_messages)
+            stale_camera_start=dict(self.sensors.stale_camera_messages)
             writer = None
             receipt_cycle = None
             try:
@@ -1445,6 +1507,7 @@ class Collector:
                     receipt['failed_episode_home_reset']=self.restore_failed_episode_home()
                     self.needs_home_restore=False
                 receipt['gpu_isolation_before']=self.gpu_footprint()
+                receipt['camera_graph']=self.camera_graph()
                 self.motion_call(self.reset_release,params['object'])
                 # Home with the same shared primitive used by Quickstart, with sim ticks active.
                 home = self.motion_call(self.request_home)
@@ -1611,6 +1674,10 @@ class Collector:
                 if cycle_result.get('worker_error'):
                     receipt['cycle_worker_error'] = cycle_result['worker_error']
                 receipt['camera_duplicate_messages'] = {key: value - duplicate_start.get(key, 0) for key, value in self.sensors.duplicate_messages.items()}
+                receipt['camera_publishers']=dict(self.sensors.camera_publishers)
+                receipt['camera_rerenders']={key:value-rerender_start.get(key,0) for key,value in self.sensors.rerender_messages.items()}
+                receipt['camera_stale_boundary_frames']={key:value-stale_camera_start.get(key,0) for key,value in self.sensors.stale_camera_messages.items()}
+                receipt['camera_rerender_log']=[dict(value) for value in self.sensors.rerender_log.values() if value['epoch'] in motion_epochs]
                 receipt['root_file_growth'] = root_growth.finish()
                 profiles=getattr(self,'wall_profiles',[])[wall_profile_start:]
                 writes=writer.write_profiles if writer else []

@@ -427,12 +427,39 @@ ticks, and rebuilds the synchronized scene before planning. A failed restore is 
 plans a home trajectory out of the previous failed contact pose. The baseline's
 calibration, samples and snapshot hash are retained in `run.json`.
 
-The sensor join retains the raw stamp, image-layout fields and SHA-256 of each
-camera buffer. Only an exact stamp/content repeat counts as a duplicate. Any
-distinct same-camera candidate within the 1 us joining window, including a late
-alternative to a consumed frame, stops collection with both identities in the
-failure proof. Pending joint samples cannot overwrite a different same-tick state.
-Per-camera duplicate counts remain diagnostic receipt fields.
+The sensor join retains raw stamps, layout/content hashes and each packet's RMW
+publisher identity. For an exact stamp from the same publisher and unchanged
+layout, it deterministically keeps the **first taken image**, including after
+consumption. Later identical packets count as duplicates; changed pixels count
+as held re-renders and retain selected/last hashes and counts. A different
+publisher (even identical pixels), changed layout, missing identity or distinct
+nearby stamp is terminal. Pending joint states cannot overwrite a different
+same-tick state. Camera packets at/below the cancellation floor plus the 1 us
+producer allowance, and pre-epoch bootstrap packets, are discarded before source
+binding/ambiguity checks.
+
+Kit can re-render while physics is held, so RGB variation alone does not imply a
+second publisher. Startup and each episode boundary require one graph endpoint
+per camera and retain its GUID and QoS; every image also carries packet identity.
+One-second graph checks alone are insufficient: the checked-in real
+ROS counterexample delivered a first same-format frame from a transient second
+publisher inside 0.201 s while startup/1 s/2 s checks all saw one source. Humble's
+Python API omits packet GID; the collector uses an isolated project-local native
+serialized take on the existing borrowed subscription handle, then normal Python
+ROS image deserialization. No system ROS or publisher proxy is installed. A C
+compiler and Humble development headers/libraries are required; the helper builds
+once per source/header fingerprint under the instance runtime. Source/library
+hashes and warm decode costs are recorded. Its executor adapter handles only the
+two marked image subscriptions; other callbacks retain Humble behavior. Existing
+callback containment turns transport errors into terminal run evidence.
+
+CycloneDDS's received-message GID is a subscription/context-local publication
+handle, not its graph endpoint GUID. Metadata records that scope; IDs from the
+two namespaces are not falsely compared. This identifies packets in this
+receiving subscription and context. See the
+[transport contract and real ROS proofs](docs/notes/collection-image-identity.md).
+Render-product pausing is a separate performance experiment, not required for
+correct first-frame selection.
 
 A typed physical convergence deadline can reject one episode after native pause,
 worker retirement and contract auditing. Stationary/short data, calibrated-home

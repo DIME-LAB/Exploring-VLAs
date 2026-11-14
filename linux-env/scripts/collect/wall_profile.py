@@ -25,6 +25,8 @@ def profile_tick(snapshot,entry,read_start,read_end):
         native_step_start_ns=step_start,validity_queries=0,validity_query_ms=0.,
         expert_dart_compute_ms=0.,command_publish_ack_ms=0.,contract_validation_ms=0.,
         image_decode_ms=0.,row_queue_ms=None,row_video_write_ms=None,capture_preparation_ms=0.,recorded=False)
+    decode=[entry[key][2].get('publisher',{}).get('transport_take_decode_ms') if len(entry[key])>2 else None for key in ('wrist','top')]
+    result['native_image_take_decode_ms']=sum(decode) if all(isinstance(v,(int,float)) for v in decode) else None
     return result
 
 

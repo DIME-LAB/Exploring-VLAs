@@ -32,7 +32,8 @@ def configure(fps, preset="collect", rate_cap=0):
     for graph in ('ActionGraph_WristCamera', 'ActionGraph_WorkspaceCamera'):
         rp = og.Controller.attribute('/Graph/' + graph + '/RGBPublish.inputs:renderProductPath').get()
         # This 6.1 viewport-backed path ticks the writer every app frame even when the
-        # sensor renders at 30 Hz. Gate the native writer too: exactly one publish per tick.
+        # sensor is set to 30 Hz. This app-frame gate does not suppress paused re-renders;
+        # the collector selects one packet per publisher/sim stamp using RMW identity.
         omni.syntheticdata.SyntheticData.Get().set_node_attributes(
             'LdrColorSDIsaacSimulationGate', {'inputs:step': 30 // fps}, rp)
         camera_gates.append(str(rp))

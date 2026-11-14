@@ -70,9 +70,12 @@ class CaptureContractTests(unittest.TestCase):
         previous=checked_window([dict(sim_ns=stamp-STEP_NS,state=[.1]*5+[0.])])[0]['tick_contract']['row']
         previous.update(wall_ns=100,joint_receive_ns=100,wrist_receive_ns=100,top_receive_ns=100)
         c.tick_audit=TickContract();c.tick_audit.previous=previous
-        for key,(msg,_) in list(entry.items()):
+        for key,value in list(entry.items()):
+            msg=value[0]
             if key!='tick':msg.header.stamp.sec,msg.header.stamp.nanosec=divmod(stamp,10**9)
-            entry[key]=(msg,200)
+            if key in ('wrist','top'):
+                meta=dict(value[2]);meta['stamp_ns']=stamp;entry[key]=(msg,200,meta)
+            else:entry[key]=(msg,200)
         snapshot=entry['tick'][0];snapshot.update(sim_ns=stamp,physics_time_s=stamp/1e9,state=[.09]*5+[0.],drive_targets=[.1]*5+[0.])
         entry['joint'][0].position=list(snapshot['state'])
         c.servo.plan=dict(epoch=1,start=10**9,done=threading.Event(),trajectory=NS(joint_names=probes.JOINTS[:5],points=[NS(positions=[.1]*5,time_from_start=NS(sec=2,nanosec=0))]))
@@ -182,6 +185,7 @@ class EpisodeIdentityTests(unittest.TestCase):
         observed=[];generation=StepGeneration();generation.install(dict(epoch=7,invalid_through_ns=0))
         c=NS(needs_home_restore=False,current_episode_id='previous episode',generation=generation,node=NS(_qs_abort_evt=threading.Event()))
         c.gpu_footprint=lambda:dict(passed=True)
+        c.camera_graph=lambda:dict(passed=True)
         c.reset_release=lambda name:observed.append(c.current_episode_id)
         c.motion_call=lambda fn,*a:fn(*a)
         scope=dict(transport_config=dict(physics_config=dict(dynamics='cpu')),self=c,params=dict(object='red',seed=123),root=Path('/a/run'),trial=9,hashlib=hashlib,motion_epochs=set())

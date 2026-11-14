@@ -6,7 +6,7 @@ from unittest.mock import Mock,patch
 import collection_status,storage,run_smoke
 import test_review_regressions as probes
 from test_frame_join import image
-from test_sensor_join import sensors,feed
+from test_sensor_join import sensors,feed,publisher_info
 from frame_join import SensorAmbiguity
 
 
@@ -21,7 +21,7 @@ class TerminalFinalizationTests(unittest.TestCase):
             c.current_attempt_path=attempt;c.finalization_certificate=certificate;c.capture_failures=[]
             c.persist_terminal_fault=MethodType(type(c).persist_terminal_fault,c)
             s=sensors();s.generation=c.generation;feed(s,10**9,0);s.read(timeout=0)
-            with self.assertRaises(SensorAmbiguity):s.put('wrist',image(10**9+500,2))
+            with self.assertRaises(SensorAmbiguity):s.put('wrist',image(10**9+500,2),publisher_info(3))
             c.sensors=s;c.callback_failure('wrist',s.failure)
             first=json.loads((run/'terminal-fault.json').read_text())['events'][0]
             self.assertEqual(len(first['sensor_evidence']['candidates']),2)

@@ -3,7 +3,7 @@ from cup_geometry import primitive_world_poses
 import collection_status
 from wall_profile import profile_tick,summary as wall_profile_summary,milliseconds,PROFILE_POLICY,joined_profiles
 from safe_home import make_baseline,validate_baseline
-from frame_join import SensorAmbiguity,identity as frame_identity,exact_duplicate
+from frame_join import SensorAmbiguity,identity as frame_identity,exact_duplicate,publisher_identity,publisher_key,CAMERA_SELECTION_POLICY
 from comparisons import comparison,matches,interval,native_frame
 from tick_contract import world_step_errors
 """CPU fault/interleaving probes at the actual collector/runtime boundaries."""
@@ -42,7 +42,7 @@ def load_class(filename, name):
     path = HERE/filename
     tree = ast.parse(path.read_text())
     cls = next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name==name)
-    scope = dict(Path=Path,atomic_json=atomic_json,primitive_world_poses=primitive_world_poses,collection_status=collection_status,joined_profiles=joined_profiles,profile_tick=profile_tick,wall_profile_summary=wall_profile_summary,milliseconds=milliseconds,PROFILE_POLICY=PROFILE_POLICY,make_baseline=make_baseline,validate_baseline=validate_baseline,SensorAmbiguity=SensorAmbiguity,frame_identity=frame_identity,exact_duplicate=exact_duplicate,math=math,comparison=comparison,matches=matches,interval=interval,native_frame=native_frame,world_step_errors=world_step_errors,frame_capacity_seconds=frame_capacity_seconds,QUERY_POLICY=QUERY_POLICY,CLOCK_POLICY=CLOCK_POLICY,random=random,replace=replace,copy=copy,PlannerSchedule=PlannerSchedule,TargetCandidate=TargetCandidate,choose_noise_scale=choose_noise_scale,final_command=final_command,TickContract=TickContract,TickContractError=TickContractError,require_snapshots=require_snapshots,digest=digest,verify_proof=verify_proof, DEFAULT_NOISE=DEFAULT_NOISE, SmoothDart=SmoothDart, initial_arm=initial_arm, ConvergenceFailure=ConvergenceFailure, QualityReject=QualityReject, POLICY=POLICY, WorkerRegistry=WorkerRegistry, FailureStreak=FailureStreak, disposition=disposition, MotionWaitTimeout=MotionWaitTimeout, contextmanager=contextmanager, OwnershipStalled=OwnershipStalled, threading=threading,time=time,np=np,json=json,JOINTS=JOINTS,
+    scope = dict(publisher_identity=publisher_identity,publisher_key=publisher_key,CAMERA_SELECTION_POLICY=CAMERA_SELECTION_POLICY,Path=Path,atomic_json=atomic_json,primitive_world_poses=primitive_world_poses,collection_status=collection_status,joined_profiles=joined_profiles,profile_tick=profile_tick,wall_profile_summary=wall_profile_summary,milliseconds=milliseconds,PROFILE_POLICY=PROFILE_POLICY,make_baseline=make_baseline,validate_baseline=validate_baseline,SensorAmbiguity=SensorAmbiguity,frame_identity=frame_identity,exact_duplicate=exact_duplicate,math=math,comparison=comparison,matches=matches,interval=interval,native_frame=native_frame,world_step_errors=world_step_errors,frame_capacity_seconds=frame_capacity_seconds,QUERY_POLICY=QUERY_POLICY,CLOCK_POLICY=CLOCK_POLICY,random=random,replace=replace,copy=copy,PlannerSchedule=PlannerSchedule,TargetCandidate=TargetCandidate,choose_noise_scale=choose_noise_scale,final_command=final_command,TickContract=TickContract,TickContractError=TickContractError,require_snapshots=require_snapshots,digest=digest,verify_proof=verify_proof, DEFAULT_NOISE=DEFAULT_NOISE, SmoothDart=SmoothDart, initial_arm=initial_arm, ConvergenceFailure=ConvergenceFailure, QualityReject=QualityReject, POLICY=POLICY, WorkerRegistry=WorkerRegistry, FailureStreak=FailureStreak, disposition=disposition, MotionWaitTimeout=MotionWaitTimeout, contextmanager=contextmanager, OwnershipStalled=OwnershipStalled, threading=threading,time=time,np=np,json=json,JOINTS=JOINTS,
                  String=lambda data:NS(data=data),StepGeneration=StepGeneration,
                  CancelledGeneration=CancelledGeneration,CommandLedger=CommandLedger,
                  corrective_action=corrective_action,JOINT_LIMITS={k:(-3,3) for k in JOINTS},
@@ -57,7 +57,12 @@ def frame(epoch=1):
     snapshot=dict(epoch=epoch,sim_ns=10**9,physics_time_s=1.,state=[0.]*6,velocity=[0.]*6,
                   drive_targets=[0.]*6,bodies={},state_source='isaac_articulation')
     def camera():return NS(header=NS(stamp=NS(sec=1,nanosec=0)),encoding='rgb8',width=640,height=480,step=1920,data=bytes(921600))
-    return {k:(v,1) for k,v in dict(joint=joint,tick=snapshot,wrist=camera(),top=camera()).items()}
+    result={k:(v,1) for k,v in dict(joint=joint,tick=snapshot,wrist=camera(),top=camera()).items()}
+    for key,number in (('wrist',1),('top',2)):
+        value=result[key][0];meta=frame_identity(key,value,10**9)
+        meta.update(receipt_epoch=epoch,publisher=publisher_identity(dict(publisher_gid=[number]+[0]*23,implementation_identifier='rmw_cyclonedds_cpp')))
+        result[key]=(value,1,meta)
+    return result
 
 
 class ReviewRegressions(unittest.TestCase):

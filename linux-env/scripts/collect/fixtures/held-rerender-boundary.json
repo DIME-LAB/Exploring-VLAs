@@ -1,0 +1,19 @@
+{
+  "source": "w_scene F-actual-held-transport-error.json",
+  "camera": "wrist",
+  "stamp_ns": 178316666666,
+  "invalid_through_ns": 178316666667,
+  "candidate_sha256": [
+    "3398405e34a4bf4aa34a2c5fa8baa4e046e6ff384de0771ebbc987d5dfb35382",
+    "c0d5d35f242a8c6e78ae66f1630c5795a9a20a1135afdc502168aaae6893d843"
+  ],
+  "rgb_layout": {
+    "encoding": "rgb8",
+    "width": 640,
+    "height": 480,
+    "step": 1920,
+    "frame_id": "camera_link"
+  },
+  "payload_bytes_available": false,
+  "note": "Retained scalar/hash evidence; tests reconstruct distinct payloads, not original RGB bytes"
+}

@@ -9,6 +9,7 @@ from contract import JOINTS
 from tick_contract import TickContract,TickContractError,require_snapshots,observation_errors,FLOAT32_DT,STEP_NS,world_step_errors
 from test_tick_contract import checked_window
 import test_review_regressions as probes
+from frame_join import identity as frame_identity
 
 FIXTURE=json.loads(Path(__file__).with_name('fixtures').joinpath('retained_clock_pairs.json').read_text())
 
@@ -17,7 +18,11 @@ def capture_snapshot(c,r,entry,snapshot,camera_offset_ns=0):
     stamp=snapshot['sim_ns'];entry['tick']=(copy.deepcopy(snapshot),time.monotonic_ns())
     for key in ('joint','wrist','top'):
         msg=entry[key][0];msg.header.stamp.sec,msg.header.stamp.nanosec=divmod(stamp+(camera_offset_ns if key in ('wrist','top') else 0),10**9)
-        entry[key]=(msg,time.monotonic_ns())
+        if key in ('wrist','top'):
+            meta=frame_identity(key,msg,stamp+camera_offset_ns)
+            meta.update(publisher=entry[key][2]['publisher'],receipt_epoch=snapshot['epoch'])
+            entry[key]=(msg,time.monotonic_ns(),meta)
+        else:entry[key]=(msg,time.monotonic_ns())
     entry['joint'][0].position=list(snapshot['state']);entry['joint'][0].velocity=list(snapshot['velocity'])
     r.world.current_time=snapshot['physics_time_s'];r.stamp=lambda:stamp
     c.node.get_clock=lambda:NS(now=lambda:NS(nanoseconds=stamp))

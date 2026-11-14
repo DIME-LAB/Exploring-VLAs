@@ -1,0 +1,58 @@
+{
+  "conclusive": true,
+  "interval_s": 1.0,
+  "no_isaac": true,
+  "transient_window_s": 0.2007303149875952,
+  "baseline_gids": [
+    "0110560152b9ff17485316b1000030030000000000000000"
+  ],
+  "during_gids": [
+    "0110560152b9ff17485316b1000030030000000000000000",
+    "0110560152b9ff17485316b1000032030000000000000000"
+  ],
+  "periodic_checks": [
+    {
+      "wall_s": 0.0,
+      "gids": [
+        "0110560152b9ff17485316b1000030030000000000000000"
+      ]
+    },
+    {
+      "wall_s": 1.0002749069972197,
+      "gids": [
+        "0110560152b9ff17485316b1000030030000000000000000"
+      ]
+    },
+    {
+      "wall_s": 2.0008759810007177,
+      "gids": [
+        "0110560152b9ff17485316b1000030030000000000000000"
+      ]
+    }
+  ],
+  "messages": [
+    {
+      "value": 222,
+      "stamp_ns": 2000000000,
+      "encoding": "rgb8",
+      "shape": [
+        640,
+        480
+      ],
+      "wall_s": 0.10120950298733078
+    },
+    {
+      "value": 11,
+      "stamp_ns": 2000000000,
+      "encoding": "rgb8",
+      "shape": [
+        640,
+        480
+      ],
+      "wall_s": 0.20057610599906184
+    }
+  ],
+  "first_frame_value": 222,
+  "first_frame_actual_publisher": "transient B",
+  "explanation": "Second rgb8 publisher sent the first image at the identical sim stamp and vanished between all 1 s graph checks"
+}
