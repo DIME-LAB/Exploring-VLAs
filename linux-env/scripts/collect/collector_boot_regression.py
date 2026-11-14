@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Construct the actual collector and reach a contract-valid held tick without Isaac."""
-import argparse,json,os,sys,threading,time,uuid
+import argparse,hashlib,json,os,sys,threading,time,uuid
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
@@ -71,7 +71,10 @@ def main():
             offsets={name:{key+'_m':[PROFILE['expected_offsets_m']['cup_'+key]]*len(PROFILE['primitives']) for key in ('contact','rest')}
                      for name in ('cup_red','cup_green','cup_blue')}
             return dict(epoch=1,invalid_through_ns=1000000000,local_corners={},effective_shape_offsets=offsets,
-                        articulation_audit=dict(fixed_base=True,root_dof_count=0,joint_dof_count=6,link_count=11))
+                        articulation_audit=dict(fixed_base=True,root_dof_count=0,joint_dof_count=6,link_count=11),
+                        loaded_sha256=hashlib.sha256((implementation.REPO/'linux-env/scripts/collect/collection_runtime.py').read_bytes()).hexdigest(),
+                        loaded_dependencies={name:hashlib.sha256((implementation.REPO/'linux-env/scripts/collect'/name).read_bytes()).hexdigest()
+                            for name in ('contract.py','protocol.py','comparisons.py','tick_contract.py','finger_geometry.py','miss_clearance.py','source_provenance.py')})
         if 'count_subscribers' in code:return [2,1,1]
         if 'rateLimitFrequency' in code:return True
         raise AssertionError('Unexpected fake Kit request: '+code)
@@ -101,7 +104,9 @@ def main():
         try:
             with self.motion_effect(None):raise AssertionError('Unowned effect accepted after bootstrap')
         except CancelledGeneration:pass
-        result.update(passed=True,first_tick=self.last_snapshot,commands=commands,validity_queries=len(queries),
+        for name in ('finger_geometry.py','miss_clearance.py','source_provenance.py'):
+            assert self.source_manifest['linux-env/scripts/collect/'+name]==hashlib.sha256((implementation.REPO/'linux-env/scripts/collect'/name).read_bytes()).hexdigest()
+        result.update(provenance_stage_passed=True,source_manifest=self.source_manifest,passed=True,first_tick=self.last_snapshot,commands=commands,validity_queries=len(queries),
                       bootstrap_revoked=True,camera_native_skew_ns=167,wall_watchdog_margin_s=self.node._motion_waiter.wall_margin,executor_alive=self.ros_thread.is_alive(),capture_alive=self.capture_thread.is_alive())
         raise HeldTickReached()
     try:

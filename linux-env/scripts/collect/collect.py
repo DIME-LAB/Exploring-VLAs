@@ -20,6 +20,7 @@ import threading
 import time
 import uuid
 import collection_status
+from source_provenance import loaded_sources,recording_manifest
 from ros_lifecycle import retire_executor,shutdown_context
 from wall_profile import profile_tick,summary as wall_profile_summary,milliseconds,PROFILE_POLICY,joined_profiles
 sys.dont_write_bytecode = True
@@ -65,6 +66,8 @@ from base_drift import summary as base_drift_summary
 from tick_contract import TickContract, TickContractError, require_snapshots, digest, verify_proof, CLOCK_POLICY, STEP_NS
 from episode_policy import (POLICY, QualityReject, ConvergenceFailure, WorkerRegistry,
                             PLANNER_REJECTIONS, FailureStreak, disposition)
+
+_COLLECT_LOADED_SOURCES = loaded_sources(Path(__file__).resolve().parent)
 
 def ns(stamp):
     return stamp.sec * 1000000000 + stamp.nanosec
@@ -969,6 +972,41 @@ class Collector:
             if time.monotonic()>=deadline:raise TickContractError(['ROS clock did not join the held physical tick'])
             if self.stop.wait(.002):raise CancelledGeneration('Collector stopped during clock join')
 
+    def recording_sources(self,transport_config):
+        # Imported local Python sources come from the loaded-module inventory.
+        # These inputs also include native entrypoints executed over the bridge.
+        tracked_sources = [
+            'linux-env/scripts/collect/image_transport_abi.json',
+            'linux-env/scripts/collect/image_take.c',
+            'isaac/exts/soarm101-dt/so_arm101_dt/extension.py',
+            'isaac/exts/soarm101-dt/so_arm101_dt/primitive_colliders.py',
+            'vla_SO-ARM101/src/so_arm101_moveit_config/config/joint_limits.yaml',
+            'linux-env/scripts/collect/collection_runtime.py',
+            'linux-env/scripts/collect/configure_clock.py',
+            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/pick_place.py',
+            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/grasp_geometry.py',
+            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/motion_operation.py',
+            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/motion_wait.py',
+            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/scene_transactions.py',
+            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/ros_callbacks.py',
+            'vla_SO-ARM101/src/so_arm101_moveit_config/config/so_arm101.srdf',
+            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/compute_workspace.py',
+            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/ik_calibration.yaml',
+            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/workspace_bounds.yaml',
+        ]
+        tracked_sources.append(PROFILE['source'])
+        source_hashes = recording_manifest(REPO,tracked_sources,transport_config['loaded_dependencies'],
+            collector_loaded=_COLLECT_LOADED_SOURCES)
+        image_source=self.executor.image_take.metadata
+        if (image_source['source_sha256']!=source_hashes['linux-env/scripts/collect/image_take.c'] or
+                image_source['python_source_sha256']!=source_hashes['linux-env/scripts/collect/image_transport.py']):
+            raise RuntimeError('Loaded image adapter differs from the recording provenance')
+        if source_hashes[PROFILE['source']] != PROFILE['source_sha256']:
+            raise RuntimeError('Primitive cup asset differs from the loaded geometry contract')
+        if transport_config['loaded_sha256'] != source_hashes['linux-env/scripts/collect/collection_runtime.py']:
+            raise RuntimeError('Kit loaded a different collection runtime')
+        return source_hashes
+
     def validate_command(self,candidate,state,previous,snapshot=None):
         timing=dict(validity_queries=0,validity_query_ms=0.,miss_clearance_ms=0.)
         def check(q):
@@ -1594,6 +1632,8 @@ class Collector:
         disk_wait = old_summary.get('disk_wait_seconds', 0.)
         clock_config = self.mutate_kit('run_python', {'code': (REPO / 'linux-env/scripts/collect/configure_clock.py').read_text() + '\nresult=configure(30)'})
         transport_config = self.mutate_kit('run_python', {'code': 'import sys\nsys.path.insert(0,' + repr(str(REPO / 'linux-env/scripts/collect')) + ')\nimport collection_runtime as c\nresult=c.install()'})
+        source_hashes=self.recording_sources(transport_config)
+        self.source_manifest=dict(source_hashes)
         self.generation.install(transport_config)
         if transport_config.get('articulation_audit',{}).get('fixed_base') is not True:
             raise RuntimeError('Unverified/floating articulation; fresh fixed-base scene is required')
@@ -1648,46 +1688,6 @@ class Collector:
                     raise ValueError(f'Missing dimensions for baseline object {name}')
                 position[2] = self.node._ground_z_var.get() + float(bbox['sz']) / 2
             self.baseline_cup_layout = initial['cup_layout']
-        tracked_sources = ['linux-env/scripts/collect/image_abi.py','linux-env/scripts/collect/image_transport_abi.json','linux-env/scripts/collect/ros_lifecycle.py','linux-env/scripts/collect/protocol.py','linux-env/scripts/collect/wall_profile.py','linux-env/scripts/collect/image_take.c','linux-env/scripts/collect/image_transport.py','isaac/exts/soarm101-dt/so_arm101_dt/extension.py','isaac/exts/soarm101-dt/so_arm101_dt/primitive_colliders.py','linux-env/scripts/collect/cup_geometry.py','linux-env/scripts/collect/pose_math.py','linux-env/scripts/collect/collection_status.py','linux-env/scripts/collect/nvml_processes.py','linux-env/scripts/collect/renderer_device.py','linux-env/scripts/collect/wall_profile.py','linux-env/scripts/collect/gpu_device.py','linux-env/scripts/collect/safe_home.py','linux-env/scripts/collect/frame_join.py','linux-env/scripts/collect/comparisons.py','linux-env/scripts/collect/collect.py', 'linux-env/scripts/collect/contract.py',
-                           'linux-env/scripts/collect/checkpoint.py',
-                           'linux-env/scripts/collect/episode_policy.py',
-                           'linux-env/scripts/collect/dart.py',
-                           'linux-env/scripts/collect/recovery.py',
-                           'linux-env/scripts/collect/query_service.py',
-                           'linux-env/scripts/collect/tick_contract.py',
-                           'linux-env/scripts/collect/command_geometry.py',
-                           'vla_SO-ARM101/src/so_arm101_moveit_config/config/joint_limits.yaml',
-                           'linux-env/scripts/collect/storage.py',
-                           'linux-env/scripts/collect/collection_runtime.py',
-                           'linux-env/scripts/collect/success.py',
-                           'linux-env/scripts/collect/diagnostics.py',
-                           'linux-env/scripts/collect/scene_sync.py',
-                           'linux-env/scripts/collect/scene_reconcile.py',
-                           'linux-env/scripts/collect/protocol.py',
-                           'linux-env/scripts/collect/configure_clock.py',
-                           'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/pick_place.py',
-                           'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/grasp_geometry.py',
-                           'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/motion_operation.py',
-                           'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/motion_wait.py',
-                           'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/scene_transactions.py',
-                           'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/ros_callbacks.py',
-                           'vla_SO-ARM101/src/so_arm101_moveit_config/config/so_arm101.srdf',
-                           'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/compute_workspace.py',
-                           'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/ik_calibration.yaml',
-                           'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/workspace_bounds.yaml']
-        tracked_sources.append(PROFILE['source'])
-        source_hashes = {name: hashlib.sha256((REPO / name).read_bytes()).hexdigest() for name in tracked_sources}
-        image_source=self.executor.image_take.metadata
-        if (image_source['source_sha256']!=source_hashes['linux-env/scripts/collect/image_take.c'] or
-                image_source['python_source_sha256']!=source_hashes['linux-env/scripts/collect/image_transport.py']):
-            raise RuntimeError('Loaded image adapter differs from the recording provenance')
-        if source_hashes[PROFILE['source']] != PROFILE['source_sha256']:
-            raise RuntimeError('Primitive cup asset differs from the loaded geometry contract')
-        if transport_config['loaded_sha256'] != source_hashes['linux-env/scripts/collect/collection_runtime.py']:
-            raise RuntimeError('Kit loaded a different collection runtime')
-        if any(source_hashes['linux-env/scripts/collect/'+name] != digest
-               for name,digest in transport_config['loaded_dependencies'].items()):
-            raise RuntimeError('Kit loaded different transport dependencies')
         if (transport_config['renderer_gpu']!=int(os.environ['SOARM_RENDERER_GPU_INDEX']) or
                 transport_config['renderer_multi_gpu'] is not False or transport_config['physics_gpu']!=0 or transport_config['cuda_device']!=0 or
                 transport_config['cuda_device_count']!=1 or transport_config['cuda_visible_devices']!=gpu_uuid(int(os.getenv('ISAACSIM_GPU','0')))):

@@ -865,13 +865,23 @@ requesting pidfd-only child cleanup. A legacy PID-only file grants no shutdown
 authority: a live foreign or reused PID is refused, never adopted. See
 [launcher-process-ownership.md](docs/notes/launcher-process-ownership.md).
 
+Recording provenance inventories the local Python sources loaded by the recorder
+and the native Kit runtime, including dependencies imported only by Kit. It
+retains initial fingerprints and refuses missing or changed files and local
+modules resolved from another checkout. Asset/config files, native entrypoints
+and image ABI inputs are included explicitly. The comparison runs before the
+first collection tick; the real-node CPU probe exercises it before reaching its
+held-tick checkpoint. No per-tick source scan is added.
+
 The integration checks below use fake Kit and MoveIt/ROS message sources and
 start no simulator. Run the real-node check on the isolated assigned domain with
 system Humble and the control workspace sourced:
 
 ```bash
-ROS_DOMAIN_ID=90 python3 -B linux-env/scripts/collect/collector_boot_regression.py \
-  --output /mnt/a4500-backup/exploring-vlas/runtime/instance-0/bootstrap-check
+ROS_DOMAIN_ID=99 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
+  CYCLONEDDS_URI="file://$PWD/linux-env/cyclonedds.xml" CUDA_VISIBLE_DEVICES='' \
+  python3 -B linux-env/scripts/collect/collector_boot_regression.py --instance 9 \
+  --output /mnt/a4500-backup/exploring-vlas/runtime/instance-9/bootstrap-check
 python3 -B linux-env/scripts/collect/process_ownership_regression.py \
   --output /mnt/a4500-backup/exploring-vlas/runtime/instance-0/process-ownership-check
 ```

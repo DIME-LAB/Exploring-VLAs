@@ -14,6 +14,7 @@ from pathlib import Path
 import time
 import uuid
 from storage import atomic_json,confined
+from source_provenance import loaded_sources,verify_sources
 import numpy as np
 import omni.graph.core as og
 import omni.kit.app
@@ -37,8 +38,7 @@ from miss_clearance import POLICY as MISS_POLICY,velocity_cap
 
 _RUNTIME = None
 _LOADED_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
-_LOADED_DEPENDENCIES = {name:hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-                        for name in ('contract.py', 'protocol.py','comparisons.py','tick_contract.py','finger_geometry.py','miss_clearance.py')}
+_LOADED_DEPENDENCIES = loaded_sources(Path(__file__).resolve().parent)
 
 
 class Runtime:
@@ -565,12 +565,10 @@ def physics_mode(stage):
 
 
 def install(mode='collect'):
-    global _RUNTIME
+    global _RUNTIME,_LOADED_DEPENDENCIES
     if hashlib.sha256(Path(__file__).read_bytes()).hexdigest() != _LOADED_SHA256:
         raise RuntimeError('Runtime source changed; relaunch this instance before collection')
-    if any(hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() != digest
-           for name,digest in _LOADED_DEPENDENCIES.items()):
-        raise RuntimeError('Runtime dependency changed; relaunch this instance before collection')
+    verify_sources(Path(__file__).resolve().parent,_LOADED_DEPENDENCIES)
     if _RUNTIME is None:
         _RUNTIME = Runtime()
     if _RUNTIME.failure:
@@ -586,8 +584,10 @@ def install(mode='collect'):
     articulation=audit_module.readback(_RUNTIME.stage,_RUNTIME.art)
     articulation['helper_sha256']=hashlib.sha256(helper.read_bytes()).hexdigest()
     if mode=='collect' and articulation['fixed_base'] is not True:raise RuntimeError('Collection requires verified fixed_base=true: '+repr(articulation))
+    finger_model=read_model(_RUNTIME.stage,effective_finger_offsets=_RUNTIME.effective_finger_offsets())
+    _LOADED_DEPENDENCIES=loaded_sources(Path(__file__).resolve().parent,previous=_LOADED_DEPENDENCIES)
     return dict(native_miss_fault_path=_RUNTIME.native_miss_fault_path,mode=mode, physics_config=physics,joint_names=_RUNTIME.art.dof_names,articulation_audit=articulation,
-                joint_index_mapping=dict(zip(JOINTS,_RUNTIME.indices)),finger_model=read_model(_RUNTIME.stage,effective_finger_offsets=_RUNTIME.effective_finger_offsets()),
+                joint_index_mapping=dict(zip(JOINTS,_RUNTIME.indices)),finger_model=finger_model,
                 epoch=_RUNTIME.epoch, invalid_through_ns=_RUNTIME.invalid_through_ns,
                 loaded_sha256=_LOADED_SHA256,
                 loaded_dependencies=_LOADED_DEPENDENCIES,
