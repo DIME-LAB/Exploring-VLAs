@@ -82,8 +82,19 @@ def receipt_error(receipt,rows=None):
         if not detection['confirmed'] or detection!=report['detection']:return 'whole-window miss evidence differs'
         stages=[s['stage'] for s in report['steps']]
         if stages!=['regrasp_miss_open','regrasp_miss_approach','regrasp_miss_descent','regrasp_miss_close','regrasp_miss_lift','regrasp_reopen']:return 'recovery sequence is incomplete'
-        for step in report['steps'][1:]:
+        for index,step in enumerate(report['steps']):
             end=step.get('end_sim_ns',step.get('sim_ns'))
+            completion=step.get('completion',{})
+            if completion.get('already_at_target'):
+                kickoff=next((k for k in report['kickoffs'] if k['proof']['velocity_cap']['phase']==step['stage']),None)
+                if kickoff is None:return 'no-op miss stage lacks its held kickoff'
+                state=kickoff['snapshot'];ack=kickoff['ack']
+                if (kickoff.get('advance') is not False or ack.get('held') is not True or ack.get('advance') is not None or
+                        completion.get('ack')!=ack or completion.get('epoch')!=state['epoch'] or completion.get('target_rad')!=step['target'] or
+                        not matches(end,state['sim_ns']) or not math.isfinite(step['target']) or abs(state['state'][5]-step['target'])>=.0005):
+                    return 'no-op miss stage did not prove its target while held'
+                continue
+            if index==0 and 'completion' not in step:continue
             if not any(matches(native_frame(r)['sim_ns'],end) and r['phase']==step['stage'] for r in rows):return 'recovery stage is not in recorded frames'
         distance=math.sqrt(sum(x*x for x in report['geometry']['offset_m']))
         if not .02-1e-12<=distance<=.04+1e-12:return 'recovery offset outside 2–4 cm'

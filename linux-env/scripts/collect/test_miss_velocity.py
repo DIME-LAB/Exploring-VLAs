@@ -15,7 +15,7 @@ class NativeMissVelocityTests(unittest.TestCase):
         scope['atomic_json']=lambda path,value:None
         r.native_miss_fault_path='/unit-test/native-motion-fault.json'
         r.epoch=1;r.stamp=lambda:10**9
-        r.busy=False;r.timeline=NS(is_playing=lambda:False,pause=lambda:None);r.failure=None
+        r.mode='collect';r.busy=False;r.timeline=NS(is_playing=lambda:False,pause=lambda:None);r.failure=None
         r.indices=[4,1,5,0,2,3]  # All reads/writes use named-joint mapping.
         r._miss_cap=None;r._miss_saved_limits=None;r._miss_last_position=None
         data=dict(limits=np.asarray([[4.,5.,6.,7.,8.,9.]],dtype=np.float32),q=np.zeros((1,6),dtype=np.float32),v=np.zeros((1,6),dtype=np.float32))
@@ -90,7 +90,8 @@ class NativeMissVelocityTests(unittest.TestCase):
             r,d,original,writes=self.runtime();r.mode=mode;r.world=NS(current_time=1.)
             # Kit has received pause(), but is_playing() still exposes the
             # preceding app update. This is the retained clock-startup failure.
-            pauses=[];r.timeline.pause=lambda:pauses.append(True);r.timeline.is_playing=lambda:True
+            pauses=[];playing=[True];r.timeline.pause=lambda:pauses.append(True);r.timeline.is_playing=lambda:playing[0]
+            r.timeline.commit=lambda:playing.__setitem__(0,False)
             published=[];r.publish_miss_fault.__func__.__globals__['atomic_json']=lambda p,v:published.append(copy.deepcopy(v))
             before=d['limits'].copy();result=r.cancel()
             with self.subTest(mode=mode):

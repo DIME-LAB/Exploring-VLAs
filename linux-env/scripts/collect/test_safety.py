@@ -1,3 +1,4 @@
+from pause_barrier import pause_committed
 from comparisons import comparison,matches,interval,native_frame
 from tick_contract import world_step_errors
 import ast
@@ -29,7 +30,7 @@ def method(path, cls, name):
     tree = ast.parse(path.read_text())
     owner = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls)
     node = next(n for n in owner.body if isinstance(n, ast.FunctionDef) and n.name == name)
-    scope = dict(comparison=comparison,matches=matches,interval=interval,native_frame=native_frame,world_step_errors=world_step_errors,MotionBudget=MotionBudget, MotionWaitTimeout=MotionWaitTimeout, SceneMutationIncomplete=SceneMutationIncomplete, MotionOperation=MotionOperation, contextmanager=contextmanager, math=math, threading=threading, time=time, np=np, json=json,
+    scope = dict(pause_committed=pause_committed,comparison=comparison,matches=matches,interval=interval,native_frame=native_frame,world_step_errors=world_step_errors,MotionBudget=MotionBudget, MotionWaitTimeout=MotionWaitTimeout, SceneMutationIncomplete=SceneMutationIncomplete, MotionOperation=MotionOperation, contextmanager=contextmanager, math=math, threading=threading, time=time, np=np, json=json,
                  String=lambda data:SimpleNamespace(data=data))
     exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), 'exec'), scope)
     return scope[name]
@@ -67,8 +68,8 @@ class SafetyTests(unittest.TestCase):
     def test_one_frame_callback_rejects_unexpected_extra_physics(self):
         callback=method(Path(__file__).with_name('collection_runtime.py'),'Runtime','after_update')
         pauses=[];published=[]
-        fake=SimpleNamespace(mode='collect',busy=True,start_time=0.,world=SimpleNamespace(current_time=2/30),
-            timeline=SimpleNamespace(pause=lambda:pauses.append(True)),publish=lambda:published.append(True))
+        fake=SimpleNamespace(failure=None,mode='collect',busy=True,start_time=0.,world=SimpleNamespace(current_time=2/30),
+            timeline=SimpleNamespace(pause=lambda:pauses.append(True),is_playing=lambda:False),publish=lambda:published.append(True))
         callback(fake,None)
         self.assertIn('One-frame step advanced',fake.failure)
         self.assertFalse(fake.busy);self.assertFalse(published)

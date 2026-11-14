@@ -633,6 +633,14 @@ cancel/reset retirement and continuation with dirty/unknown limits; storage
 repair permits cleanup, never revival. Fault evidence is copied into receipts
 even if cancellation fails. Receipts quantify the temporary operation retiming. All miss stages require measured velocity <=0.0125 rad/s
 before completion; ordinary collector/GUI completion is unchanged.
+A recovery jaw already within 0.0005 rad of its target completes under the
+same clearance/cap proof and a held-state ACK, without advancing physics or
+recording stationary frames. Its duration is zero in the step receipt; export
+checks the ACK, epoch, measured jaw and corresponding held kickoff.
+Native limit writes require a committed pause: the main-thread Timeline
+`commit()` flushes pending state/callbacks, then `is_playing()` must be false.
+The acknowledgement is bounded to three commits and one wall second; a failure
+refuses native writes and retains the unresolved fault/limit state.
 See [target-clearance and evidence contracts](docs/notes/regrasp-target-clearance.md).
 
 Every exported frame carries int64 `collection_phase` (shape `[1]`): **0 normal,
@@ -875,13 +883,26 @@ held-tick checkpoint. No per-tick source scan is added.
 
 The integration checks below use fake Kit and MoveIt/ROS message sources and
 start no simulator. Run the real-node check on the isolated assigned domain with
-system Humble and the control workspace sourced:
+system Humble and the control workspace sourced. The full attempt uses ideal
+bounded fake physics, collision-free fake MoveIt answers and synthetic camera
+pixels; its artifacts are explicitly test-only. It proves the real collector's
+construction, provenance, episode and finalization paths, while physical
+clearance, solver residual and visual recovery still require the live smoke:
 
 ```bash
 ROS_DOMAIN_ID=99 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
   CYCLONEDDS_URI="file://$PWD/linux-env/cyclonedds.xml" CUDA_VISIBLE_DEVICES='' \
   python3 -B linux-env/scripts/collect/collector_boot_regression.py --instance 9 \
   --output /mnt/a4500-backup/exploring-vlas/runtime/instance-9/bootstrap-check
+
+# Full fake attempt: six miss stages, actual shared corrective cycle and finalization.
+# Use fresh output paths. The late-fault variant proves durable failure finalization.
+ROS_DOMAIN_ID=99 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
+  CYCLONEDDS_URI="file://$PWD/linux-env/cyclonedds.xml" CUDA_VISIBLE_DEVICES='' \
+  OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
+  python3 -B linux-env/scripts/collect/collector_boot_regression.py --instance 9 \
+  --full-regrasp --output /mnt/a4500-backup/exploring-vlas/runtime/instance-9/regrasp-check
+# Repeat with --inject-native-fault and a different output path to test terminal cleanup.
 python3 -B linux-env/scripts/collect/process_ownership_regression.py \
   --output /mnt/a4500-backup/exploring-vlas/runtime/instance-0/process-ownership-check
 ```

@@ -174,3 +174,25 @@ supply effective PhysX offsets or demonstrate the speed constraint. A separately
 authorized live recovery smoke must freshly read both, verify the physical
 no-contact corridor and cap restoration, inspect miss/recovery videos, validate
 the dataset and prove owned cleanup before recovery episodes qualify.
+
+A jaw already within 0.0005 rad of its stage target completes at the held tick.
+It still installs/verifies the stage cap and clearance proof and requires the
+native held-state ACK; no execution plan, sim advance or stationary row is
+created. The receipt binds the no-op to its kickoff snapshot, epoch and target,
+and records zero planned duration. Ordinary GUI/normal completion is unchanged.
+
+Native limit retirement acknowledges pending timeline state before touching
+limits. Isaac 6.1's `omni.timeline.Timeline.commit()` applies pending state and
+invokes timeline callbacks on the main thread (installed `_timeline.pyi`, lines
+316–320), without a recursive app update or physics advance. The shared pause
+barrier requests pause, commits at most three times within one wall second, and
+requires `is_playing()` false. A refused pause leaves native writes forbidden.
+
+The full CPU transport regression starts the actual Collector and PickPlaceNode,
+executes all six miss stages with an initially open jaw and deferred timeline
+pause, hands over to the actual shared Quickstart corrective cycle, and checks
+finalization. A second run injects a native fault after handover and verifies its
+durable journal survives fresh-run finalization. This also exercises receipt
+fault deduplication without a resume-source hash shadowing the tick digest.
+The fake physics and all-valid MoveIt transport qualify the pipeline only; they
+cannot qualify physical clearance or the PhysX residual pad.

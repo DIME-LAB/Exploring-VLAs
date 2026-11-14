@@ -15,6 +15,7 @@ import time
 import uuid
 from storage import atomic_json,confined
 from source_provenance import loaded_sources,verify_sources
+from pause_barrier import pause_committed
 import numpy as np
 import omni.graph.core as og
 import omni.kit.app
@@ -48,7 +49,7 @@ class Runtime:
         torch.cuda.set_device(0)
         self.world = World.instance()
         self.timeline = omni.timeline.get_timeline_interface()
-        self.timeline.pause()
+        pause_committed(self.timeline)
         self.busy = False
         self.failure = None
         self.mode = 'collect'
@@ -132,7 +133,7 @@ class Runtime:
     def set_mode(self, mode):
         if self.busy:
             raise RuntimeError('Cannot change mode while a frame is running')
-        self.timeline.pause()
+        pause_committed(self.timeline)
         graph = '/Graph/ActionGraph_SO_ARM101/'
         connections = [(graph+'on_playback_tick.outputs:tick', graph+'articulation_controller.inputs:execIn')]
         connections += [(graph+'ros2_subscribe_joint_state.outputs:'+kind+'Command',
@@ -219,6 +220,7 @@ class Runtime:
             if getattr(self,'_miss_cap',None) is not None:raise RuntimeError('Native cap has no saved original limits')
             self._miss_requested_cap=None
             return dict(on=False,values_rad_s=None)
+        if self.busy or self.timeline.is_playing():raise RuntimeError('Native limit restore requires committed held state')
         self._miss_limits_dirty=True;self._miss_cap=None
         if getattr(self,'_miss_motion_fault',None) is not None:
             # Neither cancellation nor a later reset may bypass this barrier.
@@ -253,7 +255,7 @@ class Runtime:
                 cap=getattr(self,'_miss_cap',None),requested_cap=getattr(self,'_miss_requested_cap',None),
                 saved_original_limits_rad_s=getattr(self,'_miss_saved_limits',None),
                 dirty=getattr(self,'_miss_limits_dirty',False),samples=list(getattr(self,'_miss_samples',[])))
-        try:self.timeline.pause();self.busy=False
+        try:pause_committed(self.timeline);self.busy=False
         except Exception as pause_error:
             self.failure=original+'; native pause failed: '+repr(pause_error)
             if getattr(self,'_miss_saved_limits',None) is not None:self._miss_limits_dirty=True;self._miss_cap=None
@@ -418,8 +420,9 @@ class Runtime:
             raise RuntimeError('PhysX did not accept the executed targets')
         return dict(application_stamp_ns=self.stamp(), applied_command=list(map(float, applied)))
 
-    def start_miss_hold(self,epoch,stamp,cap,state,drive_targets):
+    def start_miss_hold(self,epoch,stamp,cap,state,drive_targets,advance=True):
         try:
+            if self.mode!='collect':raise RuntimeError('Guarded miss acknowledgement requires collect mode')
             if epoch!=self.epoch or stamp<=self.invalid_through_ns or not matches(stamp,self.stamp(),'stamp_ns'):
                 raise RuntimeError('Stale miss kickoff identity')
             actual=self.art.get_joint_positions()[0,self.indices]
@@ -427,8 +430,8 @@ class Runtime:
             if not matches(actual.tolist(),state,'target_rad') or not matches(drives.tolist(),drive_targets,'target_rad'):
                 raise RuntimeError('Miss kickoff state/drive baseline differs')
             applied=self.set_miss_velocity_cap(cap)
-            result=self.advance()
-            return dict(epoch=epoch,observation_stamp_ns=stamp,command_miss_velocity_cap=applied,advance=result)
+            result=self.advance() if advance else None
+            return dict(epoch=epoch,observation_stamp_ns=stamp,command_miss_velocity_cap=applied,advance=result,held=not advance)
         except Exception as exc:
             if self.failure:raise
             raise self.fail_miss_motion(exc) from exc
@@ -447,7 +450,7 @@ class Runtime:
 
     def cancel(self):
         try:
-            self.timeline.pause()
+            pause_committed(self.timeline)
             self.busy = False
             self.set_miss_velocity_cap(None)
             self.epoch += 1
@@ -480,7 +483,7 @@ class Runtime:
             ack = dict(epoch=payload.get('epoch'), observation_stamp_ns=payload.get('observation_stamp_ns'), error=repr(exc))
             if payload.get('epoch') == self.epoch:
                 if self.failure is None:self.fail_miss_motion(exc)
-                else:self.timeline.pause();self.busy=False
+                else:pause_committed(self.timeline);self.busy=False
         self.ack_pub.publish(String(data=json.dumps(ack)))
 
     def after_update(self, event):
@@ -488,7 +491,7 @@ class Runtime:
             if self.mode == 'collect':
                 if self.busy and self.world.current_time > self.start_time and not matches(self.world.current_time,self.start_time,'world_s'):
                     self.step_end_ns=time.monotonic_ns()
-                    self.timeline.pause()
+                    pause_committed(self.timeline)
                     delta = self.world.current_time - self.start_time
                     self.busy = False
                     if world_step_errors(self.world.current_time,self.start_time):
@@ -504,7 +507,9 @@ class Runtime:
                 self.publish()
                 self.io_executor.spin_once(timeout_sec=0.)
         except Exception as exc:
-            self.timeline.pause();self.busy = False;self.failure = repr(exc)
+            self.failure=self.failure or repr(exc)
+            try:pause_committed(self.timeline);self.busy=False
+            except Exception as pause_error:self.failure+='; pause acknowledgement failed: '+repr(pause_error)
 
     def reset_velocities(self):
         for view in self.bodies.values():

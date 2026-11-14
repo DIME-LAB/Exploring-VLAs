@@ -533,17 +533,26 @@ class Servo:
                     grasp_geometry=grasp_spec,phase_amplitude=noise.phase_statistics(scale) if isinstance(noise,ClearanceDart) else None))
             self.step(True)
 
-    def gripper(self, position, duration, blocking, phase='gripper'):
+    def gripper(self, position, duration, blocking, phase='gripper',outcome=None):
         epoch = self.node._motion_token()
         with self.generation.own('collector motion'):
             self.generation.require(epoch)
             with self.lock:
-                if abs(self.node._actual_positions['gripper_joint'] - position) < .0005 and not phase.startswith('regrasp_'):
+                if abs(self.node._actual_positions['gripper_joint'] - position) < .0005:
                     if self.reference is None:
                         self.reference = [self.node._actual_positions[name] for name in JOINTS]
                     self.reference_epoch = epoch
                     self.reference[5] = position
-                    return True if blocking else None
+                    already=True
+                else:already=False
+            if already:
+                ack=None
+                if phase.startswith('regrasp_'):
+                    self.phase=phase
+                    ack=self.step(True,advance=False)
+                    self.generation.require(epoch)
+                if outcome is not None:outcome.update(already_at_target=True,epoch=epoch,target_rad=position,ack=copy.deepcopy(ack))
+                return True if blocking else None
             done = self.node._new_motion_event()
             self.node._plan_motion_wait(done, duration)
             with self.lock:
@@ -893,7 +902,7 @@ class Collector:
             self.abort_stalled_owner(exc,'cancel/restore baseline')
             raise
 
-    def timeline(self, play):
+    def timeline(self, play, *,advance=True):
         if not play:
             return self.cancel_owner(lambda: timeline(False))
         with self.generation.own('advance'):
@@ -904,11 +913,13 @@ class Collector:
                 proof=guard.command(snapshot['state'],snapshot['drive_targets'],snapshot['drive_targets'],dict(snapshot,miss_phase=phase),lambda:self.generation.require(epoch))
                 if not proof['passed']:raise CommandCollision(proof)
                 args=(epoch,snapshot['sim_ns'],proof['velocity_cap'],snapshot['state'],snapshot['drive_targets'])
-                ack=self.mutate_kit('run_python',{'code':'import collection_runtime as c\nresult=c.runtime().start_miss_hold(*'+repr(args)+')'})
+                ack=self.mutate_kit('run_python',{'code':'import collection_runtime as c\nresult=c.runtime().start_miss_hold(*'+repr(args)+',advance='+repr(advance)+')'})
                 if ack.get('command_miss_velocity_cap')!=proof['velocity_cap'] or ack.get('epoch')!=epoch or not matches(ack.get('observation_stamp_ns'),snapshot['sim_ns'],'stamp_ns'):
                     raise RuntimeError('Miss kickoff bound was not acknowledged')
-                self.miss_kickoffs.append(dict(snapshot=copy.deepcopy(snapshot),proof=proof,ack=ack))
+                if not advance and (ack.get('held') is not True or ack.get('advance') is not None):raise RuntimeError('No-op miss stage was not acknowledged while held')
+                self.miss_kickoffs.append(dict(snapshot=copy.deepcopy(snapshot),proof=proof,ack=ack,advance=advance))
                 return ack
+            if not advance:raise RuntimeError('Held stage acknowledgement requires active miss clearance')
             return timeline(True)
 
     def restore_physical(self, code):
@@ -1340,11 +1351,12 @@ class Collector:
             tag(stage)
             snapshot=self.held_snapshot(epoch);cap=velocity_cap(stage)['values_rad_s'][5]
             motion_duration=max(3.,2*abs(snapshot['state'][5]-target)/cap)
-            if not self.servo.gripper(target,motion_duration,True,phase=stage):raise RuntimeError('Recovery gripper execution failed')
+            outcome={}
+            if not self.servo.gripper(target,motion_duration,True,phase=stage,outcome=outcome):raise RuntimeError('Recovery gripper execution failed')
             self.generation.require(epoch)
-            report['steps'].append(dict(stage=stage,target=target,sim_ns=self.held_snapshot(epoch)['sim_ns'],
-                normal_planned_duration_s=3.,miss_planned_duration_s=motion_duration,velocity_cap_rad_s=cap,
-                planned_duration_ratio=motion_duration/3.))
+            report['steps'].append(dict(stage=stage,target=target,sim_ns=self.held_snapshot(epoch)['sim_ns'],completion=outcome,
+                normal_planned_duration_s=3.,miss_planned_duration_s=0. if outcome.get('already_at_target') else motion_duration,velocity_cap_rad_s=cap,
+                planned_duration_ratio=0. if outcome.get('already_at_target') else motion_duration/3.))
         grip('regrasp_miss_open',opening)
         arm('regrasp_miss_approach','true_approach','miss_approach')
         arm('regrasp_miss_descent','true_final','miss_final')
@@ -1698,8 +1710,8 @@ class Collector:
         provenance = dict(start_trial=attempted, started=time.time(), source_sha256=source_hashes,
             git_commit=subprocess.check_output(['git', '-C', str(REPO), 'rev-parse', 'HEAD'], text=True).strip())
         if previous:
-            for name, digest in previous['source_sha256'].items():
-                if name != 'linux-env/scripts/collect/collect.py' and source_hashes[name] != digest:
+            for name, expected_source_sha in previous['source_sha256'].items():
+                if name != 'linux-env/scripts/collect/collect.py' and source_hashes[name] != expected_source_sha:
                     raise ValueError(f'Resume motion/timing source changed: {name}')
             if previous['instance'] != args.instance or previous['clock_config'] != clock_config:
                 raise ValueError('Resume instance/clock configuration differs')

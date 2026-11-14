@@ -244,9 +244,11 @@ class RecoveryTests(unittest.TestCase):
                 return dict(epoch=epoch,sim_ns=stamp,finger_offsets=fingers,block_offsets=block,source='fresh PhysX shape tensors')
             if 'start_miss_hold' not in params['code']:return dict(on=False,values_rad_s=None)
             import ast
-            args=ast.literal_eval(params['code'].split('start_miss_hold(*',1)[1][:-1])
+            call=ast.parse(params['code']).body[-1].value
+            args=ast.literal_eval(call.args[0].value)
+            advance=next(ast.literal_eval(k.value) for k in call.keywords if k.arg=='advance')
             epoch,stamp,cap,state,drives=args
-            return dict(epoch=epoch,observation_stamp_ns=stamp,command_miss_velocity_cap=cap)
+            return dict(epoch=epoch,observation_stamp_ns=stamp,command_miss_velocity_cap=cap,held=not advance,advance={} if advance else None)
         c.mutate_kit=bridge
         now[0].update(robot_base_world_pose=dict(position=[0.,0.,0.],orientation=[1.,0.,0.,0.]),robot_base_pose_source='physx_rigid_body',
             local_corners={name:list(map(list,itertools.product(*[(-v/2,v/2) for v in (bbox['sx'],bbox['sy'],bbox['sz'])])))})
@@ -289,7 +291,8 @@ class RecoveryTests(unittest.TestCase):
             record_tick()
             event.verdict=dict(ok=True);event.set()
         c.servo.execute=execute
-        def grip(target,duration,blocking,phase):
+        def grip(target,duration,blocking,phase,outcome=None):
+            if outcome is not None:outcome['already_at_target']=False
             c.timeline(True)
             events.append(('grip',phase));now[0]['sim_ns']+=33333333;now[0]['state'][5]=target;record_tick();return True
         c.servo.gripper=grip

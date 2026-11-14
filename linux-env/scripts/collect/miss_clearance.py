@@ -224,6 +224,8 @@ def receipt_error(receipt,rows):
         if phases!=list(POLICY['velocity_caps_rad_s']):return 'miss kickoff stages differ'
         for item in kickoffs:
             snapshot=item['snapshot'];proof=item['proof'];ack=item['ack'];cap=proof['velocity_cap']
+            if item.get('advance',True) is False and (ack.get('held') is not True or ack.get('advance') is not None):
+                return 'no-op miss kickoff advanced physics or lacks a held acknowledgement'
             actual=guard.command(snapshot['state'],snapshot['drive_targets'],snapshot['drive_targets'],dict(snapshot,miss_phase=cap['phase']))
             if not actual['passed'] or proof_differences(proof,actual):return 'miss kickoff clearance differs'
             if ack.get('command_miss_velocity_cap')!=cap or ack.get('epoch')!=baseline['epoch'] or not matches(ack.get('observation_stamp_ns'),snapshot['sim_ns'],'stamp_ns'):return 'miss kickoff cap was not acknowledged'
