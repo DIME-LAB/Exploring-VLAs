@@ -205,6 +205,13 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       detection, reopen/scene refresh and recovery metadata/export checks. Review and all-regrasp smoke pending.
       Later option: policy-in-the-loop interventions (DAgger/HIL-style), with the scripted expert taking over when
       the trained policy misses.
+- [ ] 3.1j Simpler physics and a deeper grasp (Aldrin, 2026-11-14): the gripper barely grips the lego. Lego -> box
+      collider (now SDF); cup -> compound of native primitives (now a 16-piece convex decomposition with a floor
+      1.7 mm too high and asymmetric walls); robot/gripper colliders -> few primitives with accurate finger pads;
+      aim for CPU PhysX if it holds RTF; grasp height lowered so the pads close on the block's middle/lower half.
+      Bar: before/after collider inventory, RTF (GPU vs CPU dynamics), grasp slip/tilt over >=10 grasps, GUI
+      quickstart still works, no camera change except the grasp pose. Then the collector's success-gate cup
+      profile and MoveIt cup objects follow the primitives. Must land before the pilot/full collection.
 - [ ] 3.2 Fine-tune (more steps/episodes than 10k/100), sim/real mix per the coursework findings.
 - [ ] 3.3 Re-run the Phase 1 evaluation matrix.
 
