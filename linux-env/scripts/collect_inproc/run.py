@@ -171,7 +171,7 @@ def run(a):
                 writer=Writer(path,render=not a.physics_only);record=True
                 expert=Expert(backend,geometry,tick,p,episode_id)
                 result=expert.cycle();record=False
-                receipt.update(script_completed=True,noise_operations=expert.noise_specs)
+                receipt.update(script_completed=True,noise_operations=expert.noise_specs,grasp_specs=expert.grasp_specs)
                 if result['recovery_report']:receipt['recovery_report']=result['recovery_report']
                 for _ in range(15):tick(expert.reference,expert.reference,[0.]*6,'containment_verification')
                 score=settled_containment(checked[-15:],p['object'],p['color'])

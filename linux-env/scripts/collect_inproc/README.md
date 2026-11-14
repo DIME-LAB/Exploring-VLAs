@@ -1,28 +1,25 @@
-# In-process SO-ARM101 prototype
+# In-process SO-ARM101 collector
 
-This standalone collector reuses shared geometry, DART, recovery, physical success,
-tick audit, fault policy and export. Bounded unrecorded priming stabilized the
-camera pipeline live; sixteen joined ticks passed before revealing a floating-base
-scene. The production asset now places its root API on the world fixed joint.
-Native production readback verifies fixed_base=true and unchanged six-name joint
-order; ROS pan/lift sweeps measured zero root drift over272 physics samples.
-The shared collector runtime initializes, and a fresh fixed-base held scene is
-available. The32-tick post-render diagnostic proves the RGB camera matrix matches native
-observation poses; SDK drawable metadata is older. The corrected per-row admission
-gate and native finalization still need their final boot. The5+5 dataset acceptance
-remains pending; no episodes have been accepted.
+The isolated prototype reuses the existing expert geometry, DART, recovery,
+physical success gate, tick contract, fault policy and exporter. The production
+asset's fixed-base correction is verified through the real ROS subscriber and
+ArticulationController: six unchanged joint names/order, native fixed_base=true,
+and zero root drift over 272 physics samples. Shared collector and extension code
+are unchanged. The asset repair and owned ROS verification entrances are
+`isaac/fix_articulation_root.py` and `fixed_root_validation.py`.
 
-Collision FK uses measured rigid root transforms and unchanged descendant checks;
-probe/collector refuse a floating native base flag. See
-[`inprocess-collector.md`](../../../docs/notes/inprocess-collector.md) and
-[`inprocess-collector-base-root.md`](../../../docs/notes/inprocess-collector-base-root.md).
-Shared ROS collector and extension code remain unchanged; the asset correction
-preserves all opinions other than the two root API fields. The offline reproducer
-is `isaac/fix_articulation_root.py` and the owned ROS verification entrance is
-`fixed_root_validation.py --port OWNED_PORT --output OWNED_REPORT` from a sourced
-ROS environment. It requires the owner's running production scene and sim grant.
+The 32-tick diagnostic proves that SDG CameraParams matches the retained native
+observation through motion/reset; SDK drawable camera metadata is older. Admission
+now requires fresh CameraParams and checks its render-camera pose against the
+frozen physical snapshot on every capture before finalizing a tick. Invalid
+physics handles are terminal. The final native boot and successful producer exit
+are still pending. No accepted episodes, 5+5 dataset, export/readback or collector
+RTF result is claimed. See [design](../../../docs/notes/inprocess-collector.md)
+and [fixed-base evidence](../../../docs/notes/inprocess-collector-base-root.md).
 
-Run the CPU checks without launching Isaac:
+## Offline checks
+
+These commands do not launch Isaac:
 
 ```bash
 cd ~/Downloads/Exploring-VLAs
@@ -31,197 +28,150 @@ OPENBLAS_NUM_THREADS=1 ~/env_isaacsim61/bin/python -m unittest discover \
 ~/env_isaacsim61/bin/python -m compileall -q linux-env/scripts/collect_inproc
 ```
 
-## Scene input and window
+Tests include actual native packet fixtures, shared tick proofs, both control/
+image delivery orders, camera metadata freshness/pose, deterministic DART,
+primitive collision geometry, real FFmpeg encode/decode and owned finalization.
+CPU checks do not prove physical grasp/recovery yield or native exit.
 
-The first experiment consumes recorded ROS receipts (`params`, `initial_physical`)
-to reproduce their exact seeded initial scene. Supply at least five distinct normal
-and five distinct re-grasp fixtures for the combined acceptance experiment. The
-runner selects fixtures of the same recovery kind, preserving the ROS comparison
-seeds even when an earlier attempt is rejected. This prototype does not reproduce the
-extension's random-layout generator: original ROS snapshots are required inputs.
-Old receipts with different body inventories refuse restore. Do not use superseded
-pilot receipts as evidence of correctness; they are useful only as pose fixtures.
+## Held scene and fixtures
 
-Inside the explicitly assigned, held ROS collector Kit, load this helper with
-`run_python` and call:
+The current fixed-base export is
+`/mnt/a4500-backup/exploring-vlas/inproc/scene-fixed-root-20261114/`.
+Its manifest contains the native articulation audit, physics baseline, joint/box
+geometry, asset digests and actual cameras resolved from the collector's own
+render-product configuration. Scene/geometry digest mismatches refuse startup.
+No camera path is hard-coded from an older document.
+
+To regenerate, only the production owner in its explicitly assigned held Kit may
+call this through its own bridge:
 
 ```python
 import sys
 sys.path.insert(0, '/home/aaugus11/Downloads/Exploring-VLAs/linux-env/scripts/collect_inproc')
 from snapshot_scene import export_scene
-result = export_scene('/mnt/a4500-backup/exploring-vlas/inproc/scene-v1')
+result = export_scene('/mnt/a4500-backup/exploring-vlas/inproc/NEW_SCENE_EXPORT')
 ```
 
-The helper requires `collection_runtime.runtime()` already installed and held.
-It resolves actual camera relationships from the current collector's render-product
-graph inputs, as in `configure_clock.py`; no old camera paths are assumed.
-It exports a flattened scene, native baseline, joint/primitive geometry and source
-digests. It refuses unknown enabled collision shapes. It does not launch or stop
-the shared sim. Stop the ROS instance only through its owner before standalone work.
+It requires an initialized, held `collection_runtime`. It never launches/stops a
+sim or saves changes to the production stage. Shut down that owned instance before
+starting standalone capture. The current asset authors its root API on root_joint;
+`articulation_audit.readback(stage, articulation)` checks the native PhysX flag and
+composed schema placement without changing the stage.
 
-Inspect a launch first; `preflight` never boots Isaac.
+The prototype uses exact ROS receipts (`params`, `initial_physical`) for seeded
+layout reproduction; it has no autonomous layout generator. Fresh read-only
+fixed-base fixtures appear under
+`/mnt/a4500-backup/exploring-vlas/datasets/smoke-descent-clearance-fixed-v1/`.
+Accepted normal attempts 0000/0001 use seeds 330000/330001. Re-grasp fixtures are
+pending. Supply at least five distinct accepted comparison seeds per kind for the
+combined acceptance experiment. Earlier floating-base receipts do not fulfill it.
+Never write into the ROS output root.
 
-With a real prior Kit log, it can report GPU mapping before scene export, but
-`inputs_ready` remains false until the exported scene, manifest and matching seed
-fixtures exist. A missing-input preflight is not clearance to start collection.
+## Boot before episodes
 
-```bash
-python3 linux-env/scripts/collect_inproc/launch.py preflight \
-  --runtime /mnt/a4500-backup/exploring-vlas/runtime/inproc-31 \
-  --gpu 0 --renderer-log /PATH/TO/PRIOR/OWNED/KIT.log -- \
-  --scene /mnt/a4500-backup/exploring-vlas/inproc/scene-v1/scene.usdc \
-  --manifest /mnt/a4500-backup/exploring-vlas/inproc/scene-v1/manifest.json \
-  --fixture /PATH/TO/ROS/attempt-0000/receipt.json \
-  --output /mnt/a4500-backup/exploring-vlas/datasets/inproc-v1 \
-  --kind both --per-kind 5 --max-attempts 30 --step-mode playing --instance 2
-```
-
-Only after the joined boot probe passes and the lead grants an episode window,
-replace `preflight` with `start --window WINDOW_ID`.
-Repeat `--fixture` for the other seeds. The prior Kit log must be under the canonical
-storage root. Renderer selection resolves UUID/PCI independently of CUDA; startup
-rechecks the current Kit table and owned process GPU allocations. `status` and
-`stop` need only `--runtime`; they use the shared identity-bound process supervisor.
-Never stop another collector or prompt2assembly process.
-
-The lead's fresh read-only inputs currently live under
-`datasets/smoke-primitive-reset-v4/` in canonical storage: five accepted normal
-receipts (seeds330000/330002/330003/330004/330005). Re-grasp inputs are pending.
-A normal pilot uses `--kind normal --per-kind 2` with those two receipts after
-boot acceptance. Accepted seeds are excluded from retries. It is a pilot, not 5+5.
-
-## Boot probe before episodes
-
-The boot probe needs no ROS episode fixtures. Preflight is safe outside a window:
+The sim is shared. Never launch without an explicit lead window. Preflight only
+prints the reviewed command and input/GPU readiness; it never starts Isaac:
 
 ```bash
 python3 linux-env/scripts/collect_inproc/launch.py preflight --probe \
-  --runtime /mnt/a4500-backup/exploring-vlas/runtime/inproc-playing-next \
+  --runtime /mnt/a4500-backup/exploring-vlas/runtime/inproc-final-native-next \
   --gpu 0 \
-  --renderer-log /mnt/a4500-backup/exploring-vlas/runtime/inproc-playing-20261114-v11/kit.log -- \
-  --scene /mnt/a4500-backup/exploring-vlas/inproc/scene-window-20261114/scene.usdc \
-  --manifest /mnt/a4500-backup/exploring-vlas/inproc/scene-window-20261114/manifest.json \
-  --output /mnt/a4500-backup/exploring-vlas/inproc/probe-playing-next \
+  --renderer-log /mnt/a4500-backup/exploring-vlas/runtime/inproc-camera-params-20261114-v1/kit.log -- \
+  --scene /mnt/a4500-backup/exploring-vlas/inproc/scene-fixed-root-20261114/scene.usdc \
+  --manifest /mnt/a4500-backup/exploring-vlas/inproc/scene-fixed-root-20261114/manifest.json \
+  --output /mnt/a4500-backup/exploring-vlas/inproc/probe-final-native-next \
   --instance 2 --frames 30 --step-mode playing --motion-check
 ```
 
-Only after a new grant, replace `preflight` with `start --window WINDOW_ID`. This
-plays the timeline at 30 Hz, using four CPU physics substeps per app update and
-retaining the existing paused viewport's Hydra engine. It refuses missing/extra
-render completions, old producer identities and mismatched clocks without polling.
-Both persistent and runtime capture-on-play flags are explicitly enabled and
-checked, because Orchestrator.reset copies the former over the latter. The probe
-records both flag readbacks, CPU RGB buffer shapes/compute counts and Fabric's
-external physics time. The internal empty-list annotation filter is bypassed;
-the collector verifies the original stamp, drawable frame and copy count itself.
-Texture async preferences are explicitly disabled and read back after warmup;
-actual one-update delivery is still a required live check. After every verified
-restore, priming discards at most 30 physical/render updates and requires three
-consecutive pairs whose original ReferenceTime equals the previous physical tick,
-with increasing drawable IDs and exactly one new RGB compute per update. No new
-targets are issued during priming. Physics/clock/drive faults are terminal; camera
-instability exhausts the explicit bound. Raw restore proof and every discarded
-update are retained. The first boundary image after priming also passes the strict
-ledger before being discarded; recorded gaps remain terminal.
-The immediate restore is checked against the preceding shared tick contract, then
-a fresh local recording contract begins at the measured settled boundary. This
-permits explicitly unrecorded settling without inventing commands or relaxing
-the shared validator. Priming after a paused later reset must pass the same live
-probe as priming after startup.
-The timeline follows the native Fabric clock; World time is checked independently
-for four-substep progression. `Capture.prepare` issues the actual command at t;
-`Capture.complete` joins the camera frames stamped t to the retained state and
-ACK within zero or one update. An already buffered frame may complete before the
-advance; the caller still returns only after exactly one advance. No row reaches
-gates or the writer before both join and advance succeed.
-`probe.json` records physical advance, paired consumption, two post-reset
-frames and no progress during CPU work between updates. A successful probe
-finalizes with `BOOT_PROBE_FINISHED`, `kind=boot_probe`, episodes=0;
-it is never an accepted dataset. Owner-side finalization follows
-worker exit and verified descendant cleanup. Check `inproc-watchdog.json`, the
-finalization certificate and `launch.py status`; a worker exit alone is insufficient.
+After a grant, replace `preflight` with `start --window WINDOW_ID`. Always use fresh
+runtime/output paths. Instance 2 uses domain92 and ports 8781/8782, GPU 0UUID plus
+independent Vulkan renderer pinning, CPU PhysX, nice10, persistent caches and
+identity-bound process cleanup. GPU 1 belongs to other users. `status` and `stop`
+require only the owned `--runtime`; they never adopt or stop another instance.
 
-`--motion-check` uses the same collision-checked clean-correction entrance for a
-0.12 rad pan movement and records both native camera view and measured poses.
-It requires real motion and the wrist view to match the observation pose more
-closely than the arrival pose. Inspect the boundary PNGs as well. This physical
-pixel-phase check is required before collecting episodes; the option needs at
-least eight frames in playing mode. Its native result is still pending.
+Playing mode retains one paused viewport engine, two fixed render products,
+30 Hz sensors and four 120 Hz physical substeps per app update. It explicitly enables
+PhysX Fabric pose publication and disables USD pose/velocity writeback, recording
+those settings. Current poses come from valid tensor views. Publication before
+an update must not advance either clock, physics callbacks or render counters.
+Both captureOnPlay flags are enabled; the empty-list annotator gate is bypassed
+and replaced by strict per-product counter/stamp/pose checks.
 
-Both adapters currently default to diagnostic `--step-mode held`; its RGB path
-failed live. Select `--step-mode playing` explicitly for the next probe. Do not
-start episode collection until that probe passes. For episodes the same option
-belongs after `--` with the run arguments. `--physics-only` uses held stepping and
-refuses `--step-mode playing`. Fresh ROS-smoke normal/re-grasp fixtures and an
-explicit episode window remain prerequisites for the 5+5 acceptance experiment.
+After each immediate verified restore, discard at most 30 unrecorded updates while
+holding restored drives, requiring three consecutive correct previous-tick camera
+pairs. Retain all priming evidence and raw restore proof. A fresh recording ledger
+begins at the measured end of priming; its first ordinary observation is one tick
+later. Original ReferenceTime stamps are retained. CameraParams and RGB compute
+counts must advance exactly 1 per tick. Exactly one actual target write/ACK at T
+belongs to each frozen state, and image T joins within zero or one update. The
+caller returns only after exactly one four-substep advance; gates/writers never
+receive a row before both pose-checked image join and advance succeed.
 
-The raw attempt layout matches the ROS collector. On a successfully finalized live
-run, use the **existing** pixi export entrance:
+The motion probe requires32proved frames,0.12rad collision-checked pan motion,
+measured physical response, native fixed-base mode, paired capture without held
+CPU work generating renders, and two further frames after an explicit paused
+restore. Inspect the boundary PNGs. `camera_pose_phase` now compares SDG camera
+metadata to physical poses; `drawable_pose_phase` retains SDK metadata. Historical
+reports before the SDG correction used `camera_pose_phase` for SDK and must not be
+compared by key alone.
+
+A successful probe must have `BOOT_PROBE_FINISHED`, `kind=boot_probe`, episodes=0,
+a successful `inproc-watchdog.json`, affirmative finalized certificate and retired
+owned descendants. A worker exit 0 alone is insufficient. The current final boot is
+queued after the ROS smoke; no episode launch is admitted by this README.
+
+## Episodes and unchanged export
+
+Only after the complete native boot passes and an episode window is granted,
+preflight a two-normal pilot with the fresh fixtures (repeat `--fixture` for each
+seed). For the full experiment use `--kind both --per-kind 5` with five normal and
+five re-grasp receipts; accepted seeds are excluded from retries. Example pilot:
+
+```bash
+python3 linux-env/scripts/collect_inproc/launch.py preflight \
+  --runtime /mnt/a4500-backup/exploring-vlas/runtime/inproc-normal-fixed-next \
+  --gpu 0 --renderer-log /PATH/TO/PASSING/OWNED/BOOT/kit.log -- \
+  --scene /mnt/a4500-backup/exploring-vlas/inproc/scene-fixed-root-20261114/scene.usdc \
+  --manifest /mnt/a4500-backup/exploring-vlas/inproc/scene-fixed-root-20261114/manifest.json \
+  --fixture /mnt/a4500-backup/exploring-vlas/datasets/smoke-descent-clearance-fixed-v1/normal/attempt-0000/receipt.json \
+  --fixture /mnt/a4500-backup/exploring-vlas/datasets/smoke-descent-clearance-fixed-v1/normal/attempt-0001/receipt.json \
+  --output /mnt/a4500-backup/exploring-vlas/datasets/inproc-normal-fixed-next \
+  --kind normal --per-kind 2 --max-attempts 6 --step-mode playing --instance 2
+```
+
+Only finalized accepted runs go through the existing export entrance:
 
 ```bash
 pixi run --manifest-path linux-env/pixi.toml python linux-env/scripts/collect_inproc/validate.py \
-  /mnt/a4500-backup/exploring-vlas/datasets/inproc-v1 \
-  --repo-id local/soarm101_inproc_v1 \
-  --report-dir /mnt/a4500-backup/exploring-vlas/reports/inproc-v1
+  /mnt/a4500-backup/exploring-vlas/datasets/inproc-normal-fixed-next \
+  --repo-id local/soarm101_inproc_normal_fixed_next \
+  --report-dir /mnt/a4500-backup/exploring-vlas/reports/inproc-normal-fixed-next
 ```
 
-This entrance calls `collect/export.py` unchanged, then checks every numeric
-state/action/timestamp against the raw episode rows. It uses the pinned LeRobot v3
-writer and validates degree features, camera shapes, fps, timing and recovery.
-Do not export physics-only candidates or terminal/incomplete runs.
+This calls `collect/export.py` unchanged, then reads back every numeric state,
+action and timestamp through the pinned LeRobot v3 dataset. Features, degree units,
+deployment order,30fps,tasks,cameras and recovery metadata remain unchanged.
+
+The expert uses shared `make_reachable_grasp_plan` yaw-specific IK, TCP offset and
+jaw values together; no separate yaw fallback is allowed. Recovery uses the same
+shared selection for its clean/miss paths. Receipts retain effective grasp specs
+and DART programs. Direct joint paths and sampled primitive sweeps are implemented;
+retract/pan/settle or OMPL fallback remains proposed if yield requires it. A carried
+block is a planning envelope, never an attachment or teleported object.
 
 ## Deferred rendering and comparison
 
-`run.py --physics-only` creates no camera products. It records all measured link/
-body/camera poses, physics contracts and labels; its completion marker is
-`PHYSICS_CAPTURE_FINISHED`, accepted-for-training remains false. `render_replay.py`
-loads that pose log in a separate Kit, disables physical bodies/joints and poses
-links explicitly. It requires the same window/GPU environment and never promotes
-candidate receipts. This experimental adapter still needs live clock, scale,
-pixel-fidelity and shutdown verification.
+`--physics-only` uses held physics stepping with no camera products and refuses
+playing mode. Pose logs contain all measured links/bodies/cameras and exact row
+hashes; physics candidates remain non-exportable. `render_replay.py` is an
+experimental separate-Kit replay, with physics disabled and explicit poses. It
+needs its own fidelity/time/shutdown proof and cannot promote candidates yet.
+Browser rendering is evaluated in the design; it is not an interchangeable RTX
+backend and has no SO-ARM101 speed or image-gap measurements.
 
-Run `compare.py` inside the same pixi environment as validation (the Isaac venv's
-OpenCV cannot decode H.264 on this host).
-`compare.py --reference ROS_ATTEMPT --candidate INPROC_ATTEMPT --output REPORT`
-checks seed/target identity and writes a two-camera side-by-side and stage summary.
-It labels this a trajectory comparison, since different expert paths can produce
-different poses at the same frame index. For a live-versus-replayed rendering
-comparison use `--replay`, which requires identical raw physical rows and reports
-PSNR/SSIM and RGB errors. Both tools are experiment scaffolding until exercised on
-the granted sim run. Browser rendering is evaluated in the design; no browser
-backend is admitted as training-equivalent.
-
-The offline collision model verifies USD-joint FK against physical link poses,
-uses the exact enabled boxes and SRDF pairs, and calls shared target/sweep checks.
-Only named finger-pad/selected-block contact is allowed. The carried-block model
-is a collision envelope, never a physical attachment. Continuous collision proof
-beyond the existing 0.01 rad sampling policy is not claimed. The expert currently
-tries direct joint paths and rejects blocked paths; retract/pan/settle or OMPL
-fallback is a proposed extension if live yield requires it.
-
-
-Playing mode explicitly enables PhysX Fabric pose publication before reset and
-records the extension and USD-writeback settings. It publishes current measured
-physics transforms before the single app update, requiring that the publication
-itself performs no physics, clock advance or render. Camera stamps are unchanged.
-The live motion/reset/pixel-phase gate must validate this synchronization path
-before any episode; CPU tests alone do not establish image correspondence.
-
-
-The PhysX Fabric publication probe did not resolve the drawable pose gate. The
-CameraParams diagnostic records the SDG post-render camera matrix and compute
-count beside the drawable matrix, with both pose errors in probe.json. Admission
-still uses the existing strict gate; the diagnostic does not establish correct
-pixels or permit episodes until its native provenance is measured.
-
-
-The diagnostic distinguishes the producers: CameraParams matches observationT
-within1.71e-7, while drawable metadata is older. Every capture now requires its
-CameraParams compute count to advance with RGB and its post-render matrix to
-match both measured camera poses before a tick can finalize. The probe gates on
-that same metadata and retains `drawable_pose_phase` only for diagnosis. Invalid
-native physics handles are terminal. The real32packet fixture exercises this
-proof and refuses the stale drawable matrix. The final native boot follows the
-ROS smoke; new read-only fixtures are expected under
-`datasets/smoke-descent-clearance-fixed-v1/`. No episode admission is claimed from
-the diagnostic or CPU tests alone.
+Run `compare.py` in pixi (the Isaac venv's OpenCV cannot decode H.264 here):
+`--reference ROS_ATTEMPT --candidate INPROC_ATTEMPT --output REPORT` checks seed/
+target identity and writes side-by-sides and stage profiles. It is a trajectory
+comparison unless the physical poses match. `--replay` requires identical raw
+physical rows and reports PSNR/SSIM/RGB errors. Neither benchmark is claimed until
+exercised on the accepted sim experiment.

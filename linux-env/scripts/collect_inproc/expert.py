@@ -10,8 +10,8 @@ from episode_policy import QualityReject, ConvergenceFailure
 from recovery import recovery_geometry, detect_miss
 from comparisons import native_frame
 from scene_sync import physical_pose_caches
-from so_arm101_control.grasp_geometry import (make_grasp_plan,find_reachable_grasp_yaw,
-    gripper_angles,_grasp_home_data_target,JOINT_LIMITS,BASELINE_JAW_GAP,JAW_GAP_RATE)
+from so_arm101_control.grasp_geometry import (make_reachable_grasp_plan,
+    _grasp_home_data_target,JOINT_LIMITS,BASELINE_JAW_GAP,JAW_GAP_RATE)
 from so_arm101_control.compute_workspace import geometric_ik, X_PAN
 from tick_contract import digest, require_snapshots
 
@@ -32,7 +32,7 @@ class Expert:
         self.params,self.episode_id=params,episode_id
         self.reference=list(backend.snapshot()['state'])
         self.executed_hold=list(self.reference)
-        self.operation=0;self.noise_specs=[];self.rows=[];self.snapshots=[]
+        self.operation=0;self.noise_specs=[];self.grasp_specs=[];self.rows=[];self.snapshots=[]
         self.limits=[JOINT_LIMITS[n] for n in JOINTS]
 
     def emit(self,reference,executed,noise,phase):
@@ -114,7 +114,7 @@ class Expert:
             geometry=geometry,miss_confirmed=False,steps=[])
         if geometry['yaw'] is None:self.reject('planner_reject',dict(reason='regrasp IK unreachable'))
         solutions={name:self.select(v) for name,v in geometry['solutions'].items()}
-        opening,closing=gripper_angles(min(bbox['sx'],bbox['sy']))
+        opening=geometry['grasp_spec']['opening_rad'];closing=geometry['grasp_spec']['closing_rad']
         def grip(phase,q):
             self.grip(q,phase)
             report['steps'].append(dict(stage=phase,sim_ns=self.snapshots[-1]['sim_ns']))
@@ -145,11 +145,11 @@ class Expert:
         self.geometry.contact=True
         recovery=self.recover() if self.params['recovery']=='regrasp' else None
         s,pose,bbox,cups=self.current_geometry()
-        opening,closing=gripper_angles(min(bbox['sx'],bbox['sy']))
-        plan=make_grasp_plan(pose,bbox,current_wrist_roll=s['state'][4],
+        selected=make_reachable_grasp_plan(pose,bbox,current_wrist_roll=s['state'][4],
             approach_height=self.params['approach_height_m'],approach_offset=self.params['approach_offset_m'])
-        yaw,solutions,_=find_reachable_grasp_yaw(plan['poses'],plan['yaw'])
-        if yaw is None:self.reject('planner_reject',dict(reason='normal grasp IK unreachable'))
+        self.grasp_specs.append({k:v for k,v in selected.items() if k!='solutions'})
+        if selected['chosen_yaw'] is None:self.reject('planner_reject',dict(reason='normal grasp IK unreachable',grasp=selected))
+        solutions=selected['solutions'];opening=selected['opening_rad'];closing=selected['closing_rad']
         self.grip(opening,'grasp_open')
         self.geometry.contact=True
         if 'approach' in solutions:self.arm(self.select(solutions['approach']),'grasp_approach')

@@ -2,13 +2,13 @@
 
 Status: the production fixed-base correction is verified, with unchanged six-joint
 order and zero measured base drift in the real ROS pan/lift sweep. A fresh held
-scene is exported. A32-tick motion/reset diagnostic proves the SDG post-render
-camera matrix matches the retained native observation (maximum error1.71e-7) and
+scene is exported. A 32-tick motion/reset diagnostic proves the SDG post-render
+camera matrix matches the retained native observation (maximum error 1.71e-7) and
 its compute counter stays aligned with RGB. SDK drawable matrices are one update
 older and are retained only as diagnostics. The corrected admission path requires
 fresh post-render metadata and checks camera pose on every row before finalizing
 its tick proof. Its final native boot/success-exit check is queued after the ROS
-smoke. No5+5 episodes, export/readback or collector RTF are accepted yet.
+smoke. No 5+5 episodes, export/readback or collector RTF are accepted yet.
 Runtime/prototype files live in `linux-env/scripts/collect_inproc/`. Shared ROS
 collector and extension code are unchanged; the production robot asset's two
 root API opinions are corrected.
@@ -181,9 +181,13 @@ physics results are provisional until every image exists and re-audits pass.
 
 ## Collision safety without per-tick MoveIt RPC
 
-Reuse `grasp_geometry.make_grasp_plan`, `find_reachable_grasp_yaw` and calibrated
-`compute_workspace.geometric_ik`. Use direct linear and retract/pan/settle paths
-with the same original time law. No new Lula robot description is needed for this
+Reuse `grasp_geometry.make_reachable_grasp_plan` and calibrated
+`compute_workspace.geometric_ik`. The shared helper couples narrow-face yaw
+(only equivalent0/+pi/-pi choices), TCP centering, safe approach offset and
+projected-width jaw opening/closing. Use its returned solutions and jaw values
+together; do not combine raw `make_grasp_plan` with a separate yaw fallback.
+The prototype implements direct linear paths with the original time law.
+Retract/pan/settle paths remain a proposed fallback for rejected direct paths. No new Lula robot description is needed for this
 5-DOF chain. A future Lula/OMPL planner is a fallback for rejected paths, not an
 excuse to skip validation. Do not change ROS/deployment planning.
 
@@ -262,343 +266,96 @@ is insufficient: require final receipt, export validator and end marker.
    `coursework-eee598/roadmap-2026-11/phase3/3.1f-inprocess-collector/` with README,
    tests, per-stage JSON, comparison frames and validator reports. No HF upload.
 
-## Prototype status and review
 
-The isolated prototype includes scene export, CPU stepping, native state/drive
-readback, synchronized RGB capture, scripted normal/re-grasp stages, primitive
-collision sweeps, raw MP4/JSONL recording, full numeric LeRobot readback, an owned
-launcher/watchdog and experimental pose replay/comparison commands. It consumes
-ROS `initial_physical` receipts to match seeded layouts; autonomous layout generation
-is not implemented. Direct paths are implemented; retract/pan/settle and OMPL
-fallback remain proposed if measured yield requires them. No live success or speed
-result is implied by these entrances.
+## Implemented pipeline and verified limits
 
-The source review identified shutdown/finalization and mm→m collider scale risks.
-Box extraction retains inherited scale in a rigid metre body frame. Kit uses
-fast shutdown after draining encoders and closing the backend; the external owner
-finalizes only after the producer exits successfully and identity-bound descendant
-cleanup has no remaining processes. Producer PID, invocation, start time and
-summary digest bind the worker's readiness record. A zero exit without these
-records is refused. Graceful Kit teardown stalled during the boot window, so the
-owner performs finalization outside Kit. Regression checks cover millimetre bodies,
-real FFmpeg encode/decode, failure readiness without a summary and lifecycle
-certificates. The review also prompted exact ROS DART seed/phase rules,
-measured pause/encoder-retirement fields, recovery audit for physics candidates,
-and camera poses derived from measured parent links.
+The prototype consumes exact ROS `initial_physical` snapshots and params to match
+seeded layouts. Autonomous layout generation is not implemented. `expert.py` uses
+the shared reachable grasp result as one coupled specification; recovery uses the
+shared true/miss geometry and its selected jaw values. Receipts retain effective
+grasp specifications and DART programs. Direct paths may be rejected; live normal
+and recovery yield remains to be measured.
 
-`playing.py` follows the verified camera setup in `~/w_31f/bench.py`: retain the
-existing active viewport with updates disabled (create an invisible one only if
-absent), apply OmniSensorAPI tickRate 30, CPU RGB annotators as in `record.py`, RenderingManager dt
-1/30 and timeline target 30, play and warm up. Installed SimulationContext.step
-with render=True delegates to one app.update at these nonzero dt values. The
-adapter refuses extra/missing physics steps or renders rather than polling a stale
-buffer. ReferenceTime is global, so it is supplemented by per-product drawable
-frame identity, RGB compute count and simulation NEW_FRAME completion count. Read
-frame metadata in the drawable callback using its actual result_handle; handle 0
-is invalid here and the optional SWH field is absent. Copies
-retain the producer's rational timestamp, including permitted sub-microsecond
-rounding differences. Whether these native fields reliably identify both pixels
-after every update is still a live-verification requirement. Experimental replay
-and held writer-gate capture remain non-exportable until verified.
+`playing.py` retains one paused viewport engine, two 640x480products, legacy CPU
+RGB/ReferenceTime/CameraParams annotators,30 Hz sensors and four 120 Hz physics
+substeps per app update. Both captureOnPlay settings are true. Native PhysX Fabric
+is enabled before reset, USD pose/velocity writeback is disabled, and physical
+transforms are explicitly published before the single app update. Publication
+must not step physics, change either clock or render. Every snapshot requires
+valid articulation/body/link physics handles; stale USD fallback is a fault.
+Record all settings and per-stage timings. Held-time capture and replay remain
+experimental and cannot be exported as accepted data.
 
-The offline suite has 45 tests, including immediate/delayed control-image order,
-the measured eight-frame latency trace,
-2,000 float32 World/native-clock frames, earlier-ACK/frozen-state preservation and
-late/missing/duplicate/epoch-crossing join refusal. The probe uses its own
-BOOT_PROBE_FINISHED marker with episodes=0; collection export is not admitted.
+After every immediate verified restore, hold the restored drive targets and
+discard at most 30 unrecorded updates. Require three consecutive previous-tick
+camera pairs with fresh RGB/CameraParams counts, correct original timestamps and
+four physical substeps. Physics/drive faults are terminal; exhausting camera
+stabilization is terminal. Keep the raw restore proof and every discarded update.
+Validate the immediate restore against the preceding TickContract before opening
+a fresh recording ledger at the measured end of priming. The ordinary first
+observation remains one tick after that boundary. Even its discarded boundary
+image must pass the strict producer ledger.
 
-The wall watchdog accepts 900 s startup, 120 s without collection progress and
-180 s graceful shutdown, with pidfd cleanup and an affirmative producer-bound
-finalization check. Heartbeat touching adds no fsync per frame. No existing Isaac
-or prompt2assembly process is adopted or stopped.
+The authoritative render camera matrix comes from legacy
+`omni.replicator.core.CameraParams`, which depends on
+PostProcessRenderProductCamera/SdRenderProductCamera and actual renderResults.
+Require its compute count to advance exactly 1 alongside RGB for each camera.
+`Playing.render(expected=T)` compares this matrix with the frozen physical link
+poses and static camera bindings, with maximum matrix-entry error<2e-4 for both
+views. A mismatch faults before `Capture.complete`, so no invalid row reaches a
+success gate or writer. SDK drawable IDs still supply progress diagnostics; SDK
+view matrices are not authoritative for the RGB camera.
 
-## First window result and next gate
+The 32-tick native diagnostic at9857b38 measured SDG camera-pose error<= 1.71e-7
+through pan motion and a paused second reset. CameraParams compute counts equaled
+RGB copy counts on every captured tick and each advanced1 within an epoch. SDK
+view matrices were one tick older, with errors up to0.030706 during motion. The
+actual packets and source receipt SHA are preserved in
+`fixtures/camera_params_32_trace.json`. Regression checks admit that trace and
+refuse substituting its older SDK view. No image or timestamp was changed.
+For probe reports, `camera_pose_phase` now means the authoritative SDG comparison;
+`drawable_pose_phase` retains the SDK comparison. Historical reports before this
+change used `camera_pose_phase` for SDK metadata, and are not directly comparable
+by field name. The final native boot must still pass the corrected gate and prove
+successful owner-side finalization.
 
-The 2026-11-14 boot-only window ended at 07:23:13Z. The held scene export contains
-11 robot links, nine rigid scene bodies, 65 enabled boxes and ten joints. Camera
-paths came from the current collector configuration and are stored in the export
-manifest. All eight standalone attempts passed GPU UUID/Vulkan/NVML assignment,
-nice/domain, CPU dynamics, native joint FK and immediate baseline restore checks.
-Four-step stepping executed before RGB refusal, but those probe versions did not
-persist its numerical evidence before failure; there is no complete cadence pass.
-No paired RGB frames were accepted. The first six attempts observed the wrong
-NEW_FRAME event channel; their zero event count proves nothing about rendering.
-Attempts seven/eight used the simulation channel and timed out with zero observed
-completions. No renders-per-advance ratio or RTF can be claimed.
+The production asset now authors its root API on the world fixed joint. Native
+production verification confirms fixed_base=true, root DOFs0, joint DOFs6, links 11
+and the exact six-name order. Six real ROS subscriber/ArticulationController
+pan/lift goals measured maximum root drift0m/0rad across 272 physical callbacks.
+Shared collection_runtime installation also resolved the same joints. The fresh
+held export is `inproc/scene-fixed-root-20261114/`, including the native audit and
+camera paths read from the collector's actual configuration. The asset-only
+correction preserves every other authored opinion and both relative external
+references; extension and shared collector code are unchanged. See
+`inprocess-collector-base-root.md` for source digests and independent reviews.
 
-Paused tick-rate sensors and an extra viewport/Hydra engine are plausible causes,
-supported by w_scene's playing-timeline reference and plan47's camera-shapes
-notes; they were not experimentally isolated in that window. Its same-update
-proposal is superseded by the bounded stamp join below. Use
-`launch.py preflight|start --probe ... --step-mode playing` with a fresh
-output/runtime and require the joined boot gate. If it fails, retain the fault
-and release; do not begin episodes. Five normal/five
-re-grasp episodes additionally require the fresh ROS-smoke fixtures and the lead's
-explicit episode window. Cleanup proof is
-`/mnt/a4500-backup/exploring-vlas/inproc/window-20261114-cleanup.json`: nine owned
-groups stopped, remaining=[], ports 8781/8782 closed, no owned NVML contexts,
-GPU0 at 21 MiB. The companion Mac report contains raw probe receipts and logs.
+The owned watchdog accepts900 s startup,120 s without capture progress and180 s
+shutdown, with the lead's granted wall deadline taking precedence. After encoder
+and backend drain, the child publishes invocation/PID/summary-digest readiness and
+fast-exits. Only the external owner can finalize after successful child exit and
+identity-bound descendant retirement. Zero exit alone cannot produce acceptance.
+The boot marker is BOOT_PROBE_FINISHED, kind=boot_probe, episodes=0; it is never a
+dataset. Tests cover real FFmpeg encode/decode, lifecycle certificates, physical
+handle faults, frozen state/real ACK preservation, producer freshness, current
+camera pose, original clocks, collision geometry, seeds and writer layout.
 
-## Playing-window result and capture settings
+Partial diagnostic timing from16 boot ticks (means,ms) was app update33.62,
+camera read4.91, combined physics/render wrapper38.79, state0.91, clean correction
+0.32, collision8.78, target write0.28 and join/hash/contract9.65. App/camera values
+are nested in the wrapper and must not be added again. This excludes startup,
+remaining host work and the dataset writer: no end-to-end collector RTF or>1x
+result is claimed. Full profiles, accepted throughput and all three render modes
+still need measurement.
 
-The second boot-only window ended at 08:00:26Z on 2026-11-14, with all four owned
-groups stopped, ports closed and no owned NVML contexts. The v2/v3/v4 probes
-observed respectively 109/121/120 render completions per camera. No RGB pair
-passed: both GPU and CPU read paths returned empty uint8 buffers, with RGB node
-compute count zero. The v4 warmup diagnostic was empty before its final restore,
-so this cannot be explained solely by the post-reset camera state. v3/v4 retained
-one actual four-PhysX-callback/four-World-step advance; World time was
-4.066666878759861 s and timeline 4.066666877 s. This is partial physical evidence,
-not a complete cadence/freshness acceptance or renders-per-tick result.
+## Remaining acceptance work
 
-Cold v2 startup took 343 s, including about five minutes of RTX compilation.
-The installed GPU-foundation source defaults `driverShaderCachePath` to the private
-portable directory; the launcher now pins it to a persistent per-GPU directory.
-Owned stopped-v2 cache contents were retained there. Later v3/v4 runs ended in
-22/25 s; these are startup/fault wall measurements, not collector throughput or a
-controlled cache ablation. Native initialization receives its own 900 s heartbeat,
-followed by the 120 s progress timeout. Product updates and timeline auto-update
-are disabled across restore's pause/play updates, preventing unrecorded reset
-renders. This guard did not repair the RGB computation failure.
-
-The lead's capture-on-play hypothesis has direct source support: installed
-`Orchestrator.reset()` copies `/persistent/omni/replicator/captureOnPlay` into
-`/omni/replicator/captureOnPlay`. The prototype previously set only the runtime
-flag; the failed probes did not record either readback, so overwrite is not yet
-an established cause. Set both flags true at boot and before camera attach/play,
-verify both before every recorded step, and retain warmup readbacks. Private Kit
-settings remain isolated; no default user configuration is edited. Tests cover
-the persistent-to-runtime reset behavior and refusal when a flag turns off.
-
-Set RenderingManager dt before products create Fabric histories. Following the
-working `~/w_31f/replay.py`, ensure `/ExternalSimulationTime` exists and record its
-`omni:time` value. During live physics the simulation manager owns that value:
-read it as the canonical graph clock and check World increments independently.
-Kinematic replay may explicitly stamp it only with physics off.
-
-## RGB readback and measured delivery phase
-
-The third window ended at 08:24:10Z on 2026-11-14. All seven owned groups stopped,
-ports closed, no owned NVML contexts remained and GPU0 returned to 21 MiB; proof
-is `inproc/playing-window3-20261114-cleanup.json` under the canonical storage root.
-Both capture flags read true in v5, yet RGB compute remained zero. Capture-on-play
-overwrite alone therefore does not explain the failure. Match the known-good
-`w_31f/run_arm.py` legacy pipeline (`srtx/enabled=false`, async rendering false).
-
-v7's SDG diagnostic found DispatchSync enabled with empty valid-time lists: its
-reference-time inputs advanced while RGB execution stayed blocked. The documented
-`disableAnnotatorGate=true` compatibility setting bypasses that internal filter;
-our own bounded stamp/frame/copy/epoch checks retain the acceptance guarantee.
-v8 onward produced real 480x640 RGBA buffers from both cameras. Diagnostic warmup
-PNGs show the exported scene; they are not accepted episode frames or a ROS match.
-
-v11's fault-only trace demonstrated consistent one-update delivery over all eight
-updates: camera RefTime matched the pre-update observation within 0–1 ns; each
-update advanced four physical callbacks/World steps and completed one render per
-camera. RGB compute counts were 121–128, and both views had identical drawable
-frame numbers (275,293,295,...305). No camera timestamp was changed. The trace
-and source digest are retained in `collect_inproc/fixtures/playing_v11_trace.json`.
-The previous same-update probe correctly rejected these deliveries; zero dataset
-rows or episodes were accepted during the window.
-
-`Capture.prepare` retains the measured state, clean/executed labels, geometry
-evidence and actual target ACK at t. `Capture.complete` joins original camera
-stamps to that retained state within one update and invokes the same shared row
-validator. It cannot issue the command twice or finalize a pending/reset-crossing
-ticket. Expert/home/recovery calls still return the pre-update observation after
-advancing once, preserving control ordering. The initial advance after restore
-primes delivery; the first row is still exactly one tick after the restore floor.
-These changes are offline-tested against the measured trace. Next window must
-verify joined proofs, a collision-checked pan movement, a paused second reset and two further joined frames,
-no work while held between updates, and successful producer exit/finalization.
-Five normal/five re-grasp episodes, export/readback, ROS comparison and RTF remain
-pending fresh fixtures and an explicit episode grant.
-
-The `--motion-check` boot option moves pan by 0.12 rad through shared clean
-corrections and the ordinary collision/ACK entrance. It retains actual drawable
-view matrices and measured camera world transforms at observation and arrival.
-Require measured pan motion >0.01 rad, each wrist view within 2e-4 (maximum matrix
-entry error) of the observation pose, and at least one moving frame clearly
-closer to observation than arrival (>1e-4 difference). Boundary PNGs also require
-a visual check; stamps alone do not establish physical pixel phase. These pose
-thresholds are diagnostic gates to verify live, not a measured fidelity result.
-
-The lead's current read-only fixture root is
-`/mnt/a4500-backup/exploring-vlas/datasets/smoke-primitive-native-tick-v3/`.
-Accepted normal fixtures are attempt-0000 (330000, red) and attempt-0002 (330002,
-green_2x3_0); re-grasp fixtures are pending. The earlier designated fixture root
-was not created. A normal pilot can use these two seeds after boot acceptance;
-it does not fulfill 5+5. Retries exclude already accepted seeds, and summaries
-record accepted seed sets so a repeated success cannot fill a distinct-seed quota.
-
-## First joined boot result
-
-`c4f6396` was exercised in an explicitly granted boot-first/normal-pilot window.
-The worker failed after 26.95 s at its first commanded join: observation
-4.066666667 s advanced physically to 4.1 s with four substeps, but both cameras
-still held RefTime 4.0 s and copy count120, with zero new completions. The next
-fault-only diagnostic update produced two completions per camera and copy count122
-(latest RefTime4.099999999 s), followed by seven regular one-completion updates.
-Only the latest buffer of the burst was read, so no unique timestamp sequence is
-claimed for the two individual deliveries. No pending row was finalized, no
-normal pilot started, and the motion/reset/success-exit gates were not reached.
-
-Sim released early at 09:13:08Z on 2026-11-14. Proof is
-`inproc/joined-window-20261114-cleanup.json`: one owned group stopped, remaining=[],
-ports8781/8782 closed, no owned NVML contexts/errors, GPU0 at21 MiB. The earlier
-steady trace does not establish a uniform startup bound.
-
-The next probe explicitly requests `hydra_texture.set_async(False)` before
-annotator attach, retaining `get_async()` after warmup. Installed API documents
-this as a render-thread preference; readback alone cannot prove synchronous
-delivery. App/Replicator async settings did not establish the texture preference
-in the failed run. Restore now emits play/commit only when paused, and timeline
-alignment avoids no-op current-time writes while the native clocks already agree.
-These changes retain the same strict join and are not claimed to fix the burst.
-A new granted probe must establish actual delivery, motion pixel phase, paused
-reset and successful exit before episodes. If variable-latency bursts remain,
-polling only the latest annotator buffer cannot admit them; per-frame immutable
-capture and a broader bounded control/image queue would need a separate design
-and contract review. No delay is hidden by dropping or restamping a frame.
-
-The bounded join also retains a frame already delivered at its own native time,
-because a synchronous render preference may change delivery phase. Such a frame
-is consumed after its actual command ACK at the same native tick; the tick still
-advances physics exactly once before returning. The measured delayed phase
-continues to join after that one advance. Tests exercise both orders and reject
-duplicate or skipped observation stamps. Neither timing mode is assumed to work
-live from the preference readback alone. The next sim window is queued after the
-ROS collector's 50-episode pilot; no new launch is authorized by this document.
-
-The lead has supplied a newer read-only fixture source with five accepted normal
-episodes: `datasets/smoke-primitive-reset-v4/` under canonical storage. Use its
-completed receipts and the pilot output when the lead grants the episode window;
-re-grasp input provenance remains to be supplied. Older v3 seed fixtures remain
-comparison evidence, not a requirement to use superseded reset behavior.
-
-
-## Bounded unrecorded priming
-
-The e5117dc boot probe on 2026-11-14 failed after 22.00 s with the same startup
-zero/two render-completion transient. Both texture async readbacks were false.
-GPU/renderer pinning, CPU PhysX, native FK and immediate restore passed; zero rows
-were finalized, and motion, later reset, pose phase and successful exit were not
-reached. The sim was released at 10:37:23Z; identity receipts prove no remaining
-owned processes or GPU contexts and ports8781/8782 closed. Both joined probes fail
-before their later reset, so recurrence after every reset is unmeasured.
-
-The playing adapter primes after every immediate verified restore. It keeps the
-restored drives without new target writes and advances at most 30 updates. Every
-advance must retain its epoch, four actual physics callbacks/World steps, native
-clock progression and restored drive targets. Startup camera omissions/bursts are
-explicitly discarded. Three consecutive updates must each supply exactly one
-completion and RGB compute per camera, increasing matching drawable frame IDs,
-and original ReferenceTime equal to the preceding measured tick. Instability
-resets the consecutive count; exhausting the bound is terminal. All priming clock,
-render and camera metadata is retained as unaccepted evidence.
-
-The end of priming becomes a measured recording boundary. Capture first validates
-the original immediate restore against the prior shared tick contract, including
-its cancellation clock, before creating a fresh local contract after the discarded
-interval. It verifies the priming clocks, unchanged drives and final three pairs
-again. This avoids fabricating command ACKs or teaching the shared contract to
-accept gaps in recorded observations. The ordinary first observation remains one
-tick after the settled boundary. Even its discarded boundary image must pass the
-strict ledger. No image/state is restamped; a later zero/two burst still faults.
-Reports and episode receipts retain both the original physical restore proof and
-the settled recording boundary. Live boot/motion/paused-reset/pose/success-exit
-acceptance is required before any normal pilot. No further sim launch is authorized
-by the released window. The 5+5 dataset, unchanged exporter/readback, same-seed
-ROS comparison, all renderer fidelity metrics and collector RTF remain pending.
-
-
-## Physical root audit before episodes
-
-The first primed boot at 77c0aa1 stabilized in seven unrecorded updates and
-completed sixteen strict joined ticks. The first physical pan response then
-triggered the stale exported-root FK guard. Measured wrist pose and joints imply
-root motion; root schema placement in both production asset and held export
-suggests a floating articulation with an external world constraint. Native production base mode is now verified fixed after the asset correction. See `inprocess-collector-base-root.md` for digests,
-evidence, the production-owner readback and a proposed scene correction. No
-extension code or shared collector module is changed. Collision FK uses measured
-physical roots with the same descendant tolerance, while probe/collector now
-require the native PhysX fixed-base flag before accepting motion/episodes.
-
-Partial boot timing (16 frames, means, milliseconds) was: app update33.62,
-camera read4.91, combined physical/render wrapper38.79, state read0.91, clean
-correction0.32, collision8.78, target write0.28 and join/hash/contract9.65. App
-update and camera read are nested in the wrapper and must not be added again.
-These are diagnostic boot slices, excluding initialization, PNG inspection and
-remaining host work, with no dataset writer. They are not a collector RTF result
-and do not demonstrate the >1x target. Physics/render and proof/collision costs
-still need measured optimization after correctness is established.
-
-
-On the corrected export,32 tick proofs passed native cadence, paired camera
-freshness, measured motion and the paused second reset. The camera-pose gate
-refused the moving frames: at frame16 wrist view matched the preceding physical
-pose rather than the state bearing its original ReferenceTime (maximum view
-error0.030706). Subsequent motion and post-reset motion confirmed the extra pose
-lag. Matching timestamps/counters do not establish physical pixel correspondence.
-The whole probe remains rejected; no episodes or successful finalization. The
-next investigation must synchronize physical transforms into renderer Fabric
-before the update, retaining original stamps and the same pose gate.
-
-
-The playing adapter explicitly enables the native PhysX Fabric pose path before
-reset/articulation initialization and reads back extension enabled=true,
-physics/updateToUsd=false and physics/updateVelocitiesToUsd=false. Physical state
-and collision transforms come from tensor snapshots; USD supplies static assets,
-materials and calibrated camera bindings. Before each existing app update it calls
-the same physics-to-Fabric publication used in installed SimulationContext.render
-without that method's extra held app update. Guards require no change to physical
-clock/index, native clock/epoch, physics callbacks or render counters during the
-publication. Its cost is reported separately as fabric_sync_ms. The original stamp
-join and moving-camera pose gate remain unchanged. This is an unverified render
-synchronization hypothesis, not a claim that the extra pose lag is solved.
-
-
-The explicit PhysX Fabric probe completed32 ticks with its settings and no-progress
-guards verified, but its drawable camera pose errors were identical to the USD
-path. The hypothesis did not resolve the gate. No successful finalization or
-episode acceptance was produced; sim released11:23:33Z. Distinguish observed
-metadata lag from actual pixel phase: drawable metadata is not yet independently
-matched to the SDG RGB result. A diagnostic now retains the legacy CameraParams
-post-render camera matrix and compute count alongside the unchanged drawable
-matrix, using the same two render products. It reports both against physical
-observation/arrival poses and does not change admission. The legacy source is
-PostProcessRenderProductCamera/SdRenderProductCamera connected to renderResults;
-wrong annotator type, invalid matrices or resolution fail. A fresh reviewed probe
-must disambiguate these producers before changing a pose gate or timestamps.
-
-
-## Authoritative post-render camera proof
-
-The diagnostic at9857b38 distinguished producers without changing its original
-gate: all32CameraParams matrices, including motion and both frames after paused
-restore, match the measured observation camera pose within1.71e-7. Their compute
-counts equal the RGB compute counts on every captured tick and both advance by
-exactly1 within each recording epoch. SDK drawable matrices remain one tick older;
-adding the post-render annotator did not change that SDK phase. Thus the rejected
-SDK pose gate did not describe the RGB camera's render results. No camera or
-image timestamp is changed to reach this conclusion.
-
-Admission now requires legacy `omni.replicator.core.CameraParams` metadata on the
-same render product as RGB/ReferenceTime, with positive compute count advancing
-exactly1 alongside RGB. `Playing.render` compares its camera matrix against the
-frozen physical snapshot's calibrated camera world pose for both cameras, using
-the unchanged2e-4 maximum-entry tolerance. A mismatch faults before
-`Capture.complete` can finalize a proof or return a row to gates/writers. The probe
-uses that same authoritative matrix and retains SDK matrices as
-`drawable_pose_phase` diagnostics. CameraParams comes from the installed
-PostProcessRenderProductCamera/SdRenderProductCamera dependency on renderResults.
-Native snapshots also require every articulation/body/link physics handle to be
-valid, preventing frozen USD fallback from masquerading as measured physics.
-
-The regression fixture `fixtures/camera_params_32_trace.json` contains the actual
-32native packets, camera transforms and source receipt SHA. It passes the new
-metadata/pose checks; substituting the old drawable matrix fails. The final native
-boot must still prove successful exit/finalization on this corrected entrance.
-GPU0is reserved for the ROS fixed-base smoke first. Its new read-only fixtures
-will live under `datasets/smoke-descent-clearance-fixed-v1/`; prior floating-base
-fixtures are comparison evidence and do not fulfill the new acceptance run.
+GPU 0is currently owned by the fixed-base ROS smoke. The final corrected boot and
+episode window require a fresh lead grant after it finishes. Read-only fresh
+fixtures appear under `datasets/smoke-descent-clearance-fixed-v1/`; accepted normal
+attempts 0000/0001 use seeds 330000/330001. Check completed receipts and provenance
+when selecting fixtures; do not modify them. Earlier floating-base fixtures do
+not fulfill the corrected-physics acceptance experiment. Re-grasp fixtures remain
+pending. No native successful finalization,5+5accepted dataset, unchanged
+export/readback, same-seed ROS frame comparison, renderer-gap metrics or collector
+RTF has yet been accepted. The lead retains a live GUI check before merging main.
