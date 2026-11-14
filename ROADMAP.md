@@ -224,6 +224,12 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       detection, reopen/scene refresh and recovery metadata/export checks. Review and all-regrasp smoke pending.
       Later option: policy-in-the-loop interventions (DAgger/HIL-style), with the scripted expert taking over when
       the trained policy misses.
+    - 2026-11-14 smokes on dual GPU 0 (branch w_collect_recovery): v1-v3 stopped on startup/handover bugs, each
+      fixed with offline regressions plus a full fake re-grasp attempt (e89a33d). v4 reached the first moving
+      miss stage: PhysX TGS moved shoulder_lift 139 urad beyond cap*dt in one substep with velocity under the
+      cap, so a velocity cap cannot bound per-substep reach. Direction (B): kinematic arm through the masked
+      miss prefix (positions + drive targets set per substep, exact by construction), normal dynamics for the
+      corrective cycle; w_collect investigating a supported native route first.
 - [ ] 3.1j Simpler physics and a deeper grasp (Aldrin, 2026-11-14): the gripper barely grips the lego. Lego -> box
       collider (now SDF); cup -> compound of native primitives (now a 16-piece convex decomposition with a floor
       1.7 mm too high and asymmetric walls); robot/gripper colliders -> few primitives with accurate finger pads;
