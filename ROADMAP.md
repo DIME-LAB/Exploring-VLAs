@@ -165,6 +165,15 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       Historical smoke: own instance down (35 tracked processes gone); superseded by the pilot proof above.
       Mac: coursework-eee598/roadmap-2026-11/phase3/3.1-collection/smoke-a8fc78b/.
     - [ ] Full collection: ~900 episodes; lead schedules after pilot review.
+      2026-11-14: runs on rtx6000 (operator: long runs there, not dual GPU 0). Host qualified (MoveIt 26 pkgs
+      apt-installed at dual's exact versions with operator OK; rtx-only charset_normalizer preload; own ABI
+      manifest ec82d39; export dependency drift refusal bf7336d). Smoke 5/5; 2 instances ~42 accepted/h each,
+      ~110 ms/tick; 4 instances (domains 93-96, seeds 530000+10000*k) measuring from 15:28Z. Batches backed up
+      SHA-verified to /mnt/a4500-backup/exploring-vlas/datasets/rtx6000-normal-*. Normal only.
+    - [ ] Faster per-tick collision check (operator, 2026-11-14): opt-in conservative pre-check that skips
+      MoveIt validity queries only on provably clear ticks (~53 of ~113 ms/tick); recorded data must stay
+      byte-identical (same-seed A/B), then review, then later batches may switch. w_collect, branch
+      w_collect_fastcheck.
       Searched 2026-11-13: no larger existing sim set on HF (3 accounts + global search), ASU Drive,
       dual-a4500 or rtx6000 (own folders); only teammates' machines unchecked.
 - [ ] 3.1f In-process ("battery"-style) collector, if the 3.1d pilot's throughput is too low for ~900+ episodes:
