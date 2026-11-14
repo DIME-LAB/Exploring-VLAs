@@ -45,7 +45,7 @@ from frame_join import SensorAmbiguity,identity as frame_identity,exact_duplicat
 from image_transport import publisher_executor_type
 from comparisons import comparison,matches,interval,native_frame,TOLERANCES
 from contract import COLORS, JOINTS, EVAL_SEEDS, corrective_action, parameters, timing_audit
-from checkpoint import progress
+from checkpoint import progress, episode_regrasp, require_recovery_mode
 from storage import atomic_json,CANONICAL_ROOT, RootFileGrowth, SceneSafetyMarker, confined, prepare_environment, wait_for_storage
 from protocol import StepGeneration, CancelledGeneration, OwnershipStalled
 from scene_sync import physical_pose_caches, collision_pose_errors
@@ -54,7 +54,7 @@ from success import SETTLED_TICKS, initial_arm, settled_containment
 from cup_geometry import PROFILE,CUP,PRIMITIVES,primitive_world_poses
 from diagnostics import final_stills
 from query_service import StrictQueryClient
-from recovery import REGRASP_POLICY, regrasp_slot, recovery_geometry, detect_miss
+from recovery import REGRASP_POLICY, recovery_geometry, detect_miss
 from dart import DEFAULT_NOISE, SmoothDart, TargetCandidate, PlannerSchedule
 from command_geometry import choose_noise_scale, final_command, QUERY_POLICY, frame_capacity_seconds
 from tick_contract import TickContract, TickContractError, require_snapshots, digest, verify_proof, CLOCK_POLICY, STEP_NS
@@ -1424,9 +1424,10 @@ class Collector:
         if (root / 'superseded.json').exists():
             raise ValueError('Superseded diagnostic run requires a fresh output directory')
         if args.resume:collection_status.require_finalized(root)
+        previous = json.loads((root / 'run.json').read_text()) if args.resume else None
+        mode = require_recovery_mode(previous,args.regrasp_only,args.normal_only)
         root.mkdir(parents=True, exist_ok=args.resume)
         with self.status_lock:self.finalization_certificate=collection_status.begin(root)
-        previous = json.loads((root / 'run.json').read_text()) if args.resume else None
         if previous and previous.get('diagnostic', False) != args.diagnostic:
             raise ValueError('Resume diagnostic retention mode differs from the existing run')
         wait_policy = dict(rtf_floor=args.wait_rtf_floor, sim_margin_s=5., wall_margin_s=frame_capacity_seconds()+30.,
@@ -1456,9 +1457,7 @@ class Collector:
         streak = FailureStreak(receipts)
         if streak.stopped:
             raise RuntimeError('Previous receipt ledger requires a stop; review before a new run')
-        if previous and previous.get('regrasp_only',False)!=args.regrasp_only:
-            raise ValueError('Resume recovery mode differs')
-        attempted, accepted = progress(receipts,args.seed,args.regrasp_only,lambda r:ledger_rows[r['params']['trial']])
+        attempted, accepted = progress(receipts,args.seed,args.regrasp_only,lambda r:ledger_rows[r['params']['trial']],normal_only=args.normal_only)
         if accepted > args.episodes:
             raise ValueError('Requested target is smaller than the accepted checkpoint')
         old_summary = json.loads((root / 'summary.json').read_text()) if (root / 'summary.json').exists() else {}
@@ -1576,7 +1575,7 @@ class Collector:
             atomic_json(root / 'run.json',dict(instance=args.instance, host=socket.gethostname(), gpu_index=int(os.getenv('ISAACSIM_GPU', '0')),
             wall_profile_policy=PROFILE_POLICY,recording_version=6,camera_selection_policy=CAMERA_SELECTION_POLICY,image_transport=self.executor.image_take.metadata, gpu_isolation_initial=initial_gpu_footprint,transport_config=transport_config, observation_state_topic='/joint_states_measured',
             diagnostic=args.diagnostic, success_profile=PROFILE,
-            motion_wait_policy=wait_policy, tick_clock_policy=CLOCK_POLICY,geometry_query_policy=QUERY_POLICY,quality_policy=POLICY,regrasp_policy=REGRASP_POLICY,regrasp_only=args.regrasp_only,
+            motion_wait_policy=wait_policy, tick_clock_policy=CLOCK_POLICY,geometry_query_policy=QUERY_POLICY,quality_policy=POLICY,regrasp_policy=REGRASP_POLICY,regrasp_only=args.regrasp_only,normal_only=args.normal_only,recovery_mode=mode,
             application_contract='Held at observation tick; read-back verified PhysX targets before one-frame advance; maximum one sim tick latency',
             clock_config=clock_config, domain=90 + args.instance,
             bridge_port=8777 + 2 * args.instance, fps=30, baseline=baseline, baseline_cup_layout=self.baseline_cup_layout, eval_seeds=EVAL_SEEDS,
@@ -1593,7 +1592,7 @@ class Collector:
             attempted += 1
             color = COLORS[accepted % 3]
             params = (json.loads(args.replay_receipt.read_text())['params'] if args.replay_receipt
-                      else parameters(args.seed+trial,color,regrasp=args.regrasp_only or regrasp_slot(accepted)))
+                      else parameters(args.seed+trial,color,regrasp=episode_regrasp(accepted,args.regrasp_only,args.normal_only)))
             params['trial'] = trial
             path = root / f'attempt-{trial:04d}'
             receipt = dict(physics=transport_config['physics_config'],params=params,accepted=False,episode_id=hashlib.sha256((str(root)+':'+str(trial)+':'+str(params['seed'])).encode()).hexdigest())
@@ -1903,7 +1902,9 @@ def main():
                         help='Conservative RTF floor used only for motion wall watchdogs')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--resume', action='store_true', help='Re-audit and continue this output ledger')
-    parser.add_argument('--regrasp-only',action='store_true',help='Use re-grasp recovery in every accepted slot for its smoke')
+    recovery_group=parser.add_mutually_exclusive_group()
+    recovery_group.add_argument('--regrasp-only',action='store_true',help='Use re-grasp recovery in every accepted slot for its smoke')
+    recovery_group.add_argument('--normal-only',action='store_true',help='Disable recovery sampling for a normal-only run')
     parser.add_argument('--diagnostic', action='store_true', help='Keep failed videos and save final recorded-frame stills')
     args = parser.parse_args()
     if not math.isfinite(args.wait_rtf_floor) or args.wait_rtf_floor <= 0:

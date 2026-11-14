@@ -92,7 +92,7 @@ def main():
                       bootstrap_revoked=True,camera_native_skew_ns=167,wall_watchdog_margin_s=self.node._motion_waiter.wall_margin,executor_alive=self.ros_thread.is_alive(),capture_alive=self.capture_thread.is_alive())
         raise HeldTickReached()
     try:
-        config=NS(output=output/'run',episodes=5,max_attempts=1,resume=False,seed=1,regrasp_only=False,replay_receipt=None,wait_rtf_floor=.1,episode_deadline=180,diagnostic=True,instance=0)
+        config=NS(output=output/'run',episodes=5,max_attempts=1,resume=False,seed=1,regrasp_only=False,normal_only=True,replay_receipt=None,wait_rtf_floor=.1,episode_deadline=180,diagnostic=True,instance=0)
         with patch.object(implementation,'mcp',fake_mcp),patch.object(implementation,'timeline',native_tick),\
              patch.object(implementation.Collector,'wait_ready',first_held_tick):
             try:

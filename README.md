@@ -825,8 +825,9 @@ bash linux-env/scripts/collect_sim.sh export 0 \
   --repo-id local/soarm101_headless_smoke \
   --report-dir /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-smooth-regrasp-v1/report
 
-# Only after the corrected five-episode smoke passes; accepted colours rotate 17/17/16.
-bash linux-env/scripts/collect_sim.sh run 0 --episodes 50 --seed 320000 \
+# Normal-only pilot: explicit mode disables the mixed recovery quota; resume requires the same mode.
+# Accepted colours rotate 17/17/16. Recovery smoke and later recovery collection are separate.
+bash linux-env/scripts/collect_sim.sh run 0 --episodes 50 --seed 350000 --normal-only \
   --output /mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1-v3
 bash linux-env/scripts/collect_sim.sh export 0 \
   /mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1-v3 \
