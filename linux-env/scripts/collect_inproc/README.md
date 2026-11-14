@@ -33,11 +33,12 @@ Inside the explicitly assigned, held ROS collector Kit, load this helper with
 import sys
 sys.path.insert(0, '/home/aaugus11/Downloads/Exploring-VLAs/linux-env/scripts/collect_inproc')
 from snapshot_scene import export_scene
-result = export_scene('/mnt/a4500-backup/exploring-vlas/inproc/scene-v1',
-                      WRIST_CAMERA_PATH, WORKSPACE_CAMERA_PATH)
+result = export_scene('/mnt/a4500-backup/exploring-vlas/inproc/scene-v1')
 ```
 
 The helper requires `collection_runtime.runtime()` already installed and held.
+It resolves actual camera relationships from the current collector's render-product
+graph inputs, as in `configure_clock.py`; no old camera paths are assumed.
 It exports a flattened scene, native baseline, joint/primitive geometry and source
 digests. It refuses unknown enabled collision shapes. It does not launch or stop
 the shared sim. Stop the ROS instance only through its owner before standalone work.
@@ -87,6 +88,8 @@ links explicitly. It requires the same window/GPU environment and never promotes
 candidate receipts. This experimental adapter still needs live clock, scale,
 pixel-fidelity and shutdown verification.
 
+Run `compare.py` inside the same pixi environment as validation (the Isaac venv's
+OpenCV cannot decode H.264 on this host).
 `compare.py --reference ROS_ATTEMPT --candidate INPROC_ATTEMPT --output REPORT`
 checks seed/target identity and writes a two-camera side-by-side and stage summary.
 It labels this a trajectory comparison, since different expert paths can produce

@@ -158,10 +158,15 @@ def run(a):
                     receipt['timing']=timing_audit(writer.rows,30)
                     receipt['accepted']=receipt['accepted'] and receipt['timing']['passed']
                 else:path.mkdir(parents=True,exist_ok=True)
-                backend.world.pause()
+                held=False;pause_failure=None
+                try:
+                    backend.world.pause();held=not backend.world.is_playing()
+                    if not held:raise RuntimeError('World pause did not hold the simulation')
+                except BaseException as exc:
+                    pause_failure=repr(exc);receipt['pause_error']=pause_failure
+                    if error is None:error=exc
                 backend.epoch+=1
-                held=not backend.world.is_playing()
-                receipt.update(end_cancel=dict(held=held,failure=None if held else 'pause failed',epoch=backend.epoch),
+                receipt.update(end_cancel=dict(held=held,failure=pause_failure,epoch=backend.epoch),
                     retirement=dict(passed=writer is None or not writer.thread.is_alive(),workers=0),profiles=profiles)
                 if receipt['accepted'] or receipt.get('physics_candidate'):
                     problem=receipt_error(receipt,writer.rows)

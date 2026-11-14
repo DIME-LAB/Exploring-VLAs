@@ -85,6 +85,9 @@ class Native:
         from isaacsim.core.api import World
         from isaacsim.core.prims import Articulation,RigidPrim
         self.manifest=json.loads(Path(manifest).read_text())
+        cup_asset=shared.REPO/'isaac/exts/soarm101-dt/assets/sorting_collision_geometry.json'
+        if hashlib.sha256(cup_asset.read_bytes()).hexdigest()!=self.manifest['cup_geometry_sha256']:
+            raise RuntimeError('Scene and physical success gate use different cup geometry')
         if hashlib.sha256(Path(scene).read_bytes()).hexdigest()!=self.manifest['scene_sha256']:
             raise RuntimeError('Scene digest differs from baseline manifest')
         omni.usd.get_context().open_stage(str(scene))
@@ -92,6 +95,9 @@ class Native:
         # Edits affect only this private stage; the source file is never saved.
         for prim in list(self.stage.GetPseudoRoot().GetChildren()):
             if prim.GetName() in ('Graph','Render'):self.stage.RemovePrim(prim.GetPath())
+        if not cameras:
+            for prim in self.stage.Traverse():
+                if prim.IsA(UsdGeom.Camera) and prim.HasAPI('OmniSensorAPI'):prim.RemoveAPI('OmniSensorAPI')
         self.world=World(physics_dt=1/120,rendering_dt=1/30,stage_units_in_meters=1.,backend='numpy',device='cpu')
         physics=self.world.get_physics_context()
         physics.enable_gpu_dynamics(False);physics.set_broadphase_type('MBP')
