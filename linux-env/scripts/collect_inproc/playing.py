@@ -29,8 +29,9 @@ class FrameLedger:
     """Bind one fresh producer pair to one actual four-substep observation."""
     def __init__(self):self.previous=None;self.boundary=None
 
-    def reset(self,epoch,stamp,world):
+    def reset(self,epoch,stamp,world,cameras=None):
         self.previous=None;self.boundary=dict(epoch=epoch,sim_ns=stamp,physics_time_s=world)
+        if cameras is not None:self.boundary['cameras']=copy.deepcopy(cameras)
 
     def check_advance(self,packet,previous):
         if previous is None:raise RuntimeError('Playing frame has no restored baseline')
@@ -177,7 +178,8 @@ class Playing(Native):
     def __init__(self,scene,manifest,warmup=120):
         import omni.timeline
         self.timeline=omni.timeline.get_timeline_interface()
-        self.pending=None;self.frames=FrameLedger()
+        self.pending=None;self.frames=FrameLedger();self.priming_reports=[]
+        self.prime_on_restore=False
         super().__init__(scene,manifest,cameras=True)
         import omni.physx
         import carb
@@ -201,7 +203,9 @@ class Playing(Native):
             '/omni/replicator/disableAnnotatorGate','/rtx/rendermode')}
         self.pipeline_settings['hydra_texture_async']={key:p.hydra_texture.get_async()
             for key,p in self.rgb.products.items()}
-        self.restore(self.manifest['baseline'])
+        # The caller restores its own baseline after inspecting initialization.
+        # Native.__init__ restores before the physics subscription exists.
+        self.prime_on_restore=True
 
     def create_cameras(self):
         import omni.kit.viewport.utility as vu
@@ -249,7 +253,54 @@ class Playing(Native):
             for product in self.rgb.products.values():product.hydra_texture.set_updates_enabled(True)
         self.pending=None
         self.frames.reset(result['epoch'],result['invalid_through_ns'],result['snapshot']['physics_time_s'])
-        return result
+        return self.prime(result) if self.prime_on_restore else result
+
+    def prime(self,restored,max_updates=30,required=3):
+        """Discard a bounded startup transient while keeping restored drives."""
+        if not 3<=required<=max_updates<=30:raise ValueError('Invalid priming bound')
+        report=dict(epoch=restored['epoch'],max_updates=max_updates,required=required,
+            passed=False,updates=[],consecutive=0)
+        self.priming_reports.append(report)
+        candidate=FrameLedger();previous=self.clock()
+        targets=restored['command_baseline']['drive_targets']
+        started=time.perf_counter_ns()
+        for index in range(max_updates):
+            packet,counts,_=self.advance()
+            snapshot=self.snapshot()
+            if (snapshot['epoch']!=restored['epoch'] or snapshot['sim_ns']!=packet['sim_ns'] or
+                not matches(snapshot['drive_targets'],targets,'target_rad') or self.last_apply is not None):
+                raise RuntimeError('Priming changed the restored command baseline')
+            row=dict(index=index,packet=copy.deepcopy(packet),accepted=False,
+                drive_targets=list(snapshot['drive_targets']))
+            report['updates'].append(row)
+            counts_now=list(packet['render_completions'].values())
+            valid=counts_now==[1,1]
+            if valid:
+                try:
+                    _,cameras,_=self.rgb.read(counts)
+                    packet.update(cameras=cameras,observation_epoch=previous['epoch'],
+                        observation_ns=previous['sim_ns'],image_delay_updates=1)
+                    if candidate.previous is None:
+                        candidate.reset(previous['epoch'],previous['sim_ns'],previous['physics_time_s'])
+                    candidate.accept(packet)
+                except RuntimeError as exc:
+                    valid=False;row['camera_error']=str(exc)
+            row['packet']=copy.deepcopy(packet)
+            if valid:report['consecutive']+=1
+            else:report['consecutive']=0;candidate=FrameLedger()
+            previous=snapshot
+            if report['consecutive']>=required:
+                report.update(passed=True,wall_ms=(time.perf_counter_ns()-started)/1e6,
+                    final_sim_ns=snapshot['sim_ns'])
+                self.pending=None;self.floor=snapshot['sim_ns']
+                self.frames.reset(snapshot['epoch'],self.floor,snapshot['physics_time_s'],packet['cameras'])
+                return dict(epoch=snapshot['epoch'],invalid_through_ns=self.floor,
+                    arm_restored=restored['arm_restored'],snapshot=snapshot,
+                    command_baseline=dict(epoch=snapshot['epoch'],sim_ns=self.floor,
+                        physics_time_s=snapshot['physics_time_s'],drive_targets=list(targets)),
+                    restore_verification=copy.deepcopy(restored),priming=copy.deepcopy(report))
+        report['wall_ms']=(time.perf_counter_ns()-started)/1e6
+        raise RuntimeError('Camera priming did not stabilize within '+str(max_updates)+' updates')
 
     def align_timeline(self):
         # World play/pause pumps updates without physics, and float32 PhysX dt
@@ -271,12 +322,11 @@ class Playing(Native):
         # PhysX callbacks independently; the shared contract checks its deltas.
         return round(self.native_time()*1e9)
 
-    def step(self):
-        if self.pending is not None:raise RuntimeError('Previous playing frame has not been consumed')
+    def advance(self):
+        """One measured physical/render update, shared by priming and recording."""
         if not self.world.is_playing():raise RuntimeError('Playing collector timeline unexpectedly stopped')
         flags=capture_settings(self.settings)
         observation=self.clock()
-        recording=self.last_apply==(observation['epoch'],observation['sim_ns'])
         self.align_timeline()
         start=time.perf_counter_ns();old_steps=self.actual_physics_steps
         index=self.world.current_time_step_index;before=dict(self.rgb.render_events)
@@ -295,17 +345,17 @@ class Playing(Native):
             raise RuntimeError('Fabric renderer clock is unavailable or non-finite')
         self.last_frame['fabric_time_s']=float(fabric_time)
         self.frames.check_advance(self.last_frame,observation)
+        return self.last_frame,before,(update_end-start)/1e6
+
+    def step(self):
+        if self.pending is not None:raise RuntimeError('Previous playing frame has not been consumed')
+        observation=self.clock()
+        recording=self.last_apply==(observation['epoch'],observation['sim_ns'])
+        _,before,update_ms=self.advance()
+        snapshot=self.clock();start=time.perf_counter_ns()
         completions=list(self.last_frame['render_completions'].values())
-        if all(count==0 for count in completions) and not recording:
-            # The first advance after restore establishes the first observation.
-            # Any camera delivery at/before that reset floor remains unconsumed.
-            self.frames.reset(snapshot['epoch'],snapshot['sim_ns'],snapshot['physics_time_s'])
-            return (time.perf_counter_ns()-start)/1e6
         if any(count!=1 for count in completions):raise RuntimeError('Expected exactly one new render for both cameras')
         images,cameras,copy_ms=self.rgb.read(before)
-        if not recording and all(v['stamp_ns']<=self.floor+1000 for v in cameras.values()):
-            self.frames.reset(snapshot['epoch'],snapshot['sim_ns'],snapshot['physics_time_s'])
-            return (time.perf_counter_ns()-start)/1e6
         matches_clock=[(stamp,delay) for stamp,delay in ((snapshot['sim_ns'],0),(observation['sim_ns'],1))
             if all(matches(v['stamp_ns'],stamp,'stamp_ns') for v in cameras.values())]
         if len(matches_clock)!=1:raise RuntimeError('Camera clocks are outside the bounded native observation window')
@@ -313,12 +363,17 @@ class Playing(Native):
         packet=dict(self.last_frame,cameras=cameras,observation_epoch=observation['epoch'],
             observation_ns=target,image_delay_updates=delay);self.last_frame=packet
         self.frames.accept(packet)
-        profile=dict(app_update_ms=(update_end-start)/1e6,camera_read_ms=copy_ms,
+        if not recording and target<=self.floor+1000:
+            # The first observation remains one tick after the measured boundary.
+            # Even this discarded boundary image must pass the strict ledger.
+            self.frames.reset(snapshot['epoch'],snapshot['sim_ns'],snapshot['physics_time_s'],cameras)
+            return update_ms+(time.perf_counter_ns()-start)/1e6
+        profile=dict(app_update_ms=update_ms,camera_read_ms=copy_ms,
             camera_stamps={k:v['stamp_ns'] for k,v in cameras.items()},playing_frame=packet,
             image_delay_updates=delay,
             synchronization='native stamp join, zero or one app update; drawable and copy counters')
         self.pending=(images,profile)
-        return (time.perf_counter_ns()-start)/1e6
+        return update_ms+(time.perf_counter_ns()-start)/1e6
 
     def frame_ready(self,expected):
         if self.pending is None:return False

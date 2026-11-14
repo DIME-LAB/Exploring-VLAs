@@ -471,3 +471,38 @@ episodes: `datasets/smoke-primitive-reset-v4/` under canonical storage. Use its
 completed receipts and the pilot output when the lead grants the episode window;
 re-grasp input provenance remains to be supplied. Older v3 seed fixtures remain
 comparison evidence, not a requirement to use superseded reset behavior.
+
+
+## Bounded unrecorded priming
+
+The e5117dc boot probe on 2026-11-14 failed after 22.00 s with the same startup
+zero/two render-completion transient. Both texture async readbacks were false.
+GPU/renderer pinning, CPU PhysX, native FK and immediate restore passed; zero rows
+were finalized, and motion, later reset, pose phase and successful exit were not
+reached. The sim was released at 10:37:23Z; identity receipts prove no remaining
+owned processes or GPU contexts and ports8781/8782 closed. Both joined probes fail
+before their later reset, so recurrence after every reset is unmeasured.
+
+The playing adapter primes after every immediate verified restore. It keeps the
+restored drives without new target writes and advances at most 30 updates. Every
+advance must retain its epoch, four actual physics callbacks/World steps, native
+clock progression and restored drive targets. Startup camera omissions/bursts are
+explicitly discarded. Three consecutive updates must each supply exactly one
+completion and RGB compute per camera, increasing matching drawable frame IDs,
+and original ReferenceTime equal to the preceding measured tick. Instability
+resets the consecutive count; exhausting the bound is terminal. All priming clock,
+render and camera metadata is retained as unaccepted evidence.
+
+The end of priming becomes a measured recording boundary. Capture first validates
+the original immediate restore against the prior shared tick contract, including
+its cancellation clock, before creating a fresh local contract after the discarded
+interval. It verifies the priming clocks, unchanged drives and final three pairs
+again. This avoids fabricating command ACKs or teaching the shared contract to
+accept gaps in recorded observations. The ordinary first observation remains one
+tick after the settled boundary. Even its discarded boundary image must pass the
+strict ledger. No image/state is restamped; a later zero/two burst still faults.
+Reports and episode receipts retain both the original physical restore proof and
+the settled recording boundary. Live boot/motion/paused-reset/pose/success-exit
+acceptance is required before any normal pilot. No further sim launch is authorized
+by the released window. The 5+5 dataset, unchanged exporter/readback, same-seed
+ROS comparison, all renderer fidelity metrics and collector RTF remain pending.

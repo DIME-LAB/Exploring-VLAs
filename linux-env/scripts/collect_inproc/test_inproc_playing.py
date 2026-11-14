@@ -26,6 +26,7 @@ class PlayingTests(unittest.TestCase):
         result=dict(epoch=7,invalid_through_ns=1000000000,snapshot=dict(physics_time_s=1.))
         for playing in (True,False):
             owner=Playing.__new__(Playing);owner.timeline=Timeline(playing)
+            owner.prime_on_restore=False
             owner.settings=Settings();owner.frames=FrameLedger()
             owner.fabric_time=SimpleNamespace(Get=lambda:1.)
             texture=SimpleNamespace(set_updates_enabled=lambda enabled:None)

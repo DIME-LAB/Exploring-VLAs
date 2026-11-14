@@ -154,6 +154,7 @@ def run(a):
             try:
                 geometry.carried=None;geometry.contact=False;geometry.selected=None
                 restored=backend.restore(fixture['initial_physical']);capture.boundary(restored)
+                receipt['restore_boundary']=restored
                 backend.step()
                 home=_grasp_home_data_target();reference=[home[n] for n in JOINTS[:5]]+[backend.snapshot()['state'][5]]
                 for _ in range(6):tick(reference,reference,[0.]*6,'home_verification')
@@ -162,6 +163,7 @@ def run(a):
                 if not gate['passed']:raise QualityReject('home_unstable',gate,gate['contract'])
                 # Zero velocities and establish a verified fresh capture boundary.
                 restored=backend.restore(backend.snapshot());capture.boundary(restored)
+                receipt['recording_boundary']=restored
                 backend.step();checked.clear()
                 writer=Writer(path,render=not a.physics_only);record=True
                 expert=Expert(backend,geometry,tick,p,episode_id)

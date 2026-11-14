@@ -47,6 +47,7 @@ def main(a):
     start=time.perf_counter()
     def save(stage):
         report['stage']=stage;report['wall_s']=time.perf_counter()-start
+        if backend:report['priming_reports']=getattr(backend,'priming_reports',[])
         atomic_json(root/'probe.json',report)
     try:
         heartbeat('probe startup',900.);save('app_start')

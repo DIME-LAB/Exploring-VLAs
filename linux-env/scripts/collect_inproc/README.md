@@ -5,10 +5,13 @@ success gate, tick audit, fault policy and exporter. The first boot window verif
 scene export, GPU/CPU assignment, native FK and immediate restore. Held-time RGB
 failed. Playing now reads both camera buffers; an eight-update trace shows one
 camera pair delivered for the preceding native timestamp on every update.
-The first joined boot rejected a zero/two-completion startup burst. Texture-level
-synchronous-render preference and timeline no-op guards are prepared offline for
-the next granted probe. No episodes or dataset rows have been accepted. CPU checks do not
-establish physical grasp yield, camera freshness, renderer fidelity or throughput. See
+Joined boot probes still reject a zero/two-completion startup burst; requesting
+synchronous textures did not remove it. A bounded unrecorded priming phase after
+each restore holds the restored drive targets and requires three consecutive
+previous-tick camera pairs within 30 updates. It preserves raw restore and priming
+evidence before opening the strict recording ledger. This priming path has not yet
+passed a live probe. No episodes or dataset rows have been accepted. CPU checks do
+not establish physical grasp yield, renderer fidelity or throughput. See
 [`docs/notes/inprocess-collector.md`](../../../docs/notes/inprocess-collector.md).
 No shared ROS collector or extension module is changed.
 
@@ -75,8 +78,8 @@ rechecks the current Kit table and owned process GPU allocations. `status` and
 Never stop another collector or prompt2assembly process.
 
 The lead's fresh read-only inputs currently live under
-`datasets/smoke-primitive-native-tick-v3/` in canonical storage: accepted normal
-receipts attempt-0000/0002 (seeds330000/330002). Re-grasp inputs are pending.
+`datasets/smoke-primitive-reset-v4/` in canonical storage: five accepted normal
+receipts (seeds330000/330002/330003/330004/330005). Re-grasp inputs are pending.
 A normal pilot uses `--kind normal --per-kind 2` with those two receipts after
 boot acceptance. Accepted seeds are excluded from retries. It is a pilot, not 5+5.
 
@@ -105,7 +108,19 @@ records both flag readbacks, CPU RGB buffer shapes/compute counts and Fabric's
 external physics time. The internal empty-list annotation filter is bypassed;
 the collector verifies the original stamp, drawable frame and copy count itself.
 Texture async preferences are explicitly disabled and read back after warmup;
-actual one-update delivery is still a required live check.
+actual one-update delivery is still a required live check. After every verified
+restore, priming discards at most 30 physical/render updates and requires three
+consecutive pairs whose original ReferenceTime equals the previous physical tick,
+with increasing drawable IDs and exactly one new RGB compute per update. No new
+targets are issued during priming. Physics/clock/drive faults are terminal; camera
+instability exhausts the explicit bound. Raw restore proof and every discarded
+update are retained. The first boundary image after priming also passes the strict
+ledger before being discarded; recorded gaps remain terminal.
+The immediate restore is checked against the preceding shared tick contract, then
+a fresh local recording contract begins at the measured settled boundary. This
+permits explicitly unrecorded settling without inventing commands or relaxing
+the shared validator. Priming after a paused later reset must pass the same live
+probe as priming after startup.
 The timeline follows the native Fabric clock; World time is checked independently
 for four-substep progression. `Capture.prepare` issues the actual command at t;
 `Capture.complete` joins the camera frames stamped t to the retained state and

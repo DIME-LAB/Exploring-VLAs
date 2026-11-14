@@ -1,0 +1,744 @@
+{
+  "source": "/mnt/a4500-backup/exploring-vlas/inproc/probe-joined-20261114-v2/probe.json",
+  "source_sha256": "393afbc3abc01c3aa5eca194dca87be6e9c95b5b339227ba6ccca780bfdec9d9",
+  "commit": "e5117dc",
+  "failed_playing_frame": {
+    "epoch": 3,
+    "sim_ns": 4100000000,
+    "timeline_ns": 4100000000,
+    "capture_settings": {
+      "/persistent/omni/replicator/captureOnPlay": true,
+      "/omni/replicator/captureOnPlay": true
+    },
+    "render_completions": {
+      "/Render/OmniverseKit/HydraTextures/Replicator_01": 0,
+      "/Render/OmniverseKit/HydraTextures/Replicator_02": 0
+    },
+    "physics_time_s": 4.100000213831663,
+    "native_physics_steps": 4,
+    "world_step_count": 4,
+    "fabric_time_s": 4.1
+  },
+  "trace": [
+    {
+      "index": 0,
+      "before_ns": 4100000000,
+      "after_ns": 4133333333,
+      "before_state": [
+        -3.4384793252684176e-05,
+        0.005487795453518629,
+        0.0019691488705575466,
+        0.00036690104752779007,
+        2.75774782494409e-05,
+        -7.929604180390015e-06
+      ],
+      "after_state": [
+        -3.436914266785607e-05,
+        0.005614610854536295,
+        0.0020152407232671976,
+        0.0003761233820114285,
+        2.816919186443556e-05,
+        -8.136909855238628e-06
+      ],
+      "physical_steps": 4,
+      "world_steps": 4,
+      "render_completions": {
+        "/Render/OmniverseKit/HydraTextures/Replicator_01": 2,
+        "/Render/OmniverseKit/HydraTextures/Replicator_02": 2
+      },
+      "accepted": false,
+      "cameras": {
+        "wrist": {
+          "swh_frame_number": null,
+          "render_frame_number": 275,
+          "frame_identity_source": "hydra drawable frame_number",
+          "render_view": [
+            0.012276989454933631,
+            0.41164827557189076,
+            -0.9112601015893387,
+            0.0,
+            -0.04027913352298137,
+            0.9107926919293844,
+            0.4108944678754675,
+            0.0,
+            0.999113040117364,
+            0.03166022025688497,
+            0.02776262813071273,
+            -0.0,
+            -0.23881500891047872,
+            -0.1896707235784356,
+            0.2461174004859722,
+            1.0
+          ],
+          "stamp_ns": 4099999999,
+          "reference_time": [
+            4099999999,
+            1000000000
+          ],
+          "copy_compute_count": 122,
+          "completions": 2
+        },
+        "top": {
+          "swh_frame_number": null,
+          "render_frame_number": 275,
+          "frame_identity_source": "hydra drawable frame_number",
+          "render_view": [
+            -0.9474767116500409,
+            -0.13315833763051044,
+            0.29078641302561664,
+            -0.0,
+            0.31742858013137687,
+            -0.5026120950533953,
+            0.8041269666052837,
+            0.0,
+            0.03907655814684262,
+            0.8541954922765139,
+            0.518481517103436,
+            -0.0,
+            0.2147382255666807,
+            -0.0723734942229261,
+            -0.5714767228106823,
+            1.0000000000000002
+          ],
+          "stamp_ns": 4099999999,
+          "reference_time": [
+            4099999999,
+            1000000000
+          ],
+          "copy_compute_count": 122,
+          "completions": 2
+        }
+      }
+    },
+    {
+      "index": 1,
+      "before_ns": 4133333333,
+      "after_ns": 4166666667,
+      "before_state": [
+        -3.436914266785607e-05,
+        0.005614610854536295,
+        0.0020152407232671976,
+        0.0003761233820114285,
+        2.816919186443556e-05,
+        -8.136909855238628e-06
+      ],
+      "after_state": [
+        -3.4415879781590775e-05,
+        0.005590441636741161,
+        0.002006463473662734,
+        0.0003743649576790631,
+        2.805720578180626e-05,
+        -8.09767243481474e-06
+      ],
+      "physical_steps": 4,
+      "world_steps": 4,
+      "render_completions": {
+        "/Render/OmniverseKit/HydraTextures/Replicator_01": 1,
+        "/Render/OmniverseKit/HydraTextures/Replicator_02": 1
+      },
+      "accepted": false,
+      "cameras": {
+        "wrist": {
+          "swh_frame_number": null,
+          "render_frame_number": 295,
+          "frame_identity_source": "hydra drawable frame_number",
+          "render_view": [
+            0.01210746635087097,
+            0.41164703511565504,
+            -0.9112629300805849,
+            0.0,
+            -0.04027898460335477,
+            0.9107908310851591,
+            0.41089860721414906,
+            0.0,
+            0.9991151148180499,
+            0.03172980446985879,
+            0.02760809392948535,
+            -0.0,
+            -0.23880167404458214,
+            -0.18967937295605564,
+            0.24613806659590726,
+            1.0
+          ],
+          "stamp_ns": 4133333333,
+          "reference_time": [
+            4133333333,
+            1000000000
+          ],
+          "copy_compute_count": 123,
+          "completions": 1
+        },
+        "top": {
+          "swh_frame_number": null,
+          "render_frame_number": 295,
+          "frame_identity_source": "hydra drawable frame_number",
+          "render_view": [
+            -0.9474767116500409,
+            -0.13315833763051044,
+            0.29078641302561664,
+            -0.0,
+            0.31742858013137687,
+            -0.5026120950533953,
+            0.8041269666052837,
+            0.0,
+            0.03907655814684262,
+            0.8541954922765139,
+            0.518481517103436,
+            -0.0,
+            0.2147382255666807,
+            -0.0723734942229261,
+            -0.5714767228106823,
+            1.0000000000000002
+          ],
+          "stamp_ns": 4133333333,
+          "reference_time": [
+            4133333333,
+            1000000000
+          ],
+          "copy_compute_count": 123,
+          "completions": 1
+        }
+      }
+    },
+    {
+      "index": 2,
+      "before_ns": 4166666667,
+      "after_ns": 4200000000,
+      "before_state": [
+        -3.4415879781590775e-05,
+        0.005590441636741161,
+        0.002006463473662734,
+        0.0003743649576790631,
+        2.805720578180626e-05,
+        -8.09767243481474e-06
+      ],
+      "after_state": [
+        -3.440905493334867e-05,
+        0.005594645626842976,
+        0.0020079968962818384,
+        0.00037467232323251665,
+        2.8076559829059988e-05,
+        -8.104034350253642e-06
+      ],
+      "physical_steps": 4,
+      "world_steps": 4,
+      "render_completions": {
+        "/Render/OmniverseKit/HydraTextures/Replicator_01": 1,
+        "/Render/OmniverseKit/HydraTextures/Replicator_02": 1
+      },
+      "accepted": false,
+      "cameras": {
+        "wrist": {
+          "swh_frame_number": null,
+          "render_frame_number": 297,
+          "frame_identity_source": "hydra drawable frame_number",
+          "render_view": [
+            0.012316536855766912,
+            0.4116535552883206,
+            -0.9112571828734004,
+            0.0,
+            -0.04027843401560203,
+            0.9107908983331863,
+            0.41089851212516926,
+            0.0,
+            0.9991125815808403,
+            0.03164316564304028,
+            0.027798550231186388,
+            -0.0,
+            -0.23881797458369802,
+            -0.18966823477661515,
+            0.24611201522636314,
+            1.0
+          ],
+          "stamp_ns": 4166666666,
+          "reference_time": [
+            4166666666,
+            1000000000
+          ],
+          "copy_compute_count": 124,
+          "completions": 1
+        },
+        "top": {
+          "swh_frame_number": null,
+          "render_frame_number": 297,
+          "frame_identity_source": "hydra drawable frame_number",
+          "render_view": [
+            -0.9474767116500409,
+            -0.13315833763051044,
+            0.29078641302561664,
+            -0.0,
+            0.31742858013137687,
+            -0.5026120950533953,
+            0.8041269666052837,
+            0.0,
+            0.03907655814684262,
+            0.8541954922765139,
+            0.518481517103436,
+            -0.0,
+            0.2147382255666807,
+            -0.0723734942229261,
+            -0.5714767228106823,
+            1.0000000000000002
+          ],
+          "stamp_ns": 4166666666,
+          "reference_time": [
+            4166666666,
+            1000000000
+          ],
+          "copy_compute_count": 124,
+          "completions": 1
+        }
+      }
+    },
+    {
+      "index": 3,
+      "before_ns": 4200000000,
+      "after_ns": 4233333333,
+      "before_state": [
+        -3.440905493334867e-05,
+        0.005594645626842976,
+        0.0020079968962818384,
+        0.00037467232323251665,
+        2.8076559829059988e-05,
+        -8.104034350253642e-06
+      ],
+      "after_state": [
+        -3.438594285398722e-05,
+        0.00559408450499177,
+        0.002007791306823492,
+        0.00037463102489709854,
+        2.807376949931495e-05,
+        -8.103420441329945e-06
+      ],
+      "physical_steps": 4,
+      "world_steps": 4,
+      "render_completions": {
+        "/Render/OmniverseKit/HydraTextures/Replicator_01": 1,
+        "/Render/OmniverseKit/HydraTextures/Replicator_02": 1
+      },
+      "accepted": false,
+      "cameras": {
+        "wrist": {
+          "swh_frame_number": null,
+          "render_frame_number": 299,
+          "frame_identity_source": "hydra drawable frame_number",
+          "render_view": [
+            0.012275711029301724,
+            0.41165210210753334,
+            -0.9112583902215516,
+            0.0,
+            -0.04027875892242526,
+            0.9107909601076466,
+            0.4108983433476704,
+            0.0,
+            0.9991130709276073,
+            0.03166028769041639,
+            0.02776144241508076,
+            -0.0,
+            -0.23881481055196188,
+            -0.18967039843483727,
+            0.24611705367293654,
+            0.9999999999999998
+          ],
+          "stamp_ns": 4200000000,
+          "reference_time": [
+            4200000000,
+            1000000000
+          ],
+          "copy_compute_count": 125,
+          "completions": 1
+        },
+        "top": {
+          "swh_frame_number": null,
+          "render_frame_number": 299,
+          "frame_identity_source": "hydra drawable frame_number",
+          "render_view": [
+            -0.9474767116500409,
+            -0.13315833763051044,
+            0.29078641302561664,
+            -0.0,
+            0.31742858013137687,
+            -0.5026120950533953,
+            0.8041269666052837,
+            0.0,
+            0.03907655814684262,
+            0.8541954922765139,
+            0.518481517103436,
+            -0.0,
+            0.2147382255666807,
+            -0.0723734942229261,
+            -0.5714767228106823,
+            1.0000000000000002
+          ],
+          "stamp_ns": 4200000000,
+          "reference_time": [
+            4200000000,
+            1000000000
+          ],
+          "copy_compute_count": 125,
+          "completions": 1
+        }
+      }
+    },
+    {
+      "index": 4,
+      "before_ns": 4233333333,
+      "after_ns": 4266666667,
+      "before_state": [
+        -3.438594285398722e-05,
+        0.00559408450499177,
+        0.002007791306823492,
+        0.00037463102489709854,
+        2.807376949931495e-05,
+        -8.103420441329945e-06
+      ],
+      "after_state": [
+        -3.436154293012805e-05,
+        0.005594128742814064,
+        0.002007814357057214,
+        0.0003746350994333625,
+        2.807387318171095e-05,
+        -8.103737854980864e-06
+      ],
+      "physical_steps": 4,
+      "world_steps": 4,
+      "render_completions": {
+        "/Render/OmniverseKit/HydraTextures/Replicator_01": 1,
+        "/Render/OmniverseKit/HydraTextures/Replicator_02": 1
+      },
+      "accepted": false,
+      "cameras": {
+        "wrist": {
+          "swh_frame_number": null,
+          "render_frame_number": 301,
+          "frame_identity_source": "hydra drawable frame_number",
+          "render_view": [
+            0.012282941869670229,
+            0.4116524026070902,
+            -0.9112581570372009,
+            0.0,
+            -0.04027887866733871,
+            0.9107909241288117,
+            0.41089841135965277,
+            0.0,
+            0.9991129772314681,
+            0.03165741544085374,
+            0.027768089154227005,
+            -0.0,
+            -0.2388153224451802,
+            -0.18967006469590045,
+            0.24611619123244396,
+            1.0
+          ],
+          "stamp_ns": 4233333333,
+          "reference_time": [
+            4233333333,
+            1000000000
+          ],
+          "copy_compute_count": 126,
+          "completions": 1
+        },
+        "top": {
+          "swh_frame_number": null,
+          "render_frame_number": 301,
+          "frame_identity_source": "hydra drawable frame_number",
+          "render_view": [
+            -0.9474767116500409,
+            -0.13315833763051044,
+            0.29078641302561664,
+            -0.0,
+            0.31742858013137687,
+            -0.5026120950533953,
+            0.8041269666052837,
+            0.0,
+            0.03907655814684262,
+            0.8541954922765139,
+            0.518481517103436,
+            -0.0,
+            0.2147382255666807,
+            -0.0723734942229261,
+            -0.5714767228106823,
+            1.0000000000000002
+          ],
+          "stamp_ns": 4233333333,
+          "reference_time": [
+            4233333333,
+            1000000000
+          ],
+          "copy_compute_count": 126,
+          "completions": 1
+        }
+      }
+    },
+    {
+      "index": 5,
+      "before_ns": 4266666667,
+      "after_ns": 4300000000,
+      "before_state": [
+        -3.436154293012805e-05,
+        0.005594128742814064,
+        0.002007814357057214,
+        0.0003746350994333625,
+        2.807387318171095e-05,
+        -8.103737854980864e-06
+      ],
+      "after_state": [
+        -3.437734631006606e-05,
+        0.00559415016323328,
+        0.002007814357057214,
+        0.00037463512853719294,
+        2.807391319947783e-05,
+        -8.103662366920616e-06
+      ],
+      "physical_steps": 4,
+      "world_steps": 4,
+      "render_completions": {
+        "/Render/OmniverseKit/HydraTextures/Replicator_01": 1,
+        "/Render/OmniverseKit/HydraTextures/Replicator_02": 1
+      },
+      "accepted": false,
+      "cameras": {
+        "wrist": {
+          "swh_frame_number": null,
+          "render_frame_number": 303,
+          "frame_identity_source": "hydra drawable frame_number",
+          "render_view": [
+            0.01228166468079289,
+            0.41165250322569286,
+            -0.911258128798141,
+            0.0,
+            -0.040278792534945304,
+            0.910790863239839,
+            0.41089855476839493,
+            0.0,
+            0.9991129964046086,
+            0.03165785884815481,
+            0.02776689375055989,
+            -0.0,
+            -0.23881526557392205,
+            -0.189670122173757,
+            0.2461162599433027,
+            1.0000000000000002
+          ],
+          "stamp_ns": 4266666666,
+          "reference_time": [
+            4266666666,
+            1000000000
+          ],
+          "copy_compute_count": 127,
+          "completions": 1
+        },
+        "top": {
+          "swh_frame_number": null,
+          "render_frame_number": 303,
+          "frame_identity_source": "hydra drawable frame_number",
+          "render_view": [
+            -0.9474767116500409,
+            -0.13315833763051044,
+            0.29078641302561664,
+            -0.0,
+            0.31742858013137687,
+            -0.5026120950533953,
+            0.8041269666052837,
+            0.0,
+            0.03907655814684262,
+            0.8541954922765139,
+            0.518481517103436,
+            -0.0,
+            0.2147382255666807,
+            -0.0723734942229261,
+            -0.5714767228106823,
+            1.0000000000000002
+          ],
+          "stamp_ns": 4266666666,
+          "reference_time": [
+            4266666666,
+            1000000000
+          ],
+          "copy_compute_count": 127,
+          "completions": 1
+        }
+      }
+    },
+    {
+      "index": 6,
+      "before_ns": 4300000000,
+      "after_ns": 4333333333,
+      "before_state": [
+        -3.437734631006606e-05,
+        0.00559415016323328,
+        0.002007814357057214,
+        0.00037463512853719294,
+        2.807391319947783e-05,
+        -8.103662366920616e-06
+      ],
+      "after_state": [
+        -3.4411463275318965e-05,
+        0.0055941143073141575,
+        0.002007801318541169,
+        0.00037463338230736554,
+        2.807411874528043e-05,
+        -8.103749678411987e-06
+      ],
+      "physical_steps": 4,
+      "world_steps": 4,
+      "render_completions": {
+        "/Render/OmniverseKit/HydraTextures/Replicator_01": 1,
+        "/Render/OmniverseKit/HydraTextures/Replicator_02": 1
+      },
+      "accepted": false,
+      "cameras": {
+        "wrist": {
+          "swh_frame_number": null,
+          "render_frame_number": 305,
+          "frame_identity_source": "hydra drawable frame_number",
+          "render_view": [
+            0.012281973017720956,
+            0.41165253491060494,
+            -0.9112581103290468,
+            0.0,
+            -0.0402787026524421,
+            0.9107908562060786,
+            0.4108985791701338,
+            0.0,
+            0.9991129962378771,
+            0.031657649203182286,
+            0.02776713877049823,
+            -0.0,
+            -0.23881535004273824,
+            -0.18967008679006234,
+            0.24611622559436233,
+            1.0
+          ],
+          "stamp_ns": 4300000000,
+          "reference_time": [
+            4300000000,
+            1000000000
+          ],
+          "copy_compute_count": 128,
+          "completions": 1
+        },
+        "top": {
+          "swh_frame_number": null,
+          "render_frame_number": 305,
+          "frame_identity_source": "hydra drawable frame_number",
+          "render_view": [
+            -0.9474767116500409,
+            -0.13315833763051044,
+            0.29078641302561664,
+            -0.0,
+            0.31742858013137687,
+            -0.5026120950533953,
+            0.8041269666052837,
+            0.0,
+            0.03907655814684262,
+            0.8541954922765139,
+            0.518481517103436,
+            -0.0,
+            0.2147382255666807,
+            -0.0723734942229261,
+            -0.5714767228106823,
+            1.0000000000000002
+          ],
+          "stamp_ns": 4300000000,
+          "reference_time": [
+            4300000000,
+            1000000000
+          ],
+          "copy_compute_count": 128,
+          "completions": 1
+        }
+      }
+    },
+    {
+      "index": 7,
+      "before_ns": 4333333333,
+      "after_ns": 4366666667,
+      "before_state": [
+        -3.4411463275318965e-05,
+        0.0055941143073141575,
+        0.002007801318541169,
+        0.00037463338230736554,
+        2.807411874528043e-05,
+        -8.103749678411987e-06
+      ],
+      "after_state": [
+        -3.437842315179296e-05,
+        0.005594182759523392,
+        0.002007818780839443,
+        0.00037463544867932796,
+        2.8074064175598323e-05,
+        -8.103434993245173e-06
+      ],
+      "physical_steps": 4,
+      "world_steps": 4,
+      "render_completions": {
+        "/Render/OmniverseKit/HydraTextures/Replicator_01": 1,
+        "/Render/OmniverseKit/HydraTextures/Replicator_02": 1
+      },
+      "accepted": false,
+      "cameras": {
+        "wrist": {
+          "swh_frame_number": null,
+          "render_frame_number": 307,
+          "frame_identity_source": "hydra drawable frame_number",
+          "render_view": [
+            0.012282157439506593,
+            0.41165246127468513,
+            -0.9112581411077352,
+            0.0,
+            -0.04027876713749182,
+            0.9107908900011793,
+            0.4108984979392643,
+            0.0,
+            0.9991129913711034,
+            0.03165763442447526,
+            0.027767330734721013,
+            -0.0,
+            -0.23881534166779395,
+            -0.18967008089633178,
+            0.246116185933259,
+            1.0
+          ],
+          "stamp_ns": 4333333333,
+          "reference_time": [
+            4333333333,
+            1000000000
+          ],
+          "copy_compute_count": 129,
+          "completions": 1
+        },
+        "top": {
+          "swh_frame_number": null,
+          "render_frame_number": 307,
+          "frame_identity_source": "hydra drawable frame_number",
+          "render_view": [
+            -0.9474767116500409,
+            -0.13315833763051044,
+            0.29078641302561664,
+            -0.0,
+            0.31742858013137687,
+            -0.5026120950533953,
+            0.8041269666052837,
+            0.0,
+            0.03907655814684262,
+            0.8541954922765139,
+            0.518481517103436,
+            -0.0,
+            0.2147382255666807,
+            -0.0723734942229261,
+            -0.5714767228106823,
+            1.0000000000000002
+          ],
+          "stamp_ns": 4333333333,
+          "reference_time": [
+            4333333333,
+            1000000000
+          ],
+          "copy_compute_count": 129,
+          "completions": 1
+        }
+      }
+    }
+  ]
+}

@@ -40,6 +40,36 @@ class Capture:
 
     def boundary(self, result):
         if self.pending is not None:raise RuntimeError('Cannot reset with an unfinished image join')
+        if 'priming' in result:
+            # Check cancellation against the immediate native restore before
+            # opening a recording ledger after explicitly unrecorded physics.
+            original=result['restore_verification'];prime=result['priming']
+            self.contract.install_boundary(original,restore=True)
+            if (not prime['passed'] or prime['epoch']!=result['epoch'] or
+                original['epoch']!=result['epoch'] or
+                not 3<=prime['required']<=prime['consecutive']<=len(prime['updates'])<=prime['max_updates']<=30 or
+                prime['final_sim_ns']!=result['invalid_through_ns'] or
+                not matches(original['command_baseline']['drive_targets'],
+                    result['command_baseline']['drive_targets'],'target_rad')):
+                raise RuntimeError('Invalid unrecorded priming boundary')
+            from playing import FrameLedger
+            clocks=FrameLedger();previous=original['snapshot']
+            steady=FrameLedger()
+            for row in prime['updates']:
+                packet=row['packet'];clocks.check_advance(packet,previous)
+                if row['accepted'] or not matches(row['drive_targets'],
+                        original['command_baseline']['drive_targets'],'target_rad'):
+                    raise RuntimeError('Priming produced a row or changed restored drives')
+                previous=packet
+            final=prime['updates'][-1]['packet']
+            if (final['sim_ns']!=result['invalid_through_ns'] or
+                final['physics_time_s']!=result['snapshot']['physics_time_s']):
+                raise RuntimeError('Priming boundary omitted its measured final clock')
+            tail=prime['updates'][-prime['consecutive']:]
+            before=original['snapshot'] if len(tail)==len(prime['updates']) else prime['updates'][-len(tail)-1]['packet']
+            steady.reset(before['epoch'],before['sim_ns'],before['physics_time_s'])
+            for row in tail:steady.accept(row['packet'])
+            self.contract=TickContract()
         self.contract.install_boundary(result, restore=True)
         self.floor = result['invalid_through_ns']
 
