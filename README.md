@@ -632,7 +632,7 @@ remain separate from collection completion:
 
 ```bash
 python3 -B linux-env/scripts/collect/run_smoke.py --cut <full-commit> \
-  --output /mnt/a4500-backup/exploring-vlas/datasets/smoke-clock-restore-v2 --plan
+  --output /mnt/a4500-backup/exploring-vlas/datasets/smoke-clock-restore-v3 --plan
 # In the granted window, use the identical command with --go instead of --plan.
 ```
 
@@ -649,7 +649,22 @@ may use `epoch=None`. Cancellation epochs must strictly increase, and both clock
 are reconciled against the latest row or held boundary even across repeated
 pause/restore calls. The held-frame capacity is 325.8 wall seconds (256 queries
 at up to 1.05 s each, plus 57 s for ACK, clock delivery, recording and scheduling);
-retirement allows another 5 s. These are hang limits, not pacing targets.
+retirement allows another 5 s. Collector motion waits add this frame capacity to
+their 30 s wall margin, leaving a full valid-query frame budget before the physical
+motion wall watchdog expires. These are hang limits, not pacing targets. The GUI waiter is unchanged.
+
+All cross-producer numeric agreement goes through `comparisons.py`; copied
+fields and proof hashes remain exact. The full inventory and retained-snapshot
+regression are in [collection-clock-comparisons.md](docs/notes/collection-clock-comparisons.md).
+Failed-verdict receipts retain both values, deltas, rules, snapshots and proofs.
+
+The launchers use [managed_process.py](linux-env/scripts/collect/managed_process.py)
+to supervise only their own process trees. PID files now name that supervisor;
+identity receipts retain workload and child PID/start-time/PGID. Close, restart,
+collection down and deployment/stack down verify ownership and claims before
+requesting pidfd-only child cleanup. A legacy PID-only file grants no shutdown
+authority: a live foreign or reused PID is refused, never adopted. See
+[launcher-process-ownership.md](docs/notes/launcher-process-ownership.md).
 
 The integration checks below use fake Kit and MoveIt/ROS message sources and
 start no simulator. Run the real-node check on the isolated assigned domain with

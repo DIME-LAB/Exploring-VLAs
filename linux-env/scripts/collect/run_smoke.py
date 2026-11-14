@@ -53,8 +53,12 @@ class OwnedProcesses:
             if pid in seen:continue
             seen.add(pid);current=identity(pid)
             if current is None or current['start_ticks']!=parent['start_ticks']:continue
-            try:children=[int(n) for n in Path('/proc',str(pid),'task',str(pid),'children').read_text().split()]
-            except OSError:children=[]
+            children=[]
+            try:
+                for task in Path('/proc',str(pid),'task').iterdir():
+                    try:children.extend(int(n) for n in (task/'children').read_text().split())
+                    except OSError:pass
+            except OSError:pass
             for child in children:
                 self.add(child,parent)
                 if child in self.known:pending.append(self.known[child])
@@ -82,6 +86,7 @@ class OwnedProcesses:
                 if row['state']!='Z':self.send(row['pid'],sig)
             end=time.monotonic()+seconds
             while self.remaining() and time.monotonic()<end:self.scan();time.sleep(.1)
+        self.scan()  # Include children reparented while their last owner exited.
         result=dict(tracked=list(self.known.values()),remaining=self.remaining())
         for fd in self.handles.values():os.close(fd)
         self.handles.clear()

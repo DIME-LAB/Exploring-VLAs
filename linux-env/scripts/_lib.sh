@@ -286,6 +286,10 @@ controllers_active() {
 control_stack_up() {
     local rviz="${1:-true}" gui="${2:-true}" log pid i nodes windows=""
     CONTROL_STARTED=0
+    if [ -n "${SOARM_INSTANCE_ROOT:-}" ]; then
+        source "$SCRIPT_DIR/collect/instance_claim.sh"
+        claim_collection_instance "$SOARM_INSTANCE_ROOT"
+    fi
     nodes="$(ros2 node list --no-daemon 2>/dev/null)"
     if printf '%s\n' "$nodes" | grep -qx /controller_manager; then
         if [ "$gui" = true ] && ! printf '%s\n' "$nodes" | grep -qx /so_arm101_control_gui; then
@@ -303,11 +307,8 @@ control_stack_up() {
         stack_require_display "$windows" || return 1
     fi
     log="$LOG_DIR/control_stack_$(date +%H%M%S).log"
-    nohup ros2 launch so_arm101_control control.launch.py rviz:="$rviz" gui:="$gui" \
-        > "$log" 2>&1 < /dev/null &
-    pid=$!
-    echo "$pid" > "$STACK_PIDFILE"
-    disown
+    pid="$(python3 "$SCRIPT_DIR/collect/managed_process.py" start --pidfile "$STACK_PIDFILE" --log "$log" -- \
+        ros2 launch so_arm101_control control.launch.py rviz:="$rviz" gui:="$gui")" || return 1
     CONTROL_STARTED=1
     CONTROL_LOG="$log"
     echo "  Log: $log"
@@ -332,20 +333,16 @@ control_stack_up() {
     return 1
 }
 
-# stop_pid <pid> <name> [grace_s]   SIGINT (lets ros2 launch / lerobot shut
-# children down cleanly), then SIGTERM after the grace period. Never SIGKILL:
-# these processes own X11 windows (see top-level CLAUDE.md "Linux gotchas").
+# stop_pid <pid> <name> [grace_s] [identity_pidfile]
+# Refuse legacy/unrecorded PIDs. The supervisor retires only its proven children.
 stop_pid() {
-    local pid="$1" name="$2" grace="${3:-15}" i
-    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
-        echo "  $name: not running"
-        return 0
+    local pid="$1" name="$2" file="${4:-$STACK_PIDFILE}"
+    if [ -f "$file" ] && [ "$(cat "$file")" != "$pid" ]; then
+        echo "Refusing mismatched $name PID / identity file" >&2; return 1
     fi
-    kill -INT "$pid" 2>/dev/null || true
-    for i in $(seq 1 "$grace"); do
-        kill -0 "$pid" 2>/dev/null || { echo "  $name: stopped (${i}s)"; return 0; }
-        sleep 1
-    done
-    echo "  $name: still running after ${grace}s — sending SIGTERM"
-    kill -TERM "$pid" 2>/dev/null || true
+    if [ -n "${SOARM_INSTANCE_ROOT:-}" ]; then
+        source "$SCRIPT_DIR/collect/instance_claim.sh"
+        claim_collection_instance "$SOARM_INSTANCE_ROOT"
+    fi
+    python3 "$SCRIPT_DIR/collect/managed_process.py" stop --pidfile "$file"
 }

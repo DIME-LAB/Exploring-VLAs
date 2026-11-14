@@ -35,6 +35,7 @@ sys.path.insert(0, str(REPO / 'omni-kit-mcp'))
 from kit_mcp.client import call as kit_call
 from so_arm101_control.grasp_geometry import JOINT_LIMITS
 from so_arm101_control.motion_wait import MotionWaiter, MotionWaitTimeout
+from comparisons import comparison,matches,interval,native_frame
 from contract import COLORS, JOINTS, EVAL_SEEDS, corrective_action, parameters, timing_audit
 from checkpoint import progress
 from storage import CANONICAL_ROOT, RootFileGrowth, SceneSafetyMarker, confined, prepare_environment, wait_for_storage
@@ -129,10 +130,10 @@ class Sensors:
         with self.condition:
             reference = dict(self.reference) if self.reference is not None else None
         if reference is not None:
-            if reference['stamp_ns'] > stamp+1000:
+            if not interval(reference['stamp_ns']-stamp,-math.inf,0,'stamp_ns'):
                 reference['source_epoch'] = None
                 reference['validity'] = 'future_stamp_or_unknown'
-            reference['same_tick'] = reference['source_epoch'] == epoch and abs(reference['stamp_ns']-stamp) <= 1000
+            reference['same_tick'] = reference['source_epoch'] == epoch and matches(reference['stamp_ns'],stamp,'stamp_ns')
             reference['age_sim_ns'] = stamp-reference['stamp_ns']
         return reference
 
@@ -289,7 +290,7 @@ class Servo:
 
     def commit_command(self, candidate, epoch, stamp):
         self.generation.require(epoch,stamp)
-        if candidate.epoch!=epoch or candidate.stamp_ns!=stamp:raise ValueError('Stale execution candidate')
+        if candidate.epoch!=epoch or not matches(candidate.stamp_ns,stamp):raise ValueError('Stale execution candidate')
         self.previous_command=candidate
         self.executed_hold=(epoch,candidate.held_reference) if candidate.held_reference is not None else None
 
@@ -306,7 +307,7 @@ class Servo:
             gripper=self.node._actual_positions['gripper_joint']
         schedule=PlannerSchedule(trajectory)
         executed_schedule=PlannerSchedule(executed_trajectory) if executed_trajectory is not None else schedule
-        if abs(schedule.duration-executed_schedule.duration)>1e-6:
+        if not matches(schedule.duration,executed_schedule.duration,'world_s'):
             raise ValueError('Clean and executed planner time laws must have the same duration')
         duration=schedule.duration
         noise=SmoothDart(duration,seed,config,enabled=tag not in ('grasp_home','grasp_home_data','home') and not tag.startswith('regrasp_miss'))
@@ -493,7 +494,7 @@ class Collector:
             clock=lambda:self.node.get_clock().now().nanoseconds/1e9,
             validate=self.generation.require, emit=self.motion_wait_diagnostic,
             abort=lambda:self.stop.is_set() or self.node._qs_abort_evt.is_set(),
-            rtf_floor=args.wait_rtf_floor)
+            rtf_floor=args.wait_rtf_floor,wall_margin=frame_capacity_seconds()+30.)
         self.stalled_abort_lock = threading.Lock()
         self.stalled_abort_started = False
         self.generation.on_stall = self.abort_stalled_owner
@@ -681,7 +682,7 @@ class Collector:
             record['physical_convergence'] = dict(exc.evidence)
             record['failing_tick_contract']=failure_tick
             record['validated_sim_tick']=bool(failure_tick and not verify_proof(failure_tick) and
-                failure_tick['row']['epoch']==exc.evidence['epoch']==epoch and failure_tick['row']['sim_ns']==exc.evidence['stamp_ns'])
+                failure_tick['row']['epoch']==exc.evidence['epoch']==epoch and matches(failure_tick['row']['sim_ns'],exc.evidence['stamp_ns']))
         if isinstance(exc,TickContractError):record['pipeline_contract_failure']=dict(errors=exc.errors,evidence=exc.evidence)
         if not hasattr(self, 'capture_failures'):
             self.capture_failures = []
@@ -711,8 +712,8 @@ class Collector:
             self.generation.require(epoch,stamp)
             current=self.node.get_clock().now().nanoseconds
             self.generation.require(epoch,stamp)
-            if abs(current-stamp)<=1000:return
-            if current>stamp+1000:raise TickContractError(['ROS clock leads the held physical tick'])
+            if matches(current,stamp,'stamp_ns'):return
+            if current>stamp and not matches(current,stamp,'stamp_ns'):raise TickContractError(['ROS clock leads the held physical tick'])
             if time.monotonic()>=deadline:raise TickContractError(['ROS clock did not join the held physical tick'])
             if self.stop.wait(.002):raise CancelledGeneration('Collector stopped during clock join')
 
@@ -968,7 +969,7 @@ class Collector:
         for _ in range(round(30*POLICY['home_settle_sim_seconds'])):
             sample=self.advance_ticks(1)[0];samples=(samples+[sample])[-6:]
             check=initial_arm(samples,[target[name] for name in JOINTS[:5]])
-            if not check['contract_passed']:raise TickContractError(check['contract']['errors'])
+            if not check['contract_passed']:raise TickContractError(check['contract']['errors'],dict(contract=check['contract'],snapshots=samples))
             if len(samples)==6:
                 checks.append(dict(sim_ns=sample['sim_ns'],**check))
                 if check['passed']:
@@ -1063,7 +1064,7 @@ class Collector:
         previous = json.loads((root / 'run.json').read_text()) if args.resume else None
         if previous and previous.get('diagnostic', False) != args.diagnostic:
             raise ValueError('Resume diagnostic retention mode differs from the existing run')
-        wait_policy = dict(rtf_floor=args.wait_rtf_floor, sim_margin_s=5., wall_margin_s=30.,
+        wait_policy = dict(rtf_floor=args.wait_rtf_floor, sim_margin_s=5., wall_margin_s=frame_capacity_seconds()+30.,
                            episode_wall_min_s=args.episode_deadline)
         if previous and previous.get('motion_wait_policy') != wait_policy:
             raise ValueError('Resume motion wait policy differs from the existing run')
@@ -1144,7 +1145,7 @@ class Collector:
                     raise ValueError(f'Missing dimensions for baseline object {name}')
                 position[2] = self.node._ground_z_var.get() + float(bbox['sz']) / 2
             self.baseline_cup_layout = initial['cup_layout']
-        tracked_sources = ['linux-env/scripts/collect/collect.py', 'linux-env/scripts/collect/contract.py',
+        tracked_sources = ['linux-env/scripts/collect/comparisons.py','linux-env/scripts/collect/collect.py', 'linux-env/scripts/collect/contract.py',
                            'linux-env/scripts/collect/checkpoint.py',
                            'linux-env/scripts/collect/episode_policy.py',
                            'linux-env/scripts/collect/dart.py',
@@ -1258,7 +1259,7 @@ class Collector:
                     check=initial_arm(verification,
                         [receipt['home_after_reset']['target'][name] for name in JOINTS[:5]])
                     receipt['home_after_reset']['post_velocity_reset_check'] = check
-                    if not check['contract_passed']:raise TickContractError(check['contract']['errors'])
+                    if not check['contract_passed']:raise TickContractError(check['contract']['errors'],dict(contract=check['contract'],snapshots=verification))
                     if not check['passed']:
                         self.reject_quality('home_unstable',dict(label='post_velocity_reset',check=check),verification)
                     self.sync_scene()
@@ -1329,12 +1330,14 @@ class Collector:
                 snapshots = self.advance_ticks(SETTLED_TICKS)
                 receipt['settled_physical'] = snapshots
                 receipt['score'] = settled_containment(snapshots, params['object'], params['color'])
-                if not receipt['score']['contract_passed']:raise TickContractError(receipt['score']['contract']['errors'])
+                if not receipt['score']['contract_passed']:raise TickContractError(receipt['score']['contract']['errors'],dict(contract=receipt['score']['contract'],snapshots=snapshots))
                 if not receipt['score']['passed']:
                     self.reject_quality('containment',receipt['score'],snapshots)
                 receipt['accepted'] = True
             except Exception as exc:
                 receipt['exception_type'] = type(exc).__name__
+                if isinstance(exc,TickContractError):
+                    receipt['pipeline_contract_failure']=dict(errors=exc.errors,evidence=exc.evidence)
                 if isinstance(exc,QualityReject):
                     receipt['quality_reject'] = dict(kind=exc.kind,evidence=exc.evidence,contract=exc.contract)
                 try:

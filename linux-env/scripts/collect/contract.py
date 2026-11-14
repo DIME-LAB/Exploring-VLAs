@@ -1,4 +1,5 @@
 """Deterministic collection parameters and timing acceptance rules (no ROS imports)."""
+from comparisons import matches,interval
 import math
 import random
 from dart import DEFAULT_NOISE
@@ -60,17 +61,17 @@ def timing_audit(rows, fps):
         errors.append('Non-monotonic wall clock')
     if any(t <= 0 for t in camera_wall):
         errors.append('Non-monotonic image receipt wall clock')
-    if any(abs(t - round(1e9 / fps)) > 10 for t in sim):
+    if any(not matches(t,round(1e9/fps),'native_ns') for t in sim):
         errors.append('Repeated or skipped sim camera frame')
-    if any(abs(r['wrist_stamp_ns'] - r['top_stamp_ns']) > 1000 or r['sim_ns'] <= 0 for r in rows):
+    if any(not matches(r['wrist_stamp_ns'],r['top_stamp_ns'],'stamp_ns') or r['sim_ns'] <= 0 for r in rows):
         errors.append('Camera stamps missing or not paired')
-    if any(abs(r['joint_stamp_ns'] - r['sim_ns']) > 1000 for r in rows):
+    if any(not matches(r['joint_stamp_ns'],r['sim_ns'],'stamp_ns') for r in rows):
         errors.append('Joint state is not from the camera sim tick')
     if any(len(r[key]) != 6 for r in rows for key in ('state', 'action', 'executed_action', 'expert_reference')):
         errors.append('Joint feature shape differs from deployment')
-    if any(max(abs(a - b) for a, b in zip(r['action'], corrective_action(r['state'], r['expert_reference']))) > 1e-9 for r in rows):
+    if any(not matches(r['action'],corrective_action(r['state'],r['expert_reference']),'arithmetic') for r in rows):
         errors.append('Recorded action differs from the clean corrective expert')
-    if any(r['expert_observation_stamp_ns'] != r['sim_ns'] for r in rows):
+    if any(not matches(r['expert_observation_stamp_ns'],r['sim_ns']) for r in rows):
         errors.append('Expert action is conditioned on a different observation tick')
     if any(r.get('state_source') != 'isaac_articulation' for r in rows):
         errors.append('Observation is not measured physical articulation feedback')
@@ -78,9 +79,9 @@ def timing_audit(rows, fps):
         errors.append('Measured joint velocities are incomplete or non-finite')
     if any(len(r.get('physics_state', [])) != 6 or
            any(not math.isfinite(v) for v in r.get('physics_state', [])) or
-           any(abs(a-b) > 1e-7 for a,b in zip(r['state'],r.get('physics_state', []))) for r in rows):
+           not matches(r['state'],r.get('physics_state', []),'state_rad') for r in rows):
         errors.append('Joint message differs from the physical snapshot')
-    if any(abs(r.get('pose_stamp_ns', -1) - r['sim_ns']) > 1000 for r in rows):
+    if any(not matches(r.get('pose_stamp_ns'),r['sim_ns'],'stamp_ns') for r in rows):
         errors.append('Physical poses are not from the camera tick')
     if any(r.get('epoch') is None or r.get('observation_epoch') != r.get('epoch') or
            r.get('expert_epoch') != r.get('epoch') or r['sim_ns'] <= r.get('invalid_through_ns', r['sim_ns']) for r in rows):
@@ -88,23 +89,23 @@ def timing_audit(rows, fps):
     if len({r.get('epoch') for r in rows}) != 1:
         errors.append('Episode spans multiple motion/reset generations')
     application_latency = [r.get('application_stamp_ns', -1) - r['sim_ns'] for r in rows]
-    if any(t < -10 or t > round(1e9 / fps) + 10 for t in application_latency):
+    if any(not interval(t,0,round(1e9/fps),'stamp_ns') for t in application_latency):
         errors.append('Command application exceeds the declared one-tick contract')
-    if any(abs(r.get('declared_application_stamp_ns', -1) - r['sim_ns']) > 10 for r in rows):
+    if any(not matches(r.get('declared_application_stamp_ns'),r['sim_ns']) for r in rows):
         errors.append('Command was not scheduled from its observation tick')
-    if any(len(r.get('applied_command', [])) != 6 or any(abs(a-b) > 1e-6 for a,b in zip(r.get('applied_command', []),r['executed_action'])) for r in rows):
+    if any(len(r.get('applied_command', [])) != 6 or not matches(r.get('applied_command', []),r['executed_action'],'target_rad') for r in rows):
         errors.append('Applied physical drive target differs from executed command')
     if any(len(r.get('physics_drive_targets', [])) != 6 for r in rows):
         errors.append('Post-step physical drive targets are missing')
-    elif any(any(abs(x-y) > 1e-6 for x,y in zip(a['applied_command'],b['physics_drive_targets'])) for a,b in zip(rows,rows[1:])):
+    elif any(not matches(a['applied_command'],b['physics_drive_targets'],'target_rad') for a,b in zip(rows,rows[1:])):
         errors.append('Applied targets did not persist through the next physical frame')
     if any(r.get('tick_contract_version') for r in rows):
         for i,row in enumerate(rows):
             errors.extend(row_errors(row,rows[i-1] if i else None))
             geometry=row.get('execution_geometry',{})
-            if not geometry.get('passed') or geometry.get('target')!=row['executed_action'] or geometry.get('epoch')!=row['epoch'] or geometry.get('sim_ns')!=row['sim_ns']:
+            if not geometry.get('passed') or not matches(geometry.get('target'),row['executed_action']) or geometry.get('epoch')!=row['epoch'] or not matches(geometry.get('sim_ns'),row['sim_ns']):
                 errors.append('Final command geometry proof differs')
-            if row.get('planner_execution_reference') and any(abs(e-r-n)>1e-9 for e,r,n in zip(row['executed_action'],row['planner_execution_reference'],row['dart_offset'])):
+            if row.get('planner_execution_reference') and not matches(row['executed_action'],[r+n for r,n in zip(row['planner_execution_reference'],row['dart_offset'])],'arithmetic'):
                 errors.append('Executed target differs from planner plus DART offset')
             if row.get('command_filter_delta')!=[0.]*6:errors.append('Execution reshaped the expert path')
             if row.get('dart_offset',[1.]*6)[5]!=0.:errors.append('Gripper was perturbed')
@@ -128,7 +129,7 @@ def timing_audit(rows, fps):
                 camera_receipt_wall_hz=(len(rows)-1)/sum(camera_wall) if sum(camera_wall)>0 else 0.,
                 wall_gap_max_ms=max(wall,default=0) * 1000,
                 sim_hz=1e9 * (len(rows) - 1) / sum(sim) if sum(sim) > 0 else 0,
-                real_time_factor=sum(sim) / 1e9 / sum(wall),
+                real_time_factor=sum(sim) / 1e9 / sum(wall) if sum(wall)>0 else None,
                 idle_frame_fraction=planning_idle, stationary_frame_fraction=stationary,
                 command_latency_sim_ms_max=max((r['command_clock_ns'] - r['sim_ns']) / 1e6 for r in rows),
                 application_latency_sim_ms_max=max(application_latency) / 1e6,

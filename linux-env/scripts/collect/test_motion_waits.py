@@ -209,4 +209,17 @@ class MotionWaitTests(unittest.TestCase):
         for changes in [dict(sim_seconds=3.),dict(ok=False),dict(pan_error_rad=.03)]:
             self.assertFalse(scope['trajectory_timing_check'](dict(row,**changes)))
 
+    def test_collector_wall_margin_admits_a_full_valid_query_frame_but_still_bounds_a_hang(self):
+        from command_geometry import frame_capacity_seconds
+        clock=Clock(0.);budget=MotionBudget(1);budget.plan(3.)
+        diagnostics=[]
+        waiter=MotionWaiter(lambda:clock.sim,lambda epoch:None,diagnostics.append,wall=lambda:clock.wall,
+                           wall_margin=frame_capacity_seconds()+30.)
+        self.assertTrue(waiter.wait_until(lambda:clock.wall>=166.4,clock.advance,budget.total,1,label='valid slow frame'))
+        self.assertEqual(diagnostics,[])
+        clock.wall=0.
+        with self.assertRaises(MotionWaitTimeout):waiter.wait_until(lambda:False,clock.advance,budget.total,1,label='hung frame')
+        self.assertGreater(diagnostics[-1]['wall_watchdog_s'],frame_capacity_seconds())
+
+
 if __name__=='__main__':unittest.main()

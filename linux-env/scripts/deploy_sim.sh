@@ -27,10 +27,6 @@
 # Model presets are shared with the GUI in so_arm101_control/model_presets.py.
 # Run `deploy_sim.sh models` to list them; --model also accepts an HF id or path.
 #
-# Dispatch defaults: isolated observation process + FIFO priority 10 for only
-# the action TID (sudo -n chrt if needed). --dispatch-priority 0 selects best effort;
-# --no-observation-process restores capture in the client process.
-#
 # Env: SOARM_KIT_MCP_PORT (bridge, default 8767) · SOARM_POLICY_GPU (default 1) ·
 #      LOG_DIR (default /tmp) · ISAACSIM_BIN / ISAACSIM_LOG (see isaacsim_launch.sh)
 #
@@ -60,9 +56,7 @@ resolve_model() {
 }
 
 policy_pgid() {
-    local pgid
-    pgid="$(cat "$POLICY_PIDFILE" 2>/dev/null)" || return 1
-    [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null && echo "$pgid"
+    python3 "$SCRIPT_DIR/collect/managed_process.py" status --pidfile "$POLICY_PIDFILE"
 }
 
 usage() {
@@ -74,11 +68,11 @@ usage() {
 # ---------------------------------------------------------------------------
 cmd_up() {
     local stream="" rviz="" gui="" model_arg="" task="$DEFAULT_TASK" policy=1 model
-    local policy_args=(--observation-process --dispatch-priority "${SOARM_DISPATCH_PRIORITY:-10}")
+    local policy_args=()
     while [ $# -gt 0 ]; do
         case "$1" in
-            --fps|--action-duration-s|--dispatch-priority) policy_args+=("$1" "${2:?option needs a value}"); shift ;;
-            --fps=*|--action-duration-s=*|--dispatch-priority=*|--no-observation-process|--observation-process|--no-dispatch-sudo|--no-rtc) policy_args+=("$1") ;;
+            --fps|--action-duration-s) policy_args+=("$1" "${2:?option needs a value}"); shift ;;
+            --fps=*|--action-duration-s=*|--no-rtc) policy_args+=("$1") ;;
             --stream)    stream="--stream" ;;
             --rate-hz) export SOARM_SIM_RATE_HZ="${2:?--rate-hz needs a value}"; shift ;;
             --rate-hz=*) export SOARM_SIM_RATE_HZ="${1#--rate-hz=}" ;;
@@ -137,10 +131,9 @@ cmd_up() {
         # `down` can SIGINT server + client together. env --default-signal=INT:
         # bash starts `&` jobs with SIGINT ignored, and a Python started that way
         # never raises KeyboardInterrupt, so `down` could only SIGTERM it.
-        setsid env --default-signal=INT bash "$SCRIPT_DIR/inference_async_lerobot.sh" \
-            --pretrained="$model" --task="$task" "${policy_args[@]}" > "$log" 2>&1 < /dev/null &
-        pid=$!
-        echo "$pid" > "$POLICY_PIDFILE"
+        pid="$(python3 "$SCRIPT_DIR/collect/managed_process.py" start --pidfile "$POLICY_PIDFILE" --log "$log" -- \
+            env --default-signal=INT bash "$SCRIPT_DIR/inference_async_lerobot.sh" \
+            --pretrained="$model" --task="$task" "${policy_args[@]}")" || return 1
         echo "$log" > "$POLICY_LOGFILE"
         echo "$model" > "$POLICY_MODELFILE"
         echo "  Model: $model"
@@ -182,26 +175,17 @@ cmd_down() {
     echo "=== deploy_sim down ==="
 
     echo "[1/3] SmolVLA policy..."
-    if pgid="$(policy_pgid)"; then
-        # SIGINT → run_async_inference_sim.py stops the client, then the server.
-        kill -INT -- "-$pgid" 2>/dev/null || true
-        for i in $(seq 1 20); do
-            kill -0 -- "-$pgid" 2>/dev/null || { echo "  stopped (${i}s)"; break; }
-            sleep 1
-        done
-        if kill -0 -- "-$pgid" 2>/dev/null; then
-            echo "  still running after 20s — sending SIGTERM"
-            kill -TERM -- "-$pgid" 2>/dev/null || true
-        fi
-    else
-        echo "  not running (or not started by deploy_sim)"
+    if [ -n "${SOARM_INSTANCE_ROOT:-}" ]; then
+        source "$SCRIPT_DIR/collect/instance_claim.sh"
+        claim_collection_instance "$SOARM_INSTANCE_ROOT"
     fi
+    python3 "$SCRIPT_DIR/collect/managed_process.py" stop --pidfile "$POLICY_PIDFILE" || return 1
     rm -f "$POLICY_PIDFILE" "$POLICY_MODELFILE" "$POLICY_LOGFILE"
     [ "$policy_only" = 1 ] && { echo "=== Policy down (Isaac + control stack left running) ==="; return 0; }
 
     echo "[2/3] ROS 2 control stack..."
     if [ -f "$CONTROL_PIDFILE" ]; then
-        stop_pid "$(cat "$CONTROL_PIDFILE")" "control stack" 15
+        stop_pid "$(cat "$CONTROL_PIDFILE")" "control stack" 15 "$STACK_PIDFILE" || return 1
         rm -f "$CONTROL_PIDFILE" "$CONTROL_LOGFILE" "$STACK_PIDFILE"
     else
         echo "  not started by deploy_sim — leaving it (stack_stop.sh stops it)"

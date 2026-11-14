@@ -54,7 +54,7 @@ PYWORLD
         source "$REPO_ROOT/vla_SO-ARM101/install/setup.bash"
         set -u
         pidfile="$SOARM_INSTANCE_ROOT/control.pid"
-        if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+        if python3 "$SCRIPT_DIR/collect/managed_process.py" status --pidfile "$pidfile"; then
             echo 'This instance already has a control stack'; exit 1
         fi
         python3 - "$REPO_ROOT" "$SOARM_INSTANCE_ROOT/controllers.yaml" <<'PYCONFIG'
@@ -65,9 +65,8 @@ config = yaml.safe_load(source.read_text())
 config['controller_manager']['ros__parameters']['update_rate'] = 120
 Path(sys.argv[2]).write_text(yaml.safe_dump(config))
 PYCONFIG
-        setsid ros2 launch so_arm101_control control.launch.py gui:=false rviz:=false use_sim:=true use_sim_time:=true feedback_joint_states_topic:=/joint_states_measured feedback_publish_rate:=120.0 controllers_config:="$SOARM_INSTANCE_ROOT/controllers.yaml" \
-            > "$SOARM_INSTANCE_ROOT/control.log" 2>&1 < /dev/null &
-        echo "$!" > "$pidfile"
+        python3 "$SCRIPT_DIR/collect/managed_process.py" start --pidfile "$pidfile" --log "$SOARM_INSTANCE_ROOT/control.log" -- \
+            ros2 launch so_arm101_control control.launch.py gui:=false rviz:=false use_sim:=true use_sim_time:=true feedback_joint_states_topic:=/joint_states_measured feedback_publish_rate:=120.0 controllers_config:="$SOARM_INSTANCE_ROOT/controllers.yaml"
         python3 "$SCRIPT_DIR/collect/wait_control.py"
         echo "Instance $index ready: domain=$ROS_DOMAIN_ID bridge=$SOARM_KIT_MCP_PORT"
         ;;
@@ -111,13 +110,9 @@ PYDEPLOY
         ;;
 
     down)
-        pidfile="$SOARM_INSTANCE_ROOT/control.pid"
-        if [ -f "$pidfile" ]; then
-            control_pid="$(cat "$pidfile")"
-            if kill -0 "$control_pid" 2>/dev/null; then
-                kill -INT -- "-$control_pid"
-            fi
-        fi
+        source "$SCRIPT_DIR/collect/instance_claim.sh"
+        claim_collection_instance "$SOARM_INSTANCE_ROOT"
+        python3 "$SCRIPT_DIR/collect/managed_process.py" stop --pidfile "$SOARM_INSTANCE_ROOT/control.pid"
         bash "$launcher" close --instance "$index"
         ;;
     *) echo 'Expected up|run|export|deploy-clock|deploy|clock-sanity|down' >&2; exit 2 ;;

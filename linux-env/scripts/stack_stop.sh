@@ -5,8 +5,7 @@
 # Use SIGINT (not SIGKILL) on processes that own X11 windows to avoid KWin
 # BadWindow cascades — see top-level CLAUDE.md "Linux gotchas".
 
-# NOTE: no `set -u` — pkill exits non-zero when nothing matches; we treat
-# that as "good, already stopped" rather than as a script error.
+# Stop only process trees recorded by these launchers; legacy PID-only records refuse.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
@@ -19,28 +18,12 @@ echo "=== Linux sim stack: stopping ==="
 # ---------------------------------------------------------------------------
 
 echo "[1/2] ROS2 control stack..."
-if pgrep -f "ros2.*launch.*control.launch" >/dev/null; then
-    pkill -SIGINT -f "ros2.*launch.*control.launch" 2>/dev/null || true
-    # Wait up to 10s for clean shutdown
-    for i in 1 2 3 4 5 6 7 8 9 10; do
-        pgrep -f "ros2.*launch.*control.launch" >/dev/null || { echo "  Stopped (${i}s)"; break; }
-        sleep 1
-    done
-    if pgrep -f "ros2.*launch.*control.launch" >/dev/null; then
-        echo "  Still running after 10s — sending SIGTERM"
-        pkill -SIGTERM -f "ros2.*launch.*control.launch" 2>/dev/null || true
-    fi
+if [ -f "$STACK_PIDFILE" ]; then
+    stop_pid "$(cat "$STACK_PIDFILE")" "control stack" 15 "$STACK_PIDFILE" || exit 1
 else
-    echo "  Not running"
+    echo "  No launcher-owned control stack recorded; leaving other processes alone"
 fi
-
-# Mirror node (if started by Record Sim tab and not auto-cleaned)
-if pgrep -f "joint_states_to_commands" >/dev/null; then
-    echo "  Stopping mirror node..."
-    pkill -SIGINT -f "joint_states_to_commands" 2>/dev/null || true
-fi
-
-rm -f "$STACK_PIDFILE"
+# Record Sim owns its mirror lifecycle. No name-based cleanup is permitted.
 
 # ---------------------------------------------------------------------------
 # 2. Isaac Sim (handles its own SIGTERM-then-SIGKILL escalation)

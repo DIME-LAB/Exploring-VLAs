@@ -1,3 +1,5 @@
+from comparisons import comparison,matches,interval,native_frame
+from tick_contract import world_step_errors
 import ast
 import sys
 from contextlib import contextmanager
@@ -27,7 +29,7 @@ def method(path, cls, name):
     tree = ast.parse(path.read_text())
     owner = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls)
     node = next(n for n in owner.body if isinstance(n, ast.FunctionDef) and n.name == name)
-    scope = dict(MotionBudget=MotionBudget, MotionWaitTimeout=MotionWaitTimeout, SceneMutationIncomplete=SceneMutationIncomplete, MotionOperation=MotionOperation, contextmanager=contextmanager, math=math, threading=threading, time=time, np=np, json=json,
+    scope = dict(comparison=comparison,matches=matches,interval=interval,native_frame=native_frame,world_step_errors=world_step_errors,MotionBudget=MotionBudget, MotionWaitTimeout=MotionWaitTimeout, SceneMutationIncomplete=SceneMutationIncomplete, MotionOperation=MotionOperation, contextmanager=contextmanager, math=math, threading=threading, time=time, np=np, json=json,
                  String=lambda data:SimpleNamespace(data=data))
     exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), 'exec'), scope)
     return scope[name]

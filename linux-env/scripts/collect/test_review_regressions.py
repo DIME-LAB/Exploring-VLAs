@@ -1,8 +1,11 @@
+from comparisons import comparison,matches,interval,native_frame
+from tick_contract import world_step_errors
 """CPU fault/interleaving probes at the actual collector/runtime boundaries."""
 import ast
 from dataclasses import replace
 from contextlib import contextmanager
 import copy
+import math
 import json
 import random
 import subprocess
@@ -33,7 +36,7 @@ def load_class(filename, name):
     path = HERE/filename
     tree = ast.parse(path.read_text())
     cls = next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name==name)
-    scope = dict(frame_capacity_seconds=frame_capacity_seconds,QUERY_POLICY=QUERY_POLICY,CLOCK_POLICY=CLOCK_POLICY,random=random,replace=replace,copy=copy,PlannerSchedule=PlannerSchedule,TargetCandidate=TargetCandidate,choose_noise_scale=choose_noise_scale,final_command=final_command,TickContract=TickContract,TickContractError=TickContractError,require_snapshots=require_snapshots,digest=digest,verify_proof=verify_proof, DEFAULT_NOISE=DEFAULT_NOISE, SmoothDart=SmoothDart, initial_arm=initial_arm, ConvergenceFailure=ConvergenceFailure, QualityReject=QualityReject, POLICY=POLICY, WorkerRegistry=WorkerRegistry, FailureStreak=FailureStreak, disposition=disposition, MotionWaitTimeout=MotionWaitTimeout, contextmanager=contextmanager, OwnershipStalled=OwnershipStalled, threading=threading,time=time,np=np,json=json,JOINTS=JOINTS,
+    scope = dict(math=math,comparison=comparison,matches=matches,interval=interval,native_frame=native_frame,world_step_errors=world_step_errors,frame_capacity_seconds=frame_capacity_seconds,QUERY_POLICY=QUERY_POLICY,CLOCK_POLICY=CLOCK_POLICY,random=random,replace=replace,copy=copy,PlannerSchedule=PlannerSchedule,TargetCandidate=TargetCandidate,choose_noise_scale=choose_noise_scale,final_command=final_command,TickContract=TickContract,TickContractError=TickContractError,require_snapshots=require_snapshots,digest=digest,verify_proof=verify_proof, DEFAULT_NOISE=DEFAULT_NOISE, SmoothDart=SmoothDart, initial_arm=initial_arm, ConvergenceFailure=ConvergenceFailure, QualityReject=QualityReject, POLICY=POLICY, WorkerRegistry=WorkerRegistry, FailureStreak=FailureStreak, disposition=disposition, MotionWaitTimeout=MotionWaitTimeout, contextmanager=contextmanager, OwnershipStalled=OwnershipStalled, threading=threading,time=time,np=np,json=json,JOINTS=JOINTS,
                  String=lambda data:NS(data=data),StepGeneration=StepGeneration,
                  CancelledGeneration=CancelledGeneration,CommandLedger=CommandLedger,
                  corrective_action=corrective_action,JOINT_LIMITS={k:(-3,3) for k in JOINTS},

@@ -12,7 +12,9 @@ def main():
     parser.add_argument('--output',required=True,type=Path)
     args=parser.parse_args()
     if os.environ.get('ROS_DOMAIN_ID')!='90':raise ValueError('Use isolated domain 90')
-    prepare_environment(0)
+    runtime=prepare_environment(0)
+    from run_smoke import InstanceClaim
+    instance_claim=InstanceClaim(runtime)
     import collect as implementation
     import rclpy
     from rclpy.node import Node
@@ -70,7 +72,7 @@ def main():
             c=Clock();c.clock.sec=1;clock.publish(c)
             j=JointState();j.header.stamp.sec=1;j.name=list(JOINTS);j.position=[0.]*6;j.velocity=[0.]*6;joint.publish(j)
             for pub in cameras:
-                msg=Image();msg.header.stamp.sec=1;msg.encoding='rgb8';msg.width=640;msg.height=480;msg.step=1920;msg.data=bytes(921600);pub.publish(msg)
+                msg=Image();msg.header.stamp.sec=1;msg.header.stamp.nanosec=2;msg.encoding='rgb8';msg.width=640;msg.height=480;msg.step=1920;msg.data=bytes(921600);pub.publish(msg)
             tick.publish(String(data=json.dumps(frame)))
         t=threading.Thread(target=publish_frame);publishers.append(t);t.start()
         return dict(start_ns=966666667,target_ns=stamp)
@@ -85,7 +87,7 @@ def main():
             with self.motion_effect(None):raise AssertionError('Unowned effect accepted after bootstrap')
         except CancelledGeneration:pass
         result.update(passed=True,first_tick=self.last_snapshot,commands=commands,validity_queries=len(queries),
-                      bootstrap_revoked=True,executor_alive=self.ros_thread.is_alive(),capture_alive=self.capture_thread.is_alive())
+                      bootstrap_revoked=True,camera_native_skew_ns=2,wall_watchdog_margin_s=self.node._motion_waiter.wall_margin,executor_alive=self.ros_thread.is_alive(),capture_alive=self.capture_thread.is_alive())
         raise HeldTickReached()
     try:
         config=NS(output=output/'run',episodes=5,max_attempts=1,resume=False,seed=1,regrasp_only=False,replay_receipt=None,wait_rtf_floor=.1,episode_deadline=180,diagnostic=True,instance=0)
@@ -111,6 +113,7 @@ def main():
         for worker in publishers:worker.join(timeout=6)
         executor.shutdown(timeout_sec=5);thread.join(timeout=5);native.destroy_node()
         if rclpy.ok():rclpy.shutdown()
+        instance_claim.close()
         (output/'validation.json').write_text(json.dumps(result,indent=2))
     print(json.dumps(dict(passed=result['passed'],validity_queries=result['validity_queries'],
         tick_ns=result['first_tick']['sim_ns'],output=str(output)),indent=2))

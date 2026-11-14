@@ -13,17 +13,17 @@ import test_review_regressions as probes
 FIXTURE=json.loads(Path(__file__).with_name('fixtures').joinpath('retained_clock_pairs.json').read_text())
 
 
-def capture_snapshot(c,r,entry,snapshot):
+def capture_snapshot(c,r,entry,snapshot,camera_offset_ns=0):
     stamp=snapshot['sim_ns'];entry['tick']=(copy.deepcopy(snapshot),time.monotonic_ns())
     for key in ('joint','wrist','top'):
-        msg=entry[key][0];msg.header.stamp.sec,msg.header.stamp.nanosec=divmod(stamp,10**9)
+        msg=entry[key][0];msg.header.stamp.sec,msg.header.stamp.nanosec=divmod(stamp+(camera_offset_ns if key in ('wrist','top') else 0),10**9)
         entry[key]=(msg,time.monotonic_ns())
     entry['joint'][0].position=list(snapshot['state']);entry['joint'][0].velocity=list(snapshot['velocity'])
     r.world.current_time=snapshot['physics_time_s'];r.stamp=lambda:stamp
     c.node.get_clock=lambda:NS(now=lambda:NS(nanoseconds=stamp))
     r.ack_pub=NS(publish=lambda msg:c.sensors.acks.update({(json.loads(msg.data)['epoch'],json.loads(msg.data)['observation_stamp_ns']):json.loads(msg.data)}))
     c.sensors.read_ack=lambda epoch,t:c.sensors.acks[(epoch,t)]
-    def read(**kwargs):c.stop.set();return stamp,entry
+    def read(**kwargs):c.stop.set();return stamp+camera_offset_ns,entry
     c.sensors.read=read;c.stop.clear();c.capture()
 
 

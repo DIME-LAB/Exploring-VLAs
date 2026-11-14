@@ -25,13 +25,15 @@ from std_msgs.msg import String
 from pxr import Gf, Usd, UsdGeom, UsdPhysics
 from isaacsim.core.api import World
 from isaacsim.core.prims import Articulation, RigidPrim
+from comparisons import matches
+from tick_contract import world_step_errors
 from contract import JOINTS
 from protocol import CommandLedger
 
 _RUNTIME = None
 _LOADED_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 _LOADED_DEPENDENCIES = {name:hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-                        for name in ('contract.py', 'protocol.py')}
+                        for name in ('contract.py', 'protocol.py','comparisons.py','tick_contract.py')}
 
 
 class Runtime:
@@ -187,7 +189,7 @@ class Runtime:
     def apply(self, command, observation_ns):
         if self.busy or self.timeline.is_playing():
             raise RuntimeError('Command application requires a held simulation')
-        if abs(self.stamp() - observation_ns) > 10:
+        if not matches(self.stamp(),observation_ns,'stamp_ns'):
             raise RuntimeError(f'Stale command observation: {observation_ns} != {self.stamp()}')
         values = np.asarray(command, dtype=np.float32)
         if values.shape != (6,) or not np.all(np.isfinite(values)):
@@ -195,7 +197,7 @@ class Runtime:
         self.art.set_joint_position_targets(values.reshape(1, 6), joint_indices=self.indices)
         self.art.set_joint_velocity_targets(np.zeros((1, 6), dtype=np.float32), joint_indices=self.indices)
         applied = self.art.get_applied_actions().joint_positions[0, self.indices]
-        if not np.allclose(applied, values, atol=1e-6, rtol=0):
+        if not matches(list(map(float,applied)),list(map(float,values)),'target_rad'):
             raise RuntimeError('PhysX did not accept the executed targets')
         return dict(application_stamp_ns=self.stamp(), applied_command=list(map(float, applied)))
 
@@ -238,11 +240,11 @@ class Runtime:
     def after_update(self, event):
         try:
             if self.mode == 'collect':
-                if self.busy and self.world.current_time > self.start_time + 1e-8:
+                if self.busy and self.world.current_time > self.start_time and not matches(self.world.current_time,self.start_time,'world_s'):
                     self.timeline.pause()
                     delta = self.world.current_time - self.start_time
                     self.busy = False
-                    if abs(delta - 1/30) > 1e-7:
+                    if world_step_errors(self.world.current_time,self.start_time):
                         raise RuntimeError(f'One-frame step advanced {delta} sim seconds')
                     self.publish()
                 # Drain clock/command callbacks in the same held frame. A short
@@ -282,9 +284,9 @@ class Runtime:
         orientation_error = max(min(max(abs(x-y) for x,y in zip(snapshot['bodies'][name]['orientation'], actual['bodies'][name]['orientation'])),
                                     max(abs(x+y) for x,y in zip(snapshot['bodies'][name]['orientation'], actual['bodies'][name]['orientation'])))
                                 for name in snapshot['bodies'])
-        if error > 1e-6:
+        if not matches(error,0.,'float32_readback'):
             raise RuntimeError(f'Initial pose restore differs by {error} m')
-        if orientation_error > 1e-6 or any(max(abs(v) for v in body['velocity']) > 1e-6 for body in actual['bodies'].values()):
+        if not matches(orientation_error,0.,'float32_readback') or any(not matches(body['velocity'],[0.]*6,'float32_readback') for body in actual['bodies'].values()):
             raise RuntimeError('Initial orientation/zero velocity restore failed')
         arm_error = velocity_error = 0.
         if arm:
@@ -294,7 +296,7 @@ class Runtime:
             velocity_error = max(abs(v) for v in actual['velocity'])
             # This read-back is immediate while held, before any constraint
             # impulses from a subsequent physics tick can affect velocity.
-            if not np.isfinite(arm_error + velocity_error) or arm_error > 1e-6 or velocity_error > 1e-6:
+            if not np.isfinite(arm_error + velocity_error) or not matches(arm_error,0.,'target_rad') or not matches(velocity_error,0.,'float32_readback'):
                 raise RuntimeError(f'Initial arm position/zero velocity restore failed: {arm_error} rad, {velocity_error} rad/s')
         return dict(epoch=self.epoch, invalid_through_ns=self.invalid_through_ns,arm_restored=bool(arm),
                     command_baseline=dict(epoch=self.epoch,sim_ns=actual['sim_ns'],physics_time_s=actual['physics_time_s'],drive_targets=list(actual['drive_targets'])),

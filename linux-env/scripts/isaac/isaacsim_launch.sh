@@ -8,7 +8,7 @@
 #   isaacsim_launch.sh quick-start [json]          # soarm101.quick_start while watching Kit (wedge detection, no retry)
 #   isaacsim_launch.sh status                      # process, bridge, stream port
 #   isaacsim_launch.sh close                       # SIGTERM, then SIGKILL, the Isaac this script started
-#   isaacsim_launch.sh kill                        # SIGKILL the Isaac this script started
+#   isaacsim_launch.sh kill                        # verified tree shutdown (same ownership policy as close)
 #   isaacsim_launch.sh restart [ext-id] [--stream] # close, then launch
 # Exit codes: launch/wait 0 ready, 1 error, 2 usage; quick-start = the client's (0 ok, 1 tool
 # error, 2 unreachable); all: 3 GPU wedge (no bridge and no Kit log progress for
@@ -64,6 +64,7 @@ if [ -n "$INSTANCE_INDEX" ]; then
     export OMNI_KIT_MCP_PORT="$((8777 + 2 * INSTANCE_INDEX))"
     export SOARM_KIT_MCP_PORT="$OMNI_KIT_MCP_PORT"
     INSTANCE_ROOT="${SOARM_INSTANCE_ROOT:-/mnt/a4500-backup/exploring-vlas/runtime/instance-$INSTANCE_INDEX}"
+    export SOARM_INSTANCE_ROOT="$INSTANCE_ROOT"
     export ISAACSIM_LOG="$INSTANCE_ROOT/isaac.log"
     python3 "$SCRIPT_DIR/../collect/storage.py" "$INSTANCE_ROOT" "$ISAACSIM_LOG"
     mkdir -p "$INSTANCE_ROOT"
@@ -100,12 +101,15 @@ client() {  # client <tool> [json] — the omni-kit-mcp reference client, pinned
     PYTHONPATH="$KIT_MCP_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -m kit_mcp.client "$@" --port "$MCP_PORT"
 }
 
-our_pid() {  # PID of the Isaac this script launched, if it is still alive
-    local pid
-    [ -f "$PIDFILE" ] || return 1
-    pid="$(cat "$PIDFILE" 2>/dev/null)"
-    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 1
-    echo "$pid"
+our_pid() {  # Only a live identity recorded by this launcher is reusable.
+    python3 "$SCRIPT_DIR/../collect/managed_process.py" status --pidfile "$PIDFILE"
+}
+
+claim_launcher_operation() {
+    if [ -n "${INSTANCE_ROOT:-}" ]; then
+        source "$SCRIPT_DIR/../collect/instance_claim.sh"
+        claim_collection_instance "$INSTANCE_ROOT"
+    fi
 }
 
 bridge_ready() {  # the bridge answers AND the extension behind soarm101.* is up
@@ -124,15 +128,8 @@ strip_ros_paths() {  # drop /opt/ros entries: Isaac must load its bundled ROS, n
     echo "$out"
 }
 
-kit_log() {  # the Kit log file our Isaac has open (its [Info] lines are not on stdout)
-    local pid
-    pid="$(our_pid)" || return 1
-    local fd
-    for fd in /proc/"$pid"/fd/*; do
-        fd="$(readlink "$fd" 2>/dev/null)" || continue
-        case "$fd" in */kit_*.log) echo "$fd"; return 0 ;; esac
-    done
-    return 1
+kit_log() {  # Read only a Kit log held by a verified managed descendant.
+    python3 "$SCRIPT_DIR/../collect/managed_process.py" kit-log --pidfile "$PIDFILE"
 }
 
 rtpso_lines() {  # count of RTX pipeline-compile progress lines in the Kit log so far
@@ -216,10 +213,11 @@ do_quick_start() {
     local params="${1:-}" out cpid size lsize=-1 progress seen n last rc
     [ -n "$params" ] || params='{}'
     out="$(mktemp)"
-    client soarm101.quick_start "$params" --timeout "${ISAACSIM_WAIT_CAP:-900}" > "$out" 2>&1 &
-    cpid=$!
+    cpid="$(PYTHONPATH="$KIT_MCP_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 "$SCRIPT_DIR/../collect/managed_process.py" start \
+        --pidfile "$out.pid" --log "$out" -- python3 -m kit_mcp.client soarm101.quick_start "$params" \
+        --timeout "${ISAACSIM_WAIT_CAP:-900}" --port "$MCP_PORT")" || return 1
     progress="$(date +%s)"; seen="$(rtpso_lines)"
-    while kill -0 "$cpid" 2>/dev/null; do
+    while python3 "$SCRIPT_DIR/../collect/managed_process.py" status --pidfile "$out.pid" >/dev/null; do
         size="$(kit_log_size)"
         # 0 = no Kit log to watch (not our Isaac): never call that a wedge.
         if [ "$size" != "$lsize" ] || [ "$size" = 0 ]; then lsize="$size"; progress="$(date +%s)"; fi
@@ -229,14 +227,14 @@ do_quick_start() {
             echo "  first-run RTX shader compile, ${last:-?} s so far (cached under this launch's cache root)" >&2
         fi
         if [ $(( $(date +%s) - progress )) -ge "$WEDGE_S" ] && ! client status --timeout 3 > /dev/null 2>&1; then
-            pkill -P "$cpid" 2>/dev/null; kill "$cpid" 2>/dev/null; wait "$cpid" 2>/dev/null
+            python3 "$SCRIPT_DIR/../collect/managed_process.py" stop --pidfile "$out.pid" || return 1
             rm -f "$out"
             wedge_msg "$WEDGE_S" >&2
             return 3
         fi
         sleep 5
     done
-    wait "$cpid"; rc=$?
+    rc="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["workload_returncode"])' "$out.pid.identity.json")"
     cat "$out"; rm -f "$out"
     return "$rc"
 }
@@ -439,10 +437,10 @@ do_launch() {
         [ -f "$nvjitlink" ] && export LD_PRELOAD="$nvjitlink${LD_PRELOAD:+:$LD_PRELOAD}"
         launch_nice="${SOARM_SIM_NICE:-0}"
         [ -n "${INSTANCE_ROOT:-}" ] && launch_nice="${SOARM_SIM_NICE:-10}"
-        exec setsid nice -n "$launch_nice" "$ISAACSIM_BIN" "${args[@]}" > "$LOG" 2>&1 < /dev/null
-    ) &
-    echo "$!" > "$PIDFILE"
-    echo "  PID:    $!"
+        python3 "$SCRIPT_DIR/../collect/managed_process.py" start --pidfile "$PIDFILE" --log "$LOG" -- \
+            nice -n "$launch_nice" "$ISAACSIM_BIN" "${args[@]}" || exit 1
+    ) || return 1
+    echo "  PID:    $(our_pid)"
     sleep 3
     if ! our_pid > /dev/null; then
         echo "ERROR: exited immediately; last log lines:"
@@ -462,26 +460,8 @@ do_launch() {
 }
 
 do_close() {
-    local sig_wait="${1:-20}" pid
-    if ! pid="$(our_pid)"; then
-        echo "Isaac Sim (started by this script) is not running"
-        rm -f "$PIDFILE"
-        return 0
-    fi
-    echo "Closing Isaac Sim pid $pid (SIGTERM)..."
-    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
-    for _ in $(seq 1 "$sig_wait"); do
-        kill -0 "$pid" 2>/dev/null || { echo "Stopped."; rm -f "$PIDFILE"; return 0; }
-        sleep 1
-    done
-    echo "Still running after ${sig_wait}s; SIGKILL to process group $pid"
-    kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
-    for _ in 1 2 3 4 5; do
-        kill -0 "$pid" 2>/dev/null || { echo "Killed."; rm -f "$PIDFILE"; return 0; }
-        sleep 1
-    done
-    echo "WARNING: pid $pid still running"
-    return 1
+    claim_launcher_operation
+    python3 "$SCRIPT_DIR/../collect/managed_process.py" stop --pidfile "$PIDFILE"
 }
 
 do_status() {
@@ -526,7 +506,7 @@ PYCODE
     status)  do_status ;;
     close)   do_close 20 ;;
     kill)    do_close 0 ;;
-    restart) shift; do_close 20 && do_launch "$@" ;;
+    restart) shift; claim_launcher_operation; do_close 20 && do_launch "$@" ;;
     *)
         sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
         exit 2
