@@ -148,7 +148,13 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
 - [ ] 3.1d Pilot 50 episodes, validate (load with LeRobotDataset, feature/fps match with deployment, spot-check
       videos), then full collection ~300 per colour (red/green/blue, ~900) with per-colour task strings, plus a
       data card.
-    - [ ] Pilot: 50 accepted episodes, balanced 17/17/16, validated and copied to the Mac (corrected 5-episode smoke required).
+    - [x] Pilot: 50 accepted episodes, balanced 17/17/16, validated and copied to the Mac (corrected 5-episode smoke required).
+      DONE 2026-11-14 (pilot-3.1-v4, frozen ef42c1b, normal-only): 50/50 accepted, zero failures, 17R/17G/16B,
+      30,134 frames; LeRobotDataset loads (30 fps, 6-D state+action, two 640x480 RGB); full timing audit PASS;
+      fixed base, base_link drift 0; 30.8 accepted/h (5835 s), per-episode RTF 0.15-0.22; owned processes down.
+      Data: /mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1-v4/. Re-grasp episodes NOT in it (3.1i open).
+      Live GUI check premerge-gui-6 PASS at c8140d0 (domain 92 localhost-only; two colours, base still);
+      main fast-forwarded to 220b2c2.
       Smoke validated 2026-11-13 at a8fc78b: 5 accepted / 7 attempts (71.43%), 3,508 frames at 30 simulated Hz;
       LeRobotDataset load and full state/action/timestamp read-back pass. Six native reset receipts, camera-phase,
       stale-epoch and late-application checks pass; 528 noisy execution steps retain clean expert labels.
@@ -242,6 +248,11 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       branches archive/real-hw-phase6-gdrive on DIME-LAB/Exploring-VLAs (5586bab) and inbarajaldrin/lerobot (ae8768ce);
       the only uncommitted file (lerobot/.planning/phases/06-real-hardware-unification/.continue-here-arm-tuning.md)
       stays on G-DRIVE. Not merged: dev has diverged heavily (control_gui/pick_place/srdf).
+- [ ] Host updates on dual: unattended-upgrade moved glibc 2.35-0ubuntu3.15 -> 3.18 at 13:18Z 2026-11-14 mid-pilot
+      (collector ABI manifest rebaselined in 220b2c2); kernel 6.8.0-149 half-installed (rtl88x2bu DKMS build fails,
+      no initrd; grub still boots 138); reboot-required pending. Operator decides on holding unattended-upgrades
+      during long collections and on the kernel fix (plan47 acts only with the operator's word).
+- [ ] Live checks on dual use ROS domain 92 + localhost-only, never domain 0 (plan47, 2026-11-14).
 - [ ] Real-hardware reintegration: port the archived real-hw work (archive/real-hw-phase6-gdrive) onto current dev
       when the real arm is back in scope (Phase 2.7 deploy switch / real-robot eval); reconcile with the sim/GUI
       split, the new grasp height and the primitive scene.
