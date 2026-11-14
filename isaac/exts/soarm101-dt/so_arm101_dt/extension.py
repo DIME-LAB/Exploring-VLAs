@@ -1593,6 +1593,13 @@ class DigitalTwin(omni.ext.IExt):
                 f"Added ground plane (color={GROUND_PLANE_COLOR}, "
                 f"matte)")
 
+        # The infinite analytic plane supplies ground contact; its render quad
+        # does not need a second triangle-mesh collider at the same height.
+        ground_prim = stage.GetPrimAtPath('/World/defaultGroundPlane')
+        for child in Usd.PrimRange(ground_prim):
+            if child.IsA(UsdGeom.Mesh) and child.HasAPI(UsdPhysics.CollisionAPI):
+                child.RemoveAPI(UsdPhysics.CollisionAPI)
+
         # Workspace ground tile (visual overlay, no collision).
         self._create_workspace_ground_tile(stage)
         # Extension tile joining the main one on its -X edge (independent material).
@@ -2019,6 +2026,9 @@ class DigitalTwin(omni.ext.IExt):
                 geometry.SetInstanceable(False)
                 deinstanced += 1
         print(f"[RobotGeometry] de-instanced {deinstanced} roots before scene build")
+
+        from .primitive_colliders import robot as author_robot_colliders
+        author_robot_colliders(stage, prim)
 
         # 4. Apply translation and orientation
         xform = UsdGeom.Xform(prim)
@@ -4544,24 +4554,10 @@ class DigitalTwin(omni.ext.IExt):
             xform.AddTranslateOp().Set(Gf.Vec3d(x, y, z))
             xform.AddOrientOp(UsdGeom.XformOp.PrecisionDouble).Set(orient)
 
-            # Rigid body + collision (convexDecomposition preserves hollow interior)
+            # The render mesh stays unchanged; the open physical cup uses boxes.
             UsdPhysics.RigidBodyAPI.Apply(cup_prim)
-            for child in Usd.PrimRange(cup_prim):
-                if child.GetTypeName() == "Mesh":
-                    UsdPhysics.CollisionAPI.Apply(child)
-                    mesh_col = UsdPhysics.MeshCollisionAPI.Apply(child)
-                    mesh_col.CreateApproximationAttr().Set("convexDecomposition")
-                    # Tighten contactOffset to match robot side. PhysX sums
-                    # the two shapes' contactOffsets when computing contact-
-                    # generation zone, so leaving the cup at the 20 mm
-                    # default (unauthored) swamps our 0.1 mm on the robot —
-                    # effective zone becomes 20.1 mm and cups still get
-                    # soft-contact pushes. 0.1 mm on both sides → 0.2 mm
-                    # total zone → only real geometric contact. See
-                    # DEBUG-GUIDE § 4.3.
-                    px = PhysxSchema.PhysxCollisionAPI.Apply(child)
-                    px.CreateContactOffsetAttr().Set(0.0001)  # 0.1 mm
-                    px.CreateRestOffsetAttr().Set(0.0)
+            from .primitive_colliders import cup as author_cup_colliders
+            author_cup_colliders(stage, cup_prim)
 
             placed += 1
             print(f"  Added cup_{color_name} at ({x:.3f}, {y:.3f}, {z:.3f})")
@@ -5590,6 +5586,10 @@ class DigitalTwin(omni.ext.IExt):
             angular_damping = prim_params["angular_damping"]
             physx_rb_api = PhysxSchema.PhysxRigidBodyAPI.Apply(mesh_prim)
             physx_rb_api.CreateAngularDampingAttr().Set(angular_damping)
+            if any(object_name.startswith(base + '_')
+                   for entries in LEGO_USDS.values() for base, _, _ in entries):
+                from .primitive_colliders import lego as author_lego_collider
+                author_lego_collider(stage, mesh_prim)
 
         del self._hidden_objects[object_name]
         print(f"Unhidden (restored) object: {object_name}")
@@ -5813,16 +5813,15 @@ class DigitalTwin(omni.ext.IExt):
                 inst_prim = stage.DefinePrim(inst_prim_path)
                 inst_prim.GetReferences().AddReference(inst_usd)
 
-        # Second pass: ensure convexHull collision and resolve body paths
+        # Each lego keeps its render mesh and receives one native bounding box.
+        from .primitive_colliders import lego as author_lego_collider
         body_paths = []
         for block_name, color_name, usd_path in blocks:
             body_path = self._get_prim_path(block_name, target_path)
             body_paths.append(body_path)
             body_prim = stage.GetPrimAtPath(body_path)
             if body_prim and body_prim.IsValid():
-                if body_prim.HasAPI(UsdPhysics.CollisionAPI):
-                    mc = UsdPhysics.MeshCollisionAPI.Apply(body_prim)
-                    mc.CreateApproximationAttr().Set("convexHull")
+                author_lego_collider(stage, body_prim)
 
         # Uniformly distribute blocks in a grid within the workspace, skipping cup zones
         fwd_min, fwd_max = BLOCK_RANDOM_FORWARD
@@ -7209,7 +7208,8 @@ class DigitalTwin(omni.ext.IExt):
                 output_path,
             ]
             mgr = _recording_mgr
-            mgr.ffmpeg_proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+            with open(output_path + '.ffmpeg.log', 'wb') as encoder_log:
+                mgr.ffmpeg_proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=encoder_log)
             mgr.recording = True
             mgr.output_path = output_path
             mgr.frame_count = 0
