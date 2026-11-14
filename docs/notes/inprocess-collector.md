@@ -7,10 +7,9 @@ camera matrix matches the retained native observation (maximum error 1.71e-7) an
 its compute counter stays aligned with RGB. SDK drawable matrices are one update
 older and are retained only as diagnostics. The corrected admission path requires
 fresh post-render metadata and checks camera pose on every row before finalizing
-its tick proof. Its final native boot and successful owner finalization passed at 9d4762c. No 5+5 episodes, export/readback or collector RTF are accepted yet.
+its tick proof. Five normal episodes now pass physical gates, the unchanged exporter and full 3300-row numeric readback at 5a3a719. Full collection+cleanup RTF is0.242× including cold startup; recording-only audits range 0.497–0.541×. Five re-grasp episodes and renderer comparisons remain unqualified. See [normal results](inprocess-collector-normal-five.md) and the [performance proposal](inprocess-collector-performance-next.md).
 Runtime/prototype files live in `linux-env/scripts/collect_inproc/`. Shared ROS
-collector and extension code are unchanged; the production robot asset's two
-root API opinions are corrected.
+collector motion/acceptance logic and extension code are unchanged; shared host-root/preload plumbing supports RTX, and the production robot asset's two root API opinions are corrected.
 
 ## Decision and architecture
 
@@ -137,7 +136,7 @@ just to get its writer/Servo: that imports the ROS process and planner stack.
 
 Rows remain radians internally, exactly as the current raw collector. Feed the
 unchanged `collect/export.py` accepted attempt layout: `frames.jsonl`, wrist/top
-MP4s, receipt, run config/summary, episodes ledger and affirmative finalization.
+MP4 s, receipt, run config/summary, episodes ledger and affirmative finalization.
 Export uses the pinned LeRobot v3 writer, converting measured state and clean
 action to degrees in deployment order: shoulder_pan, shoulder_lift, elbow_flex,
 wrist_flex, wrist_roll, gripper_joint. Feature names, 30 fps, HWC uint8 RGB inputs,
@@ -262,7 +261,7 @@ is insufficient: require final receipt, export validator and end marker.
 6. Only after N=1 correctness, compare N=2 aggregate accepted throughput on the
    assigned GPU(s). Two-pass/browser results need separate live/replay image proof.
    Publish artifacts to the Mac's
-   `coursework-eee598/roadmap-2026-11/phase3/3.1f-inprocess-collector/` with README,
+   `coursework-eee598/roadmap-2026-11/phase 3/3.1f-inprocess-collector/` with README,
    tests, per-stage JSON, comparison frames and validator reports. No HF upload.
 
 
@@ -305,7 +304,7 @@ views. A mismatch faults before `Capture.complete`, so no invalid row reaches a
 success gate or writer. SDK drawable IDs still supply progress diagnostics; SDK
 view matrices are not authoritative for the RGB camera.
 
-The 32-tick native diagnostic at9857b38 measured SDG camera-pose error<= 1.71e-7
+The 32-tick native diagnostic at 9857b38 measured SDG camera-pose error<= 1.71e-7
 through pan motion and a paused second reset. CameraParams compute counts equaled
 RGB copy counts on every captured tick and each advanced1 within an epoch. SDK
 view matrices were one tick older, with errors up to0.030706 during motion. The
@@ -329,7 +328,7 @@ correction preserves every other authored opinion and both relative external
 references; extension and shared collector code are unchanged. See
 `inprocess-collector-base-root.md` for source digests and independent reviews.
 
-The owned watchdog accepts900 s startup,120 s without capture progress and180 s
+The owned watchdog accepts900 s startup,120 s without capture progress and 180 s
 shutdown, with the lead's granted wall deadline taking precedence. After encoder
 and backend drain, the child publishes invocation/PID/summary-digest readiness and
 fast-exits. Only the external owner can finalize after successful child exit and
@@ -339,26 +338,13 @@ dataset. Tests cover real FFmpeg encode/decode, lifecycle certificates, physical
 handle faults, frozen state/real ACK preservation, producer freshness, current
 camera pose, original clocks, collision geometry, seeds and writer layout.
 
-Partial diagnostic timing from16 boot ticks (means,ms) was app update33.62,
-camera read4.91, combined physics/render wrapper38.79, state0.91, clean correction
-0.32, collision8.78, target write0.28 and join/hash/contract9.65. App/camera values
-are nested in the wrapper and must not be added again. This excludes startup,
-remaining host work and the dataset writer: no end-to-end collector RTF or >1x
-result is claimed. Full profiles, accepted throughput and all three render modes
-still need measurement.
+## Accepted normal baseline and remaining work
 
-## Remaining acceptance work
+Five accepted normal episodes at 5a3a719 provide3,300 frames/110 simseconds. The unchanged exporter and full numeric readback pass, with five same-seed ROS trajectory comparison sheets. Collection+cleanup takes 454.210 s (0.242×), including 230.922 s to run-config publication during cold initialization. Recording-only audits give0.497–0.541×. Foreground timed stages alone average 51.82 ms/tick, with writing overlapped; the >1× target remains unmet. Full stage timings and contention context are in the [normal results](inprocess-collector-normal-five.md).
 
-GPU 0 allocation remains lead-owned. The final corrected boot has passed. The
-episode window follows the ROS 50-episode pilot (approximately 2–2.5 hours) and requires a fresh lead grant. Read-only fresh
-fixtures appear under `datasets/smoke-descent-clearance-fixed-v1/`; the final normal set has five accepted receipts, attempts 0000–0004,
-seeds 330000–330004. Check completed receipts and provenance
-when selecting fixtures; do not modify them. Earlier floating-base fixtures do
-not fulfill the corrected-physics acceptance experiment. Re-grasp fixtures remain
-pending. Native successful finalization is verified. No 5+5 accepted dataset, unchanged
-export/readback, same-seed ROS frame comparison, renderer-gap metrics or collector
-RTF has yet been accepted. The lead retains a live GUI check before merging main.
+The normal scene/fixtures are fixed-base and read-only under `smoke-descent-clearance-fixed-v1/normal/attempt-0000..0004`, seeds 330000–330004. Re-grasp fixtures and five accepted re-grasp episodes remain pending. Isaac two-pass live/replay pixel/history and whole-pipeline timing, browser640×480 two-camera speed/PSNR/SSIM, and a deployment-domain strategy still require their own qualified experiments. The recommended next step is the [pacing/presentation A/B](inprocess-collector-performance-next.md); no new flags were tested in the accepted normal window. Do not infer collector throughput from physics-only or no-camera battery measurements.
 
+The lead owns every sim window. Sim released at 15:04:53Z after the normal batch, with all 17 owned PIDs retired, ports 8793/8794 closed and no owned NVML contexts/errors. Any further native, replay or performance launch needs a new grant. The full 5+5 acceptance bar remains incomplete.
 
 The final boot at 9d4762c completed 32 SDG-gated ticks with every boot check true,
 including motion, initial/paused-reset priming and valid physical handles.

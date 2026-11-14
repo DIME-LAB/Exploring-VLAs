@@ -4,8 +4,7 @@ The isolated prototype reuses the existing expert geometry, DART, recovery,
 physical success gate, tick contract, fault policy and exporter. The production
 asset's fixed-base correction is verified through the real ROS subscriber and
 ArticulationController: six unchanged joint names/order, native fixed_base=true,
-and zero root drift over 272 physics samples. Shared collector and extension code
-are unchanged. The asset repair and owned ROS verification entrances are
+and zero root drift over 272 physics samples. ROS motion/acceptance logic and extension code are unchanged; shared host-root/preload plumbing supports the qualified RTX host. The asset repair and owned ROS verification entrances are
 `isaac/fix_articulation_root.py` and `fixed_root_validation.py`.
 
 The 32-tick diagnostic proves that SDG CameraParams matches the retained native
@@ -13,8 +12,7 @@ observation through motion/reset; SDK drawable camera metadata is older. Admissi
 now requires fresh CameraParams and checks its render-camera pose against the
 frozen physical snapshot on every capture before finalizing a tick. Invalid
 physics handles are terminal. The final native boot passed 32 SDG-gated ticks, a paused second reset and
-successful owner finalization at 9d4762c; see the final-native probe receipt. No accepted episodes, 5+5 dataset, export/readback or collector
-RTF result is claimed. See [design](../../../docs/notes/inprocess-collector.md)
+successful owner finalization at 9d4762c. At 5a3a719, five normal episodes pass physical gates, unchanged export and full 3,300-row readback. Collection+cleanup RTF is0.242× including cold startup; recording-only 0.497–0.541×. Re-grasp and renderer alternatives remain unqualified; the >1× target is unmet. See [normal results](../../../docs/notes/inprocess-collector-normal-five.md) and [performance proposal](../../../docs/notes/inprocess-collector-performance-next.md). See [design](../../../docs/notes/inprocess-collector.md)
 and [fixed-base evidence](../../../docs/notes/inprocess-collector-base-root.md).
 
 ## Offline checks
@@ -84,7 +82,7 @@ python3 linux-env/scripts/collect_inproc/launch.py preflight --probe \
 ```
 
 After a grant, replace `preflight` with `start --window WINDOW_ID`. Always use fresh
-runtime/output paths. Instance 2 uses domain92 and ports 8781/8782, GPU 0UUID plus
+runtime/output paths. Instance 2 uses domain 92 and ports 8781/8782, GPU 0UUID plus
 independent Vulkan renderer pinning, CPU PhysX, nice10, persistent caches and
 identity-bound process cleanup. GPU 1 is reserved for other agents by the lead, even when all processes share
 the same Unix user; a process is owned only through this launcher's identity receipt. `status` and `stop`
@@ -152,7 +150,7 @@ pixi run --manifest-path linux-env/pixi.toml python linux-env/scripts/collect_in
 
 This calls `collect/export.py` unchanged, then reads back every numeric state,
 action and timestamp through the pinned LeRobot v3 dataset. Features, degree units,
-deployment order,30fps,tasks,cameras and recovery metadata remain unchanged.
+deployment order,30 fps,tasks,cameras and recovery metadata remain unchanged.
 
 The expert uses shared `make_reachable_grasp_plan` yaw-specific IK, TCP offset and
 jaw values together; no separate yaw fallback is allowed. Recovery uses the same
@@ -181,13 +179,12 @@ pixi run --manifest-path linux-env/pixi.toml python linux-env/scripts/collect_in
 ```
 
 Both inputs are single attempt directories containing receipt.json, frames.jsonl
-and both MP4s. Choose the candidate attempt with the matching seed and target;
+and both MP4 s. Choose the candidate attempt with the matching seed and target;
 it may have another attempt number after rejections. The output directory must
 not already exist. The command checks seed/target identity and writes
 side-by-sides and stage profiles. It is a trajectory
 comparison unless the physical poses match. `--replay` requires identical raw
-physical rows and reports PSNR/SSIM/RGB errors. Neither benchmark is claimed until
-exercised on the accepted sim experiment.
+physical rows and reports PSNR/SSIM/RGB errors. Five same-seed trajectory comparisons have been exercised on the accepted normal run; pose-matched renderer comparisons remain unqualified.
 
 
 Boot logs are written to `<runtime>/kit.log`. The completed owned boot used
