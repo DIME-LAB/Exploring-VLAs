@@ -968,7 +968,12 @@ wall deadlines fail bad attempts. Failed receipts remain; failed videos are
 excluded. The exporter refuses partial/superseded runs, re-audits original ticks,
 checks exact row/video counts, writes measured relative sim timestamps through
 the pinned LeRobotDataset API, reloads the dataset, and creates a contact sheet,
-three colour sample videos and parameter/timing reports. Report accepted yield,
+three colour sample videos and parameter/timing reports. A completed export can
+be checked again with the export command's `--validate-existing` flag: it refuses
+missing or different episode/phase metadata, re-audits the raw rows and videos,
+and compares every stored state, action and phase with that source without
+rewriting the dataset. Standalone export resolves the shared pure IK package
+without requiring a sourced ROS workspace. Report accepted yield,
 RTF, idle/stationary fractions, storage growth and episodes per wall-hour. The
 collector refuses requests above 50; the lead schedules the larger run.
 

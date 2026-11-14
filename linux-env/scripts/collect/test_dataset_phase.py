@@ -1,6 +1,6 @@
 """Frame-level phase flags survive export and distinguish capped miss labels."""
 import copy,unittest
-from dataset_phase import observed_phase,phase_code,feature,PHASES,FEATURE
+from dataset_phase import observed_phase,phase_code,feature,PHASES,FEATURE,stored_phase_codes
 
 class DatasetPhaseTests(unittest.TestCase):
     def test_normal_prefix_and_corrective_flags_are_explicit(self):
@@ -25,6 +25,14 @@ class DatasetPhaseTests(unittest.TestCase):
         self.assertEqual(phase_code(row,receipt,required=True),2)
         with self.assertRaises(ValueError):phase_code(dict(row,pose_stamp_ns=100),receipt,required=True)
         with self.assertRaises(ValueError):phase_code(dict(row,collection_phase='miss_prefix'),receipt,required=True)
+
+    def test_phase_readback_accepts_scalar_or_singleton_and_refuses_invalid_values(self):
+        import numpy as np
+        from types import SimpleNamespace
+        for values in ([np.asarray(2),np.asarray(2)],[np.asarray([2]),np.asarray([2])]):
+            self.assertEqual(stored_phase_codes(SimpleNamespace(hf_dataset={FEATURE:values})),[2,2])
+        for values in ([np.asarray(3)],[np.asarray(2.5)],[np.asarray([1,2])]):
+            with self.assertRaises(ValueError):stored_phase_codes(SimpleNamespace(hf_dataset={FEATURE:values}))
 
     def test_normal_legacy_export_is_compatible_but_new_missing_flags_refuse(self):
         receipt=dict(params=dict(recovery='none'))

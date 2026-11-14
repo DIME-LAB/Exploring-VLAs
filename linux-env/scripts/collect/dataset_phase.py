@@ -28,3 +28,16 @@ def phase_code(row,receipt,required=False):
 
 
 def feature():return dict(dtype='int64',shape=(1,),names=['phase'])
+
+
+def stored_phase_codes(dataset):
+    """Read scalar or singleton phase columns without accepting invalid codes."""
+    codes=[]
+    for value in dataset.hf_dataset[FEATURE]:
+        try:value=value.item()
+        except (AttributeError,ValueError,RuntimeError) as exc:
+            raise ValueError('Stored phase must contain exactly one integer') from exc
+        if isinstance(value,bool) or value not in PHASES.values() or int(value)!=value:
+            raise ValueError('Invalid stored phase code: '+str(value))
+        codes.append(int(value))
+    return codes
