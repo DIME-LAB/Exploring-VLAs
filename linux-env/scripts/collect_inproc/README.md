@@ -1,9 +1,11 @@
 # In-process SO-ARM101 prototype
 
 This standalone collector imports the existing geometry, DART, recovery, physical
-success gate, tick audit, fault policy and exporter. It is a prototype awaiting a
-lead-granted simulation window. CPU checks do not establish physical grasp yield,
-camera freshness, renderer fidelity or throughput. See
+success gate, tick audit, fault policy and exporter. The first boot window verified
+scene export, GPU/CPU assignment, native FK and immediate restore. Held-time RGB
+failed; no valid image pairs or episodes were accepted. The playing-timeline
+adapter is offline-tested and awaits a new lead-granted window. CPU checks do not
+establish physical grasp yield, camera freshness, renderer fidelity or throughput. See
 [`docs/notes/inprocess-collector.md`](../../../docs/notes/inprocess-collector.md).
 No shared ROS collector or extension module is changed.
 
@@ -28,7 +30,7 @@ Old receipts with different body inventories refuse restore. Do not use supersed
 pilot receipts as evidence of correctness; they are useful only as pose fixtures.
 
 Inside the explicitly assigned, held ROS collector Kit, load this helper with
-`run_python` and call (supply the actual camera prim paths):
+`run_python` and call:
 
 ```python
 import sys
@@ -67,6 +69,41 @@ storage root. Renderer selection resolves UUID/PCI independently of CUDA; startu
 rechecks the current Kit table and owned process GPU allocations. `status` and
 `stop` need only `--runtime`; they use the shared identity-bound process supervisor.
 Never stop another collector or prompt2assembly process.
+
+## Boot probe before episodes
+
+The boot probe needs no ROS episode fixtures. Preflight is safe outside a window:
+
+```bash
+python3 linux-env/scripts/collect_inproc/launch.py preflight --probe \
+  --runtime /mnt/a4500-backup/exploring-vlas/runtime/inproc-playing-next \
+  --gpu 0 \
+  --renderer-log /mnt/a4500-backup/exploring-vlas/runtime/inproc-probe2-v8/kit.log -- \
+  --scene /mnt/a4500-backup/exploring-vlas/inproc/scene-window-20261114/scene.usdc \
+  --manifest /mnt/a4500-backup/exploring-vlas/inproc/scene-window-20261114/manifest.json \
+  --output /mnt/a4500-backup/exploring-vlas/inproc/probe-playing-next \
+  --instance 2 --frames 12 --step-mode playing
+```
+
+Only after a new grant, replace `preflight` with `start --window WINDOW_ID`. This
+plays the timeline at 30 Hz, using four CPU physics substeps per app update and
+retaining the existing paused viewport's Hydra engine. It refuses missing/extra
+render completions, old producer identities and mismatched clocks without polling.
+The timeline is aligned to World without an app update after restore and before
+each step; the producer clock is checked against the timeline sampled after the
+update. `probe.json` records physical advance, paired consumption, two post-reset
+frames and no progress during CPU work between updates. A successful probe
+finalizes with `BOOT_PROBE_FINISHED`, `kind=boot_probe`, episodes=0;
+it is never an accepted dataset. Owner-side finalization follows
+worker exit and verified descendant cleanup. Check `inproc-watchdog.json`, the
+finalization certificate and `launch.py status`; a worker exit alone is insufficient.
+
+Both adapters currently default to diagnostic `--step-mode held`; its RGB path
+failed live. Select `--step-mode playing` explicitly for the next probe. Do not
+start episode collection until that probe passes. For episodes the same option
+belongs after `--` with the run arguments. `--physics-only` uses held stepping and
+refuses `--step-mode playing`. Fresh ROS-smoke normal/re-grasp fixtures and an
+explicit episode window remain prerequisites for the 5+5 acceptance experiment.
 
 The raw attempt layout matches the ROS collector. On a successfully finalized live
 run, use the **existing** pixi export entrance:

@@ -30,6 +30,7 @@ def arguments(argv=None):
     p.add_argument('--per-kind',type=int,default=5)
     p.add_argument('--max-attempts',type=int,default=30)
     p.add_argument('--physics-only',action='store_true')
+    p.add_argument('--step-mode',choices=['held','playing'],default='held')
     p.add_argument('--instance',type=int,default=31)
     return p.parse_args(argv)
 
@@ -55,6 +56,7 @@ def run(a):
         from watch import heartbeat
         heartbeat('startup',900.)
         if a.per_kind<1 or a.max_attempts<1:raise ValueError('Positive episode and attempt limits required')
+        if a.physics_only and a.step_mode=='playing':raise ValueError('Playing mode requires its camera producers')
         fixtures=[]
         for path in a.fixture:
             value=json.loads(path.read_text())
@@ -63,9 +65,7 @@ def run(a):
         kinds=['normal','regrasp'] if a.kind=='both' else [a.kind]
         pools=fixture_pools(fixtures,kinds,a.per_kind);kind_attempts={k:0 for k in kinds}
         from isaacsim import SimulationApp
-        app=SimulationApp(dict(headless=True,hide_ui=True,active_gpu=int(os.environ['SOARM_RENDERER_GPU_INDEX']),
-            physics_gpu=0,multi_gpu=False,disable_viewport_updates=True,fast_shutdown=False,
-            extra_args=['--/log/file='+os.environ['SOARM_CURRENT_KIT_LOG']]))
+        app=SimulationApp(shared.app_config())
         from native import Native
         from safety import Geometry
         from core import Capture
@@ -73,7 +73,10 @@ def run(a):
         from writer import Writer
         from replay_contract import packet
         from so_arm101_control.grasp_geometry import _grasp_home_data_target
-        backend=Native(a.scene,a.manifest,cameras=not a.physics_only)
+        if a.step_mode=='playing':
+            from playing import Playing
+            backend=Playing(a.scene,a.manifest)
+        else:backend=Native(a.scene,a.manifest,cameras=not a.physics_only)
         # Bind CUDA, renderer settings and current Kit table independently.
         import carb
         import torch
@@ -99,7 +102,7 @@ def run(a):
             * (shared.REPO/'linux-env/scripts/collect').glob('*.py'),
             shared.REPO/'isaac/exts/soarm101-dt/assets/sorting_collision_geometry.json']
         config=dict(version=1,instance=a.instance,fps=30,backend='inprocess',physics='cpu',
-            physics_only=a.physics_only,window=a.window,normal_target=a.per_kind,regrasp_target=a.per_kind,
+            physics_only=a.physics_only,step_mode=a.step_mode,window=a.window,normal_target=a.per_kind,regrasp_target=a.per_kind,
             scene_sha256=hashlib.sha256(a.scene.read_bytes()).hexdigest(),gpu_start=gpu_start,
             fixture_sha256={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in a.fixture},
             source_sha256={str(p.relative_to(shared.REPO)):hashlib.sha256(p.read_bytes()).hexdigest() for p in source_files},
@@ -124,13 +127,14 @@ def run(a):
                 s=backend.snapshot();images=None;render_profile={}
                 if not a.physics_only:images,render_profile=backend.render()
                 transforms,cameras=backend.transforms()
-                row,snapshot,timing=capture.tick(reference,executed,offset,phase,episode_id,images,s)
+                row,snapshot,timing=capture.tick(reference,executed,offset,phase,episode_id,images,s,
+                    camera_stamps=render_profile.get('camera_stamps'))
                 pose=packet(s,transforms,cameras,len(checked))
                 pose['row_sha256']=digest(row)
                 profile=dict(timing,**render_profile,sim_ns=row['sim_ns'])
                 checked.append(snapshot)
                 if record:profile['enqueue_ms']=writer.add(row,images,pose,profile)
-                profile['physics_ms']=backend.step();profiles.append(profile)
+                profile['physics_render_ms' if a.step_mode=='playing' else 'physics_ms']=backend.step();profiles.append(profile)
                 return row,snapshot
             try:
                 geometry.carried=None;geometry.contact=False;geometry.selected=None
@@ -206,11 +210,13 @@ def run(a):
             from watch import heartbeat
             heartbeat('shutdown',180.)
         except BaseException as exc:cleanup.append(dict(source='heartbeat',error=repr(exc)))
-        for label,obj in (('backend',backend),('app',app)):
+        for label,obj in (('backend',backend),):
             if obj:
                 try:obj.close()
                 except BaseException as exc:cleanup.append(dict(source=label,error=repr(exc)))
         if cleanup:terminal(root,dict(source='cleanup',errors=cleanup))
+        shared.publish_exit_ready(root,certificate,error is None and not cleanup)
+        if app:app.close(skip_cleanup=True,exit_code=0 if error is None and not cleanup else 1)
         finish(root,certificate,cleanup)
     if error:raise error
     print('PHYSICS_CAPTURE_FINISHED' if a.physics_only else 'COLLECTION_FINISHED',flush=True)

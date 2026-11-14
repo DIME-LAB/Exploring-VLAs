@@ -63,7 +63,7 @@ def main():
         from rgb_capture import RGB
         omni.usd.get_context().open_stage(str(a.scene))
         stage=omni.usd.get_context().get_stage()
-        for root in ('/Graph','/Render'):stage.RemovePrim(root)
+        for root in ('/Graph','/Render/PostProcess'):stage.RemovePrim(root)
         timeline=omni.timeline.get_timeline_interface();timeline.stop();timeline.set_auto_update(False)
         for prim in stage.Traverse():
             if prim.HasAPI(UsdPhysics.RigidBodyAPI):UsdPhysics.RigidBodyAPI(prim).CreateRigidBodyEnabledAttr().Set(False)
@@ -81,7 +81,7 @@ def main():
             poses.update({manifest['camera_paths'][k]:v for k,v in packet['cameras'].items()})
             seconds=packet['physics_time_s']
             apply_poses(stage,poses,seconds);timeline.set_current_time(seconds)
-            images,timing=rgb.read(seconds)
+            images,timing=rgb.read(seconds,app.update)
             profile=dict(index=index,render_ms=(time.perf_counter_ns()-frame_start)/1e6,**timing)
             writer.add(row,images,record,profile);profiles.append(profile);previous=record
         writer.close();writer=None

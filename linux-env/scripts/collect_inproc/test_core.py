@@ -48,6 +48,11 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(row['action'], [.1]*6)
         bad=copy.deepcopy(row);bad['action']=list(bad['executed_action'])
         self.assertIn('Noisy or stale expert label', row_errors(bad))
+    def test_original_camera_clock_is_retained(self):
+        b,c=self.capture();stamps=dict(wrist=b.s['sim_ns']+167,top=b.s['sim_ns'])
+        row,_,_=c.tick([0.]*6,[0.]*6,[0.]*6,'hold','test',camera_stamps=stamps)
+        self.assertEqual(row['wrist_stamp_ns'],stamps['wrist'])
+        self.assertFalse(row_errors(row))
     def test_skip_and_bad_drive_readback_refuse(self):
         b, c = self.capture(); b.s['sim_ns'] += STEP_NS
         with self.assertRaises(RuntimeError): c.tick([0.]*6,[0.]*6,[0.]*6,'hold','test')

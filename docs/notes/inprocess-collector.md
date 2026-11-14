@@ -1,7 +1,9 @@
 # In-process SO-ARM101 collection (ROADMAP 3.1f)
 
-Status: design and CPU contract tests; live acceptance is pending a lead-owned
-simulation window. No throughput or image-equivalence result is claimed here.
+Status: scene export and native GPU/CPU/FK/restore checks passed in the first
+lead-granted boot window. Held-time RGB failed in eight probes; zero image pairs
+or episodes were accepted. The playing-timeline adapter has offline tests only
+and requires another window. No throughput or image-equivalence result is claimed.
 The runtime and prototype live in `linux-env/scripts/collect_inproc/`; the ROS
 collector and `isaac/exts/` remain unchanged.
 
@@ -9,13 +11,20 @@ collector and `isaac/exts/` remain unchanged.
 
 Use a standalone headless `SimulationApp`, with one main-thread owner of physics,
 expert execution, reset and capture. Keep one stage, articulation and two fixed
-640x480 render products for the whole run. Four 1/120 s CPU PhysX steps precede
-each 1/30 s observation; render while physics is held, read measured state and
-both RGB annotators, compute the expert and DART, check and apply the targets,
-then step again. No wall pacing. Read native clock and physics-step count;
-never assign a clock solely from a row number. Render completion is a barrier,
-not evidence that the camera frame must be current: verify render frame metadata
-and unchanged physical state across capture in the live probe.
+640x480 render products for the whole run. The proposed live path keeps the
+timeline playing and executes one application update per 1/30 s observation,
+containing four 1/120 s CPU PhysX steps and both camera renders. Between updates,
+read measured state and annotators, compute expert/DART, check and apply targets
+synchronously. No wall pacing or render polling while the expert runs. Read native
+clock and unconditional physics callbacks; never assign time from a row number.
+Require exactly one completion per product, fresh per-product render/buffer
+identities and original camera timestamps agreeing with the physical tick.
+Own the separate timeline clock: align it to World time without an app update
+after restore and before each step, sample it after the update, require agreement
+with World within 10 ns and compare camera ReferenceTime to that sampled clock.
+This prevents pause/play offsets and accumulated float32 substep drift from
+masking a lagged camera frame. It remains a live clock/renderer verification gate.
+Held-time capture remains a diagnostic mode; its current RGB path failed live.
 
 An extension callback could reuse the live World, but retains its application
 frame, GUI, ROS graphs and reset/callback ownership costs. Standalone gives an
@@ -39,7 +48,7 @@ No shared environment or Isaac installation configuration changes are needed.
 
 | Mode | Physics pass | Render/write pass | Admission to training |
 | --- | --- | --- | --- |
-| Live Isaac | Physics + expert + DART + two annotators, same held step | Bounded RGB encoding and existing exporter | Baseline recommendation; requires 5 normal + 5 re-grasp accepted episodes and same-seed ROS comparison |
+| Live Isaac | Physics + expert + DART + two annotators, same playing application update | Bounded RGB encoding and existing exporter | Baseline recommendation; requires 5 normal + 5 re-grasp accepted episodes and same-seed ROS comparison |
 | Isaac two-pass | Cameras/render products fully absent; log measured joints, drives, all rigid-body/link world transforms, both camera transforms, metadata and labels at every camera tick | Physics disabled; replay exact poses in a separate Kit, one fixed product per camera, sequential history | Only after live/replay pixel and timing proof; no physical verdict is rerun in pass 2 |
 | Browser two-pass | Same pose log | CAD/three.js renderer with calibrated camera, exposure/material compensation | Research option until SO-ARM101 image-gap and throughput are measured; not an interchangeable RTX backend |
 
@@ -246,24 +255,64 @@ is not implemented. Direct paths are implemented; retract/pan/settle and OMPL
 fallback remain proposed if measured yield requires them. No live success or speed
 result is implied by these entrances.
 
-The first independent source review found fast shutdown would bypass finalization,
-and collider extraction would lose the mm→m body scale. Both are corrected:
-SimulationApp uses `fast_shutdown=False` with an external owned-process watchdog,
-and box extraction retains inherited scale in a rigid metre body frame. Regression
-checks cover millimetre bodies, real FFmpeg encode/decode, and zero-exit workers
-without certificates. The review also prompted exact ROS DART seed/phase rules,
+The source review identified shutdown/finalization and mm→m collider scale risks.
+Box extraction retains inherited scale in a rigid metre body frame. Kit uses
+fast shutdown after draining encoders and closing the backend; the external owner
+finalizes only after the producer exits successfully and identity-bound descendant
+cleanup has no remaining processes. Producer PID, invocation, start time and
+summary digest bind the worker's readiness record. A zero exit without these
+records is refused. Graceful Kit teardown stalled during the boot window, so the
+owner performs finalization outside Kit. Regression checks cover millimetre bodies,
+real FFmpeg encode/decode, failure readiness without a summary and lifecycle
+certificates. The review also prompted exact ROS DART seed/phase rules,
 measured pause/encoder-retirement fields, recovery audit for physics candidates,
 and camera poses derived from measured parent links.
 
-Camera freshness uses the installed Replicator writer synchronization gate, whose
-execution dependencies include each RGB producer. A single global `ReferenceTime`
-annotator cannot prove both RGB buffers are current. The capture callback requires
-both product arrays, the stamped rational time and exactly one delivery, copies
-arrays before reuse, and checks unchanged physics around rendering. The same path
-serves live capture and replay. Its graph behavior still needs the granted-window
-probe. Experimental replay remains non-exportable until the fidelity review.
+`playing.py` follows the verified camera setup in `~/w_31f/bench.py`: retain the
+existing active viewport with updates disabled (create an invisible one only if
+absent), apply OmniSensorAPI tickRate 30, GPU RGB annotators, RenderingManager dt
+1/30 and timeline target 30, play and warm up. Installed SimulationContext.step
+with render=True delegates to one app.update at these nonzero dt values. The
+adapter refuses extra/missing physics steps or renders rather than polling a stale
+buffer. ReferenceTime is global, so it is supplemented by per-product SWH frame
+identity, RGB compute count and simulation NEW_FRAME completion count. Copies
+retain the producer's rational timestamp, including permitted sub-microsecond
+rounding differences. Whether these native fields reliably identify both pixels
+after every update is still a live-verification requirement. Experimental replay
+and held writer-gate capture remain non-exportable until verified.
+
+The offline suite has 30 tests, including 2,000 aligned float32-dt frames and a
+case where camera lag cancels a timeline offset. The probe uses its own
+BOOT_PROBE_FINISHED marker with episodes=0; collection export is not admitted.
 
 The wall watchdog accepts 900 s startup, 120 s without collection progress and
 180 s graceful shutdown, with pidfd cleanup and an affirmative producer-bound
 finalization check. Heartbeat touching adds no fsync per frame. No existing Isaac
 or prompt2assembly process is adopted or stopped.
+
+## First window result and next gate
+
+The 2026-11-14 boot-only window ended at 07:23:13Z. The held scene export contains
+11 robot links, nine rigid scene bodies, 65 enabled boxes and ten joints. Camera
+paths came from the current collector configuration and are stored in the export
+manifest. All eight standalone attempts passed GPU UUID/Vulkan/NVML assignment,
+nice/domain, CPU dynamics, native joint FK and immediate baseline restore checks.
+Four-step stepping executed before RGB refusal, but those probe versions did not
+persist its numerical evidence before failure; there is no complete cadence pass.
+No paired RGB frames were accepted. The first six attempts observed the wrong
+NEW_FRAME event channel; their zero event count proves nothing about rendering.
+Attempts seven/eight used the simulation channel and timed out with zero observed
+completions. No renders-per-advance ratio or RTF can be claimed.
+
+Paused tick-rate sensors and an extra viewport/Hydra engine are plausible causes,
+supported by w_scene's playing-timeline reference and plan47's camera-shapes
+notes; they are not yet experimentally isolated. Next window starts with
+`launch.py --probe ... --step-mode playing`, using a fresh output/runtime. Require
+12 consecutive paired frames with four native steps and one render each, and no
+physics/render progress during synchronous CPU work between updates. If this
+fails, retain the fault and release; do not begin episodes. Five normal/five
+re-grasp episodes additionally require the fresh ROS-smoke fixtures and the lead's
+explicit episode window. Cleanup proof is
+`/mnt/a4500-backup/exploring-vlas/inproc/window-20261114-cleanup.json`: nine owned
+groups stopped, remaining=[], ports 8781/8782 closed, no owned NVML contexts,
+GPU0 at 21 MiB. The companion Mac report contains raw probe receipts and logs.

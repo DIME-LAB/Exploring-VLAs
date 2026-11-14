@@ -93,8 +93,8 @@ class Native:
         omni.usd.get_context().open_stage(str(scene))
         self.stage=omni.usd.get_context().get_stage()
         # Edits affect only this private stage; the source file is never saved.
-        for prim in list(self.stage.GetPseudoRoot().GetChildren()):
-            if prim.GetName() in ('Graph','Render'):self.stage.RemovePrim(prim.GetPath())
+        self.stage.RemovePrim('/Graph')
+        self.stage.RemovePrim('/Render/PostProcess')
         if not cameras:
             for prim in self.stage.Traverse():
                 if prim.IsA(UsdGeom.Camera) and prim.HasAPI('OmniSensorAPI'):prim.RemoveAPI('OmniSensorAPI')
@@ -118,7 +118,12 @@ class Native:
                 view.initialize();dest[name]=view
         self.epoch=0;self.floor=-1;self.last_apply=None
         self.local_corners=self.manifest['baseline']['local_corners']
+        # Sensor ticks are on the 30 Hz grid. Initialization may have advanced
+        # two substeps; finish that unrecorded frame before installing a baseline.
+        for _ in range((-self.world.current_time_step_index)%4):
+            self.world.step(render=False,update_fabric=True)
         self.rgb=None
+        self.engine_window=None
         if cameras:self.create_cameras()
         self.restore(self.manifest['baseline'])
         scene_prim=self.stage.GetPrimAtPath(physics.prim_path)
@@ -128,8 +133,17 @@ class Native:
     def create_cameras(self):
         from pxr import UsdGeom
         from rgb_capture import RGB
+        import omni.kit.viewport.utility as viewport_utility
         for key,path in self.manifest['camera_paths'].items():
             if not self.stage.GetPrimAtPath(path).IsA(UsdGeom.Camera):raise RuntimeError('Missing camera '+path)
+        # A retained paused viewport attaches Hydra to this opened stage. A
+        # headless render product alone does not create that engine in Kit 6.1.
+        viewport=viewport_utility.get_active_viewport()
+        if viewport is None:
+            self.engine_window=viewport_utility.create_viewport_window('inproc-engine',
+                width=640,height=480,visible=False)
+            viewport=self.engine_window.viewport_api
+        viewport.updates_enabled=False
         self.rgb=RGB(self.manifest['camera_paths'])
 
     def stamp(self):return round(float(self.world.current_time)*1e9)
@@ -171,10 +185,15 @@ class Native:
 
     def render(self):
         import omni.timeline
+        import omni.kit.app
         before=self.snapshot()
-        omni.timeline.get_timeline_interface().set_current_time(before['physics_time_s'])
-        # Zero delta explicitly prevents capture from introducing a fifth substep.
-        images,profile=self.rgb.read(before['physics_time_s'])
+        self.world.pause()
+        timeline=omni.timeline.get_timeline_interface()
+        timeline.set_auto_update(False)
+        timeline.set_current_time(before['physics_time_s'])
+        timeline.commit_silently()
+        try:images,profile=self.rgb.read(before['physics_time_s'],omni.kit.app.get_app().update)
+        finally:self.world.play()
         after=self.snapshot()
         if before!=after:raise RuntimeError('Rendering mutated the frozen physical observation')
         return images,profile
@@ -219,3 +238,4 @@ class Native:
     def close(self):
         self.world.pause()
         if self.rgb:self.rgb.close()
+        if self.engine_window:self.engine_window.destroy()

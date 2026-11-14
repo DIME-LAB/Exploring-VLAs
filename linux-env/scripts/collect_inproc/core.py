@@ -41,16 +41,18 @@ class Capture:
         self.floor = result['invalid_through_ns']
 
     def tick(self, reference, executed_reference, offset, phase, episode_id,
-             images=None, snapshot=None):
+             images=None, snapshot=None,camera_stamps=None):
         start = time.perf_counter_ns()
         s = copy.deepcopy(snapshot if snapshot is not None else self.backend.snapshot())
         read_end = time.perf_counter_ns()
         stamp, epoch = s['sim_ns'], s['epoch']
+        camera_stamps=camera_stamps if camera_stamps is not None else dict(wrist=stamp,top=stamp)
+        if set(camera_stamps)!=set(CAMERAS):raise ValueError('Both original camera stamps are required')
         received = time.monotonic_ns()
         row = dict(tick_contract_version=1, epoch=epoch, observation_epoch=epoch,
             expert_epoch=epoch, invalid_through_ns=self.floor, sim_ns=stamp,
-            pose_stamp_ns=stamp, joint_stamp_ns=stamp, wrist_stamp_ns=stamp,
-            top_stamp_ns=stamp, wall_ns=received, joint_receive_ns=received,
+            pose_stamp_ns=stamp, joint_stamp_ns=stamp, wrist_stamp_ns=camera_stamps['wrist'],
+            top_stamp_ns=camera_stamps['top'], wall_ns=received, joint_receive_ns=received,
             wrist_receive_ns=received, top_receive_ns=received,
             state=list(s['state']), velocity=list(s['velocity']),
             physics_state=list(s['state']), physics_velocity=list(s['velocity']),
@@ -62,7 +64,7 @@ class Capture:
         if images is not None:
             if set(images) != set(CAMERAS):
                 raise ValueError('Both cameras must belong to the captured frame')
-            row['camera_identity'] = {k:image_identity(images[k], stamp) for k in CAMERAS}
+            row['camera_identity'] = {k:image_identity(images[k], camera_stamps[k]) for k in CAMERAS}
         else:
             # Physics-pass rows are never exportable until replay is materialized.
             row['render_pending'] = True

@@ -19,6 +19,7 @@ def main():
     p.add_argument('--gpu',type=int,default=0)
     p.add_argument('--renderer-log',type=Path,help='Prior verified Kit GPU table for renderer-index resolution')
     p.add_argument('--window',help='Explicit lead-granted sim window; required to start')
+    p.add_argument('--probe',action='store_true',help='Boot/cadence/RGB checks without episode fixtures')
     args,rest=p.parse_known_args()
     runtime=confined(args.runtime)
     from managed_process import start,stop,verified
@@ -31,14 +32,17 @@ def main():
     renderer=resolve(rows,inventory(),uuid)
     if not rest or rest[0]!='--':raise ValueError('Pass run.py arguments after --')
     from run import arguments,fixture_pools
-    parsed=arguments([*rest[1:],'--window',args.window or 'PENDING'])
-    missing=[str(path) for path in [parsed.scene,parsed.manifest,*parsed.fixture] if not path.is_file()]
+    if args.probe:
+        from probe import arguments as probe_arguments
+        parsed=probe_arguments([*rest[1:],'--window',args.window or 'PENDING'])
+    else:parsed=arguments([*rest[1:],'--window',args.window or 'PENDING'])
+    missing=[str(path) for path in [parsed.scene,parsed.manifest,*getattr(parsed,'fixture',[])] if not path.is_file()]
     if parsed.output.exists():missing.append('Output already exists: '+str(parsed.output))
-    if not missing:
+    if not missing and not args.probe:
         try:fixture_pools([json.loads(path.read_text()) for path in parsed.fixture],
             ['normal','regrasp'] if parsed.kind=='both' else [parsed.kind],parsed.per_kind)
         except (KeyError,ValueError) as exc:missing.append(str(exc))
-    command=[str(args.python),'-u',str(Path(__file__).with_name('run.py')),*rest[1:]]
+    command=[str(args.python),'-u',str(Path(__file__).with_name('probe.py' if args.probe else 'run.py')),*rest[1:]]
     info=dict(command=command,assigned_gpu_uuid=uuid,renderer=renderer,prior_log=source,
         caches=cache_paths(uuid),runtime=str(runtime),window=args.window,
         inputs_ready=not missing,missing_inputs=missing)
@@ -52,11 +56,14 @@ def main():
         CUDA_VISIBLE_DEVICES=uuid,CUDA_DEVICE_ORDER='PCI_BUS_ID',
         SOARM_RENDERER_GPU_INDEX=str(renderer['kit_index']),
         SOARM_CURRENT_KIT_LOG=str(runtime/'kit.log'),OPENBLAS_NUM_THREADS='1',OMP_NUM_THREADS='1')
+    os.environ.update(ROS_DOMAIN_ID=str(90+parsed.instance),SOARM_INSTANCE_INDEX=str(parsed.instance),
+        SOARM_HTTP_PORT=str(8778+2*parsed.instance),SOARM_KIT_MCP_PORT=str(8777+2*parsed.instance))
     prepare_environment(31)
     # Persistent per-card caches, including Kit's shader and derived-data roots.
     card=cache_paths(uuid)
     os.environ['XDG_CACHE_HOME']=card['root']
-    watched=[sys.executable,str(Path(__file__).with_name('watch.py')),'--',*command]
+    os.environ['SOARM_SHADER_CACHE_DIR']=card['shaders']
+    watched=['nice','-n','10',sys.executable,str(Path(__file__).with_name('watch.py')),'--',*command]
     print(json.dumps(dict(info,supervisor_pid=start(pidfile,runtime/'console.log',watched)),indent=2))
 
 

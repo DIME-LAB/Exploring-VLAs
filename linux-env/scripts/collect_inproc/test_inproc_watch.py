@@ -11,6 +11,40 @@ from storage import CANONICAL_ROOT
 
 @unittest.skipUnless(sys.platform=='linux' and CANONICAL_ROOT.exists(),'Linux canonical output root required')
 class WatchTests(unittest.TestCase):
+    def test_failure_readiness_without_a_summary_is_retained(self):
+        parent=CANONICAL_ROOT/'inproc/offline-tests';parent.mkdir(parents=True,exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=parent) as directory:
+            root=Path(directory)
+            shared.publish_exit_ready(root,dict(invocation='failed-boot'),False)
+            ready=json.loads((root/'worker-exit-ready.json').read_text())
+            self.assertFalse(ready['passed']);self.assertIsNone(ready['summary_sha256'])
+            with self.assertRaises(RuntimeError):
+                shared.publish_exit_ready(root,dict(invocation='missing-summary'),True)
+
+    def test_owner_finalizes_after_a_ready_worker_exits(self):
+        parent=CANONICAL_ROOT/'inproc/offline-tests';parent.mkdir(parents=True,exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=parent) as directory:
+            runtime=Path(directory);output=runtime/'output'
+            code='''import sys,os,hashlib
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+import shared
+from storage import atomic_json
+from collection_status import begin
+root=Path(sys.argv[-1]);root.mkdir()
+c=begin(root)
+atomic_json(root/'summary.json',dict(complete=True,end_marker='COLLECTION_FINISHED',producer_invocation=c['invocation']))
+atomic_json(root/'worker-exit-ready.json',dict(version=1,passed=True,producer_pid=os.getpid(),invocation=c['invocation'],summary_sha256=hashlib.sha256((root/'summary.json').read_bytes()).hexdigest()))
+'''
+            result=subprocess.run([sys.executable,str(Path(__file__).with_name('watch.py')),'--',
+                sys.executable,'-c',code,str(Path(__file__).parent),'--output',str(output)],
+                env=dict(os.environ,SOARM_INSTANCE_ROOT=str(runtime)),capture_output=True,text=True,timeout=15)
+            self.assertEqual(result.returncode,0,result.stderr)
+            receipt=json.loads((runtime/'inproc-watchdog.json').read_text())
+            certificate=json.loads((output/'collector-finalization.json').read_text())
+            self.assertTrue(receipt['passed']);self.assertFalse(receipt['cleanup']['remaining'])
+            self.assertTrue(certificate['passed']);self.assertTrue(certificate['completed'])
+
     def invoke(self,code):
         parent=CANONICAL_ROOT/'inproc/offline-tests';parent.mkdir(parents=True,exist_ok=True)
         with tempfile.TemporaryDirectory(dir=parent) as directory:
