@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 from contract import JOINTS
 from so_arm101_control.grasp_geometry import make_reachable_grasp_plan
-from obstruction_model import finger_boxes,separation
+from finger_geometry import finger_boxes,separation
 
 FIXTURE=json.loads(Path(__file__).with_name('fixtures').joinpath('descent-obstructions.json').read_text())
 

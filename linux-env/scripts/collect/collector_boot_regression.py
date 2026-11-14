@@ -10,9 +10,11 @@ from storage import confined,prepare_environment,atomic_json
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output',required=True,type=Path)
+    parser.add_argument('--instance',type=int,default=0)
     args=parser.parse_args()
-    if os.environ.get('ROS_DOMAIN_ID')!='90':raise ValueError('Use isolated domain 90')
-    runtime=prepare_environment(0)
+    if not 0<=args.instance<=9:raise ValueError('Test instance must be 0–9')
+    if os.environ.get('ROS_DOMAIN_ID')!=str(90+args.instance):raise ValueError('Test domain must equal 90 + instance')
+    runtime=prepare_environment(args.instance)
     from run_smoke import InstanceClaim
     instance_claim=InstanceClaim(runtime)
     import collect as implementation
@@ -48,7 +50,7 @@ def main():
     service=native.create_service(GetStateValidity,'/check_state_validity',valid)
     executor=MultiThreadedExecutor(num_threads=3,context=native_context);executor.add_node(native)
     thread=threading.Thread(target=executor.spin);thread.start()
-    collector=None;publishers=[];result=dict(passed=False,actual_collector_constructor=True,actual_pick_place_constructor=True)
+    collector=None;publishers=[];result=dict(passed=False,actual_collector_constructor=True,actual_pick_place_constructor=True,domain=90+args.instance,instance=args.instance)
     stamp=1033333333;frame=dict(epoch=1,sim_ns=stamp,physics_time_s=stamp/1e9,state=[0.]*6,velocity=[0.]*6,
         drive_targets=[0.]*6,bodies={},base_world_pose=dict(position=[0.,0.,0.],orientation=[1.,0.,0.,0.]),state_source='isaac_articulation')
     class HeldTickReached(Exception):pass
@@ -93,7 +95,7 @@ def main():
                       bootstrap_revoked=True,camera_native_skew_ns=167,wall_watchdog_margin_s=self.node._motion_waiter.wall_margin,executor_alive=self.ros_thread.is_alive(),capture_alive=self.capture_thread.is_alive())
         raise HeldTickReached()
     try:
-        config=NS(output=output/'run',episodes=5,max_attempts=1,resume=False,seed=1,regrasp_only=False,normal_only=True,replay_receipt=None,wait_rtf_floor=.1,episode_deadline=180,diagnostic=True,instance=0)
+        config=NS(output=output/'run',episodes=5,max_attempts=1,resume=False,seed=1,regrasp_only=False,normal_only=True,replay_receipt=None,wait_rtf_floor=.1,episode_deadline=180,diagnostic=True,instance=args.instance)
         with patch.object(implementation,'mcp',fake_mcp),patch.object(implementation,'timeline',native_tick),\
              patch.object(implementation.Collector,'wait_ready',first_held_tick):
             try:

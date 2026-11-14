@@ -7,7 +7,7 @@ from contract import JOINTS
 from dart import SmoothDart,ClearanceDart,DEFAULT_NOISE,PlannerSchedule
 from so_arm101_control.grasp_geometry import make_reachable_grasp_plan
 from so_arm101_control.compute_workspace import forward_kinematics
-from obstruction_model import finger_boxes,separation
+from finger_geometry import finger_boxes,separation
 
 FIXTURE=json.loads(Path(__file__).with_name('fixtures').joinpath('descent-obstructions.json').read_text())
 

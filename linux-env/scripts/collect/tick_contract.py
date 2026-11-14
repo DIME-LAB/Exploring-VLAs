@@ -36,6 +36,11 @@ class TickContractError(RuntimeError):
 def digest(value):return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
 
 
+def frame_digest(row):
+    """Tick identity excludes the separately audited, post-capture wall profile."""
+    return digest({k:v for k,v in row.items() if k!='wall_profile'})
+
+
 def vector(value,size):
     return isinstance(value,(list,tuple)) and len(value)==size and all(isinstance(v,(int,float)) and math.isfinite(v) for v in value)
 
@@ -137,6 +142,15 @@ def row_errors(row,previous=None):
     geometry=row.get('execution_geometry',{})
     if not geometry.get('passed') or geometry.get('epoch')!=row.get('epoch') or not matches(geometry.get('sim_ns'),stamp) or not matches(geometry.get('target'),row.get('executed_action')):
         errors.append('Final command geometry identity differs')
+    miss=geometry.get('miss_target_clearance')
+    if row.get('recovery')=='regrasp' and row.get('phase','').startswith('regrasp_') and not isinstance(miss,dict):
+        errors.append('Missing explicit miss target-clearance proof')
+    if miss is not None:
+        if (not miss.get('passed') or miss.get('epoch')!=row.get('epoch') or
+                not matches(miss.get('sim_ns'),row.get('pose_stamp_ns')) or
+                not matches(miss.get('target'),row.get('executed_action')) or
+                not isinstance(miss.get('model_sha256'),str) or len(miss['model_sha256'])!=64):
+            errors.append('Miss target-clearance identity differs')
     errors.extend(support_contact_errors(row))
     return errors
 

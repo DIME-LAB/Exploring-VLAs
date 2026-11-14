@@ -6,7 +6,7 @@ from comparisons import comparison,matches,native_frame
 from contract import timing_audit
 from protocol import StepGeneration
 from success import initial_arm,settled_containment
-from tick_contract import TickContract,TickContractError,require_snapshots,verify_proof,verdict_contract_valid,digest
+from tick_contract import frame_digest,TickContract,TickContractError,require_snapshots,verify_proof,verdict_contract_valid,digest
 from test_restore_clock import capture_snapshot
 from test_tick_contract import checked_window
 import test_review_regressions as probes
@@ -79,8 +79,9 @@ class ComparisonTests(unittest.TestCase):
                 row[key]+=2
             row['execution_geometry']['sim_ns']+=2
         recovery=report['recovery_report'];before=recovery['measured_before']['sim_ns'];after=recovery['measured_after_lift']['sim_ns']
-        recovery['window_frame_sha256s']=[digest(r) for r in rows if before<=native_frame(r)['sim_ns']<=after]
-        receipt=dict(params=params,episode_id=c.current_episode_id,**report)
+        recovery['window_frame_sha256s']=[frame_digest(r) for r in rows if before<=native_frame(r)['sim_ns']<=after]
+        recovery['all_miss_frame_sha256s']=[frame_digest(r) for r in rows if before<=native_frame(r)['sim_ns']<=recovery['clearance_end_sim_ns']]
+        receipt=dict(params=params,episode_id=c.current_episode_id,episode_start_physical=c.initial_recovery_physical,**report)
         self.assertIsNone(receipt_error(receipt,rows))
         next(row for row in rows if native_frame(row)['sim_ns']==before)['pose_stamp_ns']+=1
         self.assertIsNotNone(receipt_error(receipt,rows))

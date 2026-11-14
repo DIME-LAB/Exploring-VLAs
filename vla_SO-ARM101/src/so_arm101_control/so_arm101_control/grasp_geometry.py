@@ -279,6 +279,18 @@ def gripper_angles(width, tcp_clearance=TCP_CLEARANCE_M,
     return max(lo, min(opening, hi)), max(lo, min(closing, hi))
 
 
+
+def projected_grip_width(pose,bbox,yaw):
+    if not bbox:return None
+    qz,qw=pose.get('qz',0.),pose.get('qw',1.)
+    axis=math.atan2(2*qw*qz,1-2*qz*qz)
+    delta=math.remainder(yaw-axis,math.pi)
+    # Equivalent requested axes must yield identical actuator commands, not
+    # pi-dependent sine round-off. Other orientations retain the projection.
+    if abs(delta)<1e-12:return bbox['sy']
+    if abs(abs(delta)-math.pi/2)<1e-12:return bbox['sx']
+    return abs(bbox['sx']*math.sin(delta))+abs(bbox['sy']*math.cos(delta))
+
 def make_grasp_plan(pose, bbox, *, cross=False, current_wrist_roll=None,
                     tcp_clearance=TCP_CLEARANCE_M, bbox_enabled=True,
                     object_z_override=0.0, approach_height=0.020,
@@ -297,8 +309,7 @@ def make_grasp_plan(pose, bbox, *, cross=False, current_wrist_roll=None,
     width=object_grip_width(bbox,cross)
     if yaw_override is not None:
         yaw=float(yaw_override)
-        object_yaw=math.atan2(2*qw*qz,1-2*qz*qz)
-        if bbox:width=abs(bbox['sx']*math.sin(yaw-object_yaw))+abs(bbox['sy']*math.cos(yaw-object_yaw))
+        width=projected_grip_width(pose,bbox,yaw)
     dx, dy = jaw_offset(width, yaw, tcp_clearance, bbox_enabled)
     x, y = pose['x'] + dx, pose['y'] + dy
     height = float((bbox or {}).get('sz', 0.0))
@@ -316,8 +327,21 @@ def make_grasp_plan(pose, bbox, *, cross=False, current_wrist_roll=None,
     return dict(tcp=(x, y, z), yaw=yaw, jaw_offset=(dx, dy), poses=poses)
 
 
+
+def grasp_jaw_plan(pose,bbox,*,cross=False,tcp_clearance=TCP_CLEARANCE_M,
+                   open_clearance=JAW_OPEN_CLEARANCE_M,close_clearance=JAW_CLOSE_CLEARANCE_M):
+    """Jaw commands and candidate TCP centering share this projected-width rule.
+
+    The admitted requested/+pi/-pi axes have identical projected width, so
+    jaw commands are determined even before collision-aware axis selection.
+    """
+    geometry=make_grasp_plan(pose,bbox,cross=cross)
+    yaw=geometry['yaw'];width=projected_grip_width(pose,bbox,yaw)
+    opening,closing=gripper_angles(width,tcp_clearance,open_clearance,close_clearance)
+    return dict(projected_width_m=width,opening_rad=opening,closing_rad=closing,yaw=yaw)
+
 def make_reachable_grasp_plan(pose,bbox,*,open_clearance=JAW_OPEN_CLEARANCE_M,
-                              close_clearance=JAW_CLOSE_CLEARANCE_M,additional_poses=None,**settings):
+                              close_clearance=JAW_CLOSE_CLEARANCE_M,additional_poses=None,candidate_validator=None,**settings):
     """Keep narrow-face grasps aligned and recompute centering for each yaw.
 
     Oblique yaw changes are not admissible substitutes for a narrow-face grasp.
@@ -325,10 +349,9 @@ def make_reachable_grasp_plan(pose,bbox,*,open_clearance=JAW_OPEN_CLEARANCE_M,
     """
     requested=make_grasp_plan(pose,bbox,**settings)
     requested_yaw=requested['yaw'];attempts=[]
-    object_yaw=math.atan2(2*pose.get('qw',1.)*pose.get('qz',0.),1-2*pose.get('qz',0.)**2)
     for offset in (0.,math.pi,-math.pi):
         yaw=requested_yaw+offset
-        width=(abs(bbox['sx']*math.sin(yaw-object_yaw))+abs(bbox['sy']*math.cos(yaw-object_yaw))) if bbox else None
+        width=projected_grip_width(pose,bbox,yaw)
         tcp=settings.get('tcp_clearance',TCP_CLEARANCE_M)
         opening,closing=gripper_angles(width,tcp,open_clearance,close_clearance)
         margin=BASELINE_JAW_GAP+JAW_GAP_RATE*opening-width if width is not None else None
@@ -351,8 +374,13 @@ def make_reachable_grasp_plan(pose,bbox,*,open_clearance=JAW_OPEN_CLEARANCE_M,
         chosen,solutions,debug=find_reachable_grasp_yaw(checked_poses,yaw,yaw_offsets=(0.,))
         attempt.update(reachable=chosen is not None,debug=debug)
         if chosen is not None:
-            return dict(geometry=geometry,checked_poses=checked_poses,solutions=solutions,requested_yaw=requested_yaw,chosen_yaw=chosen,
-                        projected_width_m=width,opening_rad=opening,closing_rad=closing,opening_margin_m=margin,
-                        attempts=attempts,policy='narrow-face equivalents; yaw-specific TCP and jaw clearance')
+            candidate=dict(geometry=geometry,checked_poses=checked_poses,solutions=solutions,requested_yaw=requested_yaw,chosen_yaw=chosen,
+                projected_width_m=width,opening_rad=opening,closing_rad=closing,opening_margin_m=margin)
+            if candidate_validator is not None:
+                validation=candidate_validator(candidate)
+                attempt['validation']=validation
+                if not validation['passed']:continue
+                candidate['validation']=validation
+            return dict(candidate,attempts=attempts,policy='narrow-face equivalents; yaw-specific TCP and jaw clearance')
     return dict(geometry=requested,checked_poses=[],solutions={},requested_yaw=requested_yaw,chosen_yaw=None,
                 attempts=attempts,policy='no admissible narrow-face grasp')

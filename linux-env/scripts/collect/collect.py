@@ -57,7 +57,8 @@ from query_service import StrictQueryClient
 from recovery import REGRASP_POLICY, recovery_geometry, detect_miss
 from recovery_search import SEARCH_POLICY,PlanningWallBudget,choose as choose_recovery_plan
 from dart import DEFAULT_NOISE, SmoothDart, ClearanceDart, TargetCandidate, PlannerSchedule
-from command_geometry import choose_noise_scale, final_command, QUERY_POLICY, frame_capacity_seconds
+from command_geometry import choose_noise_scale, final_command, QUERY_POLICY, frame_capacity_seconds,CommandCollision
+from miss_clearance import MissClearance
 import support_contact
 from base_drift import summary as base_drift_summary
 from tick_contract import TickContract, TickContractError, require_snapshots, digest, verify_proof, CLOCK_POLICY, STEP_NS
@@ -765,6 +766,7 @@ class Collector:
                 elif hasattr(context,key):delattr(context,key)
 
     def retire_motion(self, epoch=None):
+        self.active_miss_clearance=None
         with self.servo.lock:
             idle = self.servo.plan is None and self.servo.grip_plan is None
             hold = (tuple(self.servo.reference) if idle and self.servo.reference is not None and
@@ -948,7 +950,7 @@ class Collector:
             if self.stop.wait(.002):raise CancelledGeneration('Collector stopped during clock join')
 
     def validate_command(self,candidate,state,previous,snapshot=None):
-        timing=dict(validity_queries=0,validity_query_ms=0.)
+        timing=dict(validity_queries=0,validity_query_ms=0.,miss_clearance_ms=0.)
         def check(q):
             self.generation.require(candidate.epoch,candidate.stamp_ns)
             start=time.monotonic_ns();timing['validity_queries']+=1
@@ -962,7 +964,22 @@ class Collector:
                     return dict(passed=False)
                 ctx=support_contact.context(snapshot,self.node._ground_z_var.get(),getattr(self.node,'_attached_lego_name',None))
                 return support_contact.classify(rows,ctx)
-        try:return final_command(candidate,state,previous,check,[JOINT_LIMITS[n] for n in JOINTS],allow_measured_start=allow)
+        try:
+            result=final_command(candidate,state,previous,check,[JOINT_LIMITS[n] for n in JOINTS],allow_measured_start=allow)
+            active=getattr(self,'active_miss_clearance',None)
+            if active is not None:
+                origin,clearance=active
+                self.generation.require(origin,candidate.stamp_ns)
+                if origin!=candidate.epoch or snapshot is None:raise RuntimeError('Miss clearance belongs to another epoch')
+                start=time.monotonic_ns()
+                try:
+                    proof=clearance.command(state,previous,list(candidate.positions),snapshot,
+                        lambda:self.generation.require(origin,candidate.stamp_ns))
+                finally:timing['miss_clearance_ms']=milliseconds(start,time.monotonic_ns())
+                result['miss_target_clearance']=proof
+                if not proof['passed']:raise CommandCollision(dict(result,passed=False))
+            result['miss_clearance_ms']=timing['miss_clearance_ms']
+            return result
         except Exception as exc:
             exc.wall_profile_geometry=timing
             raise
@@ -1053,6 +1070,7 @@ class Collector:
                     profile['expert_dart_compute_ms']=milliseconds(compute_start,time.monotonic_ns())
                     profile['stage']='execution_geometry'
                     geometry=self.validate_command(candidate,state,snapshot['drive_targets'],snapshot)
+                    profile['miss_clearance_ms']=geometry.pop('miss_clearance_ms',0.)
                     profile['validity_queries']=geometry['query_timing']['queries']
                     profile['validity_query_ms']=geometry['query_timing']['total_query_wall_s']*1000
                     self.generation.require(epoch,stamp)
@@ -1195,18 +1213,20 @@ class Collector:
         report=dict(epoch=epoch,episode_id=self.current_episode_id,kind='regrasp',miss_confirmed=False,
             request=dict(pose=pose,bbox=bbox,params=params['regrasp'],settings=settings),candidate_attempts=[],steps=[])
         result['recovery_report']=report
-        # The same target-removal barrier and shared collision validator used
-        # by Quickstart; both clean and executed paths are checked separately.
+        # The expert aims at the true target, so MoveIt omits intended grasp
+        # contact. The independent native-box oracle keeps the executed miss
+        # clear of that target throughout approach, close, lift and reopen.
+        clearance=MissClearance(self.native_finger_model,before,name)
+        report['clearance']=copy.deepcopy(clearance.spec)
         self.node._remove_single_lego_from_world(name)
-        opening,closing=self.node._gripper_angle_for_object(name)
         planning_budget=planning_budget or PlanningWallBudget()
         capacity=SEARCH_POLICY['max_queries']*(QUERY_POLICY['per_query_timeout_s']+QUERY_POLICY['delivery_margin_s'])+5.
         started=time.monotonic()
         try:
             with planning_budget.reserve(capacity):
-                selection=choose_recovery_plan(pose,bbox,params['regrasp'],before['state'],opening,closing,
+                selection=choose_recovery_plan(pose,bbox,params['regrasp'],before['state'],
                     lambda q:self.node._check_state_valid_with_contacts(dict(zip(JOINTS,q))),
-                    [JOINT_LIMITS[n] for n in JOINTS],lambda:self.generation.require(epoch),settings,report['candidate_attempts'])
+                    [JOINT_LIMITS[n] for n in JOINTS],lambda:self.generation.require(epoch),settings,report['candidate_attempts'],clearance)
         finally:report['planning_wall']=dict(capacity_s=capacity,elapsed_s=time.monotonic()-started)
         if selection is None:self.reject_quality('planner_reject',dict(stage='miss_search',reason='all recovery candidates refused',attempts=report['candidate_attempts']))
         report.update(geometry=selection['geometry'],selection={k:v for k,v in selection.items() if k not in ('geometry','targets')})
@@ -1233,7 +1253,10 @@ class Collector:
             self.generation.require(epoch)
             report['steps'].append(dict(stage=stage,clean_target=clean_target,executed_target=executed_target,
                 start_sim_ns=snapshot['sim_ns'],end_sim_ns=self.held_snapshot(epoch)['sim_ns']))
-        opening,closing=self.node._gripper_angle_for_object(name)
+        opening,closing=selection['opening_rad'],selection['closing_rad']
+        with self.generation.own('install miss target clearance'):
+            self.generation.require(epoch)
+            self.active_miss_clearance=(epoch,clearance)
         def grip(stage,target):
             tag(stage)
             if not self.servo.gripper(target,3.,True,phase=stage):raise RuntimeError('Recovery gripper execution failed')
@@ -1242,7 +1265,6 @@ class Collector:
         grip('regrasp_miss_open',opening)
         arm('regrasp_miss_approach','true_approach','miss_approach')
         arm('regrasp_miss_descent','true_final','miss_final')
-        before=self.held_snapshot(epoch)
         grip('regrasp_miss_close',closing) # Deliberately no MoveIt attach on this first attempt.
         arm('regrasp_miss_lift','true_final','miss_lift')
         after=self.held_snapshot(epoch)
@@ -1252,7 +1274,7 @@ class Collector:
         detection=detect_miss(window,name,closing)
         report['window_frame_sha256s']=[s['tick_contract']['row_sha256'] for s in window]
         report['detection']=detection
-        report['measured_before']={k:v for k,v in before.items() if k!='tick_contract'}
+        report['measured_before']={k:v for k,v in window[0].items() if k!='tick_contract'}
         report['measured_after_lift']={k:v for k,v in after.items() if k!='tick_contract'}
         # Even an accidentally successful first grasp is released before the
         # quality refusal; it must not leave a held block for the next reset.
@@ -1261,6 +1283,15 @@ class Collector:
         if not detection['confirmed']:
             self.reject_quality('regrasp_miss_not_confirmed',detection,window)
         current=self.held_snapshot(epoch)
+        report['clearance_end_sim_ns']=current['sim_ns']
+        with self.writer_lock:
+            all_window=[s for s in self.episode_snapshots if before['sim_ns']<=s['sim_ns']<=current['sim_ns']]
+        require_snapshots(all_window)
+        report['all_miss_frame_sha256s']=[s['tick_contract']['row_sha256'] for s in all_window]
+        report['frame_hash_policy']='tick row excluding separately audited wall_profile'
+        with self.generation.own('finish deliberate miss'):
+            self.generation.require(epoch)
+            self.active_miss_clearance=None
         self.sync_scene(snapshot=current)
         report['scene_after_reopen']=self.scene_pose_check
         report['corrective_attempt']='shared Quickstart cycle from fresh measured poses'
@@ -1518,6 +1549,7 @@ class Collector:
         self.generation.install(transport_config)
         if transport_config.get('articulation_audit',{}).get('fixed_base') is not True:
             raise RuntimeError('Unverified/floating articulation; fresh fixed-base scene is required')
+        self.native_finger_model=transport_config.get('finger_model')
         expected_bodies = set(transport_config['local_corners']) | {'cup_red','cup_green','cup_blue'}
         offsets = transport_config['effective_shape_offsets']
         if set(offsets) != expected_bodies:

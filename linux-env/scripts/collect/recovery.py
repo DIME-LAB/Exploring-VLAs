@@ -1,9 +1,9 @@
 """Transport-independent re-grasp geometry, quotas and measured miss checks."""
 import math,random
 from comparisons import matches,native_frame
-from tick_contract import digest,row_errors,STEP_NS
+from tick_contract import digest,frame_digest,row_errors,STEP_NS
 
-REGRASP_POLICY=dict(version=2,share=.18,offset_min_m=.02,offset_max_m=.04,
+REGRASP_POLICY=dict(version=3,share=.18,offset_min_m=.02,offset_max_m=.04,
     verification_lift_m=.03,object_motion_max_m=.003,jaw_close_tolerance_rad=.008)
 
 
@@ -71,7 +71,7 @@ def receipt_error(receipt,rows=None):
         before,after=report['measured_before'],report['measured_after_lift']
         window=[r for r in rows if before['sim_ns']<=native_frame(r)['sim_ns']<=after['sim_ns']]
         if not window or not matches(native_frame(window[0])['sim_ns'],before['sim_ns']) or not matches(native_frame(window[-1])['sim_ns'],after['sim_ns']):return 'miss window is outside recorded episode'
-        if [digest(r) for r in window]!=report['window_frame_sha256s']:return 'miss window row hashes differ'
+        if [frame_digest(r) for r in window]!=report['window_frame_sha256s']:return 'miss window row hashes differ'
         if any(row_errors(r,rows[i-1] if i else None) for i,r in enumerate(rows)):return 'recovery rows fail pipeline contract'
         snapshots=[native_frame(r) for r in window]
         for endpoint,snapshot in ((before,snapshots[0]),(after,snapshots[-1])):
@@ -91,6 +91,9 @@ def receipt_error(receipt,rows=None):
             if error:return error
         elif abs(distance-abs(receipt['params']['regrasp']['signed_offset_m']))>1e-12:return 'recovery offset differs from seed'
         if not report['scene_after_reopen']['passed']:return 'recovery scene was not verified'
+        from miss_clearance import receipt_error as miss_clearance_error
+        error=miss_clearance_error(receipt,rows)
+        if error:return error
     except (KeyError,TypeError,ValueError,IndexError):return 'recovery evidence is incomplete'
     return None
 

@@ -30,11 +30,12 @@ from comparisons import matches
 from tick_contract import world_step_errors
 from contract import JOINTS
 from protocol import CommandLedger
+from finger_geometry import read_model
 
 _RUNTIME = None
 _LOADED_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 _LOADED_DEPENDENCIES = {name:hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-                        for name in ('contract.py', 'protocol.py','comparisons.py','tick_contract.py')}
+                        for name in ('contract.py', 'protocol.py','comparisons.py','tick_contract.py','finger_geometry.py')}
 
 
 class Runtime:
@@ -353,7 +354,7 @@ def install(mode='collect'):
     articulation['helper_sha256']=hashlib.sha256(helper.read_bytes()).hexdigest()
     if mode=='collect' and articulation['fixed_base'] is not True:raise RuntimeError('Collection requires verified fixed_base=true: '+repr(articulation))
     return dict(mode=mode, physics_config=physics,joint_names=_RUNTIME.art.dof_names,articulation_audit=articulation,
-                joint_index_mapping=dict(zip(JOINTS,_RUNTIME.indices)),
+                joint_index_mapping=dict(zip(JOINTS,_RUNTIME.indices)),finger_model=read_model(_RUNTIME.stage),
                 epoch=_RUNTIME.epoch, invalid_through_ns=_RUNTIME.invalid_through_ns,
                 loaded_sha256=_LOADED_SHA256,
                 loaded_dependencies=_LOADED_DEPENDENCIES,

@@ -57,9 +57,10 @@ class FakeMoveIt(Node):
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--output',required=True,type=Path);p.add_argument('--tk',action='store_true');args=p.parse_args()
-    if os.environ.get('ROS_DOMAIN_ID')!='90':raise ValueError('Use assigned isolated domain90, no live sim domain')
-    prepare_environment(0);output=confined(args.output);rclpy.init()
+    p=argparse.ArgumentParser();p.add_argument('--output',required=True,type=Path);p.add_argument('--tk',action='store_true');p.add_argument('--instance',type=int,default=0);args=p.parse_args()
+    if not 0<=args.instance<=9:raise ValueError('Test instance must be 0–9')
+    if os.environ.get('ROS_DOMAIN_ID')!=str(90+args.instance):raise ValueError('Test domain must equal 90 + instance')
+    prepare_environment(args.instance);output=confined(args.output);rclpy.init()
     from so_arm101_control.control_gui import SOArm101ControlGUI
     from so_arm101_control.scene_transactions import SceneMutationIncomplete,SceneMutationClient
     server=FakeMoveIt();gui=SOArm101ControlGUI();client=Node('gui_scene_regression_client')

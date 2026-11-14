@@ -10,10 +10,14 @@ from checkpoint import progress
 from recovery import REGRASP_POLICY,regrasp_slot,recovery_parameters,recovery_geometry,detect_miss,receipt_error,recovery_summary
 from recovery_search import SEARCH_POLICY,PlanningWallBudget,choose as choose_recovery_plan
 from query_service import StrictQueryClient
+from miss_clearance import MissClearance
+from command_geometry import CommandCollision
+from test_miss_clearance import MODEL
+import itertools
 from protocol import CancelledGeneration
 from episode_policy import disposition,QualityReject
 from test_tick_contract import checked_window
-from tick_contract import TickContract,require_snapshots
+from tick_contract import TickContract,require_snapshots,frame_digest
 import test_motion_operations as motions
 import test_review_regressions as probes
 
@@ -41,7 +45,7 @@ class RecoveryTests(unittest.TestCase):
             ok=trial not in (5,6)
             receipt=dict(params=p,accepted=ok,timing=dict(passed=ok))
             if ok and p['recovery']=='regrasp':
-                c,_=self.driver(params=p);c.regrasp_prefix(p,1,receipt);receipt['episode_id']=c.current_episode_id;receipt['test_rows']=c.test_rows
+                c,_=self.driver(params=p);c.regrasp_prefix(p,1,receipt);receipt['episode_id']=c.current_episode_id;receipt['episode_start_physical']=c.initial_recovery_physical;receipt['test_rows']=c.test_rows
             receipts.append(receipt)
             if ok:accepted+=1
         self.assertEqual(progress(receipts,1000,row_loader=lambda r:r.get('test_rows')),(20,18))
@@ -58,7 +62,7 @@ class RecoveryTests(unittest.TestCase):
     def test_recovery_evidence_is_bound_to_raw_episode_epoch_and_hashes(self):
         c,_=self.driver();params=parameters(1,'red',regrasp=True);report={}
         c.regrasp_prefix(params,1,report)
-        receipt=dict(params=params,episode_id=c.current_episode_id,**report)
+        receipt=dict(params=params,episode_id=c.current_episode_id,episode_start_physical=c.initial_recovery_physical,**report)
         self.assertIsNone(receipt_error(receipt,c.test_rows))
         for kind in ('epoch','id','state','hash'):
             bad=copy.deepcopy(receipt);rows=copy.deepcopy(c.test_rows)
@@ -70,6 +74,23 @@ class RecoveryTests(unittest.TestCase):
             elif kind=='state':rows[3]['state'][0]+=.001
             else:bad['recovery_report']['window_frame_sha256s'][0]='0'*64
             with self.subTest(kind=kind):self.assertIsNotNone(receipt_error(bad,rows))
+
+    def test_first_recorded_tick_may_follow_the_unrecorded_held_anchor_by_one_frame(self):
+        c,_=self.driver(record_anchor=False);p=parameters(1,'red',regrasp=True);result={};c.regrasp_prefix(p,1,result)
+        receipt=dict(params=p,episode_id=c.current_episode_id,episode_start_physical=c.initial_recovery_physical,**result)
+        self.assertIsNone(receipt_error(receipt,c.test_rows))
+        before=result['recovery_report']['measured_before']['sim_ns']
+        self.assertEqual(before,c.initial_recovery_physical['sim_ns']+33333333)
+        self.assertEqual(before,c.test_rows[0]['pose_stamp_ns'])
+
+    def test_post_capture_wall_profile_does_not_change_semantic_recovery_hashes(self):
+        c,_=self.driver();p=parameters(1,'red',regrasp=True);result={};c.regrasp_prefix(p,1,result)
+        receipt=dict(params=p,episode_id=c.current_episode_id,episode_start_physical=c.initial_recovery_physical,**result)
+        rows=copy.deepcopy(c.test_rows)
+        for row in rows:row['wall_profile']=dict(recorded=True,stage='complete',native_sim_ns=row['pose_stamp_ns'])
+        self.assertIsNone(receipt_error(receipt,rows))
+        rows[1]['state'][0]+=.001
+        self.assertIsNotNone(receipt_error(receipt,rows))
 
     def test_offset_is_seeded_and_true_geometry_is_exactly_shared(self):
         from so_arm101_control.grasp_geometry import make_reachable_grasp_plan
@@ -112,7 +133,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(disposition(receipt)['reason'],'missing_regrasp_evidence')
         c,_=self.driver();result={};params=parameters(1,'red',regrasp=True)
         c.regrasp_prefix(params,1,result)
-        receipt.update(params=params,episode_id=c.current_episode_id,**result)
+        receipt.update(params=params,episode_id=c.current_episode_id,episode_start_physical=c.initial_recovery_physical,**result)
         self.assertEqual(disposition(receipt,rows=c.test_rows)['kind'],'accepted')
         self.assertEqual(recovery_summary([receipt])['share'],1.)
         broken=copy.deepcopy(receipt);broken['recovery_report']['measured_after_lift']['bodies'][params['object']]['position'][2]+=.03
@@ -192,21 +213,32 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(events[:4],['select','open','detach','fresh measured tick'])
         self.assertEqual(events[4],('scene',snap))
 
-    def driver(self,followed=False,cancel_at=None,params=None):
+    def driver(self,followed=False,cancel_at=None,params=None,record_anchor=True):
         c,r,_,_,_=motions.MotionOperationTests().setup_motion();node=c.node
-        scope=c.regrasp_prefix.__func__.__globals__;scope.update(recovery_geometry=recovery_geometry,detect_miss=detect_miss,SEARCH_POLICY=SEARCH_POLICY,PlanningWallBudget=PlanningWallBudget,choose_recovery_plan=choose_recovery_plan)
+        scope=c.regrasp_prefix.__func__.__globals__;scope.update(MissClearance=MissClearance,recovery_geometry=recovery_geometry,detect_miss=detect_miss,SEARCH_POLICY=SEARCH_POLICY,PlanningWallBudget=PlanningWallBudget,choose_recovery_plan=choose_recovery_plan)
         params=parameters(1,'red',regrasp=True) if params is None else params
         c.current_episode_id='recovery-test';c.test_rows=[];c.episode_snapshots=[];audit=TickContract()
         name=params['object'];now=[snapshot(10**9)];now[0]['bodies'][name]=dict(position=[.20,0.,.0064])
+        c.native_finger_model=MODEL
+        now[0].update(robot_base_world_pose=dict(position=[0.,0.,0.],orientation=[1.,0.,0.,0.]),robot_base_pose_source='physx_rigid_body',
+            local_corners={name:list(map(list,itertools.product(*[(-v/2,v/2) for v in (.031,.0206,.0128)])))})
         def record_tick():
             now[0]['physics_time_s']=now[0]['sim_ns']/1e9
             s=checked_window([dict(now[0],episode_id=c.current_episode_id,phase=getattr(node,'_last_motion_tag','fixture'))])[0]
             row=s['tick_contract']['row']
             if audit.previous:row['physics_drive_targets']=list(audit.previous['applied_command'])
             row['command_velocity']=[(a-b)*30 for a,b in zip(row['executed_action'][:5],row['physics_drive_targets'][:5])]
+            active=getattr(c,'active_miss_clearance',None)
+            if active is not None:
+                proof=active[1].command(row['state'],row['physics_drive_targets'],row['executed_action'],s)
+                if not proof['passed']:raise CommandCollision(proof)
+                row['execution_geometry']['miss_target_clearance']=proof
             s['tick_contract']=audit.finish(row);now[0]=s
+            row['wall_profile']=dict(stage='complete',recorded=True,tick_total_ms=150.)
             c.test_rows.append(row);c.episode_snapshots.append(copy.deepcopy(s))
         record_tick()
+        c.initial_recovery_physical=copy.deepcopy(now[0])
+        if not record_anchor:c.test_rows.clear();c.episode_snapshots.clear()
         events=[];node.objects_lock=threading.Lock()
         node.objects_data={name:dict(x=.20,y=0.,z=.0064,qz=0.,qw=1.)}
         node._lookup_bbox=lambda name:dict(sx=.031,sy=.0206,sz=.0128)
@@ -244,11 +276,10 @@ class RecoveryTests(unittest.TestCase):
             if e[0]=='arm':self.assertNotEqual(e[2],e[3])
         json.dumps(result)
 
-    def test_accidental_grasp_reopens_then_quality_rejects(self):
+    def test_target_motion_stops_the_miss_before_it_can_be_certified(self):
         c,events=self.driver(followed=True)
-        with self.assertRaises(QualityReject) as raised:c.regrasp_prefix(parameters(1,'red',regrasp=True),1,{})
-        self.assertEqual(raised.exception.kind,'regrasp_miss_not_confirmed')
-        self.assertEqual(events[-1],('grip','regrasp_reopen'))
+        with self.assertRaises(CommandCollision):c.regrasp_prefix(parameters(1,'red',regrasp=True),1,{})
+        self.assertNotIn(('grip','regrasp_reopen'),events)
 
     def test_cancel_during_prefix_planning_cannot_dispatch_old_target(self):
         c,events=self.driver(cancel_at='planning')

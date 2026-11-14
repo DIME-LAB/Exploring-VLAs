@@ -212,7 +212,10 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       (`recovery: regrasp`) in the dataset. Success gate unchanged (final placement). Bar: offline tests, a smoke with
       only re-grasp episodes (videos checked by eye), yield, and the share/offset distribution in the data card.
       Offline implementation: 18% accepted-slot quota, dual clean/executed shared-IK paths, measured empty-lift
-      detection, reopen/scene refresh and recovery metadata/export checks. Review and all-regrasp smoke pending.
+      detection, reopen/scene refresh and recovery metadata/export checks. The target-free MoveIt
+      path is supplemented by native-box finger clearance, a pre-approach target-motion anchor,
+      full jaw sweeps, yaw rejection fallback and shared projected-width jaw commands.
+      Targeted review and all-regrasp smoke remain required.
       Later option: policy-in-the-loop interventions (DAgger/HIL-style), with the scripted expert taking over when
       the trained policy misses.
 - [ ] 3.1j Simpler physics and a deeper grasp (Aldrin, 2026-11-14): the gripper barely grips the lego. Lego -> box

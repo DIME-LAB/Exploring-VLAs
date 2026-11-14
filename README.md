@@ -320,7 +320,9 @@ and smoke. The lead schedules the full run.
 
 Grasp execution uses a yaw-consistent narrow-face plan: TCP centering, projected
 width and opening margin are recomputed for each admissible +/-180-degree
-orientation. It approaches from above inside the open-jaw corridor. Near-block
+orientation. Collision-rejected candidates try the remaining equivalents, and
+actual jaw commands use that same projected width for either bbox dimension order.
+It approaches from above inside the open-jaw corridor. Near-block
 DART remains nonzero with a smaller clearance-bounded budget and fades for final
 contact; receipts report amplitude by phase. Only micrometre support contact at a
 **measured start** can be tolerated: targets and swept paths stay strict. Native
@@ -353,7 +355,9 @@ recording and completion delivery. Each completion event owns its verdict;
 waiting workers revalidate their original epoch after waking. Attach/detach,
 scene updates, carried-object bookkeeping and status writes validate and execute
 under that same ownership lock, so cancelled workers cannot affect a later episode.
-Cancellation/reset waits up to 15 wall seconds for ownership to retire. A stalled
+Cancellation/reset waits for ownership within the declared per-query frame
+capacity plus a retirement margin; the same capacity bounds capture and motion
+watchdogs. A stalled
 owner emits a diagnostic and aborts the run; an emergency native cancellation
 invalidates queued commands without running reset setters. Its RPC is separately
 bounded at 30 wall seconds. A poisoned run cannot install another generation. Reset invalidates every observation at or before its native sim stamp,
@@ -606,11 +610,21 @@ Recovery holds belong to the command's immutable epoch and install only after
 its physical ACK. Collector collision-query unavailability, timeout or missing
 response poisons collection; it cannot become a planner quality refusal.
 
+Deliberate misses additionally check the target that MoveIt omits for intended
+expert grasp contact. Native finger-box kinematics certify all executed miss
+segments, including initial opening and closing sweeps, with a 1 mm margin.
+A per-tick guard rechecks final commands and target corner movement against a
+pre-approach held anchor. The clean open-jaw paths are checked separately;
+closed corrective labels may intentionally aim at the target. The full model,
+refusals, current target/base poses, numeric rules and timing are logged.
+See [target-clearance and evidence contracts](docs/notes/regrasp-target-clearance.md).
+
 Frames and receipts carry `recovery: regrasp`; exported datasets retain full
 per-episode recovery/seed evidence in `meta/collection_episodes.json` without
 changing deployment features. Acceptance, resume and export recheck the measured
 miss and completed reopen/scene-refresh evidence against the raw episode ID,
-epoch, stage stamps, physical states/poses and close/lift row hashes. Export reports the achieved
+epoch, stage stamps, physical states/poses and whole-miss row hashes (excluding separately audited
+post-capture wall profiles). Export reports the achieved
 share/offset distribution and prefers recovery episodes for sample videos.
 Smooth DART and re-grasp require a validated smoke at the current scene/cut; their physical yield and
 side-by-side/recovery videos require targeted review and a newly authorized
@@ -626,12 +640,16 @@ exercise the actual Tk Refresh/detach/log path and event-loop heartbeat:
 ```bash
 source /opt/ros/humble/setup.bash
 source vla_SO-ARM101/install/setup.bash
-export ROS_DOMAIN_ID=90 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export ROS_DOMAIN_ID=95 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export SOARM_INSTANCE_ROOT=/mnt/a4500-backup/exploring-vlas/runtime/instance-5
 export CYCLONEDDS_URI="file://$PWD/linux-env/cyclonedds.xml"
 unset ROS_LOCALHOST_ONLY
 PYTHONDONTWRITEBYTECODE=1 python3 -B linux-env/scripts/collect/gui_scene_regression.py \
-  --output /mnt/a4500-backup/exploring-vlas/runtime/instance-0/gui-async-scene-regression.json
+  --instance 5 --output /mnt/a4500-backup/exploring-vlas/runtime/instance-5/gui-async-scene-regression.json
 ```
+Use an unused test domain/runtime. Both ROS startup probes accept `--instance N`
+and require domain `90 + N`; they never start Isaac. `--normal-only` excludes all
+re-grasp branches, and resume/replay/export reject a mode mismatch.
 Pose-cache subscribers recheck bypass under the map lock;
 controller-reference diagnostics carry source time/epoch validity and are never
 used as expert labels. Post-step
@@ -916,8 +934,8 @@ RTF, idle/stationary fractions, storage growth and episodes per wall-hour. The
 collector refuses requests above 50; the lead schedules the larger run.
 
 Offline validation: `python3 -m unittest discover -s linux-env/scripts/collect -p
- 'test_*.py'`. This includes 1,000 randomized comparisons with frozen verified-GUI
-geometry, the successful fallback-warning probe, late-application and above-rim
+ 'test_*.py'`. This includes 1,000 randomized comparisons of legacy pure geometry,
+actual shared grasp/jaw execution for both dimension orders/cross settings, the successful fallback-warning probe, late-application and above-rim
 rejections, storage thresholds, output confinement and deployment feedback flags.
 Always validate the completed five-episode smoke before starting the pilot;
 check physical feedback, application acknowledgements, containment and dataset

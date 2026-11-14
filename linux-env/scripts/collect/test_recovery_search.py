@@ -7,6 +7,8 @@ from protocol import CancelledGeneration
 from recovery_search import candidate_specs,choose,PlanningWallBudget,selection_error
 from recovery import recovery_geometry,receipt_error
 from query_service import StrictQueryClient
+from miss_clearance import MissClearance
+from test_miss_clearance import MODEL,context,FIXTURE
 import test_recovery as probes
 import test_review_regressions as collector_probes
 
@@ -16,6 +18,11 @@ LIMITS=[(-3.,3.)]*6
 
 
 class RecoverySearchTests(unittest.TestCase):
+    def clearance(self):
+        # These probes isolate the scene oracle's results; actual box clearance
+        # and retained-pose counterexamples are exercised by test_miss_clearance.
+        return NS(state=lambda *a,**k:dict(passed=True),segment=lambda *a,**k:dict(passed=True))
+
     def test_seeded_directions_and_magnitudes_are_bounded_and_original_first(self):
         p=parameters(340000,'red',regrasp=True)['regrasp'];specs=candidate_specs(p)
         self.assertEqual(len(specs),16);self.assertEqual(specs[0]['signed_offset_m'],p['signed_offset_m']);self.assertEqual(specs[0]['direction_offset_rad'],0.)
@@ -24,13 +31,15 @@ class RecoverySearchTests(unittest.TestCase):
 
     def test_rejected_endpoint_keeps_mock_contacts_then_opposite_direction_passes(self):
         p=parameters(340000,'red',regrasp=True)['regrasp'];settings=dict(current_wrist_roll=-1.5221,approach_height=.02315197,approach_offset=[-.00392181,-.00394137])
-        first=recovery_geometry(POSE,BBOX,candidate_specs(p)[0],**settings);bad=first['solutions']['miss_final'][0]
+        refused=[]
+        def gather(candidate):refused.extend(candidate['solutions']['miss_final']);return dict(passed=False)
+        recovery_geometry(POSE,BBOX,candidate_specs(p)[0],candidate_validator=gather,**settings)
         contact=NS(contact_body_1='test_link',contact_body_2='test_obstacle',depth=.0002)
-        def check(q):return (False,[contact]) if max(abs(q[i]-bad[n]) for i,n in enumerate(JOINTS[:5]))<1e-9 else (True,[])
-        attempts=[];selected=choose(POSE,BBOX,p,[0.]*5+[.2],.2,.1,check,LIMITS,lambda:None,settings,attempts)
+        def check(q):return (False,[contact]) if any(max(abs(q[i]-bad[n]) for i,n in enumerate(JOINTS[:5]))<1e-9 for bad in refused) else (True,[])
+        attempts=[];selected=choose(POSE,BBOX,p,[0.]*5+[.2],check,LIMITS,lambda:None,settings,attempts,self.clearance())
         self.assertEqual(selected['index'],1);self.assertFalse(attempts[0]['passed']);self.assertTrue(attempts[1]['passed'])
-        self.assertEqual(attempts[0]['proof']['endpoints'][-1]['proof']['contacts'][0]['body_2'],'test_obstacle')
-        self.assertEqual(len(attempts[1]['proof']['paths']),8)
+        self.assertEqual(attempts[0]['yaw_attempts'][0]['validation']['proof']['endpoints'][-1]['proof']['contacts'][0]['body_2'],'test_obstacle')
+        self.assertEqual(len(attempts[1]['proof']['paths']),9)
         report=dict(selection={k:v for k,v in selected.items() if k not in ('geometry','targets')},geometry=selected['geometry'],candidate_attempts=attempts)
         self.assertIsNone(selection_error(report,p));report['selection']['index']=0
         self.assertIsNotNone(selection_error(report,p))
@@ -42,7 +51,7 @@ class RecoverySearchTests(unittest.TestCase):
         def check(q):
             calls.append(q)
             return (False,[contact]) if len(calls)%12==0 else (True,[])
-        result=choose(dict(x=.2,y=0.,z=.0064,qw=1.,qz=0.),BBOX,p,[0.]*6,.2,.1,check,LIMITS,lambda:None,dict(current_wrist_roll=0.),attempts)
+        result=choose(dict(x=.2,y=0.,z=.0064,qw=1.,qz=0.),BBOX,p,[0.]*6,check,LIMITS,lambda:None,dict(current_wrist_roll=0.),attempts,self.clearance())
         self.assertIsNone(result);self.assertTrue(any(a.get('proof',{}).get('paths') for a in attempts))
         self.assertTrue(any(any(not path['proof']['passed'] for path in a.get('proof',{}).get('paths',[])) for a in attempts))
 
@@ -51,7 +60,7 @@ class RecoverySearchTests(unittest.TestCase):
         for error in (TimeoutError('no MoveIt answer'),CancelledGeneration('old epoch')):
             attempts=[]
             def check(q):raise error
-            with self.assertRaises(type(error)):choose(dict(x=.2,y=0.,z=.0064,qw=1.,qz=0.),BBOX,p,[0.]*6,.2,.1,check,LIMITS,lambda:None,dict(current_wrist_roll=0.),attempts)
+            with self.assertRaises(type(error)):choose(dict(x=.2,y=0.,z=.0064,qw=1.,qz=0.),BBOX,p,[0.]*6,check,LIMITS,lambda:None,dict(current_wrist_roll=0.),attempts,self.clearance())
             self.assertEqual(len(attempts),1)
 
     def test_actual_prefix_exhausted_candidates_never_execute(self):

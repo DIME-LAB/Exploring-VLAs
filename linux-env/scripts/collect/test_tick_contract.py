@@ -20,6 +20,7 @@ def checked_window(snapshots):
             action=state,executed_action=state,expert_reference=state,expert_observation_stamp_ns=stamp,
             observation_stamp_ns=stamp,declared_application_stamp_ns=stamp,application_stamp_ns=stamp,command_clock_ns=stamp,
             applied_command=state,phase=source.get('phase','fixture'),episode_id=source.get('episode_id','fixture'))
+        if 'robot_base_world_pose' in s:row.update(robot_base_world_pose=s['robot_base_world_pose'],robot_base_pose_source='physx_rigid_body')
         row.update(planner_execution_reference=list(state),dart_offset=[0.]*6,command_filter_delta=[0.]*6,command_velocity=[(a-b)*30 for a,b in zip(state[:5],row['physics_drive_targets'][:5])])
         s['tick_contract']=audit.finish(row);result.append(s)
     return result
