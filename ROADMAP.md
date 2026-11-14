@@ -155,11 +155,14 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       Data: /mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1-v4/. Re-grasp episodes NOT in it (3.1i open).
       Live GUI check premerge-gui-6 PASS at c8140d0 (domain 92 localhost-only; two colours, base still);
       main fast-forwarded to 220b2c2.
+      Fresh clock-only ABI requalification at 220b2c2 PASS: slow/uncapped RTF 0.334/0.719;
+      no episodes, 49 owned identities retired, private ports closed, GPU1 allocation zero.
+      Mac report: phase3/3.1-collection/abi-220b2c2-clock/.
       Smoke validated 2026-11-13 at a8fc78b: 5 accepted / 7 attempts (71.43%), 3,508 frames at 30 simulated Hz;
       LeRobotDataset load and full state/action/timestamp read-back pass. Six native reset receipts, camera-phase,
       stale-epoch and late-application checks pass; 528 noisy execution steps retain clean expert labels.
       Collection 34.57 accepted episodes/hour; uncapped FJT RTF 0.716, so real-time deployment remains unproven.
-      Own instance down (35 tracked processes gone). Pilot awaits explicit lead GO.
+      Historical smoke: own instance down (35 tracked processes gone); superseded by the pilot proof above.
       Mac: coursework-eee598/roadmap-2026-11/phase3/3.1-collection/smoke-a8fc78b/.
     - [ ] Full collection: ~900 episodes; lead schedules after pilot review.
       Searched 2026-11-13: no larger existing sim set on HF (3 accounts + global search), ASU Drive,
@@ -198,8 +201,9 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       noise during grasp/release; the clean expert correction stays the recorded action. Bar: jerk/acceleration of
       executed targets vs current noise vs none, exact label recomputation, unchanged yield, side-by-side video.
       Offline implementation: seeded minimum-jerk segments, original planner timing, operation-wide noise scaling and final MoveIt command checks;
-      CPU noise-derivative/label checks and retained-trace benchmark pass. Targeted review, live yield/video and
-      5-episode smoke remain required before the full run.
+      CPU noise-derivative/label checks and retained-trace benchmark pass. Fixed-base normal smoke 5/5 and
+      pilot-3.1-v4 50/50 pass with smooth noise; clean labels exact, 5123 noisy rows, no gripper noise.
+      The legacy/smooth comparison is qualitative (different geometry/plans); controlled yield comparison remains open.
 - [ ] 3.1i Re-grasp recovery episodes (decided 2026-11-13), aimed at the 1.9 failure (closes 26-38 mm off the lego):
       a fixed share (~15-20%) of full-run episodes where the expert's FIRST grasp is deliberately offset 2-4 cm via
       injected perturbation (so the miss is never a recorded action), the miss is detected (gripper closes past the
@@ -219,7 +223,8 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       quickstart still works, no camera change except the grasp pose. Then the collector's success-gate cup
       profile and MoveIt cup objects follow the primitives. Must land before the pilot/full collection.
       Collector integration uses the shared 13-box cup asset for success planes and MoveIt, admits documented
-      20 um rest contact, and verifies CPU dynamics; offline tests pass, live smoke/pilot remain pending.
+      20 um rest contact, and verifies CPU dynamics. Fixed-base normal smoke 5/5 and pilot-3.1-v4 50/50
+      pass: fresh native offsets 0.1 mm/0, 13 boxes/cup and 1/lego; fixed_base=true and base drift zero.
 - [ ] 3.2 Fine-tune (more steps/episodes than 10k/100), sim/real mix per the coursework findings.
 - [ ] 3.3 Re-run the Phase 1 evaluation matrix.
 

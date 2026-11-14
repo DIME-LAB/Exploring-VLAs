@@ -308,6 +308,16 @@ directly (tailnet or LAN); an ssh tunnel can't carry it. One viewer at a time.
 
 ## Collecting sim data
 
+The normal-only pilot passed at frozen `ef42c1b`: **50/50 accepted**, 17 red /
+17 green /16 blue, 30,134 frames at 30 fps. LeRobotDataset load, timing, clean
+expert labels, native scene resets and owned cleanup pass. Collection achieved
+30.85 accepted episodes/hour (export excluded); median episode RTF was 0.1975.
+Bulk data: `/mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1-v4/normal/dataset`.
+Mac evidence: `coursework-eee598/roadmap-2026-11/phase3/3.1-collection/pilot-3.1-v4/`
+contains the README, audit, parameters, contact sheet and three colour videos.
+Re-grasp episodes are excluded pending their separate physical-clearance review
+and smoke. The lead schedules the full run.
+
 Grasp execution uses a yaw-consistent narrow-face plan: TCP centering, projected
 width and opening margin are recomputed for each admissible +/-180-degree
 orientation. It approaches from above inside the open-jaw corridor. Near-block
