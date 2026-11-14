@@ -14,7 +14,7 @@ export OMNI_KIT_MCP_PORT="$SOARM_KIT_MCP_PORT"
 unset ROS_LOCALHOST_ONLY
 export CYCLONEDDS_URI="file://$REPO_ROOT/linux-env/cyclonedds.xml"
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-export SOARM_COLLECTION_ROOT="${SOARM_COLLECTION_ROOT:-/mnt/a4500-backup/exploring-vlas}"
+export SOARM_COLLECTION_ROOT="${SOARM_COLLECTION_ROOT:-$(python3 "$SCRIPT_DIR/collect/host_config.py")}"
 export HF_LEROBOT_HOME="${HF_LEROBOT_HOME:-$SOARM_COLLECTION_ROOT/datasets}"
 export SOARM_INSTANCE_ROOT="${SOARM_INSTANCE_ROOT:-$SOARM_COLLECTION_ROOT/runtime/instance-$index}"
 export TMPDIR="$SOARM_INSTANCE_ROOT/tmp"

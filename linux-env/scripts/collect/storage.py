@@ -6,8 +6,9 @@ import shutil
 import stat
 import time
 import uuid
+from host_config import profile
 
-CANONICAL_ROOT = Path('/mnt/a4500-backup/exploring-vlas')
+CANONICAL_ROOT = Path(profile()['root'])
 
 
 def confined(path):

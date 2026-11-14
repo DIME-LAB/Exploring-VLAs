@@ -63,7 +63,7 @@ if [ -n "$INSTANCE_INDEX" ]; then
     export ROS_DOMAIN_ID="$((90 + INSTANCE_INDEX))"
     export OMNI_KIT_MCP_PORT="$((8777 + 2 * INSTANCE_INDEX))"
     export SOARM_KIT_MCP_PORT="$OMNI_KIT_MCP_PORT"
-    INSTANCE_ROOT="${SOARM_INSTANCE_ROOT:-/mnt/a4500-backup/exploring-vlas/runtime/instance-$INSTANCE_INDEX}"
+    INSTANCE_ROOT="${SOARM_INSTANCE_ROOT:-$(python3 "$SCRIPT_DIR/../collect/host_config.py")/runtime/instance-$INSTANCE_INDEX}"
     export SOARM_INSTANCE_ROOT="$INSTANCE_ROOT"
     export ISAACSIM_LOG="$INSTANCE_ROOT/isaac.log"
     python3 "$SCRIPT_DIR/../collect/storage.py" "$INSTANCE_ROOT" "$ISAACSIM_LOG"
