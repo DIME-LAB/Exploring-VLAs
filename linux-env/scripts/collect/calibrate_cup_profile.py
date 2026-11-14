@@ -3,7 +3,7 @@ import argparse,hashlib,json,sys
 from pathlib import Path
 import numpy as np
 from cup_profile import PROFILE,triangles_from_stl,verify_shell
-from storage import confined
+from storage import confined,atomic_json
 repo=Path(__file__).resolve().parents[3]
 source=repo/'vla_SO-ARM101/src/so_arm101_description/meshes/cup/cup.stl'
 tri=triangles_from_stl(source.read_bytes())
@@ -57,5 +57,5 @@ assert verify_shell(source.read_bytes(),report)['passed'], report
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--output',type=Path,help='Optional calibration report under the collection output root')
 args=parser.parse_args()
-if args.output:confined(args.output).write_text(json.dumps(report,indent=2))
+if args.output:atomic_json(confined(args.output),report)
 print(json.dumps(report,indent=2))

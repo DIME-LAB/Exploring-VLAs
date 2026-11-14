@@ -4,7 +4,7 @@ import argparse,json,os,subprocess,sys,time
 from pathlib import Path
 from managed_process import start,stop,verified,record_path
 from run_smoke import InstanceClaim,identity
-from storage import confined
+from storage import confined,atomic_json
 
 
 def wait_for(condition,seconds=10):
@@ -70,7 +70,7 @@ def main():
     finally:
         for pidfile in active:
             if verified(pidfile):stop(pidfile)
-        (root/'validation.json').write_text(json.dumps(report,indent=2))
+        atomic_json(root/'validation.json',report)
     print(json.dumps(dict(passed=report['passed'],owned_tree=True,orphan=True,claim_refusals=len(claim_probes))))
 
 

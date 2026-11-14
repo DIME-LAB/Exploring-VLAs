@@ -5,7 +5,7 @@ from types import SimpleNamespace as NS
 from pathlib import Path
 import numpy as np
 from dart import DEFAULT_NOISE,SmoothDart
-from storage import confined
+from storage import confined,atomic_json
 import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[3]/'vla_SO-ARM101/src/so_arm101_control'))
 from so_arm101_control.grasp_geometry import JOINT_LIMITS
@@ -60,7 +60,7 @@ def main():
         maximum_noise_velocity=max(r['noise_metrics']['velocity']['maximum'] for r in results),
         maximum_noise_offset_rad=max(r['planner_offset_max_rad'] for r in results))
     assert report['maximum_noise_acceleration']<=.30001 and report['maximum_noise_velocity']<=.050001
-    (output/'metrics.json').write_text(json.dumps(report,indent=2))
+    atomic_json(output/'metrics.json',report)
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt

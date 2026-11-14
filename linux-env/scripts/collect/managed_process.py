@@ -25,8 +25,15 @@ def read_leaf(path):
 def save(path,value):
     temporary=path.with_name(path.name+'.'+uuid.uuid4().hex)
     fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
-    with os.fdopen(fd,'w') as f:json.dump(value,f,indent=2)
-    os.replace(temporary,path)
+    try:
+        with os.fdopen(fd,'w') as f:
+            json.dump(value,f,indent=2);f.flush();os.fsync(f.fileno())
+        os.replace(temporary,path)
+        directory=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY)
+        try:os.fsync(directory)
+        finally:os.close(directory)
+    finally:
+        if temporary.exists():temporary.unlink()
 
 
 def recorded_remaining(row):
@@ -136,21 +143,33 @@ def supervise(path,nonce,command):
         if row['cleanup']['remaining']:raise RuntimeError('Managed children did not retire; see '+str(record_path(path)))
 
 
+
+def verified_exit(path,expected):
+    final=json.loads(read_leaf(record_path(Path(expected['pidfile']))))
+    if final.get('nonce')!=expected['nonce'] or any(final['supervisor'][key]!=expected['supervisor'][key]
+                                                  for key in ('pid','start_ticks','pgid')):
+        raise RuntimeError('Final supervisor ownership differs')
+    remaining=recorded_remaining(final)
+    if remaining or final.get('state')!='stopped' or final.get('cleanup',{}).get('remaining'):
+        raise RuntimeError('Unresolved cleanup after supervisor exit: '+repr(remaining)+'; see '+str(record_path(path)))
+    return dict(stopped=True,cleanup=final['cleanup'])
+
+
 def stop_owned(path,expected):
     row=verified(path)
-    if row is None:return dict(stopped=True,already_down=True)
+    if row is None:return verified_exit(path,expected)
     if row['nonce']!=expected['nonce']:raise RuntimeError('Launcher ownership changed before stop')
     origin=Path(row['pidfile'])
     with claim(origin):
         row=verified(path)
-        if row is None:return dict(stopped=True,already_down=True)
+        if row is None:return verified_exit(path,expected)
         if row['nonce']!=expected['nonce']:raise RuntimeError('Launcher ownership changed while waiting for stop')
         pid=row['supervisor']['pid'];fd=os.pidfd_open(pid)
         try:
             again=verified(path)
-            if again is None:return dict(stopped=True,already_down=True)
+            if again is None:return verified_exit(path,expected)
             if again['nonce']!=row['nonce']:raise RuntimeError('Launcher ownership changed before control request')
-            if select.select([fd],[],[],0)[0]:return dict(stopped=True,already_down=True)
+            if select.select([fd],[],[],0)[0]:return verified_exit(path,expected)
             with socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET) as client:
                 client.settimeout(5);client.connect(row['address'])
                 peer=struct.unpack('3i',client.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))
@@ -158,10 +177,7 @@ def stop_owned(path,expected):
                 client.sendall(json.dumps(dict(stop=row['nonce'])).encode())
                 if json.loads(client.recv(1024))!={'accepted':True}:raise RuntimeError('Process stop was not accepted')
             if not select.select([fd],[],[],35)[0]:raise TimeoutError('Owned supervisor did not retire; no numeric signal fallback')
-            final=json.loads(read_leaf(record_path(origin)))
-            if final.get('nonce')!=row['nonce'] or final['state']!='stopped' or final['cleanup']['remaining']:
-                raise RuntimeError('Owned tree cleanup was not proven')
-            return dict(stopped=True,cleanup=final['cleanup'])
+            return verified_exit(path,expected)
         finally:os.close(fd)
 
 

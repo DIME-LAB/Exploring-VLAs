@@ -6,7 +6,7 @@ collection control, and the control/policy processes started by `_lib.sh` and
 `.identity.json` records the supervisor and workload PID/start-time/PGID, launch
 command, original PID-file path, instance root and nonce, discovered descendants
 and final cleanup result. Identity leaf reads refuse symlinks; receipts are
-written atomically.
+written atomically with file and directory fsync.
 
 Start serializes on a PID-file lock and refuses a live PID without its matching
 receipt, a reused PID, or a receipt for another launcher path. The startup helper
@@ -56,3 +56,19 @@ supervisor keeps `cleanup_failed` and its identities. Missing supervisor/marker
 alone never proves cleanup: status/down/start refuse while any recorded birth
 identity remains, including an unresolved late orphan. They become available
 only after those identities are proven gone; no retry silently adopts them.
+
+Every stop branch, including an already-readable supervisor pidfd, re-reads the
+final identity receipt and requires the original nonce, birth identity, stopped
+state and empty descendant cleanup. An exited supervisor alone cannot report
+success. Runner cleanup errors and port-probe errors produce a failed smoke
+receipt; an outer finally releases the instance claim even if finalization fails.
+Receipts published at producer exit are reconciled before starting another stage.
+
+Indexed GPU launches use the assigned physical card UUID as CUDA_VISIBLE_DEVICES.
+CUDA ordinals become zero within that process; the renderer keeps its physical
+card selection. The collector records startup and before/after-attempt NVML memory
+for launcher-owned birth identities. Other users' contexts are ignored; any
+positive owned memory on another card fails. Persistent shader/OptiX/CUDA caches
+are private to this project and keyed by hostname plus card UUID. Camera warm-up
+precedes recording; neither the shader directory nor other projects' caches are
+cleared.

@@ -39,7 +39,8 @@ _LOADED_DEPENDENCIES = {name:hashlib.sha256(Path(__file__).with_name(name).read_
 class Runtime:
     def __init__(self):
         import torch
-        torch.cuda.set_device(int(os.environ.get('ISAACSIM_GPU', '0')))
+        if torch.cuda.device_count()!=1:raise RuntimeError('Collection requires exactly one visible CUDA device')
+        torch.cuda.set_device(0)
         self.world = World.instance()
         self.timeline = omni.timeline.get_timeline_interface()
         self.timeline.pause()
@@ -150,6 +151,7 @@ class Runtime:
         return result
 
     def snapshot(self):
+        state_read_start=time.monotonic_ns()
         self.require_scene()
         positions = self.art.get_joint_positions()[0, self.indices]
         velocities = self.art.get_joint_velocities()[0, self.indices]
@@ -171,13 +173,15 @@ class Runtime:
         rotation = base.ExtractRotationQuat()
         base_pose = dict(position=list(base.ExtractTranslation()),
                          orientation=[rotation.GetReal()]+list(rotation.GetImaginary()))
-        return dict(base_world_pose=base_pose, epoch=self.epoch, sim_ns=self.stamp(), physics_time_s=self.world.current_time,
+        return dict(wall_profile_native=dict(state_read_ms=(time.monotonic_ns()-state_read_start)/1e6),base_world_pose=base_pose, epoch=self.epoch, sim_ns=self.stamp(), physics_time_s=self.world.current_time,
                     state=list(map(float, positions)), velocity=list(map(float, velocities)),
                     drive_targets=list(map(float, targets)),
                     bodies=bodies, local_corners=self.local_corners, state_source='isaac_articulation')
 
     def publish(self):
         snapshot = self.snapshot()
+        snapshot['wall_profile_native'].update(step_start_ns=getattr(self,'step_start_ns',None),
+            step_end_ns=getattr(self,'step_end_ns',None),snapshot_ready_ns=time.monotonic_ns())
         msg = JointState()
         msg.header.stamp.sec, msg.header.stamp.nanosec = divmod(snapshot['sim_ns'], 1000000000)
         msg.name = list(JOINTS);msg.position = snapshot['state'];msg.velocity = snapshot['velocity']
@@ -208,6 +212,7 @@ class Runtime:
             raise RuntimeError('An advancing frame is already pending or mode is not collect')
         self.start_time = self.world.current_time
         self.busy = True
+        self.step_start_ns=time.monotonic_ns()
         self.timeline.play()
         return dict(start_ns=round(self.start_time * 1e9), target_ns=round((self.start_time + 1/30) * 1e9))
 
@@ -241,6 +246,7 @@ class Runtime:
         try:
             if self.mode == 'collect':
                 if self.busy and self.world.current_time > self.start_time and not matches(self.world.current_time,self.start_time,'world_s'):
+                    self.step_end_ns=time.monotonic_ns()
                     self.timeline.pause()
                     delta = self.world.current_time - self.start_time
                     self.busy = False
@@ -264,7 +270,7 @@ class Runtime:
             view.set_velocities(np.zeros((1, 6), dtype=np.float32))
         return True
 
-    def restore(self, snapshot, arm=False):
+    def restore(self, snapshot, arm=False, restore_drives=False):
         if self.busy or self.timeline.is_playing():
             raise RuntimeError('Restore requires a held simulation')
         self.cancel()
@@ -277,7 +283,7 @@ class Runtime:
         if arm:
             self.art.set_joint_positions(np.asarray([snapshot['state']], dtype=np.float32), joint_indices=self.indices)
             self.art.set_joint_velocities(np.zeros((1, 6), dtype=np.float32), joint_indices=self.indices)
-            self.apply(snapshot['state'], self.stamp())
+            self.apply(snapshot['drive_targets'] if restore_drives else snapshot['state'], self.stamp())
         actual = self.snapshot()
         error = max(abs(x-y) for name in snapshot['bodies']
                     for x,y in zip(snapshot['bodies'][name]['position'], actual['bodies'][name]['position']))
@@ -292,6 +298,9 @@ class Runtime:
         if arm:
             if len(actual['state']) != 6 or len(actual['velocity']) != 6 or len(snapshot['state']) != 6:
                 raise RuntimeError('Initial arm restore requires all six measured joints')
+            requested_drives=snapshot['drive_targets'] if restore_drives else snapshot['state']
+            if not matches(actual['drive_targets'],requested_drives,'target_rad'):
+                raise RuntimeError('Initial arm drive-target restore failed')
             arm_error = max(abs(x-y) for x,y in zip(snapshot['state'], actual['state']))
             velocity_error = max(abs(v) for v in actual['velocity'])
             # This read-back is immediate while held, before any constraint
@@ -299,6 +308,7 @@ class Runtime:
             if not np.isfinite(arm_error + velocity_error) or not matches(arm_error,0.,'target_rad') or not matches(velocity_error,0.,'float32_readback'):
                 raise RuntimeError(f'Initial arm position/zero velocity restore failed: {arm_error} rad, {velocity_error} rad/s')
         return dict(epoch=self.epoch, invalid_through_ns=self.invalid_through_ns,arm_restored=bool(arm),
+                    restored_drive_source='snapshot_drive_targets' if restore_drives else 'snapshot_state',
                     command_baseline=dict(epoch=self.epoch,sim_ns=actual['sim_ns'],physics_time_s=actual['physics_time_s'],drive_targets=list(actual['drive_targets'])),
                     max_position_error_m=error, max_orientation_error=orientation_error,
                     max_arm_position_error_rad=arm_error, max_arm_velocity_rad_s=velocity_error, snapshot=actual)
@@ -323,7 +333,11 @@ def install(mode='collect'):
                 epoch=_RUNTIME.epoch, invalid_through_ns=_RUNTIME.invalid_through_ns,
                 loaded_sha256=_LOADED_SHA256,
                 loaded_dependencies=_LOADED_DEPENDENCIES,
-                cuda_device=torch.cuda.current_device(), renderer_gpu=carb.settings.get_settings().get('/renderer/activeGpu'),
+                cuda_device=torch.cuda.current_device(),cuda_device_count=torch.cuda.device_count(),
+                cuda_visible_devices=os.environ.get('CUDA_VISIBLE_DEVICES'),assigned_gpu_uuid=os.environ.get('SOARM_ASSIGNED_GPU_UUID'),
+                shader_cache_path=carb.settings.get_settings().get('/rtx/shaderDb/shaderCachePath'),optix_cache_path=os.environ.get('OPTIX_CACHE_PATH'),
+                kit_threads=carb.settings.get_settings().get('/plugins/carb.tasking.plugin/threadCount'),
+                renderer_gpu=carb.settings.get_settings().get('/renderer/activeGpu'),
                 physics_gpu=carb.settings.get_settings().get('/physics/cudaDevice'),
                 measured_topic='/joint_states_measured', local_corners=_RUNTIME.local_corners,
                 effective_shape_offsets=_RUNTIME.resolved_shape_offsets())

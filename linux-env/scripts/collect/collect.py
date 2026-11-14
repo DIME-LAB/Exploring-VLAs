@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+from wall_profile import profile_tick,summary as wall_profile_summary,milliseconds,PROFILE_POLICY
 sys.dont_write_bytecode = True
 
 import numpy as np
@@ -35,6 +36,9 @@ sys.path.insert(0, str(REPO / 'omni-kit-mcp'))
 from kit_mcp.client import call as kit_call
 from so_arm101_control.grasp_geometry import JOINT_LIMITS
 from so_arm101_control.motion_wait import MotionWaiter, MotionWaitTimeout
+from gpu_device import owned_gpu_audit,gpu_uuid,GpuIsolationError
+from safe_home import make_baseline,validate_baseline
+from frame_join import SensorAmbiguity,identity as frame_identity,exact_duplicate
 from comparisons import comparison,matches,interval,native_frame
 from contract import COLORS, JOINTS, EVAL_SEEDS, corrective_action, parameters, timing_audit
 from checkpoint import progress
@@ -81,6 +85,8 @@ class Sensors:
         self.last = -1
         self.failure = None
         self.duplicate_messages = collections.Counter()
+        self.consumed = collections.OrderedDict()
+        self.seen_camera_frames = {'wrist':{},'top':{}}
         self.reference = None
         self.acks = {}
         self.subs = []
@@ -138,16 +144,36 @@ class Sensors:
         return reference
 
     def put(self, key, msg):
+        receive_ns=time.monotonic_ns()
         if key == 'tick':
             msg = json.loads(msg.data)
             raw_stamp = msg['sim_ns']
         else:
             raw_stamp = ns(msg.header.stamp)
-        if raw_stamp <= 0:
-            return
+        if raw_stamp<=0:return
+        incoming=frame_identity(key,msg,raw_stamp)
+        incoming['receipt_epoch']=self.generation.epoch
         with self.condition:
-            if self.last >= 0 and raw_stamp <= self.last+1000:
-                if key in ('wrist','top'):self.duplicate_messages[key]+=1
+            if self.failure:return
+            if not hasattr(self,'consumed'):self.consumed=collections.OrderedDict()
+            if not hasattr(self,'seen_camera_frames'):self.seen_camera_frames={'wrist':{},'top':{}}
+            if key in self.seen_camera_frames:
+                # Buckets are only a lookup index. Search adjacent buckets and
+                # retain original stamps/content; distinct candidates are fatal.
+                seen=self.seen_camera_frames[key];bucket=raw_stamp//1000
+                candidates=[seen[b] for b in (bucket-1,bucket,bucket+1)
+                            if b in seen and matches(seen[b]['stamp_ns'],raw_stamp,'stamp_ns')]
+                if candidates:
+                    if len(candidates)==1 and exact_duplicate(candidates[0],incoming):
+                        self.duplicate_messages[key]+=1;return
+                    self.failure=SensorAmbiguity(dict(stream=key,reason='distinct same-camera candidates',
+                        candidates=[*candidates,incoming],owner_epoch=self.generation.epoch))
+                    self.condition.notify_all();raise self.failure
+                seen[bucket]=incoming
+            if self.last>=0 and raw_stamp<=self.last+1000:
+                # This sample was never eligible for a current joined frame.
+                # Previously observed camera identities above still detect a
+                # conflicting late alternative to any recorded/pending frame.
                 return
             candidates=[]
             for anchor,entry in self.pending.items():
@@ -155,14 +181,22 @@ class Sensors:
                         for name,value in entry.items()]
                 if all(matches(raw_stamp,stamp,'stamp_ns') for stamp in stamps):candidates.append(anchor)
             if len(candidates)>1:
-                self.failure='Ambiguous camera/state sim-tick join: '+str(dict(stamp_ns=raw_stamp,candidates=candidates))
-                self.condition.notify_all();return
+                self.failure=SensorAmbiguity(dict(stream=key,reason='multiple compatible groups',
+                    candidates=[frame_identity(name,value[0],value[0]['sim_ns'] if name=='tick' else ns(value[0].header.stamp))
+                                for anchor in candidates for name,value in self.pending[anchor].items()]+[incoming],
+                    owner_epoch=self.generation.epoch))
+                self.condition.notify_all();raise self.failure
             anchor=candidates[0] if candidates else raw_stamp
             entry=self.pending.setdefault(anchor,{})
-            if key in entry and key!='joint':
-                self.duplicate_messages[key]+=1
-                return
-            entry[key]=(msg,time.monotonic_ns())
+            if key in entry:
+                old=entry[key][0];old_stamp=old['sim_ns'] if key=='tick' else ns(old.header.stamp)
+                previous=frame_identity(key,old,old_stamp)
+                if exact_duplicate(previous,incoming):
+                    self.duplicate_messages[key]+=1;return
+                self.failure=SensorAmbiguity(dict(stream=key,reason='distinct candidates for one pending tick',
+                    candidates=[previous,incoming],owner_epoch=self.generation.epoch))
+                self.condition.notify_all();raise self.failure
+            entry[key]=(msg,receive_ns)
             while len(self.pending)>240:self.pending.popitem(last=False)
             self.condition.notify_all()
 
@@ -171,12 +205,15 @@ class Sensors:
         with self.condition:
             while True:
                 if self.failure:
+                    if isinstance(self.failure,BaseException):raise self.failure
                     raise RuntimeError(self.failure)
                 ready = sorted(k for k,v in self.pending.items() if len(v)==4)
                 if ready:
                     stamp = ready[0]
                     entry = self.pending.pop(stamp)
                     self.last = ns(entry['wrist'][0].header.stamp)
+                    self.consumed[self.last]={key:frame_identity(key,value[0],value[0]['sim_ns'] if key=='tick' else ns(value[0].header.stamp)) for key,value in entry.items()}
+                    while len(self.consumed)>240:self.consumed.popitem(last=False)
                     for old in list(self.pending):
                         if old <= self.last+1000:
                             del self.pending[old]
@@ -220,9 +257,11 @@ class EpisodeWriter:
                     if item is None:
                         break
                     row, images = item
+                    write_start=time.monotonic_ns()
                     for key, img in images.items():
                         self.encoders[key].stdin.write(img.tobytes())
                     out.write(json.dumps(row) + '\n')
+                    row['wall_profile']['row_video_write_ms']=milliseconds(write_start,time.monotonic_ns())
                     self.rows.append(row)
         except Exception as exc:
             self.failure = repr(exc)
@@ -517,6 +556,13 @@ class Collector:
         self.capture_thread = threading.Thread(target=self.capture, daemon=True)
         self.capture_thread.start()
 
+
+    def gpu_footprint(self):
+        proof=owned_gpu_audit(Path(os.environ['SOARM_INSTANCE_ROOT']),int(os.getenv('ISAACSIM_GPU','0')))
+        self.last_gpu_footprint=proof
+        if not proof['passed']:raise GpuIsolationError(proof)
+        return proof
+
     def motion_wait_diagnostic(self, record):
         self.wait_diagnostics.append(record)
         print(json.dumps(record), flush=True)
@@ -687,6 +733,7 @@ class Collector:
             record['failing_tick_contract']=failure_tick
             record['validated_sim_tick']=bool(failure_tick and not verify_proof(failure_tick) and
                 failure_tick['row']['epoch']==exc.evidence['epoch']==epoch and matches(failure_tick['row']['sim_ns'],exc.evidence['stamp_ns']))
+        if isinstance(exc,SensorAmbiguity):record['sensor_join_failure']=exc.evidence
         if isinstance(exc,TickContractError):record['pipeline_contract_failure']=dict(errors=exc.errors,evidence=exc.evidence)
         if not hasattr(self, 'capture_failures'):
             self.capture_failures = []
@@ -736,15 +783,19 @@ class Collector:
         while not self.stop.is_set():
             epoch=None;failure_tick=None
             try:
+                read_start=time.monotonic_ns()
                 try:stamp,entry=self.sensors.read(timeout=30)
                 except TimeoutError:
                     if self.servo.plan or self.servo.grip_plan:raise TimeoutError('Motion stalled: no synchronized camera/state tick within 30 wall seconds')
                     continue
+                read_end=time.monotonic_ns()
                 epoch=entry['tick'][0]['epoch']
                 self.generation.require(epoch,stamp)
                 with self.generation.own('capture/dispatch'):
                     self.generation.require(epoch,stamp)
                     joint,received=entry['joint'];snapshot=entry['tick'][0]
+                    profile=profile_tick(snapshot,entry,read_start,read_end)
+                    preparation_start=time.monotonic_ns()
                     mapped=dict(zip(joint.name,joint.position));mapped_v=dict(zip(joint.name,joint.velocity))
                     state=[mapped[n] for n in JOINTS];velocity=[mapped_v[n] for n in JOINTS]
                     row=dict(tick_contract_version=1,observation_epoch=snapshot['epoch'],expert_epoch=epoch,epoch=epoch,
@@ -757,14 +808,19 @@ class Collector:
                         physics_drive_targets=snapshot['drive_targets'],pose_stamp_ns=snapshot['sim_ns'],
                         physics_time_s=snapshot['physics_time_s'],physical_bodies=copy.deepcopy(snapshot['bodies']),
                         episode_id=getattr(self,'current_episode_id',None),
+                        camera_identity={key:frame_identity(key,entry[key][0],ns(entry[key][0].header.stamp)) for key in ('wrist','top')},
                         camera_layout={k:dict(encoding=entry[k][0].encoding,width=entry[k][0].width,height=entry[k][0].height,step=entry[k][0].step,bytes=len(entry[k][0].data)) for k in ('wrist','top')})
                     if not hasattr(self,'tick_audit'):self.tick_audit=TickContract()
+                    contract_start=time.monotonic_ns()
                     self.tick_audit.observe(row)
                     self.wait_tick_clock(stamp,epoch)
+                    profile['contract_validation_ms']+=milliseconds(contract_start,time.monotonic_ns())
                     self.node._joint_states_callback(joint);self.update_pose_cache(snapshot)
                     for plan in (self.servo.plan,self.servo.grip_plan):
                         if plan:self.generation.require(plan['epoch'])
                     physical_failure=None
+                    profile['capture_preparation_ms']=milliseconds(preparation_start,time.monotonic_ns())-profile['contract_validation_ms']
+                    compute_start=time.monotonic_ns()
                     try:
                         clean,executed,active,phase,reference,command_clock,completed,advance,candidate=self.servo.tick(stamp,state,snapshot['drive_targets'])
                     except ConvergenceFailure as exc:
@@ -774,12 +830,17 @@ class Collector:
                         completed=[];advance=False
                         candidate=TargetCandidate(epoch,stamp,tuple(executed),(0.,)*5,
                             tuple(e-c for e,c in zip(executed,clean)),(0.,)*6,tuple(executed),planner_reference=tuple(executed))
+                    profile['expert_dart_compute_ms']=milliseconds(compute_start,time.monotonic_ns())
                     geometry=self.validate_command(candidate,state,snapshot['drive_targets'])
+                    profile['validity_queries']=geometry['query_timing']['queries']
+                    profile['validity_query_ms']=geometry['query_timing']['total_query_wall_s']*1000
                     self.generation.require(epoch,stamp)
+                    command_start=time.monotonic_ns()
                     self.servo.publish_reference(executed)
                     self.generation.require(epoch,stamp)
                     self.command_pub.publish(String(data=json.dumps(dict(epoch=epoch,observation_stamp_ns=stamp,command=executed,advance=advance))))
                     ack=self.sensors.read_ack(epoch,stamp)
+                    profile['command_publish_ack_ms']=milliseconds(command_start,time.monotonic_ns())
                     self.generation.require(epoch,stamp)
                     row.update(action=clean,executed_action=executed,expert_reference=reference,
                         expert_observation_stamp_ns=stamp,command_clock_ns=command_clock,executing=active,phase=phase,
@@ -793,13 +854,27 @@ class Collector:
                         body=snapshot['bodies'][selected]
                         row['target_object_pose']=dict(zip(('x','y','z'),body['position']))
                         row['target_body']=body;row['target_cup']=snapshot['bodies']['cup_'+self.servo.params['color']]
+                    contract_start=time.monotonic_ns()
                     proof=self.tick_audit.finish(row)
+                    profile['contract_validation_ms']+=milliseconds(contract_start,time.monotonic_ns())
                     self.servo.commit_command(candidate,epoch,stamp)
+                    profile.update(executing=active,phase=phase,recorded=False)
                     checked=copy.deepcopy(snapshot);checked['tick_contract']=proof
+                    if not hasattr(self,'wall_profiles'):self.wall_profiles=[]
+                    self.wall_profiles.append(profile)
+                    row['wall_profile']=profile
                     with self.writer_lock:
                         if self.writer:
-                            self.writer.add(row,{key:Sensors.image(entry[key][0]).copy() for key in ('wrist','top')})
+                            profile['recorded']=True
+                            decode_start=time.monotonic_ns()
+                            images={key:Sensors.image(entry[key][0]).copy() for key in ('wrist','top')}
+                            profile['image_decode_ms']=milliseconds(decode_start,time.monotonic_ns())
+                            queue_start=time.monotonic_ns()
+                            self.writer.add(row,images)
+                            profile['row_queue_ms']=milliseconds(queue_start,time.monotonic_ns())
                             self.episode_snapshots.append(checked)
+                    profile['capture_processing_ms']=milliseconds(read_end,time.monotonic_ns())
+                    profile['tick_total_ms']=milliseconds(profile.get('native_step_start_ns') or read_end,time.monotonic_ns())
                     with self.tick_condition:
                         self.last_processed_ns=stamp;self.last_snapshot=checked;self.tick_condition.notify_all()
                     if physical_failure is not None:
@@ -845,6 +920,7 @@ class Collector:
                 if not self.tick_condition.wait_for(lambda: (self.last_snapshot and self.last_snapshot['epoch'] == epoch and self.last_processed_ns > previous) or self.failure, timeout=frame_capacity_seconds()):
                     raise TimeoutError('Held-frame capacity exceeded '+str(frame_capacity_seconds())+' wall seconds; query/ACK/clock/recording did not retire')
                 if self.failure:
+                    if isinstance(self.failure,BaseException):raise self.failure
                     raise RuntimeError(self.failure)
                 snapshots.append(self.last_snapshot)
         return snapshots
@@ -966,6 +1042,45 @@ class Collector:
                 self.servo.reference, self.servo.reference_epoch = reference, epoch
                 self.servo.previous_executed = None
         return target
+
+
+    def restore_failed_episode_home(self):
+        try:return self._restore_failed_episode_home()
+        except Exception as exc:
+            self.abort_stalled_owner(exc,'failed episode home reset')
+            raise
+
+    def _restore_failed_episode_home(self):
+        from so_arm101_control.grasp_geometry import _grasp_home_data_target
+        with self.writer_lock:
+            if self.writer is not None:raise RuntimeError('Cannot restore home while recording an episode')
+        baseline=self.safe_home_baseline
+        validate_baseline(baseline,_grasp_home_data_target())
+        retirement=self.workers.retire()
+        if not retirement.get('passed'):raise RuntimeError('Failed episode workers did not retire before reset')
+        cleared=self.scene_reset.clear()  # MoveIt, including attachments, is the authority.
+        if not cleared.get('verified'):raise RuntimeError('Failed episode scene clear did not verify')
+        with self.motion_effect(self.generation.epoch):
+            self.node._attached_lego_name=None;self.node._attached_lego_tcp_offset=None
+        restored=self.restore_physical('import collection_runtime as c\nr=c.runtime()\nresult=r.restore('+
+            repr(baseline['snapshot'])+',arm=True,restore_drives=True)')
+        actual=restored['snapshot'];wanted=baseline['snapshot']
+        for key,expected in (('state',wanted['state']),('velocity',[0.]*6),('drive_targets',wanted['drive_targets'])):
+            if not matches(actual.get(key),expected,'float32_readback'):
+                raise RuntimeError('Failed episode home restore readback differs: '+key)
+        with self.generation.own('restored home reference'):
+            self.generation.require(restored['epoch'])
+            with self.servo.lock:
+                self.servo.reference=list(wanted['drive_targets']);self.servo.reference_epoch=restored['epoch']
+                self.servo.executed_hold=None;self.servo.previous_executed=None
+        samples=self.advance_ticks(6)
+        check=initial_arm(samples,baseline['home_target'])
+        if not check['contract_passed']:raise TickContractError(check['contract']['errors'],dict(contract=check['contract'],snapshots=samples))
+        if not check['passed']:raise RuntimeError('Failed episode restored home did not settle: '+repr(check))
+        self.sync_scene(snapshot=samples[-1])
+        return dict(passed=True,unrecorded=True,before_planning=True,source_episode_id=baseline['source_episode_id'],
+                    source_baseline_sha256=baseline['snapshot_sha256'],retirement=retirement,scene_clear=cleared,
+                    restore=restored,settle=check,scene_verify=self.scene_pose_check)
 
     def settle_home(self, label):
         target = self.hold_home()
@@ -1090,6 +1205,8 @@ class Collector:
             logged = [json.loads(line) for line in (root / 'episodes.jsonl').read_text().splitlines()]
             if logged != receipts:
                 raise ValueError('Resume attempt log differs from the receipt ledger')
+        self.safe_home_baseline=copy.deepcopy(previous.get('safe_home_baseline')) if previous else None
+        self.needs_home_restore=bool(receipts and receipts[-1].get('disposition',{}).get('kind')=='quality_reject')
         streak = FailureStreak(receipts)
         if streak.stopped:
             raise RuntimeError('Previous receipt ledger requires a stop; review before a new run')
@@ -1149,7 +1266,7 @@ class Collector:
                     raise ValueError(f'Missing dimensions for baseline object {name}')
                 position[2] = self.node._ground_z_var.get() + float(bbox['sz']) / 2
             self.baseline_cup_layout = initial['cup_layout']
-        tracked_sources = ['linux-env/scripts/collect/comparisons.py','linux-env/scripts/collect/collect.py', 'linux-env/scripts/collect/contract.py',
+        tracked_sources = ['linux-env/scripts/collect/wall_profile.py','linux-env/scripts/collect/gpu_device.py','linux-env/scripts/collect/safe_home.py','linux-env/scripts/collect/frame_join.py','linux-env/scripts/collect/comparisons.py','linux-env/scripts/collect/collect.py', 'linux-env/scripts/collect/contract.py',
                            'linux-env/scripts/collect/checkpoint.py',
                            'linux-env/scripts/collect/episode_policy.py',
                            'linux-env/scripts/collect/dart.py',
@@ -1187,9 +1304,12 @@ class Collector:
         if any(source_hashes['linux-env/scripts/collect/'+name] != digest
                for name,digest in transport_config['loaded_dependencies'].items()):
             raise RuntimeError('Kit loaded different transport dependencies')
-        if any(transport_config[name] != int(os.getenv('ISAACSIM_GPU','0'))
-               for name in ('renderer_gpu','physics_gpu','cuda_device')):
-            raise RuntimeError('Renderer/physics/CUDA instance GPU assignment differs')
+        if (transport_config['renderer_gpu']!=int(os.getenv('ISAACSIM_GPU','0')) or
+                transport_config['physics_gpu']!=0 or transport_config['cuda_device']!=0 or
+                transport_config['cuda_device_count']!=1 or transport_config['cuda_visible_devices']!=gpu_uuid(int(os.getenv('ISAACSIM_GPU','0')))):
+            raise RuntimeError('Renderer/physics/CUDA instance GPU isolation differs')
+        try:initial_gpu_footprint=self.gpu_footprint()
+        finally:atomic_json(root/'gpu-isolation-startup.json',getattr(self,'last_gpu_footprint',dict(passed=False,error='GPU audit did not complete')))
         provenance = dict(start_trial=attempted, started=time.time(), source_sha256=source_hashes,
             git_commit=subprocess.check_output(['git', '-C', str(REPO), 'rev-parse', 'HEAD'], text=True).strip())
         if previous:
@@ -1202,7 +1322,7 @@ class Collector:
             atomic_json(root / 'run.json',previous)
         else:
             atomic_json(root / 'run.json',dict(instance=args.instance, host=socket.gethostname(), gpu_index=int(os.getenv('ISAACSIM_GPU', '0')),
-            recording_version=3, transport_config=transport_config, observation_state_topic='/joint_states_measured',
+            wall_profile_policy=PROFILE_POLICY,recording_version=3, gpu_isolation_initial=initial_gpu_footprint,transport_config=transport_config, observation_state_topic='/joint_states_measured',
             diagnostic=args.diagnostic, success_profile=PROFILE,
             motion_wait_policy=wait_policy, tick_clock_policy=CLOCK_POLICY,geometry_query_policy=QUERY_POLICY,quality_policy=POLICY,regrasp_policy=REGRASP_POLICY,regrasp_only=args.regrasp_only,
             application_contract='Held at observation tick; read-back verified PhysX targets before one-frame advance; maximum one sim tick latency',
@@ -1216,6 +1336,7 @@ class Collector:
             if self.stop.is_set() or self.failure:
                 raise RuntimeError(self.failure or 'Collection interrupted')
             disk_wait += wait_for_storage(root, self.stop, emit=lambda value: print(value, flush=True))
+            wall_profile_start=len(getattr(self,'wall_profiles',[]))
             root_growth = RootFileGrowth(Path(os.environ['SOARM_INSTANCE_ROOT']))
             attempted += 1
             color = COLORS[accepted % 3]
@@ -1237,6 +1358,10 @@ class Collector:
                     self.episode_snapshots=[]
                     self.node._qs_abort_evt.clear()
                     motion_epochs.add(self.generation.epoch)
+                if self.needs_home_restore:
+                    receipt['failed_episode_home_reset']=self.restore_failed_episode_home()
+                    self.needs_home_restore=False
+                receipt['gpu_isolation_before']=self.gpu_footprint()
                 self.motion_call(self.reset_release,params['object'])
                 # Home with the same shared primitive used by Quickstart, with sim ticks active.
                 home = self.motion_call(self.request_home)
@@ -1248,6 +1373,10 @@ class Collector:
                         raise RuntimeError('Pre-episode home failed')
                 self.servo.configure(params)
                 receipt['home_before_reset'] = self.settle_home('before_reset')
+                if self.safe_home_baseline is None:
+                    self.safe_home_baseline=make_baseline(receipt['home_before_reset'],receipt['episode_id'])
+                    run_config=json.loads((root/'run.json').read_text());run_config['safe_home_baseline']=self.safe_home_baseline
+                    atomic_json(root/'run.json',run_config)
                 receipt['cup_randomization'] = self.scene(params, baseline)
                 # Replay uses the recorded initial arm/hold exactly; normal
                 # collection verifies the calibrated home after every barrier.
@@ -1340,6 +1469,7 @@ class Collector:
                 receipt['accepted'] = True
             except Exception as exc:
                 receipt['exception_type'] = type(exc).__name__
+                if isinstance(exc,GpuIsolationError):receipt['gpu_isolation_failure']=exc.evidence
                 if isinstance(exc,TickContractError):
                     receipt['pipeline_contract_failure']=dict(errors=exc.errors,evidence=exc.evidence)
                 if isinstance(exc,QualityReject):
@@ -1387,6 +1517,11 @@ class Collector:
                             receipt['error'] = 'Object did not lift at least 25 mm before placement'
                             receipt['quality_reject'] = dict(kind='insufficient_lift',evidence=dict(lift_m=maximum_z-initial_z),contract=require_snapshots(snapshots))
                 receipt['capture_failures'] = list(self.capture_failures[failure_log_start:])
+                sensor_failure=getattr(self.sensors,'failure',None)
+                if isinstance(sensor_failure,SensorAmbiguity):
+                    if receipt.get('error'):receipt['secondary_error']=receipt['error']
+                    receipt.update(error=repr(sensor_failure),exception_type='SensorAmbiguity',
+                        original_sensor_error_preserved=True,sensor_join_failure=sensor_failure.evidence)
                 receipt['noise_operations'] = list(self.servo.noise_specs)
                 if cycle_result.get('recovery_report'):
                     receipt['recovery_report']=cycle_result['recovery_report']
@@ -1394,10 +1529,17 @@ class Collector:
                     receipt['cycle_worker_error'] = cycle_result['worker_error']
                 receipt['camera_duplicate_messages'] = {key: value - duplicate_start.get(key, 0) for key, value in self.sensors.duplicate_messages.items()}
                 receipt['root_file_growth'] = root_growth.finish()
+                profiles=getattr(self,'wall_profiles',[])[wall_profile_start:]
+                receipt['wall_tick_profile']=dict(summary=wall_profile_summary(profiles),recorded_summary=wall_profile_summary([p for p in profiles if p['recorded']]),ticks=profiles)
                 receipt['motion_wait_diagnostics'] = [r for r in self.wait_diagnostics[wait_log_start:]
                                                        if r['epoch'] in motion_epochs]
+                try:receipt['gpu_isolation_after']=self.gpu_footprint()
+                except Exception as gpu_error:
+                    receipt['gpu_isolation_after']=getattr(gpu_error,'evidence',dict(passed=False,error=repr(gpu_error)))
+                    self.failure=self.failure or repr(gpu_error)
                 receipt['disposition'] = disposition(receipt,self.failure,writer.rows if writer else None)
                 receipt['accepted'] = receipt['disposition']['kind']=='accepted'
+                self.needs_home_restore=receipt['disposition']['kind']=='quality_reject'
                 receipt['failure_streak'] = streak.observe(receipt['disposition'])
                 path.mkdir(parents=True, exist_ok=True)
                 atomic_json(path / 'receipt.json',receipt)
@@ -1443,6 +1585,14 @@ class Collector:
             self.executor.shutdown(timeout_sec=5)
             self.node.destroy_node()
             rclpy.shutdown()
+        source_failure=getattr(self.sensors,'failure',None)
+        if self.failure or source_failure:
+            path=Path(self.args.output)/'summary.json'
+            summary=json.loads(path.read_text()) if path.exists() else {}
+            summary.update(complete=False,terminal_failure=dict(error=self.failure or str(source_failure),
+                sensor_evidence=getattr(source_failure,'evidence',None)),end_marker='COLLECTION_ABORTED')
+            atomic_json(path,summary)
+            raise RuntimeError('Collector terminal failure: '+str(self.failure or source_failure))
 
     def request_stop(self):
         self.stop.set()

@@ -28,6 +28,10 @@ export SOARM_GRASP_TRACE_DIR="$SOARM_INSTANCE_ROOT/grasp-traces"
 python3 "$SCRIPT_DIR/collect/storage.py" "$SOARM_COLLECTION_ROOT" "$SOARM_INSTANCE_ROOT" "$HF_LEROBOT_HOME" "$SOARM_GRASP_TRACE_DIR"
 mkdir -p "$SOARM_INSTANCE_ROOT" "$HF_LEROBOT_HOME"
 mkdir -p "$TMPDIR" "$ROS_LOG_DIR" "$HF_HOME" "$OPTIX_CACHE_PATH"
+if [ "$command" != down ]; then
+    device_environment="$(python3 "$SCRIPT_DIR/collect/gpu_device.py" --gpu "$ISAACSIM_GPU")"
+    eval "$device_environment"
+fi
 launcher="$SCRIPT_DIR/isaac/isaacsim_launch.sh"
 case "$command" in
     up)
@@ -68,6 +72,7 @@ PYCONFIG
         python3 "$SCRIPT_DIR/collect/managed_process.py" start --pidfile "$pidfile" --log "$SOARM_INSTANCE_ROOT/control.log" -- \
             ros2 launch so_arm101_control control.launch.py gui:=false rviz:=false use_sim:=true use_sim_time:=true feedback_joint_states_topic:=/joint_states_measured feedback_publish_rate:=120.0 controllers_config:="$SOARM_INSTANCE_ROOT/controllers.yaml"
         python3 "$SCRIPT_DIR/collect/wait_control.py"
+        python3 "$SCRIPT_DIR/collect/warm_cameras.py" --output "$SOARM_INSTANCE_ROOT/cache-warmup.json"
         echo "Instance $index ready: domain=$ROS_DOMAIN_ID bridge=$SOARM_KIT_MCP_PORT"
         ;;
     run)
@@ -102,7 +107,6 @@ print(call('run_python', {'code': code}, port=int(sys.argv[1]), timeout=30))
 PYDEPLOY
         if [ "$command" = deploy ]; then
             export SOARM_POLICY_GPU="$ISAACSIM_GPU"
-            unset CUDA_VISIBLE_DEVICES
             exec bash "$SCRIPT_DIR/inference_async_lerobot.sh" --fps 30 \
                 --action-duration-s 0.03333333333333333 --joint-states-topic /joint_states_measured \
                 --server-port "$((18090 + index))" "$@"

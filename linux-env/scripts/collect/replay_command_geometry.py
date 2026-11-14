@@ -8,7 +8,7 @@ import argparse,copy,hashlib,json,os,signal,subprocess,sys,threading,time
 from pathlib import Path
 from contextlib import nullcontext
 from types import SimpleNamespace as NS
-from storage import confined,prepare_environment
+from storage import confined,prepare_environment,atomic_json
 
 
 def main():
@@ -107,7 +107,7 @@ def main():
                     previous=target
                 last_block=block;index=end;phase_no+=1
             episode['native_scene']=native_scene_summary(reconciler.query());result['episodes'].append(episode)
-            (output/'geometry-replay.json').write_text(json.dumps(result,indent=2));print(json.dumps({k:v for k,v in episode.items() if k not in ('native_scene','refusals','preflight_refusals')}),flush=True)
+            atomic_json(output/'geometry-replay.json',result);print(json.dumps({k:v for k,v in episode.items() if k not in ('native_scene','refusals','preflight_refusals')}),flush=True)
         result['complete']=True;result['frames']=sum(e['frames'] for e in result['episodes'])
     finally:
         # Track only this launch's descendants, then stop the exact owned process group.
@@ -124,7 +124,7 @@ def main():
         except subprocess.TimeoutExpired:os.killpg(process.pid,signal.SIGTERM);process.wait(timeout=10)
         log.close();result['owned_pids']=sorted(pids);result['shutdown_returncode']=process.returncode
         result['surviving_owned_pids']=[p for p in pids if Path('/proc',str(p)).exists()]
-        (output/'geometry-replay.json').write_text(json.dumps(result,indent=2))
+        atomic_json(output/'geometry-replay.json',result)
         (output/'END').write_text('GEOMETRY_REPLAY_FINISHED\n' if result.get('complete') else 'GEOMETRY_REPLAY_INCOMPLETE\n')
     if result['surviving_owned_pids']:raise RuntimeError('Offline MoveIt children survived shutdown')
 

@@ -8,7 +8,7 @@ import subprocess
 
 from contract import JOINTS, timing_audit
 from recovery import receipt_error, recovery_summary
-from storage import confined, prepare_environment
+from storage import atomic_json,confined, prepare_environment
 
 
 def main():
@@ -86,7 +86,7 @@ def main():
         accepted_paths.append(path)
     dataset.finalize()
     recovery=recovery_summary(manifest)
-    (dataset_root/'meta/collection_episodes.json').write_text(json.dumps(manifest,indent=2))
+    atomic_json(dataset_root/'meta/collection_episodes.json',manifest)
     loaded = LeRobotDataset(args.repo_id, root=dataset_root, video_backend='pyav', tolerance_s=.001)
     assert loaded.fps == 30 and loaded.num_episodes == len(manifest)
     assert loaded.features['action']['names'] == names
@@ -111,12 +111,12 @@ def main():
     validation = dict(recovery=recovery,loaded=True, fps=loaded.fps, episodes=loaded.num_episodes,
                      frames=len(loaded), features=loaded.features, timing_passed=all(a['passed'] for a in audits),
                      color_counts={color: sum(e['params']['color'] == color for e in manifest) for color in ('red', 'green', 'blue')})
-    (report / 'validation.json').write_text(json.dumps(validation, indent=2))
-    (report / 'timing-audit.json').write_text(json.dumps(audits, indent=2))
-    (report / 'episode-params.json').write_text(json.dumps(manifest, indent=2))
-    shutil.copy2(run / 'summary.json', report / 'summary.json')
+    atomic_json(report / 'validation.json',validation)
+    atomic_json(report / 'timing-audit.json',audits)
+    atomic_json(report / 'episode-params.json',manifest)
+    atomic_json(report/'summary.json',json.loads((run/'summary.json').read_text()))
     shutil.copy2(run / 'episodes.jsonl', report / 'attempt-log.jsonl')
-    shutil.copy2(run / 'run.json', report / 'run.json')
+    atomic_json(report/'run.json',json.loads((run/'run.json').read_text()))
     print(json.dumps(validation, default=str), flush=True)
 
 

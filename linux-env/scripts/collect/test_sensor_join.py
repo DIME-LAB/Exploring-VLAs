@@ -46,7 +46,7 @@ class SensorJoinTests(unittest.TestCase):
     def test_ambiguous_nearby_candidates_fail_instead_of_arbitrarily_joining(self):
         s=sensors();stamp=1033333333
         s.put('joint',message(stamp));s.put('top',message(stamp+1500))
-        s.put('wrist',message(stamp+750))
+        with self.assertRaisesRegex(RuntimeError,'Ambiguous'):s.put('wrist',message(stamp+750))
         with self.assertRaisesRegex(RuntimeError,'Ambiguous'):s.read(timeout=0)
 
 

@@ -4,7 +4,7 @@ import argparse,json,os,sys,threading,time
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
-from storage import confined,prepare_environment
+from storage import confined,prepare_environment,atomic_json
 
 
 def main():
@@ -114,7 +114,7 @@ def main():
         executor.shutdown(timeout_sec=5);thread.join(timeout=5);native.destroy_node()
         if rclpy.ok():rclpy.shutdown()
         instance_claim.close()
-        (output/'validation.json').write_text(json.dumps(result,indent=2))
+        atomic_json(output/'validation.json',result)
     print(json.dumps(dict(passed=result['passed'],validity_queries=result['validity_queries'],
         tick_ns=result['first_tick']['sim_ns'],output=str(output)),indent=2))
 

@@ -53,3 +53,20 @@ class ManagedProcessTests(unittest.TestCase):
                 spawn.assert_not_called()
         with patch('managed_process.record_path',return_value=record),patch('managed_process.identity',return_value=None):
             self.assertEqual(managed_process.stop(path),dict(stopped=True,already_down=True))
+
+    def test_supervisor_exit_after_verification_still_checks_final_descendants(self):
+        from contextlib import nullcontext
+        from pathlib import Path
+        root=dict(pid=41234,start_ticks='born',pgid=41234)
+        child=dict(pid=51234,start_ticks='child',pgid=777,state='S')
+        row=dict(supervisor=root,state='running',pidfile='/virtual/actor.pid',nonce='immutable',address='unused')
+        final=dict(row,state='cleanup_failed',cleanup=dict(tracked=[child],remaining=[child]))
+        with patch('managed_process.verified',return_value=row),patch('managed_process.claim',return_value=nullcontext()),\
+             patch('managed_process.os.pidfd_open',return_value=77,create=True),patch('managed_process.os.close'),\
+             patch('managed_process.select.select',return_value=([77],[],[])),\
+             patch('managed_process.read_leaf',return_value=json.dumps(final)),\
+             patch('managed_process.identity',side_effect=lambda pid:child if pid==51234 else None),\
+             patch('managed_process.socket.socket') as channel:
+            with self.assertRaisesRegex(RuntimeError,'Unresolved cleanup'):
+                managed_process.stop_owned(Path('/virtual/actor.pid'),row)
+            channel.assert_not_called()

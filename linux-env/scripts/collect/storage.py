@@ -48,6 +48,11 @@ def prepare_environment(instance):
     for name, path in paths.items():
         path.mkdir(parents=True, exist_ok=True)
         os.environ[name] = str(path)
+    if os.environ.get('SOARM_ASSIGNED_GPU_UUID'):
+        from gpu_device import cache_paths
+        card=cache_paths(os.environ['SOARM_ASSIGNED_GPU_UUID'])
+        os.environ['OPTIX_CACHE_PATH']=card['optix'];os.environ['CUDA_CACHE_PATH']=card['cuda']
+        for name in ('optix','cuda'):Path(card[name]).mkdir(parents=True,exist_ok=True)
     os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
     sys.dont_write_bytecode = True
     return runtime

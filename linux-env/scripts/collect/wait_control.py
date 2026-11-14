@@ -5,7 +5,7 @@ from pathlib import Path
 import time
 import rclpy
 from controller_manager_msgs.srv import ListControllers
-from storage import prepare_environment
+from storage import prepare_environment,atomic_json
 
 
 def main():
@@ -25,7 +25,7 @@ def main():
             if future.done() and future.result():
                 states = {c.name:c.state for c in future.result().controller}
                 if all(states.get(name) == 'active' for name in required):
-                    (runtime / 'control-ready.json').write_text(json.dumps(dict(ready=True,controllers=states),indent=2))
+                    atomic_json(runtime / 'control-ready.json',dict(ready=True,controllers=states))
                     print('Control ready: arm, gripper and state broadcaster active',flush=True)
                     return
             rclpy.spin_once(node, timeout_sec=.1)

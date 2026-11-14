@@ -13,7 +13,7 @@ from moveit_msgs.msg import PlanningScene,AllowedCollisionEntry,AttachedCollisio
 from moveit_msgs.srv import ApplyPlanningScene,GetPlanningScene
 from sensor_msgs.msg import JointState
 from std_srvs.srv import Trigger
-from storage import confined,prepare_environment
+from storage import confined,prepare_environment,atomic_json
 
 
 def operation(value):
@@ -170,6 +170,6 @@ def main():
         if root is not None:root.destroy()
         receipt.update(executor_thread_stopped=not ros_thread.is_alive(),executor_errors=executor_errors,
                        scene_threads_stopped=all(not w.is_alive() for w in workers))
-        output.write_text(json.dumps(receipt,indent=2));print(json.dumps(receipt,indent=2))
+        atomic_json(output,receipt);print(json.dumps(receipt,indent=2))
     if not receipt['passed']:raise RuntimeError(receipt.get('error','GUI regression failed'))
 if __name__=='__main__':main()

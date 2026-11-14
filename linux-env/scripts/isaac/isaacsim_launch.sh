@@ -314,8 +314,8 @@ do_launch() {
         return 1
     fi
 
-    # GPU pin: Kit's renderer and PhysX take the index; CUDA_VISIBLE_DEVICES (by UUID) keeps
-    # Warp/torch contexts off the other card, which a Kit argument alone does not.
+    # The renderer selects the physical index. PhysX/Warp/torch see only the
+    # assigned UUID and use CUDA ordinal zero inside that visibility boundary.
     local gpu_uuid
     gpu_uuid="$(nvidia-smi --query-gpu=uuid --format=csv,noheader -i "$GPU" 2>/dev/null | head -1)"
     if [ -z "$gpu_uuid" ]; then
@@ -348,8 +348,13 @@ do_launch() {
         args+=(isaacsim.exp.full)
         export DISPLAY="${DISPLAY:-:0}"
     fi
-    physics_gpu=0
-    [ -z "${INSTANCE_ROOT:-}" ] || physics_gpu="$GPU"
+    if [ -n "${INSTANCE_ROOT:-}" ]; then
+        local device_environment
+        device_environment="$(python3 "$SCRIPT_DIR/../collect/gpu_device.py" --gpu "$GPU")" || return 1
+        eval "$device_environment"
+        [[ "${SOARM_KIT_THREADS:-6}" =~ ^[1-6]$ ]] || { echo "Kit threads must be 1..6" >&2; return 1; }
+    fi
+    physics_gpu=0  # CUDA ordinal inside the single assigned physical device.
     args+=(--ext-folder "$EXT_FOLDER"
            --ext-folder "$KIT_MCP_ROOT/exts"
            --enable omni.kit.mcp
@@ -378,9 +383,9 @@ do_launch() {
                "--/exts/omni.services.transport.server.http/port=$((8778 + 2 * INSTANCE_INDEX))"
                --/exts/omni.services.transport.server.http/allow_port_range=false
                "--/persistent/physics/numThreads=${SOARM_PHYSICS_THREADS:-4}"
-               --/plugins/carb.tasking.plugin/threadCount=6
+               "--/plugins/carb.tasking.plugin/threadCount=${SOARM_KIT_THREADS:-6}"
                --/exts/omni.replicator.srtx/enabled=false
-               "--/rtx/shaderDb/shaderCachePath=$HOME/.cache/ov/shaders")
+               "--/rtx/shaderDb/shaderCachePath=$SOARM_SHADER_CACHE_DIR")
     fi
     # shellcheck disable=SC2206
     [ -n "${ISAACSIM_EXTRA_ARGS:-}" ] && args+=(${ISAACSIM_EXTRA_ARGS})
@@ -407,14 +412,11 @@ do_launch() {
         export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
         export CYCLONEDDS_URI="file://$CYCLONEDDS_XML"
         export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}"
-        if [ -n "${INSTANCE_ROOT:-}" ]; then
-            unset CUDA_VISIBLE_DEVICES
-        else
-            export CUDA_VISIBLE_DEVICES="$gpu_uuid"
-        fi
+        export CUDA_VISIBLE_DEVICES="$gpu_uuid"
+        export SOARM_ASSIGNED_GPU_UUID="$gpu_uuid"
         export OMNI_KIT_ACCEPT_EULA=YES
         export PYTHONDONTWRITEBYTECODE=1
-        export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+        export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
         export OMNI_KIT_MCP_PORT="$MCP_PORT"
         export KIT_MCP_TOOL_PATHS="$TOOLS_PATH"
         export KIT_MCP_TOOL_MODULES="$TOOLS_MODULE"

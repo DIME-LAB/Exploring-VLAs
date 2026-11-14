@@ -419,6 +419,20 @@ retires its target. Before and after scene reset it explicitly holds the nominal
 calibrated home and checks a six-tick measured window, allowing at most five sim
 seconds to settle. Home motions/holds receive no DART noise. The existing 0.01 rad
 home error, 0.002 rad spread and 0.008 rad motion-convergence limits remain.
+After a quality rejection, the next attempt first restores the saved, verified
+home snapshot, including all six physical joint positions and drive targets and
+rigid-body poses/velocities. The reset retires workers and clears the authoritative MoveIt scene, then
+restores the native snapshot, verifies readback and six contract-checked settling
+ticks, and rebuilds the synchronized scene before planning. A failed restore is terminal; the collector never
+plans a home trajectory out of the previous failed contact pose. The baseline's
+calibration, samples and snapshot hash are retained in `run.json`.
+
+The sensor join retains the raw stamp, image-layout fields and SHA-256 of each
+camera buffer. Only an exact stamp/content repeat counts as a duplicate. Any
+distinct same-camera candidate within the 1 us joining window, including a late
+alternative to a consumed frame, stops collection with both identities in the
+failure proof. Pending joint samples cannot overwrite a different same-tick state.
+Per-camera duplicate counts remain diagnostic receipt fields.
 
 A typed physical convergence deadline can reject one episode after native pause,
 worker retirement and contract auditing. Stationary/short data, calibrated-home
@@ -602,7 +616,11 @@ before accepting deployment. Legacy eval defaults remain separate from this pres
 
 Instance N selects domain `90+N`, bridge `8777+2N`, HTTP `8778+2N`, policy RPC
 `18090+N` and private runtime files. `ISAACSIM_GPU` selects renderer, physics
-CUDA and CUDA consumers (default 0); Isaac leaves CUDA_VISIBLE_DEVICES unset.
+CUDA and CUDA consumers (default 0). Indexed launches resolve that physical
+card's UUID and pin `CUDA_VISIBLE_DEVICES` to it. CUDA consumers use its remapped
+ordinal 0; renderer settings retain the physical index. Startup and per-attempt
+GPU receipts include verified process birth identities and NVML memory on every
+card; any owned context on another card stops collection.
 Use only assigned resources on shared boxes. DDS uses loopback-only CycloneDDS;
 do not also set ROS_LOCALHOST_ONLY. World timing is set before scene creation,
 including the 30 Hz frame-rate clamp. Never change World timing on a live scene.
@@ -613,7 +631,13 @@ ROS logs, temp, HF/OptiX caches, portable roots and per-instance grasp traces
 are directed there. The indexed launcher overrides inherited
 `MCP_CLIENT_OUTPUT_DIR` with its confined instance resources directory and validates
 the resolved path before creating it. Direct Python entrypoints apply confinement before imports that
-create trace/log/cache files. Shared shaders under `~/.cache/ov` remain shared. Require
+create trace/log/cache files. Indexed launches use persistent per-box/per-card
+shader, OptiX and CUDA caches beneath `cache/isaac/<box>/<GPU-UUID>/`; inherited
+cache paths are overridden. Existing `~/.cache/ov` contents are never cleared.
+Bring-up warms both cameras for 30 unique frames before collection and writes
+`cache-warmup.json`. The default Kit task pool is six threads (configurable 1–6)
+and physics uses four threads per instance. These are capacity limits, not a claim
+of measured multi-instance throughput. Require
 50 GiB on the output filesystem before each attempt; below that, wait every
 60 s until 52 GiB is available. Root has a **20 GiB last-resort stop**, including
 launcher startup: the earlier 90 GiB rule protected root writes, while collection
@@ -621,18 +645,35 @@ bulk data lives on another filesystem. Never alter the sibling backup archive.
 Receipts measure growth of writable root files in this instance's process trees,
 identifying shared caches. This is space growth, not in-place rewrite traffic.
 
+Every capture includes cheap wall timing in `wall_profile`; receipts retain all
+attempt ticks plus mean/p95 for Kit step-to-post-update, camera arrival/join,
+in-process native state reads, MoveIt validity query count/time, expert/DART
+compute, publish-to-ACK, contract checks, image decode and row/encoder writes.
+The common clock is same-host monotonic wall time, never a dataset timestamp.
+Kit post-update is a render-completion proxy rather than a GPU fence; the separate
+step-to-both-camera-arrivals interval includes ROS transport. Async video writes
+can overlap another tick, so stage shares are reported against total tick time
+without claiming an additive partition. Per-tick native reads use no bridge RPC.
+The next live smoke must measure these costs; offline checks do not establish
+throughput.
+
 The combined smoke runner uses the same launcher, collector and export entrypoints.
 It first inspects one attempt in each mode, then resumes to five accepted normal
 and five dedicated re-grasp episodes, retaining failed videos with `--diagnostic`.
 It saves first-reset/restore receipts, stage/attempt wall times, dataset-load
-validation and PID/start-time/pidfd cleanup evidence. `--plan` starts no processes. `--go`
+validation and PID/start-time/pidfd cleanup evidence. Receipt scans reconcile once
+more after each producer exits. Every JSON publication is atomic; after exit an
+invalid final receipt fails. Cleanup/probe errors still publish a failed smoke
+receipt and release the instance claim. A shutdown exit code alone never proves
+or disproves a completed collection: accepted episodes and export validation
+receipts are required, and cleanup must independently verify every owned child. `--plan` starts no processes. `--go`
 requires the lead's explicit window; independent review can run concurrently,
 and its verdict can supersede the smoke data. Visual review and pilot approval
 remain separate from collection completion:
 
 ```bash
 python3 -B linux-env/scripts/collect/run_smoke.py --cut <full-commit> \
-  --output /mnt/a4500-backup/exploring-vlas/datasets/smoke-clock-restore-v4 --plan
+  --output /mnt/a4500-backup/exploring-vlas/datasets/smoke-clock-restore-v5 --plan
 # In the granted window, use the identical command with --go instead of --plan.
 ```
 

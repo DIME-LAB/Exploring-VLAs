@@ -16,7 +16,7 @@ sys.path.insert(0, str(REPO / 'vla_SO-ARM101/src/so_arm101_control'))
 sys.path.insert(0, str(REPO / 'omni-kit-mcp'))
 from kit_mcp.client import call
 from so_arm101_control.grasp_geometry import ARM_JOINT_NAMES
-from storage import confined, prepare_environment
+from storage import atomic_json,confined, prepare_environment
 from so_arm101_control.motion_wait import MotionWaiter
 
 
@@ -90,8 +90,8 @@ def main():
             results.append(row); print(json.dumps(row), flush=True)
     finally:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(dict(passed=len(results) == 2, regimes=results,
-            motion_wait_diagnostics=diagnostics), indent=2))
+        atomic_json(args.output,dict(passed=len(results) == 2, regimes=results,
+            motion_wait_diagnostics=diagnostics))
         try:
             kit((REPO / 'linux-env/scripts/collect/configure_clock.py').read_text() + '\nresult=configure(30)')
             kit('import collection_runtime as c\nc.runtime().cancel()\nresult=c.install("collect")')

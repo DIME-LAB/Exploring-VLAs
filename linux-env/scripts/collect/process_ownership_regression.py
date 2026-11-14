@@ -2,7 +2,7 @@
 """Exercise instance claims and pidfd cleanup on processes this probe spawns."""
 import argparse,json,os,subprocess,sys,time
 from pathlib import Path
-from storage import confined
+from storage import confined,atomic_json
 from run_smoke import InstanceClaim,OwnedProcesses,identity
 
 
@@ -30,7 +30,7 @@ def main():
         if ledger.handles:ledger.stop()
         for child in children:
             if child.poll() is None:raise RuntimeError('Owned process probe did not retire')
-        claim.close();(root/'validation.json').write_text(json.dumps(result,indent=2))
+        claim.close();atomic_json(root/'validation.json',result)
     print(json.dumps(dict(passed=result['passed'],overlapping_claim_refused=True,pidfd_child_retired=True)))
 
 

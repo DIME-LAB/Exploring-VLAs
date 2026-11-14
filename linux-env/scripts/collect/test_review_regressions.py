@@ -1,3 +1,6 @@
+from wall_profile import profile_tick,summary as wall_profile_summary,milliseconds,PROFILE_POLICY
+from safe_home import make_baseline,validate_baseline
+from frame_join import SensorAmbiguity,identity as frame_identity,exact_duplicate
 from comparisons import comparison,matches,interval,native_frame
 from tick_contract import world_step_errors
 """CPU fault/interleaving probes at the actual collector/runtime boundaries."""
@@ -36,7 +39,7 @@ def load_class(filename, name):
     path = HERE/filename
     tree = ast.parse(path.read_text())
     cls = next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name==name)
-    scope = dict(math=math,comparison=comparison,matches=matches,interval=interval,native_frame=native_frame,world_step_errors=world_step_errors,frame_capacity_seconds=frame_capacity_seconds,QUERY_POLICY=QUERY_POLICY,CLOCK_POLICY=CLOCK_POLICY,random=random,replace=replace,copy=copy,PlannerSchedule=PlannerSchedule,TargetCandidate=TargetCandidate,choose_noise_scale=choose_noise_scale,final_command=final_command,TickContract=TickContract,TickContractError=TickContractError,require_snapshots=require_snapshots,digest=digest,verify_proof=verify_proof, DEFAULT_NOISE=DEFAULT_NOISE, SmoothDart=SmoothDart, initial_arm=initial_arm, ConvergenceFailure=ConvergenceFailure, QualityReject=QualityReject, POLICY=POLICY, WorkerRegistry=WorkerRegistry, FailureStreak=FailureStreak, disposition=disposition, MotionWaitTimeout=MotionWaitTimeout, contextmanager=contextmanager, OwnershipStalled=OwnershipStalled, threading=threading,time=time,np=np,json=json,JOINTS=JOINTS,
+    scope = dict(profile_tick=profile_tick,wall_profile_summary=wall_profile_summary,milliseconds=milliseconds,PROFILE_POLICY=PROFILE_POLICY,make_baseline=make_baseline,validate_baseline=validate_baseline,SensorAmbiguity=SensorAmbiguity,frame_identity=frame_identity,exact_duplicate=exact_duplicate,math=math,comparison=comparison,matches=matches,interval=interval,native_frame=native_frame,world_step_errors=world_step_errors,frame_capacity_seconds=frame_capacity_seconds,QUERY_POLICY=QUERY_POLICY,CLOCK_POLICY=CLOCK_POLICY,random=random,replace=replace,copy=copy,PlannerSchedule=PlannerSchedule,TargetCandidate=TargetCandidate,choose_noise_scale=choose_noise_scale,final_command=final_command,TickContract=TickContract,TickContractError=TickContractError,require_snapshots=require_snapshots,digest=digest,verify_proof=verify_proof, DEFAULT_NOISE=DEFAULT_NOISE, SmoothDart=SmoothDart, initial_arm=initial_arm, ConvergenceFailure=ConvergenceFailure, QualityReject=QualityReject, POLICY=POLICY, WorkerRegistry=WorkerRegistry, FailureStreak=FailureStreak, disposition=disposition, MotionWaitTimeout=MotionWaitTimeout, contextmanager=contextmanager, OwnershipStalled=OwnershipStalled, threading=threading,time=time,np=np,json=json,JOINTS=JOINTS,
                  String=lambda data:NS(data=data),StepGeneration=StepGeneration,
                  CancelledGeneration=CancelledGeneration,CommandLedger=CommandLedger,
                  corrective_action=corrective_action,JOINT_LIMITS={k:(-3,3) for k in JOINTS},
@@ -60,6 +63,7 @@ class ReviewRegressions(unittest.TestCase):
         Servo, _ = load_class('collect.py','Servo')
         Runtime, _ = load_class('collection_runtime.py','Runtime')
         c=object.__new__(Collector);r=object.__new__(Runtime);v=object.__new__(Servo)
+        c.gpu_footprint=lambda:dict(passed=True)
         c.generation=StepGeneration();c.generation.install(dict(epoch=1,invalid_through_ns=966666667))
         c.stalled_abort_lock=threading.Lock();c.stalled_abort_started=False
         c.stop=threading.Event();c.failure=None;c.writer=None;c.writer_lock=threading.Lock()
