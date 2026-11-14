@@ -16,7 +16,8 @@ RIM_CLEARANCE_M=CUP['contact_offset_m']
 PROFILE=dict(version=2,kind='compound_box_halfplanes',source=SOURCE,source_sha256=hashlib.sha256(RAW).hexdigest(),
     frame='cup-base',drop_origin_offset_m=[0.,0.,CUP['rim_m']/2],primitives=PRIMITIVES,
     wall_rest_tolerance_m=WALL_REST_TOLERANCE_M,floor_rest_tolerance_m=FLOOR_REST_TOLERANCE_M,
-    rim_clearance_m=RIM_CLEARANCE_M,effective_offsets_m=dict(cup_contact=CUP['contact_offset_m'],cup_rest=CUP['rest_offset_m'],block_contact=.0001,block_rest=0.),
+    rim_clearance_m=RIM_CLEARANCE_M,expected_offsets_m=dict(cup_contact=CUP['contact_offset_m'],cup_rest=CUP['rest_offset_m'],block_contact=CUP['contact_offset_m'],block_rest=CUP['rest_offset_m']),
+    offsets_basis='Authored primitive collision offsets; fresh tensor readback is required, not historical measurements',
     tolerance_basis='9 um measured rest penetration + 10 um solver variability + 1 um transform/float bound')
 if (SPEC['version']!=1 or len(PRIMITIVES)!=13 or len(WALLS)!=12 or CUP['rest_offset_m']!=0 or
         len({p['name'] for p in PRIMITIVES})!=13):raise ValueError('Unexpected primitive cup schema')

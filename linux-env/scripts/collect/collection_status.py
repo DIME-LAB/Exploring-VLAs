@@ -1,5 +1,5 @@
 """Monotone terminal markers and affirmative per-process collector finalization."""
-import hashlib,json,os,time,uuid
+import hashlib,json,os,time,uuid,re
 from pathlib import Path
 from storage import atomic_json,confined
 
@@ -43,8 +43,19 @@ def terminal(root,event,attempt=None):
 
 def begin(root):
     reject_terminal(root)
+    predecessor=None
+    if ((Path(root)/'collector-finalization.json').exists() or (Path(root)/'run.json').exists() or
+            any(Path(root).glob('attempt-*'))):
+        predecessor=require_finalized(root)
+        archive=Path(root)/'finalizations';archive.mkdir(exist_ok=True)
+        archived=dict(certificate=predecessor,summary_raw_json=(Path(root)/'summary.json').read_text())
+        path=archive/(predecessor['invocation']+'.json')
+        if path.exists():
+            if json.loads(path.read_text())!=archived:raise RuntimeError('Predecessor archive differs from its certified state')
+        else:atomic_json(path,archived)
     value=dict(version=1,invocation=uuid.uuid4().hex,producer_pid=os.getpid(),started_wall_ns=time.time_ns(),
                completed=False,passed=False)
+    if predecessor:value['predecessor_invocation']=predecessor['invocation']
     summary_path=Path(root)/'summary.json'
     summary=json.loads(summary_path.read_text()) if summary_path.exists() else {}
     summary.update(complete=False,producer_invocation=value['invocation'],end_marker='COLLECTION_IN_PROGRESS')
@@ -72,9 +83,18 @@ def finish(root,certificate,errors):
 def require_finalized(root,producer_pid=None,not_before_ns=None):
     reject_terminal(root)
     certificate=json.loads((Path(root)/'collector-finalization.json').read_text())
-    if not certificate.get('completed') or not certificate.get('passed') or certificate.get('cleanup_errors'):
+    if certificate.get('completed') is not True or certificate.get('passed') is not True or certificate.get('cleanup_errors'):
         raise RuntimeError('Collector finalization is incomplete or failed')
+    required=('version','invocation','producer_pid','started_wall_ns','completed_wall_ns','cleanup_errors','summary_sha256')
+    if (any(key not in certificate for key in required) or certificate['version']!=1 or
+            not isinstance(certificate['invocation'],str) or not re.fullmatch('[0-9a-f]{32}',certificate['invocation']) or
+            not isinstance(certificate['producer_pid'],int) or certificate['producer_pid']<=0 or
+            not isinstance(certificate['started_wall_ns'],int) or not isinstance(certificate['completed_wall_ns'],int) or
+            certificate['started_wall_ns']<=0 or certificate['completed_wall_ns']<certificate['started_wall_ns'] or
+            certificate['cleanup_errors']!=[]):raise RuntimeError('Malformed collector finalization certificate')
     summary_path=Path(root)/'summary.json'
+    summary=json.loads(summary_path.read_text())
+    if summary.get('producer_invocation')!=certificate['invocation']:raise RuntimeError('Finalization invocation differs from summary')
     if hashlib.sha256(summary_path.read_bytes()).hexdigest()!=certificate.get('summary_sha256'):
         raise RuntimeError('Collector summary changed after finalization')
     if producer_pid is not None and certificate.get('producer_pid')!=producer_pid:

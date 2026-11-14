@@ -54,7 +54,7 @@ def main():
         code=(params or {}).get('code','')
         if 'result=configure(30)' in code:return dict(fps=30)
         if 'result=c.install()' in code:
-            offsets={name:{key+'_m':[PROFILE['effective_offsets_m']['cup_'+key]]*len(PROFILE['primitives']) for key in ('contact','rest')}
+            offsets={name:{key+'_m':[PROFILE['expected_offsets_m']['cup_'+key]]*len(PROFILE['primitives']) for key in ('contact','rest')}
                      for name in ('cup_red','cup_green','cup_blue')}
             return dict(epoch=1,invalid_through_ns=1000000000,local_corners={},effective_shape_offsets=offsets)
         if 'count_subscribers' in code:return [2,1,1]

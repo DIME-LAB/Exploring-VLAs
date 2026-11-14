@@ -96,3 +96,25 @@ class PrimitiveCupTests(unittest.TestCase):
         self.assertTrue(all(not co.meshes for co in cups));self.assertEqual(markers,[])
         cups[0].primitive_poses[0].position.z+=.001
         self.assertFalse(c.scene_reset.verify(c.episode_start_physical,list(c.node._actual_positions))['passed'])
+
+    def test_fresh_offset_gate_matches_authored_box_attributes_and_rejects_mesh_era_values(self):
+        root=Path(__file__).resolve().parents[3]
+        source=root/'isaac/exts/soarm101-dt/so_arm101_dt/primitive_colliders.py';tree=ast.parse(source.read_text())
+        constant=next(n for n in tree.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='CONTACT_OFFSET_M' for t in n.targets))
+        fn=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='collision');authored={}
+        api=NS(CreateContactOffsetAttr=lambda:NS(Set=lambda v:authored.update(contact=v)),
+               CreateRestOffsetAttr=lambda:NS(Set=lambda v:authored.update(rest=v)))
+        env=dict(UsdPhysics=NS(CollisionAPI=NS(Apply=lambda prim:NS(CreateCollisionEnabledAttr=lambda:NS(Set=lambda v:None)))),
+            PhysxSchema=NS(PhysxCollisionAPI=NS(Apply=lambda prim:api)),UsdGeom=NS(Imageable=lambda prim:NS(MakeInvisible=lambda:None)))
+        exec(compile(ast.Module(body=[constant,fn],type_ignores=[]),str(source),'exec'),env);env['collision'](object())
+        self.assertEqual(authored,dict(contact=.0001,rest=0.))
+        collector=Path(__file__).with_name('collect.py');parsed=ast.parse(collector.read_text())
+        run=next(n for n in ast.walk(parsed) if isinstance(n,ast.FunctionDef) and n.name=='run')
+        loop=next(n for n in run.body if isinstance(n,ast.For) and isinstance(n.target,ast.Tuple) and [v.id for v in n.target.elts]==['name','values'])
+        offsets={'red_2x3_0':dict(contact_m=[authored['contact']],rest_m=[authored['rest']]),
+                 'cup_red':dict(contact_m=[authored['contact']]*13,rest_m=[authored['rest']]*13)}
+        env=dict(offsets=offsets,PROFILE=PROFILE,PRIMITIVES=PRIMITIVES)
+        exec(compile(ast.Module(body=[loop],type_ignores=[]),str(collector),'exec'),env)
+        offsets['red_2x3_0']['contact_m']=[.0013625002466142178]
+        with self.assertRaisesRegex(RuntimeError,'Effective shape offsets differ'):
+            exec(compile(ast.Module(body=[loop],type_ignores=[]),str(collector),'exec'),env)

@@ -84,3 +84,12 @@ against a reused PID. Renderer table mapping follows [NVIDIA Kit Q9](https://doc
 The NVML ABI is pinned to the installed nvml.h nvmlProcessInfo_v2_t definition;
 queries do not load a CUDA runtime. These are sampled allocation checks, not a
 kernel device-access boundary.
+
+Resume validates the predecessor certificate before beginning another invocation.
+Incomplete predecessor evidence is refused and preserved. A valid predecessor
+certificate and its exact summary text are archived before status changes.
+Cleanup before an invocation began writes separate instance runtime diagnostics.
+Shutdown requires executor.shutdown=True and a retired spin thread; failed/unknown
+results poison the generation and fail certification. Certificate schema and
+invocation checks detect accidental mixes; these are local consistency receipts,
+not authentication of a same-permission writer.

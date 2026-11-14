@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 import collection_status
 from wall_profile import profile_tick,summary as wall_profile_summary,milliseconds,PROFILE_POLICY,joined_profiles
 sys.dont_write_bytecode = True
@@ -502,6 +503,7 @@ class Servo:
 
 class Collector:
     def __init__(self, args):
+        if args.resume:collection_status.require_finalized(confined(args.output))
         from so_arm101_control.pick_place import PickPlaceNode
         from so_arm101_control.scene_transactions import SceneExecution
         self.args = args
@@ -546,6 +548,7 @@ class Collector:
             rtf_floor=args.wait_rtf_floor,wall_margin=frame_capacity_seconds()+30.)
         self.status_lock=threading.RLock()
         self.finalization_certificate=None
+        self.startup_status_output=confined(Path(os.environ['SOARM_INSTANCE_ROOT'])/'collector-startup'/uuid.uuid4().hex)
         self.current_attempt_path=None
         self.stalled_abort_lock = threading.Lock()
         self.stalled_abort_started = False
@@ -648,12 +651,15 @@ class Collector:
             self.scene_incomplete(exc, source='Kit')
             raise
 
+    def status_output(self):
+        return Path(self.args.output) if self.finalization_certificate is not None else self.startup_status_output
+
     def persist_terminal_fault(self,exc,source):
         sensor=getattr(self.sensors,'failure',None)
         with self.status_lock:
-            return collection_status.terminal(self.args.output,dict(error=repr(exc),source=source,
+            return collection_status.terminal(self.status_output(),dict(error=repr(exc),source=source,
                 epoch=self.generation.epoch,sensor_evidence=getattr(sensor,'evidence',None)),
-                attempt=self.current_attempt_path)
+                attempt=self.current_attempt_path if self.finalization_certificate is not None else None)
 
     def callback_failure(self, name, exc):
         self.abort_stalled_owner(OwnershipStalled('ROS callback '+name+': '+repr(exc)), 'ROS callback')
@@ -1251,6 +1257,7 @@ class Collector:
         root = confined(args.output)
         if (root / 'superseded.json').exists():
             raise ValueError('Superseded diagnostic run requires a fresh output directory')
+        if args.resume:collection_status.require_finalized(root)
         root.mkdir(parents=True, exist_ok=args.resume)
         with self.status_lock:self.finalization_certificate=collection_status.begin(root)
         previous = json.loads((root / 'run.json').read_text()) if args.resume else None
@@ -1306,7 +1313,7 @@ class Collector:
             if any(len(values[key+'_m'])!=expected_shapes for key in ('contact','rest')):
                 raise RuntimeError('Physical primitive shape count differs from the shared geometry: '+name)
             for key in ('contact','rest'):
-                expected = PROFILE['effective_offsets_m'][kind+'_'+key]
+                expected = PROFILE['expected_offsets_m'][kind+'_'+key]
                 if not values[key+'_m'] or any(abs(value-expected)>1e-7 for value in values[key+'_m']):
                     raise RuntimeError('Effective shape offsets differ from measured profile metadata: '+name)
         deadline = time.monotonic() + 15
@@ -1656,6 +1663,7 @@ class Collector:
 
     def close(self):
         self.stop.set();errors=[]
+        status_root=self.status_output();status_root.mkdir(parents=True,exist_ok=True)
         with self.sensors.condition:
             self.sensors.closed=True;self.sensors.condition.notify_all()
         # Invalidate stale success BEFORE any cleanup RPC or executor operation.
@@ -1666,6 +1674,7 @@ class Collector:
             try:callback()
             except BaseException as exc:
                 errors.append(dict(stage=name,error=repr(exc)))
+                self.generation.poison(exc);self.node._qs_abort_evt.set()
                 try:self.persist_terminal_fault(exc,'cleanup '+name)
                 except BaseException as publication_error:errors.append(dict(stage='terminal publication',error=repr(publication_error)))
         cleanup('pre-cleanup terminal status',lambda:note_terminal('before cleanup'))
@@ -1675,15 +1684,21 @@ class Collector:
             self.capture_thread.join(timeout=frame_capacity_seconds()+5)
             if self.capture_thread.is_alive():raise RuntimeError('Capture worker did not retire')
         cleanup('capture retirement',retire_capture)
-        cleanup('executor shutdown',lambda:self.executor.shutdown(timeout_sec=5))
+        def retire_executor():
+            result=self.executor.shutdown(timeout_sec=5)
+            if result is not True:raise RuntimeError('ROS executor shutdown did not drain callbacks: '+repr(result))
+            self.ros_thread.join(timeout=5)
+            if self.ros_thread.is_alive():raise RuntimeError('ROS executor spin thread did not retire')
+        cleanup('executor shutdown',retire_executor)
         cleanup('node destruction',self.node.destroy_node)
         cleanup('ROS shutdown',rclpy.shutdown)
         cleanup('post-cleanup terminal status',lambda:note_terminal('after cleanup'))
-        cleanup('wall profile persistence',lambda:atomic_json(Path(self.args.output)/'wall-profile-finalization.json',
+        cleanup('wall profile persistence',lambda:atomic_json(status_root/'wall-profile-finalization.json',
             dict(ticks=getattr(self,'wall_profiles',[]),capture_failures=self.capture_failures)))
         with self.status_lock:
-            certificate=collection_status.finish(self.args.output,self.finalization_certificate,errors)
-        if not certificate['passed']:raise RuntimeError('Collector finalization failed: '+repr(certificate))
+            certificate=collection_status.finish(status_root,self.finalization_certificate,errors)
+        if (self.finalization_certificate is not None and not certificate['passed']) or errors:
+            raise RuntimeError('Collector finalization failed: '+repr(certificate))
 
     def request_stop(self):
         self.stop.set()
@@ -1732,8 +1747,11 @@ def main():
     signal.signal(signal.SIGTERM, lambda *_: collector.request_stop())
     try:
         collector.run()
-    finally:
-        collector.close()
+    except BaseException:
+        try:collector.close()
+        except BaseException as cleanup_error:print('Secondary collector cleanup failure: '+repr(cleanup_error),file=sys.stderr,flush=True)
+        raise
+    else:collector.close()
 
 
 if __name__ == '__main__':

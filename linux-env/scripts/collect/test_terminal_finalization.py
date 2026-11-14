@@ -13,10 +13,10 @@ from frame_join import SensorAmbiguity
 class TerminalFinalizationTests(unittest.TestCase):
     def test_actual_late_camera_fault_failed_close_and_runner_refuse_stale_success(self):
         with tempfile.TemporaryDirectory() as directory,patch('storage.confined',side_effect=Path),patch('collection_status.confined',side_effect=Path):
-            root=Path(directory);run=root/'normal';run.mkdir();attempt=run/'attempt-0000';attempt.mkdir()
-            storage.atomic_json(run/'summary.json',dict(complete=True,episodes=5,end_marker='COLLECTION_FINISHED'))
+            root=Path(directory);run=root/'normal';run.mkdir();certificate=collection_status.begin(run);attempt=run/'attempt-0000';attempt.mkdir()
+            storage.atomic_json(run/'summary.json',dict(complete=True,episodes=5,producer_invocation=certificate['invocation'],end_marker='COLLECTION_FINISHED'))
             storage.atomic_json(attempt/'receipt.json',dict(accepted=True))
-            certificate=collection_status.begin(run);collection_status.finish(run,certificate,[])
+            collection_status.finish(run,certificate,[])
             c,r,entry=probes.ReviewRegressions().collector();c.args=NS(output=run);c.status_lock=threading.RLock()
             c.current_attempt_path=attempt;c.finalization_certificate=certificate;c.capture_failures=[]
             c.persist_terminal_fault=MethodType(type(c).persist_terminal_fault,c)
@@ -26,7 +26,7 @@ class TerminalFinalizationTests(unittest.TestCase):
             first=json.loads((run/'terminal-fault.json').read_text())['events'][0]
             self.assertEqual(len(first['sensor_evidence']['candidates']),2)
             self.assertFalse(json.loads((attempt/'receipt.json').read_text())['accepted'])
-            c.executor=NS(shutdown=lambda **kw:None);c.node.destroy_node=lambda:None
+            c.executor=NS(shutdown=lambda **kw:True);c.ros_thread=NS(join=lambda **kw:None,is_alive=lambda:False);c.node.destroy_node=lambda:None
             c.capture_thread=NS(join=lambda **kw:None,is_alive=lambda:False)
             scope=c.close.__globals__;scope['timeline']=Mock(side_effect=ConnectionError('native cancel unavailable'))
             scope['mcp']=Mock(return_value=True);scope['rclpy']=NS(shutdown=lambda:None)

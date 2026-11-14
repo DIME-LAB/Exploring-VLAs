@@ -582,8 +582,9 @@ penetration (9 um measured rest contact + 10 um solver variability + 1 um float
 allowance), below the 0.1 mm contact distance; rest offsets are zero. The upper
 gate is 0.1 mm below the rim. There is no STL radial envelope or 0.7 mm inward
 margin. The 15 settled ticks and 25 mm lift requirement remain. Metadata records
-the primitive asset hash, per-corner plane distances and verified effective
-shape offsets/counts. See [cup geometry](docs/notes/collection-success-geometry.md).
+the primitive asset hash, per-corner plane distances and authored expected
+offsets/counts. Fresh native tensor reads must match those expectations at each
+collector installation; old measured offsets are never relabelled as current. See [cup geometry](docs/notes/collection-success-geometry.md).
 
 The collection World is created with `device='cpu'`; the loaded scene explicitly
 disables GPU dynamics. Runtime refuses an absent/unknown/true GPU-dynamics value
@@ -694,7 +695,14 @@ and are never cleared; any root/attempt terminal marker forbids resume/export or
 success. Bring-up of a collector invocation invalidates earlier completed summary
 status. Its finalization certificate must affirm cleanup, match the producing PID
 and stage time, and hash the final summary; a stale accepted/complete receipt
-cannot substitute for it. A shutdown exit code alone never proves
+cannot substitute for it. Resume validates the predecessor before constructing
+or beginning a replacement collector; incomplete/missing certification refuses.
+A valid predecessor certificate and exact summary are archived before the new
+invocation changes status. Cleanup for an invocation that never began writes
+separate instance runtime diagnostics, preserving refused predecessor evidence.
+Executor shutdown must return True and its spin thread must retire; timeout or
+unknown completion is terminal. Certificates check schema and matching invocation
+as local consistency evidence; they do not authenticate a same-permission writer. A shutdown exit code alone never proves
 or disproves a completed collection: accepted episodes and export validation
 receipts are required, and cleanup must independently verify every owned child. `--plan` starts no processes. `--go`
 requires the lead's explicit window; independent review can run concurrently,
