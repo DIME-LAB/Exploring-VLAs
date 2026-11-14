@@ -321,16 +321,8 @@ def _load_cup_mesh():
 _LEGO_SIZES = ('2x2', '2x3', '2x4')
 
 
-# Vertical clearance between grasp TCP (fixed-jaw tip) and the block's top face.
-# The gripper link's collision mesh has some downward-facing geometry below
-# tcp_link (servo housing, jaw hinge). Without clearance, /check_state_validity
-# flags gripper-vs-world-lego contact at grasp pose (~77 µm tangent penetration
-# via FCL narrow-phase), which then poisons every subsequent OMPL plan with
-# "start state in collision" (ec=-2). This is NOT a USD-fix compensation —
-# it's the physical clearance needed between the gripper's lower-facing link
-# geometry and the block's upper face. If the gripper hardware is ever
-# redesigned with a cleaner TCP profile, this can drop to 0; if the block
-# collision envelope is ever padded or grown, this should grow accordingly.
+# Top clearance for drop and bbox-free targets. Tabletop grasp height comes
+# from the shared finger envelope and table clearance in grasp_geometry.
 from so_arm101_control.grasp_geometry import TCP_ABOVE_BLOCK_CLEARANCE_M as _GRIPPER_TCP_CLEARANCE_ABOVE_BLOCK_M
 
 
@@ -615,11 +607,8 @@ class GuiSceneBehavior:
                 self._append_log(f'Attach skipped: no pose for {obj_name}', 'warn')
                 return False
 
-            # Model: tcp_link is the fixed-jaw tip. After grasp_move + gripper_close,
-            # the block is pinched between the two jaws with:
-            #   - Block side-center (vertical mid-height) at tcp.Z (no vertical offset)
-            #   - Block center XY offset from tcp by the jaw half-width (set by
-            #     _compute_jaw_offset during grasp_move)
+            # tcp_link is the fixed-jaw tip. The block's vertical and lateral
+            # offsets depend on the grasp height and the observed jaw closure.
             # We compute the actual block-in-tcp transform via TF — this gives the
             # correct XY offset AND the block's orientation relative to tcp (which
             # determines how the BOX collision volume is oriented in tcp's frame).
@@ -2606,11 +2595,8 @@ class PickPlaceNode(Node):
                 self._append_log(f'Attach skipped: no pose for {obj_name}', 'warn')
                 return False
 
-            # Model: tcp_link is the fixed-jaw tip. After grasp_move + gripper_close,
-            # the block is pinched between the two jaws with:
-            #   - Block side-center (vertical mid-height) at tcp.Z (no vertical offset)
-            #   - Block center XY offset from tcp by the jaw half-width (set by
-            #     _compute_jaw_offset during grasp_move)
+            # tcp_link is the fixed-jaw tip. The block's vertical and lateral
+            # offsets depend on the grasp height and the observed jaw closure.
             # We compute the actual block-in-tcp transform via TF — this gives the
             # correct XY offset AND the block's orientation relative to tcp (which
             # determines how the BOX collision volume is oriented in tcp's frame).

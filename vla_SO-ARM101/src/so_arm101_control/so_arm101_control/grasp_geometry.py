@@ -52,6 +52,13 @@ JAW_OPEN_CLEARANCE_M = 0.005        # extra jaw gap on open beyond symmetric bas
 JAW_CLOSE_CLEARANCE_M = 0.0         # extra jaw gap on close beyond symmetric baseline (m)
 TCP_CLEARANCE_M = 0.001             # extra IK offset beyond grip_width/2 for jaw overhang (m)
 
+TCP_ABOVE_BLOCK_CLEARANCE_M = 0.00165
+# The moving-jaw nose extends 8.03 mm below the fixed-jaw TCP at the
+# 2x3 opening angle. Round its envelope upward and retain table clearance.
+FINGER_BELOW_TCP_M = 0.0081
+FINGER_TABLE_CLEARANCE_M = 0.0012
+GRASP_TCP_FROM_BLOCK_BOTTOM_M = FINGER_BELOW_TCP_M + FINGER_TABLE_CLEARANCE_M
+
 # URDF wrist_roll joint origin pitch offset (mirrors compute_workspace.py)
 _WRIST_ROLL_URDF_PITCH = 0.0487
 # Inherent 90° from kinematic chain (wrist_flex yaw=-π/2, wrist_roll yaw=π)
@@ -165,18 +172,18 @@ _GWS = _load_workspace_yaml('grasp_workspace_bounds')
 GRASP_WORKSPACE_BOUNDS = {
     'R_MIN': _GWS.get('r_min', 0.09),
     'R_MAX': _GWS.get('r_max', 0.31),
-    'Z_MIN': _GWS.get('z_min', -0.20),
+    # Include the physical tabletop target; 1 um admits float32 pose readback.
+    'Z_MIN': min(_GWS.get('z_min', -0.20), GRASP_TCP_FROM_BLOCK_BOTTOM_M - 1e-6),
     'Z_MAX': _GWS.get('z_max', 0.07),
 }
 
 
 def check_grasp_reachable(x, y, z, ground_z=None):
-    """Check if (x, y, z) is within the top-down grasp workspace.
+    """Screen the coarse top-down workspace before full IK/collision checks.
 
-    Bounds are computed by sweeping geometric_ik() over a (r, z, yaw) grid,
-    so they represent the true IK-solvable region, not just FK-reachable.
+    Bounds combine a sampled IK envelope with the physical tabletop target.
     ground_z: if provided, reject targets at or below the ground plane.
-    Returns (ok, reason_string). ok=True means reachable.
+    Returns (ok, reason_string); passing still requires IK and collision validation.
     """
     if ground_z is not None and z <= ground_z:
         return False, f'at/below ground: z={z:.3f}m <= ground={ground_z:.3f}m'
@@ -246,7 +253,6 @@ def find_reachable_grasp_yaw(poses, requested_yaw, debug=False):
 
 
 
-TCP_ABOVE_BLOCK_CLEARANCE_M = 0.00165
 
 
 def object_grip_width(bbox, cross=False):
@@ -290,8 +296,13 @@ def make_grasp_plan(pose, bbox, *, cross=False, current_wrist_roll=None,
     yaw = _normalize_grasp_yaw(yaw, pan, current_wrist_roll)
     dx, dy = jaw_offset(object_grip_width(bbox, cross), yaw, tcp_clearance, bbox_enabled)
     x, y = pose['x'] + dx, pose['y'] + dy
-    z = (object_z_override if abs(object_z_override) > 1e-4 else
-         pose['z'] + float((bbox or {}).get('sz', 0.0)) / 2 + TCP_ABOVE_BLOCK_CLEARANCE_M)
+    height = float((bbox or {}).get('sz', 0.0))
+    if abs(object_z_override) > 1e-4:
+        z = object_z_override
+    elif drop or height <= 0.0:
+        z = pose['z'] + height / 2 + TCP_ABOVE_BLOCK_CLEARANCE_M
+    else:
+        z = pose['z'] - height / 2 + GRASP_TCP_FROM_BLOCK_BOTTOM_M
     z += .05 if drop else 0.0
     poses = []
     if approach_height > 0:
