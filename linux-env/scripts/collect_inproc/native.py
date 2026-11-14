@@ -148,6 +148,8 @@ class Native:
 
     def stamp(self):return round(float(self.world.current_time)*1e9)
 
+    def clock(self):return dict(epoch=self.epoch,sim_ns=self.stamp(),physics_time_s=float(self.world.current_time))
+
     def snapshot(self):
         bodies={}
         for name,view in self.bodies.items():
@@ -198,8 +200,8 @@ class Native:
         if before!=after:raise RuntimeError('Rendering mutated the frozen physical observation')
         return images,profile
 
-    def transforms(self):
-        s=self.snapshot()
+    def transforms(self,snapshot=None):
+        s=self.snapshot() if snapshot is None else snapshot
         transforms={self.manifest['link_paths'][name]:matrix for name,matrix in s['links'].items()}
         transforms.update({self.manifest['body_paths'][name]:pose_matrix(b['position'],b['orientation']).tolist()
             for name,b in s['bodies'].items()})
@@ -209,8 +211,8 @@ class Native:
             cameras[key]=(parent@np.asarray(binding['matrix'])).tolist()
         return transforms,cameras
 
-    def restore(self,baseline):
-        self.world.pause()
+    def restore(self,baseline,manage_timeline=True):
+        if manage_timeline:self.world.pause()
         self.epoch+=1;self.floor=self.stamp();self.last_apply=None
         if set(baseline['bodies'])!=set(self.bodies):raise RuntimeError('Restore body inventory differs')
         for name,b in baseline['bodies'].items():
@@ -231,7 +233,7 @@ class Native:
         if not matches(s['state'],baseline['state'],'target_rad') or not matches(s['velocity'],[0.]*6,'float32_readback'):
             raise RuntimeError('Restore arm readback differs')
         boundary=dict(epoch=self.epoch,sim_ns=self.floor,physics_time_s=s['physics_time_s'],drive_targets=s['drive_targets'])
-        self.world.play()
+        if manage_timeline:self.world.play()
         return dict(epoch=self.epoch,invalid_through_ns=self.floor,arm_restored=True,
             snapshot=s,command_baseline=boundary)
 

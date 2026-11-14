@@ -44,6 +44,12 @@ def fixture_pools(fixtures,kinds,per_kind):
     return pools
 
 
+def next_fixture(pool,attempt,accepted_seeds):
+    remaining=[fixture for fixture in pool if fixture['params']['seed'] not in accepted_seeds]
+    if not remaining:raise ValueError('No unaccepted fixture seed remains for this recovery kind')
+    return remaining[attempt%len(remaining)]
+
+
 def run(a):
     import threading
     import numpy as np
@@ -64,6 +70,7 @@ def run(a):
             fixtures.append(value)
         kinds=['normal','regrasp'] if a.kind=='both' else [a.kind]
         pools=fixture_pools(fixtures,kinds,a.per_kind);kind_attempts={k:0 for k in kinds}
+        accepted_seeds={k:set() for k in kinds}
         from isaacsim import SimulationApp
         app=SimulationApp(shared.app_config())
         from native import Native
@@ -115,7 +122,7 @@ def run(a):
             if stopped.is_set():raise RuntimeError('Collection interrupted')
             wait_for_storage(root,stopped)
             kind=next(k for k in kinds if counts[k]<a.per_kind)
-            fixture=pools[kind][kind_attempts[kind]%len(pools[kind])];kind_attempts[kind]+=1
+            fixture=next_fixture(pools[kind],kind_attempts[kind],accepted_seeds[kind]);kind_attempts[kind]+=1
             p=parameters(fixture['params']['seed'],fixture['params']['color'],
                 split=fixture['params'].get('split','train'),regrasp=kind=='regrasp')
             np.random.seed(p['seed']%2**32)
@@ -126,16 +133,24 @@ def run(a):
                 if stopped.is_set():raise RuntimeError('Collection interrupted')
                 heartbeat()
                 s=backend.snapshot();images=None;render_profile={}
-                if not a.physics_only:images,render_profile=backend.render()
-                transforms,cameras=backend.transforms()
-                row,snapshot,timing=capture.tick(reference,executed,offset,phase,episode_id,images,s,
-                    camera_stamps=render_profile.get('camera_stamps'))
+                transforms,cameras=backend.transforms(s)
+                if a.step_mode=='playing':
+                    token=capture.prepare(reference,executed,offset,phase,episode_id,s)
+                    physics_ms=backend.step()
+                    images,render_profile=backend.render(expected=s)
+                    row,snapshot,timing=capture.complete(token,images,render_profile['camera_stamps'])
+                else:
+                    if not a.physics_only:images,render_profile=backend.render()
+                    row,snapshot,timing=capture.tick(reference,executed,offset,phase,episode_id,images,s,
+                        camera_stamps=render_profile.get('camera_stamps'))
                 pose=packet(s,transforms,cameras,len(checked))
                 pose['row_sha256']=digest(row)
                 profile=dict(timing,**render_profile,sim_ns=row['sim_ns'])
                 checked.append(snapshot)
                 if record:profile['enqueue_ms']=writer.add(row,images,pose,profile)
-                profile['physics_render_ms' if a.step_mode=='playing' else 'physics_ms']=backend.step();profiles.append(profile)
+                profile['physics_render_ms' if a.step_mode=='playing' else 'physics_ms']=(
+                    physics_ms if a.step_mode=='playing' else backend.step())
+                profiles.append(profile)
                 return row,snapshot
             try:
                 geometry.carried=None;geometry.contact=False;geometry.selected=None
@@ -193,7 +208,8 @@ def run(a):
                 atomic_json(path/'receipt.json',receipt)
                 with (root/'episodes.jsonl').open('a') as out:out.write(json.dumps(receipt)+'\n')
                 receipts.append(receipt)
-                if decision['kind']=='accepted':counts[kind]+=1
+                if decision['kind']=='accepted':
+                    counts[kind]+=1;accepted_seeds[kind].add(p['seed'])
                 stop=streak.observe(decision)
                 if stop['stop']:
                     if error is None:error=RuntimeError('Collection stopped: '+repr(stop))
@@ -201,6 +217,7 @@ def run(a):
         if not all(counts[k]>=a.per_kind for k in kinds):raise RuntimeError('Episode quota not reached')
         atomic_json(root/'gpu-final.json',gpu_check())
         summary=dict(complete=not a.physics_only,counts=counts,attempts=len(receipts),
+            accepted_seeds={k:sorted(seeds) for k,seeds in accepted_seeds.items()},
             producer_invocation=certificate['invocation'],wall_s=time.perf_counter()-start,
             end_marker='PHYSICS_CAPTURE_FINISHED' if a.physics_only else 'COLLECTION_FINISHED')
         atomic_json(root/'summary.json',summary)

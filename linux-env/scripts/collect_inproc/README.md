@@ -3,9 +3,10 @@
 This standalone collector imports the existing geometry, DART, recovery, physical
 success gate, tick audit, fault policy and exporter. The first boot window verified
 scene export, GPU/CPU assignment, native FK and immediate restore. Held-time RGB
-failed. Playing produced render events and a four-substep advance but empty RGB
-buffers; no image pairs or episodes were accepted. Capture-on-play and Fabric
-readbacks are prepared offline and await a new lead-granted window. CPU checks do not
+failed. Playing now reads both camera buffers; an eight-update trace shows one
+camera pair delivered for the preceding native timestamp on every update.
+The bounded timestamp join is offline-tested and awaits a lead-granted boot
+acceptance window. No episodes or dataset rows have been accepted. CPU checks do not
 establish physical grasp yield, camera freshness, renderer fidelity or throughput. See
 [`docs/notes/inprocess-collector.md`](../../../docs/notes/inprocess-collector.md).
 No shared ROS collector or extension module is changed.
@@ -47,7 +48,7 @@ It exports a flattened scene, native baseline, joint/primitive geometry and sour
 digests. It refuses unknown enabled collision shapes. It does not launch or stop
 the shared sim. Stop the ROS instance only through its owner before standalone work.
 
-Inspect a launch first; `preflight` never boots Isaac:
+Inspect a launch first; `preflight` never boots Isaac.
 
 With a real prior Kit log, it can report GPU mapping before scene export, but
 `inputs_ready` remains false until the exported scene, manifest and matching seed
@@ -61,15 +62,22 @@ python3 linux-env/scripts/collect_inproc/launch.py preflight \
   --manifest /mnt/a4500-backup/exploring-vlas/inproc/scene-v1/manifest.json \
   --fixture /PATH/TO/ROS/attempt-0000/receipt.json \
   --output /mnt/a4500-backup/exploring-vlas/datasets/inproc-v1 \
-  --kind both --per-kind 5 --max-attempts 30
+  --kind both --per-kind 5 --max-attempts 30 --step-mode playing --instance 2
 ```
 
-After the lead grants a window, replace `preflight` with `start --window WINDOW_ID`.
+Only after the joined boot probe passes and the lead grants an episode window,
+replace `preflight` with `start --window WINDOW_ID`.
 Repeat `--fixture` for the other seeds. The prior Kit log must be under the canonical
 storage root. Renderer selection resolves UUID/PCI independently of CUDA; startup
 rechecks the current Kit table and owned process GPU allocations. `status` and
 `stop` need only `--runtime`; they use the shared identity-bound process supervisor.
 Never stop another collector or prompt2assembly process.
+
+The lead's fresh read-only inputs currently live under
+`datasets/smoke-primitive-native-tick-v3/` in canonical storage: accepted normal
+receipts attempt-0000/0002 (seeds330000/330002). Re-grasp inputs are pending.
+A normal pilot uses `--kind normal --per-kind 2` with those two receipts after
+boot acceptance. Accepted seeds are excluded from retries. It is a pilot, not 5+5.
 
 ## Boot probe before episodes
 
@@ -79,11 +87,11 @@ The boot probe needs no ROS episode fixtures. Preflight is safe outside a window
 python3 linux-env/scripts/collect_inproc/launch.py preflight --probe \
   --runtime /mnt/a4500-backup/exploring-vlas/runtime/inproc-playing-next \
   --gpu 0 \
-  --renderer-log /mnt/a4500-backup/exploring-vlas/runtime/inproc-playing-20261114-v4/kit.log -- \
+  --renderer-log /mnt/a4500-backup/exploring-vlas/runtime/inproc-playing-20261114-v11/kit.log -- \
   --scene /mnt/a4500-backup/exploring-vlas/inproc/scene-window-20261114/scene.usdc \
   --manifest /mnt/a4500-backup/exploring-vlas/inproc/scene-window-20261114/manifest.json \
   --output /mnt/a4500-backup/exploring-vlas/inproc/probe-playing-next \
-  --instance 2 --frames 12 --step-mode playing
+  --instance 2 --frames 30 --step-mode playing --motion-check
 ```
 
 Only after a new grant, replace `preflight` with `start --window WINDOW_ID`. This
@@ -93,15 +101,25 @@ render completions, old producer identities and mismatched clocks without pollin
 Both persistent and runtime capture-on-play flags are explicitly enabled and
 checked, because Orchestrator.reset copies the former over the latter. The probe
 records both flag readbacks, CPU RGB buffer shapes/compute counts and Fabric's
-external physics time. The flags/Fabric correction has not run live yet.
-The timeline is aligned to World without an app update after restore and before
-each step; the producer clock is checked against the timeline sampled after the
-update. `probe.json` records physical advance, paired consumption, two post-reset
+external physics time. The internal empty-list annotation filter is bypassed;
+the collector verifies the original stamp, drawable frame and copy count itself.
+The timeline follows the native Fabric clock; World time is checked independently
+for four-substep progression. `Capture.prepare` issues the actual command at t;
+after one update `Capture.complete` joins the camera frames stamped t to the
+retained measured state and ACK. No row or proof is accepted before this join.
+`probe.json` records physical advance, paired consumption, two post-reset
 frames and no progress during CPU work between updates. A successful probe
 finalizes with `BOOT_PROBE_FINISHED`, `kind=boot_probe`, episodes=0;
 it is never an accepted dataset. Owner-side finalization follows
 worker exit and verified descendant cleanup. Check `inproc-watchdog.json`, the
 finalization certificate and `launch.py status`; a worker exit alone is insufficient.
+
+`--motion-check` uses the same collision-checked clean-correction entrance for a
+0.12 rad pan movement and records both native camera view and measured poses.
+It requires real motion and the wrist view to match the observation pose more
+closely than the arrival pose. Inspect the boundary PNGs as well. This physical
+pixel-phase check is required before collecting episodes; the option needs at
+least eight frames in playing mode. Its native result is still pending.
 
 Both adapters currently default to diagnostic `--step-mode held`; its RGB path
 failed live. Select `--step-mode playing` explicitly for the next probe. Do not

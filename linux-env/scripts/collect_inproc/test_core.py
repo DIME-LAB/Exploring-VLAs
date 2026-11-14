@@ -15,11 +15,14 @@ class Backend:
         self.s = dict(epoch=1, sim_ns=STEP_NS, physics_time_s=1/30,
             state=[0.]*6, velocity=[0.]*6, drive_targets=[0.]*6,
             bodies={}, state_source='isaac_articulation')
+        self.applications=[]
     def snapshot(self): return copy.deepcopy(self.s)
+    def clock(self):return {k:self.s[k] for k in ('epoch','sim_ns','physics_time_s')}
     def apply(self, values, stamp, epoch):
         if (stamp, epoch) != (self.s['sim_ns'], self.s['epoch']):
             raise RuntimeError('Stale command')
         self.s['drive_targets'] = list(values)
+        self.applications.append((stamp,epoch,list(values)))
         return dict(application_stamp_ns=stamp, applied_command=list(values))
 
 
@@ -53,6 +56,36 @@ class CoreTests(unittest.TestCase):
         row,_,_=c.tick([0.]*6,[0.]*6,[0.]*6,'hold','test',camera_stamps=stamps)
         self.assertEqual(row['wrist_stamp_ns'],stamps['wrist'])
         self.assertFalse(row_errors(row))
+    def images(self):return {key:np.zeros((480,640,3),np.uint8) for key in ('wrist','top')}
+    def test_one_update_join_uses_frozen_state_and_the_real_earlier_ack(self):
+        b,c=self.capture();stamp=b.s['sim_ns']
+        token=c.prepare([.1]*6,[.1]*6,[.001]*5+[0.],'move','joined')
+        self.assertIsNone(c.contract.previous)
+        b.s.update(sim_ns=stamp+STEP_NS,physics_time_s=2/30,state=[.02]*6)
+        row,snapshot,timing=c.complete(token,self.images(),dict(wrist=stamp-1,top=stamp))
+        self.assertEqual(row['state'],[0.]*6);self.assertEqual(row['action'],[.035]*6)
+        self.assertEqual(row['executed_action'],[.101]*5+[.035])
+        self.assertEqual(row['application_stamp_ns'],stamp)
+        self.assertEqual(row['wrist_stamp_ns'],stamp-1)
+        self.assertEqual(len(b.applications),1)
+        self.assertEqual(timing['image_delay_updates'],1)
+        self.assertFalse(row_errors(row));self.assertFalse(verify_proof(snapshot['tick_contract']))
+        with self.assertRaises(RuntimeError):c.complete(token,self.images(),dict(wrist=stamp,top=stamp))
+    def test_missing_stale_or_cross_epoch_join_never_finalizes(self):
+        for mutation in ('late','epoch','stamp','missing','world_frozen'):
+            with self.subTest(mutation=mutation):
+                b,c=self.capture();stamp=b.s['sim_ns']
+                token=c.prepare([0.]*6,[0.]*6,[0.]*6,'hold','joined')
+                stamps=dict(wrist=stamp,top=stamp);images=self.images()
+                if mutation=='late':b.s['sim_ns']+=2*STEP_NS
+                if mutation=='epoch':b.s['epoch']+=1
+                if mutation=='stamp':stamps['wrist']+=STEP_NS
+                if mutation=='missing':del images['wrist']
+                if mutation=='world_frozen':b.s['sim_ns']+=STEP_NS
+                with self.assertRaises((RuntimeError,ValueError)):c.complete(token,images,stamps)
+                self.assertIsNone(c.contract.previous)
+                with self.assertRaises(RuntimeError):c.prepare([0.]*6,[0.]*6,[0.]*6,'hold','joined')
+                self.assertEqual(len(b.applications),1)
     def test_skip_and_bad_drive_readback_refuse(self):
         b, c = self.capture(); b.s['sim_ns'] += STEP_NS
         with self.assertRaises(RuntimeError): c.tick([0.]*6,[0.]*6,[0.]*6,'hold','test')

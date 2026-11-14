@@ -1,10 +1,11 @@
 # In-process SO-ARM101 collection (ROADMAP 3.1f)
 
-Status: scene export and native GPU/CPU/FK/restore checks passed. Eight held-time
-and four playing-window attempts accepted zero RGB pairs or episodes. Playing
-produced render completions and a measured four-substep advance, but RGB compute
-counts stayed zero. Capture-setting/Fabric diagnostics are prepared offline for
-the next lead-granted window. No throughput or image-equivalence result is claimed.
+Status: scene export, native GPU/CPU/FK/restore and real two-camera RGB readback
+are verified. A diagnostic trace measured eight consecutive four-substep updates,
+each delivering one camera pair for the preceding native timestamp (within 1 ns).
+The bounded timestamp join is implemented and offline-tested; its boot acceptance
+and the 5+5 episode bar still require a window. No accepted dataset, throughput or
+image-equivalence result is claimed.
 The runtime and prototype live in `linux-env/scripts/collect_inproc/`; the ROS
 collector and `isaac/exts/` remain unchanged.
 
@@ -14,17 +15,26 @@ Use a standalone headless `SimulationApp`, with one main-thread owner of physics
 expert execution, reset and capture. Keep one stage, articulation and two fixed
 640x480 render products for the whole run. The proposed live path keeps the
 timeline playing and executes one application update per 1/30 s observation,
-containing four 1/120 s CPU PhysX steps and both camera renders. Between updates,
-read measured state and annotators, compute expert/DART, check and apply targets
-synchronously. No wall pacing or render polling while the expert runs. Read native
-clock and unconditional physics callbacks; never assign time from a row number.
-Require exactly one completion per product, fresh per-product render/buffer
-identities and original camera timestamps agreeing with the physical tick.
-Own the separate timeline clock: align it to World time without an app update
-after restore and before each step, sample it after the update, require agreement
-with World within 10 ns and compare camera ReferenceTime to that sampled clock.
-This prevents pause/play offsets and accumulated float32 substep drift from
-masking a lagged camera frame. It remains a live clock/renderer verification gate.
+containing four 1/120 s CPU PhysX steps. At native time t, freeze the measured
+state, compute expert/DART, collision-check and apply targets, retaining the real
+ACK stamped t. One update advances physics to t+1/30 and delivers images originally
+stamped t. Join those images to the frozen observation and ACK; only then run the
+unchanged TickContract and write the row. No wall pacing or render polling while
+the expert runs. Read native clock and unconditional physics callbacks; never
+assign time from a row number. Require one completion per product, fresh drawable
+frame numbers and consecutive RGB compute counts, with original camera timestamps
+matching the retained observation within the shared 1 us tolerance. A missing,
+duplicated or skipped frame, epoch crossing or delay beyond one update is a fault.
+
+The canonical clock is the actual Fabric `/ExternalSimulationTime.omni:time`
+readback, as used by native graph/camera time. Align the timeline to that clock
+without an app update and require their agreement within 10 ns. World.current_time
+accumulates float32 PhysX callbacks independently: check its increments with the
+shared world_step_errors, as CLOCK_POLICY.absolute_world_native_equality=False
+requires. Neither Fabric time nor the camera stamps are rewritten. After reset,
+one unrecorded advance establishes the first observation; no pending row is
+accepted before its matching pair arrives. Restore writes happen synchronously
+between updates and resume a paused timeline without World.play's extra update.
 Held-time capture remains a diagnostic mode; its current RGB path failed live.
 
 An extension callback could reuse the live World, but retains its application
@@ -49,7 +59,7 @@ No shared environment or Isaac installation configuration changes are needed.
 
 | Mode | Physics pass | Render/write pass | Admission to training |
 | --- | --- | --- | --- |
-| Live Isaac | Physics + expert + DART + two annotators, same playing application update | Bounded RGB encoding and existing exporter | Baseline recommendation; requires 5 normal + 5 re-grasp accepted episodes and same-seed ROS comparison |
+| Live Isaac | Physics + expert + DART; native-stamped camera delivery one update later | Bounded stamp join, RGB encoding and existing exporter | Baseline recommendation; requires 5 normal + 5 re-grasp accepted episodes and same-seed ROS comparison |
 | Isaac two-pass | Cameras/render products fully absent; log measured joints, drives, all rigid-body/link world transforms, both camera transforms, metadata and labels at every camera tick | Physics disabled; replay exact poses in a separate Kit, one fixed product per camera, sequential history | Only after live/replay pixel and timing proof; no physical verdict is rerun in pass 2 |
 | Browser two-pass | Same pose log | CAD/three.js renderer with calibrated camera, exposure/material compensation | Research option until SO-ARM101 image-gap and throughput are measured; not an interchangeable RTX backend |
 
@@ -275,15 +285,18 @@ absent), apply OmniSensorAPI tickRate 30, CPU RGB annotators as in `record.py`, 
 1/30 and timeline target 30, play and warm up. Installed SimulationContext.step
 with render=True delegates to one app.update at these nonzero dt values. The
 adapter refuses extra/missing physics steps or renders rather than polling a stale
-buffer. ReferenceTime is global, so it is supplemented by per-product SWH frame
-identity, RGB compute count and simulation NEW_FRAME completion count. Copies
+buffer. ReferenceTime is global, so it is supplemented by per-product drawable
+frame identity, RGB compute count and simulation NEW_FRAME completion count. Read
+frame metadata in the drawable callback using its actual result_handle; handle 0
+is invalid here and the optional SWH field is absent. Copies
 retain the producer's rational timestamp, including permitted sub-microsecond
 rounding differences. Whether these native fields reliably identify both pixels
 after every update is still a live-verification requirement. Experimental replay
 and held writer-gate capture remain non-exportable until verified.
 
-The offline suite has 33 tests, including 2,000 aligned float32-dt frames and a
-case where camera lag cancels a timeline offset. The probe uses its own
+The offline suite has 41 tests, including the measured eight-frame latency trace,
+2,000 float32 World/native-clock frames, earlier-ACK/frozen-state preservation and
+late/missing/duplicate/epoch-crossing join refusal. The probe uses its own
 BOOT_PROBE_FINISHED marker with episodes=0; collection export is not admitted.
 
 The wall watchdog accepts 900 s startup, 120 s without collection progress and
@@ -307,11 +320,11 @@ completions. No renders-per-advance ratio or RTF can be claimed.
 
 Paused tick-rate sensors and an extra viewport/Hydra engine are plausible causes,
 supported by w_scene's playing-timeline reference and plan47's camera-shapes
-notes; they are not yet experimentally isolated. Next window starts with
-`launch.py --probe ... --step-mode playing`, using a fresh output/runtime. Require
-12 consecutive paired frames with four native steps and one render each, and no
-physics/render progress during synchronous CPU work between updates. If this
-fails, retain the fault and release; do not begin episodes. Five normal/five
+notes; they were not experimentally isolated in that window. Its same-update
+proposal is superseded by the bounded stamp join below. Use
+`launch.py preflight|start --probe ... --step-mode playing` with a fresh
+output/runtime and require the joined boot gate. If it fails, retain the fault
+and release; do not begin episodes. Five normal/five
 re-grasp episodes additionally require the fresh ROS-smoke fixtures and the lead's
 explicit episode window. Cleanup proof is
 `/mnt/a4500-backup/exploring-vlas/inproc/window-20261114-cleanup.json`: nine owned
@@ -352,8 +365,60 @@ the persistent-to-runtime reset behavior and refusal when a flag turns off.
 Set RenderingManager dt before products create Fabric histories. Following the
 working `~/w_31f/replay.py`, ensure `/ExternalSimulationTime` exists and record its
 `omni:time` value. During live physics the simulation manager owns that value:
-read it, require agreement with measured World time, and never assign a fabricated
-physics clock. Kinematic replay may explicitly stamp it only with physics off.
-The new flag and Fabric checks are offline-tested; native verification waits for
-the next grant after the ROS smoke. First require 12 paired frames plus two after
-reset and successful owned exit before attempting any episodes.
+read it as the canonical graph clock and check World increments independently.
+Kinematic replay may explicitly stamp it only with physics off.
+
+## RGB readback and measured delivery phase
+
+The third window ended at 08:24:10Z on 2026-11-14. All seven owned groups stopped,
+ports closed, no owned NVML contexts remained and GPU0 returned to 21 MiB; proof
+is `inproc/playing-window3-20261114-cleanup.json` under the canonical storage root.
+Both capture flags read true in v5, yet RGB compute remained zero. Capture-on-play
+overwrite alone therefore does not explain the failure. Match the known-good
+`w_31f/run_arm.py` legacy pipeline (`srtx/enabled=false`, async rendering false).
+
+v7's SDG diagnostic found DispatchSync enabled with empty valid-time lists: its
+reference-time inputs advanced while RGB execution stayed blocked. The documented
+`disableAnnotatorGate=true` compatibility setting bypasses that internal filter;
+our own bounded stamp/frame/copy/epoch checks retain the acceptance guarantee.
+v8 onward produced real 480x640 RGBA buffers from both cameras. Diagnostic warmup
+PNGs show the exported scene; they are not accepted episode frames or a ROS match.
+
+v11's fault-only trace demonstrated consistent one-update delivery over all eight
+updates: camera RefTime matched the pre-update observation within 0–1 ns; each
+update advanced four physical callbacks/World steps and completed one render per
+camera. RGB compute counts were 121–128, and both views had identical drawable
+frame numbers (275,293,295,...305). No camera timestamp was changed. The trace
+and source digest are retained in `collect_inproc/fixtures/playing_v11_trace.json`.
+The previous same-update probe correctly rejected these deliveries; zero dataset
+rows or episodes were accepted during the window.
+
+`Capture.prepare` retains the measured state, clean/executed labels, geometry
+evidence and actual target ACK at t. `Capture.complete` joins original camera
+stamps to that retained state after one update and invokes the same shared row
+validator. It cannot issue the command twice or finalize a pending/reset-crossing
+ticket. Expert/home/recovery calls still return the pre-update observation after
+advancing once, preserving control ordering. The initial advance after restore
+primes delivery; the first row is still exactly one tick after the restore floor.
+These changes are offline-tested against the measured trace. Next window must
+verify joined proofs, a collision-checked pan movement, a paused second reset and two further joined frames,
+no work while held between updates, and successful producer exit/finalization.
+Five normal/five re-grasp episodes, export/readback, ROS comparison and RTF remain
+pending fresh fixtures and an explicit episode grant.
+
+The `--motion-check` boot option moves pan by 0.12 rad through shared clean
+corrections and the ordinary collision/ACK entrance. It retains actual drawable
+view matrices and measured camera world transforms at observation and arrival.
+Require measured pan motion >0.01 rad, each wrist view within 2e-4 (maximum matrix
+entry error) of the observation pose, and at least one moving frame clearly
+closer to observation than arrival (>1e-4 difference). Boundary PNGs also require
+a visual check; stamps alone do not establish physical pixel phase. These pose
+thresholds are diagnostic gates to verify live, not a measured fidelity result.
+
+The lead's current read-only fixture root is
+`/mnt/a4500-backup/exploring-vlas/datasets/smoke-primitive-native-tick-v3/`.
+Accepted normal fixtures are attempt-0000 (330000, red) and attempt-0002 (330002,
+green_2x3_0); re-grasp fixtures are pending. The earlier designated fixture root
+was not created. A normal pilot can use these two seeds after boot acceptance;
+it does not fulfill 5+5. Retries exclude already accepted seeds, and summaries
+record accepted seed sets so a repeated success cannot fill a distinct-seed quota.
