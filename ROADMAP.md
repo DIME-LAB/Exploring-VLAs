@@ -244,6 +244,14 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       at 30 Hz sim time (client fps = server action_fps = 30), not 17.4/19.4 Hz. Re-observe every 10-25
       actions (paper: open-loop 50 dropped LIBERO 80%->52%). RTC: execution_horizon=10,
       max_guidance_weight=10, inference_delay from measured latency. Warm compiled checkpoints first.
+    - Language probes (Aldrin, 2026-11-14): training uses 3 fixed strings ("Pick a <colour> lego and place it in
+      <colour> cup"). Evaluate (a) colour swap: same scene layout, ask for each colour in turn (does the target
+      follow the prompt, not the layout?); (b) paraphrases: held-out rewordings per colour ("put the red brick
+      in the red cup", "red block to the red bin", ...), scored separately from the exact-string matrix.
+- [ ] 3.4 (only if 3.3 paraphrases fail) Prompt-variety run: relabel each training sample's task from a set
+      of templates per colour at merge time (no new collection), hold some templates out for eval, and compare
+      against the fixed-string model on both exact and held-out prompts. Published SmolVLA/LeRobot guidance is
+      silent on whether prompt variety helps; the paper standardised labels instead.
 
 ## Ops / optional (decide individually)
 
