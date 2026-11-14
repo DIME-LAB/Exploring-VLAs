@@ -627,8 +627,11 @@ and angular speeds must remain below 0.1 mm/s and 0.005 rad/s at each guarded
 advance. Per-joint substep excess is logged against the declared 5 urad pad;
 **the owned live smoke, not CPU tests or limit readback, must qualify the solver
 residual**. Any observed violation rejects the episode and stops the run. Native
-fault samples are written before rollback and copied into attempt receipts even
-if cancellation fails. Receipts quantify the temporary operation retiming. All miss stages require measured velocity <=0.0125 rad/s
+fault samples must be durably written before rollback (after pausing), with at
+most three publication attempts. Persistent journal failure blocks rollback,
+cancel/reset retirement and continuation with dirty/unknown limits; storage
+repair permits cleanup, never revival. Fault evidence is copied into receipts
+even if cancellation fails. Receipts quantify the temporary operation retiming. All miss stages require measured velocity <=0.0125 rad/s
 before completion; ordinary collector/GUI completion is unchanged.
 See [target-clearance and evidence contracts](docs/notes/regrasp-target-clearance.md).
 

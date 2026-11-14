@@ -67,7 +67,7 @@ class Runtime:
         fault_dir=confined(Path(os.environ['SOARM_INSTANCE_ROOT'])/'native-motion-faults');fault_dir.mkdir(parents=True,exist_ok=True)
         self.native_miss_fault_path=str(fault_dir/(uuid.uuid4().hex+'.json'))
         self._miss_cap=None;self._miss_saved_limits=None;self._miss_last_position=None
-        self._miss_limits_dirty=False;self._miss_requested_cap=None;self._miss_motion_fault=None
+        self._miss_limits_dirty=False;self._miss_requested_cap=None;self._miss_motion_fault=None;self._miss_fault_durable=False
         self._miss_substeps=0;self._miss_max_velocity=0.;self._miss_max_displacement=0.
         self.world.add_physics_callback('collection_miss_velocity_check',self.check_miss_substep)
         self.finger_views={}
@@ -192,11 +192,25 @@ class Runtime:
 
     def publish_miss_fault(self):
         path=getattr(self,'native_miss_fault_path',None);fault=getattr(self,'_miss_motion_fault',None)
-        if path and fault:
-            try:atomic_json(Path(path),fault)
+        if fault is None:raise RuntimeError('Native fault publication has no evidence')
+        self._miss_fault_durable=False
+        for _ in range(3):
+            fault['publication_attempts']=fault.get('publication_attempts',0)+1
+            fault['durability_unresolved']=False
+            try:
+                if not path:raise RuntimeError('Native fault publication path is unavailable')
+                # atomic_json acknowledges only after file and directory fsync.
+                atomic_json(Path(path),fault)
             except Exception as exc:
                 fault['publication_error']=repr(exc)
-                self.failure=(self.failure or '')+'; native fault publication failed: '+repr(exc)
+                fault['publication_errors']=(fault.get('publication_errors',[])+[repr(exc)])[-8:]
+                fault['durability_unresolved']=True
+            else:
+                self._miss_fault_durable=True
+                return
+        error='Native fault evidence is not durable after 3 publication attempts; remain held with unresolved limits'
+        self.failure=(self.failure or fault['error'])+'; '+error
+        raise RuntimeError(error)
 
     def restore_miss_limits(self):
         saved=getattr(self,'_miss_saved_limits',None)
@@ -206,6 +220,10 @@ class Runtime:
             self._miss_requested_cap=None
             return dict(on=False,values_rad_s=None)
         self._miss_limits_dirty=True;self._miss_cap=None
+        if getattr(self,'_miss_motion_fault',None) is not None:
+            # Neither cancellation nor a later reset may bypass this barrier.
+            # Keep saved originals and unknown state until evidence is durable.
+            self.publish_miss_fault()
         try:
             if saved is None:raise RuntimeError('Dirty native limits have no saved originals')
             self.art.set_max_joint_velocities(np.asarray([saved],dtype=np.float32),joint_indices=self.indices)
@@ -235,17 +253,20 @@ class Runtime:
                 cap=getattr(self,'_miss_cap',None),requested_cap=getattr(self,'_miss_requested_cap',None),
                 saved_original_limits_rad_s=getattr(self,'_miss_saved_limits',None),
                 dirty=getattr(self,'_miss_limits_dirty',False),samples=list(getattr(self,'_miss_samples',[])))
-        self.publish_miss_fault()
         try:self.timeline.pause();self.busy=False
         except Exception as pause_error:
             self.failure=original+'; native pause failed: '+repr(pause_error)
             if getattr(self,'_miss_saved_limits',None) is not None:self._miss_limits_dirty=True;self._miss_cap=None
-            self._miss_motion_fault['pause_error']=repr(pause_error);self.publish_miss_fault()
+            self._miss_motion_fault['pause_error']=repr(pause_error)
+            try:self.publish_miss_fault()
+            except Exception:pass  # Publication stays unresolved; no native rollback is attempted.
             return RuntimeError(self.failure)
-        try:self.restore_miss_limits()
+        try:
+            if getattr(self,'_miss_saved_limits',None) is None and not getattr(self,'_miss_limits_dirty',False):
+                self.publish_miss_fault()
+            self.restore_miss_limits()
         except Exception as rollback:self.failure=original+'; '+repr(rollback)
         else:self.failure=original
-        self.publish_miss_fault()
         return RuntimeError(self.failure)
 
     def stationary_target(self,cap,check=True):

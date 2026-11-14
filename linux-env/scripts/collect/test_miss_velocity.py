@@ -11,6 +11,9 @@ from test_review_regressions import load_class
 class NativeMissVelocityTests(unittest.TestCase):
     def runtime(self):
         Runtime,scope=load_class('collection_runtime.py','Runtime');r=object.__new__(Runtime)
+        # Explicit healthy durable-writer adapter; publication-failure tests replace it.
+        scope['atomic_json']=lambda path,value:None
+        r.native_miss_fault_path='/unit-test/native-motion-fault.json'
         r.epoch=1;r.stamp=lambda:10**9
         r.busy=False;r.timeline=NS(is_playing=lambda:False,pause=lambda:None);r.failure=None
         r.indices=[4,1,5,0,2,3]  # All reads/writes use named-joint mapping.
@@ -225,6 +228,62 @@ class NativeMissVelocityTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):r.cancel()
         self.assertGreater(published[-1]['samples'][-1]['frame_excess_over_cap_rad'][0],5e-6)
         self.assertEqual(r._miss_saved_limits,original[0].tolist())
+
+    def test_fault_publication_first_failure_recovers_before_native_rollback(self):
+        r,d,original,_=self.runtime();r.world=NS(current_time=1.)
+        r.set_miss_velocity_cap(velocity_cap('regrasp_miss_close'))
+        events=[];published=[];writer_scope=r.publish_miss_fault.__func__.__globals__
+        def publish(path,fault):
+            events.append('publish')
+            if events.count('publish')==1:raise OSError('first publication unavailable')
+            published.append(copy.deepcopy(fault));events.append('durable')
+        writer_scope['atomic_json']=publish
+        setter=r.art.set_max_joint_velocities
+        def restore(*args,**kwargs):
+            self.assertTrue(r._miss_fault_durable);self.assertTrue(published)
+            events.append('rollback');return setter(*args,**kwargs)
+        r.art.set_max_joint_velocities=restore
+        r.timeline.pause=lambda:events.append('pause')
+        d['q'][0,r.indices[0]]=.05*POLICY['step_s']+8e-6
+        with self.assertRaises(RuntimeError):r.check_miss_substep(1/120)
+        self.assertEqual(events[:5],['pause','publish','publish','durable','rollback'])
+        self.assertTrue(published[-1]['rollback_verified']);self.assertEqual(published[0]['publication_attempts'],2)
+        self.assertIn('first publication unavailable',published[0]['publication_errors'][0])
+        self.assertGreater(published[0]['samples'][-1]['frame_excess_over_cap_rad'][0],5e-6)
+        np.testing.assert_array_equal(d['limits'][:,r.indices],original)
+        self.assertFalse(r.miss_cap_state()['on']);self.assertIsNotNone(r.failure)
+        self.assertIsNotNone(r.cancel()['failure'])
+        with self.assertRaises(RuntimeError):r.advance()
+
+    def test_fault_publication_persistent_failure_keeps_limits_unresolved_on_cancel_reset(self):
+        r,d,original,writes=self.runtime();r.world=NS(current_time=1.)
+        r.set_miss_velocity_cap(velocity_cap('regrasp_miss_close'))
+        installed=d['limits'].copy();initial_writes=len(writes);attempts=[];events=[]
+        writer_scope=r.publish_miss_fault.__func__.__globals__
+        def unavailable(path,fault):attempts.append(copy.deepcopy(fault));raise OSError('journal unavailable')
+        writer_scope['atomic_json']=unavailable;r.timeline.pause=lambda:events.append('pause')
+        d['q'][0,r.indices[0]]=.05*POLICY['step_s']+8e-6
+        with self.assertRaisesRegex(RuntimeError,'not durable'):r.check_miss_substep(1/120)
+        self.assertEqual(len(attempts),3);self.assertEqual(events,['pause'])
+        self.assertEqual(len(writes),initial_writes);np.testing.assert_array_equal(d['limits'],installed)
+        self.assertEqual(r._miss_saved_limits,original[0].tolist())
+        self.assertIsNone(r.miss_cap_state()['on']);self.assertTrue(r._miss_limits_dirty)
+        self.assertFalse(r._miss_fault_durable);self.assertTrue(r._miss_motion_fault['durability_unresolved'])
+        self.assertNotIn('rollback_verified',r._miss_motion_fault)
+        for operation in (r.cancel,lambda:r.restore({},arm=True),lambda:r.set_miss_velocity_cap(None)):
+            with self.assertRaisesRegex(RuntimeError,'not durable'):operation()
+            self.assertEqual(r.epoch,1);self.assertEqual(len(writes),initial_writes)
+            np.testing.assert_array_equal(d['limits'],installed)
+            self.assertIsNone(r.miss_cap_state()['on'])
+        self.assertEqual(len(attempts),12)
+        with self.assertRaises(RuntimeError):r.advance()
+        with self.assertRaises(RuntimeError):r.set_miss_velocity_cap(velocity_cap('regrasp_reopen'))
+        self.assertEqual(len(writes),initial_writes)
+        # Storage repair can retire limits, but cannot revive the failed runtime.
+        durable=[];writer_scope['atomic_json']=lambda path,fault:durable.append(copy.deepcopy(fault))
+        self.assertIsNotNone(r.cancel()['failure']);self.assertTrue(durable[-1]['rollback_verified'])
+        np.testing.assert_array_equal(d['limits'][:,r.indices],original)
+        with self.assertRaises(RuntimeError):r.advance()
 
     def test_invalid_kickoff_restores_prior_cap_and_cannot_resume(self):
         for fault in ('epoch','stamp','state','drive'):

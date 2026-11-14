@@ -115,8 +115,17 @@ phase, original/new operation durations, kickoff boundaries and cap restoration.
 The training merge can audit which deliberate-miss steps ran under a cap.
 Rows include all substep samples. Receipts summarize signed per-joint maximum
 local/frame/certificate excess in `miss_solver_residuals`. A native fault is
-atomically published before pause/rollback in this instance's unique
+written atomically in this instance's unique
 `native-motion-faults/<runtime-id>.json`; its path is returned at installation.
+On a fault, pause is attempted first. A successful durable publication is a
+checked barrier before any native limit rollback, including later cancel/reset
+cleanup. The writer acknowledges file and directory fsync and retries at most
+three times. If all three attempts fail, limits remain dirty/unknown, saved
+originals are retained, rollback is refused and the runtime stays terminal.
+The in-memory fault explicitly reports unresolved durability; no off or
+durable-before-rollback claim is made. Storage repair can allow verified limit
+retirement but cannot revive the failed runtime. Publication attempt counts and
+errors are retained, including a failed first attempt followed by recovery.
 The collector copies matching-epoch evidence into the attempt receipt, even
 when native cancellation itself fails. The first error remains primary and
 rollback diagnostics are secondary. No marker or runtime error is cleared to
