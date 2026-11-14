@@ -7,6 +7,7 @@ import shutil
 import subprocess
 
 from contract import JOINTS, timing_audit
+from collection_status import require_finalized
 from recovery import receipt_error, recovery_summary
 from storage import atomic_json,confined, prepare_environment
 
@@ -21,6 +22,7 @@ def main():
     run, report = confined(run), confined(report)
     if (run / 'superseded.json').exists():
         raise ValueError('Superseded diagnostic run cannot be exported as a dataset')
+    require_finalized(run)
     summary = json.loads((run / 'summary.json').read_text())
     if not summary.get('complete') or summary.get('end_marker') != 'COLLECTION_FINISHED':
         raise ValueError('Collection is incomplete; refusing to export a partial run')

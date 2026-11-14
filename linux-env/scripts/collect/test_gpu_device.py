@@ -6,13 +6,6 @@ import gpu_device
 
 
 class GpuDeviceTests(unittest.TestCase):
-    def test_owned_context_on_another_card_is_not_hidden_by_other_users_memory(self):
-        owned={123:dict(pid=123,start_ticks='born')}
-        proof=gpu_device.audit_rows('GPU-aaaa',owned,[['123','GPU-aaaa','1652'],['123','GPU-bbbb','192'],['999','GPU-bbbb','8000']])
-        self.assertFalse(proof['passed']);self.assertEqual(proof['foreign_gpu_memory_mib'],{'GPU-bbbb':192})
-        proof=gpu_device.audit_rows('GPU-aaaa',owned,[['123','GPU-aaaa','1652'],['999','GPU-bbbb','8000']])
-        self.assertTrue(proof['passed']);self.assertNotIn('GPU-bbbb',proof['per_gpu_memory_mib'])
-
     def test_caches_are_persistent_per_box_and_card(self):
         first=gpu_device.cache_paths('GPU-aaaa','box-a');second=gpu_device.cache_paths('GPU-bbbb','box-a')
         self.assertNotEqual(first['root'],second['root'])

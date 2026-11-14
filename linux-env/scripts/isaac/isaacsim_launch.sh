@@ -314,7 +314,7 @@ do_launch() {
         return 1
     fi
 
-    # The renderer selects the physical index. PhysX/Warp/torch see only the
+    # The renderer selects its Kit-table index. PhysX/Warp/torch see only the
     # assigned UUID and use CUDA ordinal zero inside that visibility boundary.
     local gpu_uuid
     gpu_uuid="$(nvidia-smi --query-gpu=uuid --format=csv,noheader -i "$GPU" 2>/dev/null | head -1)"
@@ -350,16 +350,17 @@ do_launch() {
     fi
     if [ -n "${INSTANCE_ROOT:-}" ]; then
         local device_environment
-        device_environment="$(python3 "$SCRIPT_DIR/../collect/gpu_device.py" --gpu "$GPU")" || return 1
+        device_environment="$(python3 "$SCRIPT_DIR/../collect/gpu_device.py" --gpu "$GPU" --kit-log "$LOG")" || return 1
         eval "$device_environment"
         [[ "${SOARM_KIT_THREADS:-6}" =~ ^[1-6]$ ]] || { echo "Kit threads must be 1..6" >&2; return 1; }
     fi
+    local renderer_gpu="${SOARM_RENDERER_GPU_INDEX:-$GPU}"
     physics_gpu=0  # CUDA ordinal inside the single assigned physical device.
     args+=(--ext-folder "$EXT_FOLDER"
            --ext-folder "$KIT_MCP_ROOT/exts"
            --enable omni.kit.mcp
            --enable "$ext"
-           --/renderer/multiGpu/enabled=false "--/renderer/activeGpu=$GPU" "--/physics/cudaDevice=$physics_gpu"
+           --/renderer/multiGpu/enabled=false "--/renderer/activeGpu=$renderer_gpu" "--/physics/cudaDevice=$physics_gpu"
            # isaacsim.exp.full turns on the async-rendering toggle (isaacsim.core.throttling); with it,
            # reset()/play() can deadlock compiling an MDL material. Ported from isaac-sim-mcp
            # 83dcf46 / e2a2247 (ur5e-dt, aic-dt launchers).
@@ -450,6 +451,9 @@ do_launch() {
         return 1
     fi
     do_wait || return $?      # 3 = GPU wedge: reported by do_wait, Isaac left running
+    if [ -n "${INSTANCE_ROOT:-}" ]; then
+        python3 "$SCRIPT_DIR/../collect/gpu_device.py" --gpu "$GPU" --kit-log "$LOG" --verify-renderer || return 1
+    fi
     if [ "$stream" = 1 ]; then
         local i
         for i in $(seq 1 30); do stream_listening && break; sleep 2; done

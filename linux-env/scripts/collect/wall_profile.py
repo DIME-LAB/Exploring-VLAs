@@ -1,11 +1,11 @@
 """Same-host monotonic wall timing; diagnostic only, never a simulation clock."""
-import math
+import math,copy
 
-PROFILE_POLICY=dict(version=1,clock='CLOCK_MONOTONIC on the same host',
+PROFILE_POLICY=dict(version=2,clock='CLOCK_MONOTONIC on the same host',
     kit_boundary='advance requested to Kit post-update; proxy for render completion, not a GPU fence',
     camera_boundary='both RGB callbacks received; includes DDS transport and native publication ordering',
     native_state='in-process PhysX/body read; no per-tick bridge/run_python RPC',
-    async_write='encoder pipe + row write on encoder worker; may overlap next tick',
+    async_write='write-profiles.jsonl links immutable capture rows by profile_id; queue includes request to dequeue; overlaps next tick',
     shares='mean stage / mean tick total; stages can overlap, shares are not an additive partition')
 
 
@@ -16,7 +16,7 @@ def profile_tick(snapshot,entry,read_start,read_end):
     native=snapshot.get('wall_profile_native',{})
     cameras=max(entry[k][1] for k in ('wrist','top'))
     step_start=native.get('step_start_ns');step_end=native.get('step_end_ns')
-    result=dict(epoch=snapshot['epoch'],sim_ns=snapshot['sim_ns'],capture_start_ns=read_end,
+    result=dict(profile_id=str(snapshot['epoch'])+':'+str(snapshot['sim_ns'])+':'+str(read_start),epoch=snapshot['epoch'],sim_ns=snapshot['sim_ns'],capture_start_ns=read_end,
         read_wait_ms=milliseconds(read_start,read_end),camera_receive_ns=cameras,
         kit_step_render_ms=milliseconds(step_start,step_end) if step_start is not None and step_end is not None else None,
         step_to_both_cameras_ms=milliseconds(step_start,cameras) if step_start is not None else None,
@@ -24,7 +24,7 @@ def profile_tick(snapshot,entry,read_start,read_end):
         native_state_read_ms=native.get('state_read_ms'),native_state_bridge_calls=0,
         native_step_start_ns=step_start,validity_queries=0,validity_query_ms=0.,
         expert_dart_compute_ms=0.,command_publish_ack_ms=0.,contract_validation_ms=0.,
-        image_decode_ms=0.,row_queue_ms=0.,row_video_write_ms=0.,capture_preparation_ms=0.)
+        image_decode_ms=0.,row_queue_ms=None,row_video_write_ms=None,capture_preparation_ms=0.,recorded=False)
     return result
 
 
@@ -39,3 +39,17 @@ def summary(rows):
     queries=[row.get('validity_queries',0) for row in rows]
     return dict(policy=PROFILE_POLICY,ticks=len(rows),stages=stats,validity_query_count=sum(queries),
                 mean_validity_queries=sum(queries)/len(queries) if queries else 0.)
+
+
+def joined_profiles(captures,writes):
+    linked={row['profile_id']:row for row in writes}
+    if len(linked)!=len(writes):raise RuntimeError('Duplicate async write profile identity')
+    result=[]
+    for original in captures:
+        row=copy.deepcopy(original);write=linked.pop(row['profile_id'],None)
+        if write is not None:
+            if any(write[key]!=row[key] for key in ('epoch','sim_ns')):raise RuntimeError('Async write profile differs from capture tick')
+            row.update({key:write[key] for key in ('row_queue_ms','row_video_write_ms')})
+        result.append(row)
+    if linked:raise RuntimeError('Async write has no matching capture profile')
+    return result

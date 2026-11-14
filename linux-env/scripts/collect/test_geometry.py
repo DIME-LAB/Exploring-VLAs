@@ -19,11 +19,19 @@ class GeometryBoundaryTests(unittest.TestCase):
         plan = make_grasp_plan(pose, bbox, approach_offset=(.003, -.002))
         self.assertAlmostEqual(plan['tcp'][0], .2)
         self.assertAlmostEqual(plan['tcp'][1], .011)
-        self.assertAlmostEqual(plan['tcp'][2], .01445)
+        self.assertAlmostEqual(plan['tcp'][2], .0093)
         self.assertAlmostEqual(plan['poses'][0][1], .203)
         self.assertAlmostEqual(plan['poses'][0][2], .009)
         self.assertEqual(plan['poses'][-1][1:], plan['tcp'])
         self.assertEqual(pose['y'], 0.)
+
+    def test_tabletop_grasp_clears_the_measured_moving_finger_envelope(self):
+        from so_arm101_control.grasp_geometry import FINGER_BELOW_TCP_M,FINGER_TABLE_CLEARANCE_M
+        bbox=dict(sx=.032,sy=.016,sz=.0128)
+        for bottom in (0.,.001,.01):
+            plan=make_grasp_plan(dict(x=.2,y=0.,z=bottom+bbox['sz']/2,qw=1.,qz=0.),bbox)
+            self.assertAlmostEqual(plan['tcp'][2]-bottom,.0093)
+            self.assertGreaterEqual(plan['tcp'][2]-FINGER_BELOW_TCP_M-bottom,FINGER_TABLE_CLEARANCE_M-1e-12)
 
     def test_jaw_clearance_and_limits(self):
         opening, closing = gripper_angles(.02)
@@ -70,12 +78,22 @@ class LegacyParityTests(unittest.TestCase):
                 '_grasp_obj_z_var':override,'_grasp_topic_var':'/drop_poses' if drop else '/objects_poses_sim',
                 '_grasp_approach_height_var':height}.items():setattr(old,name,setting(value))
             expected=old.plan(pose)
+            if not drop and abs(override)<=1e-4:
+                # The authorized grasp-height change is explicit; all inherited
+                # XY/yaw/jaw, approach spacing, drop and override behavior stays.
+                target_z=pose['z']-bbox['sz']/2+.0093
+                delta=target_z-expected['tcp'][2]
+                expected['tcp']=(*expected['tcp'][:2],target_z)
+                expected['poses']=[(*point[:3],point[3]+delta) for point in expected['poses']]
             actual=make_grasp_plan(pose,bbox,cross=cross,current_wrist_roll=wr,tcp_clearance=tcp,
                 bbox_enabled=enabled,object_z_override=override,approach_height=height,drop=drop)
             for key in ('tcp','jaw_offset'):
                 for a,b in zip(actual[key],expected[key]):self.assertAlmostEqual(a,b,delta=1e-12)
             self.assertAlmostEqual(actual['yaw'],expected['yaw'],delta=1e-12)
-            self.assertEqual(actual['poses'],expected['poses'])
+            self.assertEqual(len(actual['poses']),len(expected['poses']))
+            for a,b in zip(actual['poses'],expected['poses']):
+                self.assertEqual(a[0],b[0])
+                for u,v in zip(a[1:],b[1:]):self.assertAlmostEqual(u,v,delta=1e-12)
             angles=gripper_angles(object_grip_width(bbox,cross),tcp,opening,closing)
             for a,b in zip(angles,old._gripper_angle_for_object('block')):self.assertAlmostEqual(a,b,delta=1e-12)
 

@@ -29,7 +29,7 @@ python3 "$SCRIPT_DIR/collect/storage.py" "$SOARM_COLLECTION_ROOT" "$SOARM_INSTAN
 mkdir -p "$SOARM_INSTANCE_ROOT" "$HF_LEROBOT_HOME"
 mkdir -p "$TMPDIR" "$ROS_LOG_DIR" "$HF_HOME" "$OPTIX_CACHE_PATH"
 if [ "$command" != down ]; then
-    device_environment="$(python3 "$SCRIPT_DIR/collect/gpu_device.py" --gpu "$ISAACSIM_GPU")"
+    device_environment="$(python3 "$SCRIPT_DIR/collect/gpu_device.py" --gpu "$ISAACSIM_GPU" --kit-log "$SOARM_INSTANCE_ROOT/isaac.log")"
     eval "$device_environment"
 fi
 launcher="$SCRIPT_DIR/isaac/isaacsim_launch.sh"

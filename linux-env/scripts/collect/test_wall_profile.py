@@ -1,6 +1,6 @@
 """Stage timings preserve raw clock boundaries and report overlapping shares."""
 import unittest
-from wall_profile import profile_tick,summary,milliseconds
+from wall_profile import profile_tick,summary,milliseconds,joined_profiles
 
 class WallProfileTests(unittest.TestCase):
     def test_actual_native_and_camera_boundaries_and_native_state_has_no_bridge_rpc(self):
@@ -31,11 +31,39 @@ class WallProfileTests(unittest.TestCase):
         import test_review_regressions as probes
         Writer,scope=probes.load_class('collect.py','EpisodeWriter')
         with tempfile.TemporaryDirectory() as directory:
-            writer=object.__new__(Writer);writer.path=Path(directory);writer.rows=[];writer.failure=None
+            writer=object.__new__(Writer);writer.path=Path(directory);writer.rows=[];writer.write_profiles=[];writer.failure=None
             writer.queue=queue.Queue();writer.encoders={k:NS(stdin=io.BytesIO()) for k in ('wrist','top')}
-            profile=dict(row_video_write_ms=0.);row=dict(epoch=1,sim_ns=1,wall_profile=profile)
+            profile=dict(profile_id='tick-1',epoch=1,sim_ns=1,row_video_write_ms=None,capture_processing_ms=2.,tick_total_ms=150.);row=dict(epoch=1,sim_ns=1,wall_profile=profile)
             images={k:np.zeros((2,2,3),dtype=np.uint8) for k in ('wrist','top')}
-            writer.queue.put((row,images));writer.queue.put(None);writer.write_loop()
-            self.assertIsNone(writer.failure);self.assertGreater(profile['row_video_write_ms'],0.)
+            writer.queue.put((row,images,0));writer.queue.put(None);writer.write_loop()
+            self.assertIsNone(writer.failure);self.assertIsNone(profile['row_video_write_ms']);self.assertGreater(writer.write_profiles[0]['row_video_write_ms'],0.)
             self.assertEqual(len(writer.rows),1);self.assertEqual(len(writer.encoders['top'].stdin.getvalue()),12)
-            self.assertEqual(json.loads((writer.path/'frames.jsonl').read_text())['sim_ns'],1)
+            persisted=json.loads((writer.path/'frames.jsonl').read_text())
+            self.assertEqual(persisted['wall_profile'],profile)
+            async_row=json.loads((writer.path/'write-profiles.jsonl').read_text())
+            self.assertEqual(async_row,writer.write_profiles[0])
+            self.assertGreater(joined_profiles([profile],[async_row])[0]['row_video_write_ms'],0.)
+
+    def test_geometry_failure_keeps_partial_tick_and_failing_stage(self):
+        import test_review_regressions as probes
+        c,r,entry=probes.ReviewRegressions().collector()
+        c.node._check_state_valid_with_contacts=lambda q:(False,[])
+        c.capture()
+        self.assertTrue(c.failure);self.assertEqual(len(c.wall_profiles),1)
+        profile=c.wall_profiles[0]
+        self.assertEqual(profile['stage'],'execution_geometry');self.assertEqual(profile['outcome'],'failed')
+        self.assertGreater(profile['validity_queries'],0);self.assertGreater(profile['validity_query_ms'],0.)
+        self.assertIn('error',profile);self.assertIn('tick_total_ms',profile)
+
+    def test_profile_is_complete_before_immediate_encoder_consumption(self):
+        from types import SimpleNamespace as NS
+        import copy
+        import test_review_regressions as probes
+        c,r,entry=probes.ReviewRegressions().collector();persisted=[]
+        c.capture.__globals__['Sensors']=probes.load_class('collect.py','Sensors')[0]
+        c.writer=NS(add=lambda row,images:persisted.append(copy.deepcopy(row)))
+        c.capture()
+        self.assertEqual(len(persisted),1)
+        profile=persisted[0]['wall_profile']
+        self.assertIn('capture_processing_ms',profile);self.assertIn('tick_total_ms',profile)
+        self.assertIsNone(profile['row_video_write_ms']);self.assertEqual(profile,c.wall_profiles[0])

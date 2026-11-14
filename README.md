@@ -618,9 +618,19 @@ Instance N selects domain `90+N`, bridge `8777+2N`, HTTP `8778+2N`, policy RPC
 `18090+N` and private runtime files. `ISAACSIM_GPU` selects renderer, physics
 CUDA and CUDA consumers (default 0). Indexed launches resolve that physical
 card's UUID and pin `CUDA_VISIBLE_DEVICES` to it. CUDA consumers use its remapped
-ordinal 0; renderer settings retain the physical index. Startup and per-attempt
-GPU receipts include verified process birth identities and NVML memory on every
-card; any owned context on another card stops collection.
+ordinal 0. Renderer indices come from Kit's GPU table, resolved against UUID and
+PCI bus identity; they are independent of nvidia-smi indices. Startup and per-attempt
+GPU receipts include both NVML compute and graphics process lists on every card.
+Same-PID/card memory is not counted twice. Missing API coverage or memory
+attribution is **unverified**, never zero. Birth identities and the owned descendant
+set are checked before and after sampling; unstable samples get three bounded
+attempts and then refuse as unverified. Any verified owned foreign-card context
+stops collection. A prior owned Kit log supplies the launch-index hint; startup
+requires the current log's sole Active device to match the assigned UUID and PCI
+bus, and collection audits it again. A fresh instance without a prior device table
+refuses before launch; provision its owned table during an explicitly assigned
+setup window. These checks verify sampled allocations; they do not create an OS
+device-access boundary.
 Use only assigned resources on shared boxes. DDS uses loopback-only CycloneDDS;
 do not also set ROS_LOCALHOST_ONLY. World timing is set before scene creation,
 including the 30 Hz frame-rate clamp. Never change World timing on a live scene.
@@ -645,7 +655,7 @@ bulk data lives on another filesystem. Never alter the sibling backup archive.
 Receipts measure growth of writable root files in this instance's process trees,
 identifying shared caches. This is space growth, not in-place rewrite traffic.
 
-Every capture includes cheap wall timing in `wall_profile`; receipts retain all
+Every capture includes cheap wall timing in an immutable `wall_profile`; receipts retain all
 attempt ticks plus mean/p95 for Kit step-to-post-update, camera arrival/join,
 in-process native state reads, MoveIt validity query count/time, expert/DART
 compute, publish-to-ACK, contract checks, image decode and row/encoder writes.
@@ -653,7 +663,12 @@ The common clock is same-host monotonic wall time, never a dataset timestamp.
 Kit post-update is a render-completion proxy rather than a GPU fence; the separate
 step-to-both-camera-arrivals interval includes ROS transport. Async video writes
 can overlap another tick, so stage shares are reported against total tick time
-without claiming an additive partition. Per-tick native reads use no bridge RPC.
+without claiming an additive partition. Encoder completion is persisted in
+`write-profiles.jsonl`, linked by profile ID, epoch and sim stamp; it never changes
+an already queued capture row. Receipts retain separate capture/write records and
+join them for statistics. Failed joins, contracts, geometry or ACKs retain partial
+profiles with their failing stage, including final shutdown in
+`wall-profile-finalization.json`. Per-tick native reads use no bridge RPC.
 The next live smoke must measure these costs; offline checks do not establish
 throughput.
 
@@ -664,7 +679,12 @@ It saves first-reset/restore receipts, stage/attempt wall times, dataset-load
 validation and PID/start-time/pidfd cleanup evidence. Receipt scans reconcile once
 more after each producer exits. Every JSON publication is atomic; after exit an
 invalid final receipt fails. Cleanup/probe errors still publish a failed smoke
-receipt and release the instance claim. A shutdown exit code alone never proves
+receipt and release the instance claim. Terminal markers publish before cleanup
+and are never cleared; any root/attempt terminal marker forbids resume/export or
+success. Bring-up of a collector invocation invalidates earlier completed summary
+status. Its finalization certificate must affirm cleanup, match the producing PID
+and stage time, and hash the final summary; a stale accepted/complete receipt
+cannot substitute for it. A shutdown exit code alone never proves
 or disproves a completed collection: accepted episodes and export validation
 receipts are required, and cleanup must independently verify every owned child. `--plan` starts no processes. `--go`
 requires the lead's explicit window; independent review can run concurrently,

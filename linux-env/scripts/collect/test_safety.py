@@ -197,7 +197,7 @@ class SafetyTests(unittest.TestCase):
         source=(ROOT/'linux-env/scripts/isaac/isaacsim_launch.sh').read_text()
         start=source.index('    physics_gpu=0')
         end=source.index('    # shellcheck disable=SC2206',start)
-        script='set -eu\nargs=()\nGPU=1\nINSTANCE_INDEX=1\nINSTANCE_ROOT=/mnt/a4500-backup/exploring-vlas/runtime/probe\nheadless=1\nEXT_FOLDER=exts\nKIT_MCP_ROOT=mcp\next=soarm101-dt\nRATE_HZ=0\nSOARM_SHADER_CACHE_DIR=/mnt/a4500-backup/exploring-vlas/cache/probe/shaders\n'
+        script='set -eu\nargs=()\nGPU=1\nrenderer_gpu=1\nINSTANCE_INDEX=1\nINSTANCE_ROOT=/mnt/a4500-backup/exploring-vlas/runtime/probe\nheadless=1\nEXT_FOLDER=exts\nKIT_MCP_ROOT=mcp\next=soarm101-dt\nRATE_HZ=0\nSOARM_SHADER_CACHE_DIR=/mnt/a4500-backup/exploring-vlas/cache/probe/shaders\n'
         script+=source[start:end]+'\nprintf "%s\\n" "${args[@]}"\n'
         result=subprocess.run(['bash','-c',script],check=True,capture_output=True,text=True).stdout.splitlines()
         self.assertIn('--/renderer/activeGpu=1',result)

@@ -18,7 +18,8 @@ import subprocess
 import sys
 import threading
 import time
-from wall_profile import profile_tick,summary as wall_profile_summary,milliseconds,PROFILE_POLICY
+import collection_status
+from wall_profile import profile_tick,summary as wall_profile_summary,milliseconds,PROFILE_POLICY,joined_profiles
 sys.dont_write_bytecode = True
 
 import numpy as np
@@ -204,6 +205,7 @@ class Sensors:
         deadline = time.monotonic() + timeout
         with self.condition:
             while True:
+                if getattr(self,'closed',False):raise CancelledGeneration('Sensor join closed')
                 if self.failure:
                     if isinstance(self.failure,BaseException):raise self.failure
                     raise RuntimeError(self.failure)
@@ -237,6 +239,7 @@ class EpisodeWriter:
         self.path = path
         path.mkdir(parents=True, exist_ok=False)
         self.rows = []
+        self.write_profiles=[]
         self.queue = queue.Queue(maxsize=60)
         self.failure = None
         self.encoders = {}
@@ -251,17 +254,20 @@ class EpisodeWriter:
 
     def write_loop(self):
         try:
-            with (self.path / 'frames.jsonl').open('w') as out:
+            with (self.path / 'frames.jsonl').open('w') as out, (self.path/'write-profiles.jsonl').open('w') as timings:
                 while True:
                     item = self.queue.get()
                     if item is None:
                         break
-                    row, images = item
+                    row, images,enqueue_ns = item
                     write_start=time.monotonic_ns()
                     for key, img in images.items():
                         self.encoders[key].stdin.write(img.tobytes())
                     out.write(json.dumps(row) + '\n')
-                    row['wall_profile']['row_video_write_ms']=milliseconds(write_start,time.monotonic_ns())
+                    profile=row['wall_profile']
+                    completed=dict(profile_id=profile['profile_id'],epoch=row['epoch'],sim_ns=row['sim_ns'],
+                        row_queue_ms=milliseconds(enqueue_ns,write_start),row_video_write_ms=milliseconds(write_start,time.monotonic_ns()))
+                    timings.write(json.dumps(completed)+'\n');self.write_profiles.append(completed)
                     self.rows.append(row)
         except Exception as exc:
             self.failure = repr(exc)
@@ -269,7 +275,7 @@ class EpisodeWriter:
     def add(self, row, images):
         if self.failure:
             raise RuntimeError(self.failure)
-        self.queue.put((row, images), timeout=2)
+        self.queue.put((copy.deepcopy(row), images,time.monotonic_ns()), timeout=2)
 
     def close(self):
         self.queue.put(None, timeout=5)
@@ -538,6 +544,9 @@ class Collector:
             validate=self.generation.require, emit=self.motion_wait_diagnostic,
             abort=lambda:self.stop.is_set() or self.node._qs_abort_evt.is_set(),
             rtf_floor=args.wait_rtf_floor,wall_margin=frame_capacity_seconds()+30.)
+        self.status_lock=threading.RLock()
+        self.finalization_certificate=None
+        self.current_attempt_path=None
         self.stalled_abort_lock = threading.Lock()
         self.stalled_abort_started = False
         self.generation.on_stall = self.abort_stalled_owner
@@ -623,6 +632,7 @@ class Collector:
     def scene_incomplete(self, exc, source='MoveIt'):
         self.node._scene_terminal_error = str(exc)
         self.generation.poison(exc)
+        self.persist_terminal_fault(exc,source)
         self.stop.set()
         self.node._qs_abort_evt.set()
         try:
@@ -636,6 +646,13 @@ class Collector:
         except (TimeoutError, ConnectionError, OSError) as exc:
             self.scene_incomplete(exc, source='Kit')
             raise
+
+    def persist_terminal_fault(self,exc,source):
+        sensor=getattr(self.sensors,'failure',None)
+        with self.status_lock:
+            return collection_status.terminal(self.args.output,dict(error=repr(exc),source=source,
+                epoch=self.generation.epoch,sensor_evidence=getattr(sensor,'evidence',None)),
+                attempt=self.current_attempt_path)
 
     def callback_failure(self, name, exc):
         self.abort_stalled_owner(OwnershipStalled('ROS callback '+name+': '+repr(exc)), 'ROS callback')
@@ -652,6 +669,8 @@ class Collector:
             self.failure = str(exc)
         with self.tick_condition:
             self.tick_condition.notify_all()
+        try:self.persist_terminal_fault(exc,requester)
+        except Exception as publication_error:self.failure+='; terminal status publication failed: '+repr(publication_error)
         # No generation lock: its owner may be stuck in publication forever.
         # Native cancellation only pauses and invalidates queued commands.
         try:
@@ -769,10 +788,16 @@ class Collector:
             if self.stop.wait(.002):raise CancelledGeneration('Collector stopped during clock join')
 
     def validate_command(self,candidate,state,previous):
+        timing=dict(validity_queries=0,validity_query_ms=0.)
         def check(q):
             self.generation.require(candidate.epoch,candidate.stamp_ns)
-            return self.node._check_state_valid_with_contacts(dict(zip(JOINTS,q)))
-        return final_command(candidate,state,previous,check,[JOINT_LIMITS[n] for n in JOINTS])
+            start=time.monotonic_ns();timing['validity_queries']+=1
+            try:return self.node._check_state_valid_with_contacts(dict(zip(JOINTS,q)))
+            finally:timing['validity_query_ms']+=milliseconds(start,time.monotonic_ns())
+        try:return final_command(candidate,state,previous,check,[JOINT_LIMITS[n] for n in JOINTS])
+        except Exception as exc:
+            exc.wall_profile_geometry=timing
+            raise
 
     def reject_quality(self,kind,evidence,snapshots=None):
         if snapshots is None:snapshots=[self.held_snapshot(self.generation.epoch)]
@@ -781,13 +806,16 @@ class Collector:
 
     def capture(self):
         while not self.stop.is_set():
-            epoch=None;failure_tick=None
+            epoch=None;failure_tick=None;profile=None;profile_frozen=False;profile_retained=False;keep_profile=True
+            read_start=time.monotonic_ns()
+            profile=dict(profile_id='unjoined:'+str(read_start),epoch=self.generation.epoch,sim_ns=None,
+                capture_start_ns=read_start,recorded=False,stage='sensor_join',outcome='pending')
             try:
                 read_start=time.monotonic_ns()
                 try:stamp,entry=self.sensors.read(timeout=30)
                 except TimeoutError:
                     if self.servo.plan or self.servo.grip_plan:raise TimeoutError('Motion stalled: no synchronized camera/state tick within 30 wall seconds')
-                    continue
+                    keep_profile=False;continue
                 read_end=time.monotonic_ns()
                 epoch=entry['tick'][0]['epoch']
                 self.generation.require(epoch,stamp)
@@ -795,6 +823,7 @@ class Collector:
                     self.generation.require(epoch,stamp)
                     joint,received=entry['joint'];snapshot=entry['tick'][0]
                     profile=profile_tick(snapshot,entry,read_start,read_end)
+                    profile.update(stage='observation_contract',outcome='pending')
                     preparation_start=time.monotonic_ns()
                     mapped=dict(zip(joint.name,joint.position));mapped_v=dict(zip(joint.name,joint.velocity))
                     state=[mapped[n] for n in JOINTS];velocity=[mapped_v[n] for n in JOINTS]
@@ -820,6 +849,7 @@ class Collector:
                         if plan:self.generation.require(plan['epoch'])
                     physical_failure=None
                     profile['capture_preparation_ms']=milliseconds(preparation_start,time.monotonic_ns())-profile['contract_validation_ms']
+                    profile['stage']='expert_dart_compute'
                     compute_start=time.monotonic_ns()
                     try:
                         clean,executed,active,phase,reference,command_clock,completed,advance,candidate=self.servo.tick(stamp,state,snapshot['drive_targets'])
@@ -831,10 +861,12 @@ class Collector:
                         candidate=TargetCandidate(epoch,stamp,tuple(executed),(0.,)*5,
                             tuple(e-c for e,c in zip(executed,clean)),(0.,)*6,tuple(executed),planner_reference=tuple(executed))
                     profile['expert_dart_compute_ms']=milliseconds(compute_start,time.monotonic_ns())
+                    profile['stage']='execution_geometry'
                     geometry=self.validate_command(candidate,state,snapshot['drive_targets'])
                     profile['validity_queries']=geometry['query_timing']['queries']
                     profile['validity_query_ms']=geometry['query_timing']['total_query_wall_s']*1000
                     self.generation.require(epoch,stamp)
+                    profile['stage']='command_publish_ack'
                     command_start=time.monotonic_ns()
                     self.servo.publish_reference(executed)
                     self.generation.require(epoch,stamp)
@@ -854,27 +886,32 @@ class Collector:
                         body=snapshot['bodies'][selected]
                         row['target_object_pose']=dict(zip(('x','y','z'),body['position']))
                         row['target_body']=body;row['target_cup']=snapshot['bodies']['cup_'+self.servo.params['color']]
+                    profile['stage']='final_contract'
                     contract_start=time.monotonic_ns()
                     proof=self.tick_audit.finish(row)
                     profile['contract_validation_ms']+=milliseconds(contract_start,time.monotonic_ns())
                     self.servo.commit_command(candidate,epoch,stamp)
                     profile.update(executing=active,phase=phase,recorded=False)
                     checked=copy.deepcopy(snapshot);checked['tick_contract']=proof
-                    if not hasattr(self,'wall_profiles'):self.wall_profiles=[]
-                    self.wall_profiles.append(profile)
-                    row['wall_profile']=profile
                     with self.writer_lock:
                         if self.writer:
-                            profile['recorded']=True
+                            profile['recorded']=True;profile['stage']='image_decode'
                             decode_start=time.monotonic_ns()
                             images={key:Sensors.image(entry[key][0]).copy() for key in ('wrist','top')}
                             profile['image_decode_ms']=milliseconds(decode_start,time.monotonic_ns())
-                            queue_start=time.monotonic_ns()
+                        profile.update(stage='convergence' if physical_failure else 'complete',
+                            outcome='quality_reject' if physical_failure else 'captured')
+                        profile['capture_processing_ms']=milliseconds(read_end,time.monotonic_ns())
+                        profile['tick_total_ms']=milliseconds(profile.get('native_step_start_ns') or read_end,time.monotonic_ns())
+                        # The row gets its own finalized capture profile. Encoder/queue
+                        # completion is persisted separately, never by mutating this row.
+                        row['wall_profile']=copy.deepcopy(profile);profile_frozen=True
+                        if self.writer:
                             self.writer.add(row,images)
-                            profile['row_queue_ms']=milliseconds(queue_start,time.monotonic_ns())
                             self.episode_snapshots.append(checked)
-                    profile['capture_processing_ms']=milliseconds(read_end,time.monotonic_ns())
-                    profile['tick_total_ms']=milliseconds(profile.get('native_step_start_ns') or read_end,time.monotonic_ns())
+                    if physical_failure is not None:profile['error']=repr(physical_failure)
+                    if not hasattr(self,'wall_profiles'):self.wall_profiles=[]
+                    self.wall_profiles.append(copy.deepcopy(profile));profile_retained=True
                     with self.tick_condition:
                         self.last_processed_ns=stamp;self.last_snapshot=checked;self.tick_condition.notify_all()
                     if physical_failure is not None:
@@ -884,15 +921,19 @@ class Collector:
                         self.node._set_motion_status(dict(ok=True,outcome='physical_sim_tick_converged',epoch=epoch),event)
                         event.set()
             except OwnershipStalled as exc:
-                self.abort_stalled_owner(exc,'capture/dispatch');return
-            except CancelledGeneration:continue
+                profile.update(outcome='terminal',error=repr(exc));self.abort_stalled_owner(exc,'capture/dispatch');return
+            except CancelledGeneration as exc:
+                profile.update(outcome='cancelled',error=repr(exc));continue
             except Exception as exc:
+                profile.update(outcome='failed',error=repr(exc))
+                profile.update(getattr(exc,'wall_profile_geometry',{}))
                 if self.generation.stalled:
                     self.abort_stalled_owner(OwnershipStalled(self.generation.stalled),'capture/dispatch');return
                 with self.generation.own('collector motion'):
                     if epoch is not None and epoch!=self.generation.epoch:continue
                     if epoch is None:epoch=self.generation.epoch
                     record=self.record_capture_failure(exc,epoch,failure_tick)
+                    record['wall_profile']=copy.deepcopy(profile)
                     message=record['error'];self.node._qs_abort_evt.set()
                     if isinstance(exc,ConvergenceFailure) and record['validated_sim_tick']:
                         with self.servo.lock:
@@ -908,6 +949,14 @@ class Collector:
                     else:self.abort_stalled_owner(exc,'capture pipeline fault')
                     if getattr(self.node,'_motion_event',None):self.node._motion_event.set()
                     if self.failure:return
+
+            finally:
+                if keep_profile and not profile_retained:
+                    if not profile_frozen:
+                        profile['capture_processing_ms']=milliseconds(profile['capture_start_ns'],time.monotonic_ns())
+                        profile['tick_total_ms']=milliseconds(profile.get('native_step_start_ns') or read_start,time.monotonic_ns())
+                    if not hasattr(self,'wall_profiles'):self.wall_profiles=[]
+                    self.wall_profiles.append(copy.deepcopy(profile))
 
     def advance_ticks(self, count):
         snapshots = []
@@ -1180,6 +1229,7 @@ class Collector:
         if (root / 'superseded.json').exists():
             raise ValueError('Superseded diagnostic run requires a fresh output directory')
         root.mkdir(parents=True, exist_ok=args.resume)
+        with self.status_lock:self.finalization_certificate=collection_status.begin(root)
         previous = json.loads((root / 'run.json').read_text()) if args.resume else None
         if previous and previous.get('diagnostic', False) != args.diagnostic:
             raise ValueError('Resume diagnostic retention mode differs from the existing run')
@@ -1266,7 +1316,7 @@ class Collector:
                     raise ValueError(f'Missing dimensions for baseline object {name}')
                 position[2] = self.node._ground_z_var.get() + float(bbox['sz']) / 2
             self.baseline_cup_layout = initial['cup_layout']
-        tracked_sources = ['linux-env/scripts/collect/wall_profile.py','linux-env/scripts/collect/gpu_device.py','linux-env/scripts/collect/safe_home.py','linux-env/scripts/collect/frame_join.py','linux-env/scripts/collect/comparisons.py','linux-env/scripts/collect/collect.py', 'linux-env/scripts/collect/contract.py',
+        tracked_sources = ['linux-env/scripts/collect/collection_status.py','linux-env/scripts/collect/nvml_processes.py','linux-env/scripts/collect/renderer_device.py','linux-env/scripts/collect/wall_profile.py','linux-env/scripts/collect/gpu_device.py','linux-env/scripts/collect/safe_home.py','linux-env/scripts/collect/frame_join.py','linux-env/scripts/collect/comparisons.py','linux-env/scripts/collect/collect.py', 'linux-env/scripts/collect/contract.py',
                            'linux-env/scripts/collect/checkpoint.py',
                            'linux-env/scripts/collect/episode_policy.py',
                            'linux-env/scripts/collect/dart.py',
@@ -1304,8 +1354,8 @@ class Collector:
         if any(source_hashes['linux-env/scripts/collect/'+name] != digest
                for name,digest in transport_config['loaded_dependencies'].items()):
             raise RuntimeError('Kit loaded different transport dependencies')
-        if (transport_config['renderer_gpu']!=int(os.getenv('ISAACSIM_GPU','0')) or
-                transport_config['physics_gpu']!=0 or transport_config['cuda_device']!=0 or
+        if (transport_config['renderer_gpu']!=int(os.environ['SOARM_RENDERER_GPU_INDEX']) or
+                transport_config['renderer_multi_gpu'] is not False or transport_config['physics_gpu']!=0 or transport_config['cuda_device']!=0 or
                 transport_config['cuda_device_count']!=1 or transport_config['cuda_visible_devices']!=gpu_uuid(int(os.getenv('ISAACSIM_GPU','0')))):
             raise RuntimeError('Renderer/physics/CUDA instance GPU isolation differs')
         try:initial_gpu_footprint=self.gpu_footprint()
@@ -1322,7 +1372,7 @@ class Collector:
             atomic_json(root / 'run.json',previous)
         else:
             atomic_json(root / 'run.json',dict(instance=args.instance, host=socket.gethostname(), gpu_index=int(os.getenv('ISAACSIM_GPU', '0')),
-            wall_profile_policy=PROFILE_POLICY,recording_version=3, gpu_isolation_initial=initial_gpu_footprint,transport_config=transport_config, observation_state_topic='/joint_states_measured',
+            wall_profile_policy=PROFILE_POLICY,recording_version=4, gpu_isolation_initial=initial_gpu_footprint,transport_config=transport_config, observation_state_topic='/joint_states_measured',
             diagnostic=args.diagnostic, success_profile=PROFILE,
             motion_wait_policy=wait_policy, tick_clock_policy=CLOCK_POLICY,geometry_query_policy=QUERY_POLICY,quality_policy=POLICY,regrasp_policy=REGRASP_POLICY,regrasp_only=args.regrasp_only,
             application_contract='Held at observation tick; read-back verified PhysX targets before one-frame advance; maximum one sim tick latency',
@@ -1355,6 +1405,7 @@ class Collector:
             try:
                 with self.generation.own('attempt start'):
                     self.current_episode_id=receipt['episode_id']
+                    self.current_attempt_path=path
                     self.episode_snapshots=[]
                     self.node._qs_abort_evt.clear()
                     motion_epochs.add(self.generation.epoch)
@@ -1530,7 +1581,9 @@ class Collector:
                 receipt['camera_duplicate_messages'] = {key: value - duplicate_start.get(key, 0) for key, value in self.sensors.duplicate_messages.items()}
                 receipt['root_file_growth'] = root_growth.finish()
                 profiles=getattr(self,'wall_profiles',[])[wall_profile_start:]
-                receipt['wall_tick_profile']=dict(summary=wall_profile_summary(profiles),recorded_summary=wall_profile_summary([p for p in profiles if p['recorded']]),ticks=profiles)
+                writes=writer.write_profiles if writer else []
+                joined=joined_profiles(profiles,writes)
+                receipt['wall_tick_profile']=dict(summary=wall_profile_summary(joined),recorded_summary=wall_profile_summary([p for p in joined if p['recorded']]),ticks=profiles,async_writes=writes)
                 receipt['motion_wait_diagnostics'] = [r for r in self.wait_diagnostics[wait_log_start:]
                                                        if r['epoch'] in motion_epochs]
                 try:receipt['gpu_isolation_after']=self.gpu_footprint()
@@ -1541,6 +1594,7 @@ class Collector:
                 receipt['accepted'] = receipt['disposition']['kind']=='accepted'
                 self.needs_home_restore=receipt['disposition']['kind']=='quality_reject'
                 receipt['failure_streak'] = streak.observe(receipt['disposition'])
+                if receipt['disposition']['kind']=='terminal':self.persist_terminal_fault(receipt.get('error'),'attempt disposition')
                 path.mkdir(parents=True, exist_ok=True)
                 atomic_json(path / 'receipt.json',receipt)
                 with (root / 'episodes.jsonl').open('a') as log:
@@ -1557,16 +1611,16 @@ class Collector:
                 yield_fraction=accepted / (trial + 1), error=receipt.get('error'), timing=receipt.get('timing'))), flush=True)
             elapsed = previous_wall + time.monotonic() - start
             if receipt['failure_streak']['stop']:
-                stopped=dict(complete=False,episodes=accepted,attempts=attempted,wall_seconds=elapsed,
+                stopped=dict(producer_invocation=self.finalization_certificate['invocation'],complete=False,episodes=accepted,attempts=attempted,wall_seconds=elapsed,
                     stop=receipt['disposition'],failure_streak=receipt['failure_streak'],end_marker='COLLECTION_STOPPED')
                 atomic_json(root/'summary.json',stopped)
                 self.stop.set();self.node._qs_abort_evt.set()
                 self.generation.poison(RuntimeError(repr(stopped['stop'])))
                 raise RuntimeError('Collection stopped: '+repr(stopped['stop']))
-            atomic_json(root / 'summary.json',dict(complete=False, episodes=accepted,
+            atomic_json(root / 'summary.json',dict(producer_invocation=self.finalization_certificate['invocation'],complete=False, episodes=accepted,
                 attempts=attempted, wall_seconds=elapsed, disk_wait_seconds=disk_wait,
                 end_marker='COLLECTION_IN_PROGRESS'))
-        summary = dict(complete=accepted == args.episodes, episodes=accepted, attempts=attempted,
+        summary = dict(producer_invocation=self.finalization_certificate['invocation'],complete=accepted == args.episodes, episodes=accepted, attempts=attempted,
             yield_fraction=accepted / max(attempted, 1), wall_seconds=previous_wall + time.monotonic() - start,
             disk_wait_seconds=disk_wait,
             episodes_per_wall_hour=accepted * 3600 / max(previous_wall + time.monotonic() - start, 1), end_marker='COLLECTION_FINISHED')
@@ -1576,23 +1630,35 @@ class Collector:
             raise RuntimeError('Attempt budget exhausted before the requested success count')
 
     def close(self):
-        self.stop.set()
-        try:
-            if self.generation.stalled:timeline(False)
-            else:self.timeline(False)
-            mcp('run_python', {'code': "import carb\ns=carb.settings.get_settings()\ns.set_int('/app/runLoops/main/rateLimitFrequency',10)\ns.set_bool('/app/runLoops/main/rateLimitEnabled',True)\nresult=True"})
-        finally:
-            self.executor.shutdown(timeout_sec=5)
-            self.node.destroy_node()
-            rclpy.shutdown()
-        source_failure=getattr(self.sensors,'failure',None)
-        if self.failure or source_failure:
-            path=Path(self.args.output)/'summary.json'
-            summary=json.loads(path.read_text()) if path.exists() else {}
-            summary.update(complete=False,terminal_failure=dict(error=self.failure or str(source_failure),
-                sensor_evidence=getattr(source_failure,'evidence',None)),end_marker='COLLECTION_ABORTED')
-            atomic_json(path,summary)
-            raise RuntimeError('Collector terminal failure: '+str(self.failure or source_failure))
+        self.stop.set();errors=[]
+        with self.sensors.condition:
+            self.sensors.closed=True;self.sensors.condition.notify_all()
+        # Invalidate stale success BEFORE any cleanup RPC or executor operation.
+        def note_terminal(source):
+            fault=self.failure or getattr(self.sensors,'failure',None)
+            if fault:self.persist_terminal_fault(fault,source)
+        def cleanup(name,callback):
+            try:callback()
+            except BaseException as exc:
+                errors.append(dict(stage=name,error=repr(exc)))
+                try:self.persist_terminal_fault(exc,'cleanup '+name)
+                except BaseException as publication_error:errors.append(dict(stage='terminal publication',error=repr(publication_error)))
+        cleanup('pre-cleanup terminal status',lambda:note_terminal('before cleanup'))
+        cleanup('native cancellation',lambda:timeline(False) if self.generation.stalled else self.timeline(False))
+        cleanup('idle rate',lambda:mcp('run_python', {'code': "import carb\ns=carb.settings.get_settings()\ns.set_int('/app/runLoops/main/rateLimitFrequency',10)\ns.set_bool('/app/runLoops/main/rateLimitEnabled',True)\nresult=True"}))
+        def retire_capture():
+            self.capture_thread.join(timeout=frame_capacity_seconds()+5)
+            if self.capture_thread.is_alive():raise RuntimeError('Capture worker did not retire')
+        cleanup('capture retirement',retire_capture)
+        cleanup('executor shutdown',lambda:self.executor.shutdown(timeout_sec=5))
+        cleanup('node destruction',self.node.destroy_node)
+        cleanup('ROS shutdown',rclpy.shutdown)
+        cleanup('post-cleanup terminal status',lambda:note_terminal('after cleanup'))
+        cleanup('wall profile persistence',lambda:atomic_json(Path(self.args.output)/'wall-profile-finalization.json',
+            dict(ticks=getattr(self,'wall_profiles',[]),capture_failures=self.capture_failures)))
+        with self.status_lock:
+            certificate=collection_status.finish(self.args.output,self.finalization_certificate,errors)
+        if not certificate['passed']:raise RuntimeError('Collector finalization failed: '+repr(certificate))
 
     def request_stop(self):
         self.stop.set()

@@ -65,10 +65,22 @@ receipt; an outer finally releases the instance claim even if finalization fails
 Receipts published at producer exit are reconciled before starting another stage.
 
 Indexed GPU launches use the assigned physical card UUID as CUDA_VISIBLE_DEVICES.
-CUDA ordinals become zero within that process; the renderer keeps its physical
-card selection. The collector records startup and before/after-attempt NVML memory
+CUDA ordinals become zero within that process; the renderer uses its Kit-table index, resolved against physical UUID and PCI
+bus. A previous owned log is only a launch hint; the current log must prove the
+sole Active device is the assigned card. The collector records startup and before/after-attempt NVML memory
 for launcher-owned birth identities. Other users' contexts are ignored; any
 positive owned memory on another card fails. Persistent shader/OptiX/CUDA caches
 are private to this project and keyed by hostname plus card UUID. Camera warm-up
 precedes recording; neither the shader directory nor other projects' caches are
 cleared.
+
+GPU attribution enumerates both nvmlDeviceGetComputeRunningProcesses_v3 and
+nvmlDeviceGetGraphicsRunningProcesses_v3 for every card. Shared PID/card memory
+uses the larger value rather than a sum. API errors and unknown memory stay
+unverified. Kernel ancestry rooted at verified supervisors and the collector
+includes descendants; birth/PGID sets are reconciled on both sides of sampling.
+Unstable samples retry at most three times and never report a confirmed allocation
+against a reused PID. Renderer table mapping follows [NVIDIA Kit Q9](https://docs.omniverse.nvidia.com/kit/docs/kit-manual/110.1.5/guide/linux_troubleshooting.html#q9-how-to-specify-what-gpus-to-run-omniverse-apps-on).
+The NVML ABI is pinned to the installed nvml.h nvmlProcessInfo_v2_t definition;
+queries do not load a CUDA runtime. These are sampled allocation checks, not a
+kernel device-access boundary.

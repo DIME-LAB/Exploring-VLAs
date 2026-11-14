@@ -338,6 +338,7 @@ def install(mode='collect'):
                 shader_cache_path=carb.settings.get_settings().get('/rtx/shaderDb/shaderCachePath'),optix_cache_path=os.environ.get('OPTIX_CACHE_PATH'),
                 kit_threads=carb.settings.get_settings().get('/plugins/carb.tasking.plugin/threadCount'),
                 renderer_gpu=carb.settings.get_settings().get('/renderer/activeGpu'),
+                renderer_multi_gpu=carb.settings.get_settings().get('/renderer/multiGpu/enabled'),
                 physics_gpu=carb.settings.get_settings().get('/physics/cudaDevice'),
                 measured_topic='/joint_states_measured', local_corners=_RUNTIME.local_corners,
                 effective_shape_offsets=_RUNTIME.resolved_shape_offsets())

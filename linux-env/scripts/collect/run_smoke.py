@@ -8,6 +8,7 @@ import argparse,ctypes,fcntl,json,os,re,select,shutil,signal,socket,subprocess,s
 from pathlib import Path
 sys.dont_write_bytecode=True
 from gpu_device import gpu_uuid
+from collection_status import require_finalized
 from storage import atomic_json,CANONICAL_ROOT,confined
 
 REPO=Path(__file__).resolve().parents[3]
@@ -242,14 +243,17 @@ def main():
                     stage_error=repr(exc);raise
                 finally:
                     ledger.scan();row=dict(name=item['name'],pid=process.pid,returncode=process.returncode,
-                        wall_s=(time.time_ns()-start)/1e9,error=stage_error)
+                        started_wall_ns=start,wall_s=(time.time_ns()-start)/1e9,error=stage_error)
                     stages.append(row);atomic_json(output/'stages.json',stages);atomic_json(output/'attempt-times.json',attempt_times)
                     print(json.dumps(row),flush=True)
         try:
             for item in recipe['stages']:
                 code=stage(item);name=item['name']
+                if name.endswith('-resume'):
+                    require_finalized(output/name.split('-')[0],producer_pid=stages[-1]['pid'],not_before_ns=stages[-1]['started_wall_ns'])
                 if name.endswith('-first'):
                     kind=name.split('-')[0];run=output/kind;receipt=first_receipt(run,name,code,output/(name+'.log'))
+                    require_finalized(run,producer_pid=stages[-1]['pid'],not_before_ns=stages[-1]['started_wall_ns'])
                     scene=json.loads((run/'first-reset-scene.json').read_text())
                     summary=json.loads((run/'summary.json').read_text())
                     if summary.get('stop') or summary.get('terminal_failure'):raise RuntimeError(name+' has a terminal collector receipt')
