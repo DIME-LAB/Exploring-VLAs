@@ -12,10 +12,11 @@ def collector(root,certificate,shutdown):
     c,r,entry=probes.ReviewRegressions().collector()
     c.args=NS(output=root,resume=True);c.status_lock=threading.RLock();c.finalization_certificate=certificate
     c.startup_status_output=root.parent/'startup';c.current_attempt_path=None;c.capture_failures=[]
-    c.sensors=sensors();c.executor=NS(shutdown=shutdown);c.ros_thread=NS(join=lambda **kw:None,is_alive=lambda:False)
+    c.sensors=sensors();c.executor=NS(shutdown=shutdown,_executor=NS(shutdown=lambda **kw:None,_threads=[]));c.ros_thread=NS(join=lambda **kw:None,is_alive=lambda:False)
+    c.ros_context=NS(destroy=lambda:None)
     c.capture_thread=NS(join=lambda **kw:None,is_alive=lambda:False);c.node.destroy_node=lambda:None
     c.timeline=lambda play:dict(held=True)
-    scope=c.close.__globals__;scope.update(confined=Path,Path=Path,mcp=Mock(return_value=True),rclpy=NS(shutdown=lambda:None))
+    scope=c.close.__globals__;scope.update(confined=Path,Path=Path,mcp=Mock(return_value=True),rclpy=NS(shutdown=lambda **kw:None,get_default_context=lambda:None))
     c.persist_terminal_fault=type(c).persist_terminal_fault.__get__(c,type(c))
     return c
 

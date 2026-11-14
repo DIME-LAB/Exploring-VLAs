@@ -7,6 +7,8 @@ from pathlib import Path
 import sys
 import threading
 import time
+import clock_status
+from ros_lifecycle import retire_executor,shutdown_context
 
 import rclpy
 from rclpy.executors import MultiThreadedExecutor
@@ -53,13 +55,15 @@ def main():
     expected_domain = str(90 + int(os.environ.get('SOARM_INSTANCE_INDEX', '0')))
     if os.environ.get('ROS_DOMAIN_ID') != expected_domain:
         raise ValueError('Clock sanity requires this instance\'s assigned ROS domain')
+    certificate=clock_status.begin(args.output)
     kit('import sys\nsys.path.insert(0,' + repr(str(REPO / 'linux-env/scripts/collect')) + ')\n'
         'import collection_runtime as c\nc.install("deploy")\nc.runtime().timeline.play()\nresult=True')
     rclpy.init(); node = PickPlaceNode(node_name='collection_clock_sanity', use_sim_time=True,
                                      joint_states_topic='/joint_states_measured')
     ex = MultiThreadedExecutor(num_threads=4); ex.add_node(node)
     thread = threading.Thread(target=ex.spin, daemon=True); thread.start()
-    results, diagnostics = [], []
+    results, diagnostics, cleanup_errors = [], [], []
+    context=node.context;primary_error=None
     install_motion_waiter(node, diagnostics)
     try:
         deadline = time.monotonic() + 30
@@ -88,15 +92,26 @@ def main():
             if name == 'slow' and row['measured_rtf'] >= 1:
                 raise RuntimeError(f'Required RTF regime not achieved: {row}')
             results.append(row); print(json.dumps(row), flush=True)
+    except BaseException as exc:
+        primary_error=repr(exc)
+        raise
     finally:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        atomic_json(args.output,dict(passed=len(results) == 2, regimes=results,
-            motion_wait_diagnostics=diagnostics))
-        try:
-            kit((REPO / 'linux-env/scripts/collect/configure_clock.py').read_text() + '\nresult=configure(30)')
-            kit('import collection_runtime as c\nc.runtime().cancel()\nresult=c.install("collect")')
-        finally:
-            ex.shutdown(timeout_sec=5);  node.destroy_node(); rclpy.shutdown()
+        def cleanup(label,callback):
+            try:
+                callback()
+                return True
+            except BaseException as exc:
+                cleanup_errors.append(dict(stage=label,error=repr(exc)))
+                return False
+        cleanup('native collect preset',lambda:kit((REPO / 'linux-env/scripts/collect/configure_clock.py').read_text() + '\nresult=configure(30)'))
+        cleanup('native cancellation',lambda:kit('import collection_runtime as c\nc.runtime().cancel()\nresult=c.install("collect")'))
+        retired=cleanup('executor retirement',lambda:retire_executor(ex,thread))
+        if retired:
+            destroyed=cleanup('action clients and node destruction',node.destroy_node)
+            if destroyed:cleanup('ROS context destruction',lambda:shutdown_context(rclpy,context))
+        final=clock_status.finish(args.output,certificate,dict(checks_passed=len(results)==2,regimes=results,
+            motion_wait_diagnostics=diagnostics,primary_error=primary_error),cleanup_errors)
+        if not final['passed'] and primary_error is None:raise RuntimeError('Clock probe finalization failed: '+repr(final))
 
 
 if __name__ == '__main__':

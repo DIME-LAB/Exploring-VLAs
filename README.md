@@ -448,8 +448,10 @@ Python API omits packet GID; the collector uses an isolated project-local native
 serialized take on the existing borrowed subscription handle, then normal Python
 ROS image deserialization. No system ROS or publisher proxy is installed. A C
 compiler and Humble development headers/libraries are required; the helper builds
-once per source/header fingerprint under the instance runtime. Source/library
-hashes and warm decode costs are recorded. Its executor adapter handles only the
+only against the checked-in, validated Humble ABI manifest: transitive headers,
+loaded RCL/RMW/CycloneDDS/rclpy libraries and executor implementation. Unknown
+inputs or a cached helper differing from its build receipt refuse startup.
+Source/library hashes and warm decode costs are recorded. Its executor adapter handles only the
 two marked image subscriptions; other callbacks retain Humble behavior. Existing
 callback containment turns transport errors into terminal run evidence.
 
@@ -460,6 +462,14 @@ receiving subscription and context. See the
 [transport contract and real ROS proofs](docs/notes/collection-image-identity.md).
 Render-product pausing is a separate performance experiment, not required for
 correct first-frame selection.
+
+The epoch and cancellation floor are published as one identity. Camera stale
+filtering and publisher binding share that identity lock; durable episode receipts
+allow fenced image/re-render history to be pruned. The shared node explicitly
+destroys its ActionClient waitables before base-node destruction. Collector and
+clock checks retire the spin thread and callback pool before destroying nodes and
+contexts. Clock checks require an invocation-bound post-cleanup certificate and
+refuse abnormal producer exit. See [ROS lifetime evidence](docs/notes/collection-ros-lifecycle.md).
 
 A typed physical convergence deadline can reject one episode after native pause,
 worker retirement and contract auditing. Stationary/short data, calibrated-home

@@ -49,7 +49,7 @@ class RerenderIdentityTests(unittest.TestCase):
         for info in (None,dict(publisher_gid=[0]*24,implementation_identifier='rmw_cyclonedds_cpp')):
             s=sensors()
             with self.assertRaises(SensorAmbiguity):s.put('wrist',image(10**9,11),info)
-        s=sensors();s.generation.epoch=None
+        s=sensors();s.generation.poison('test bootstrap')
         s.put('wrist',image(10**9,11),None);self.assertIsNone(s.failure);self.assertEqual(s.camera_publishers,{})
 
     def test_native_transport_error_is_retained_for_callback_and_capture_containment(self):

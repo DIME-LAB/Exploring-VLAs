@@ -7,38 +7,39 @@ Python's normal deserialize_message still constructs the sensor_msgs/Image.
 import ctypes as C,fcntl,hashlib,os,subprocess,uuid,time,inspect
 from pathlib import Path
 from storage import confined,atomic_json
+import image_abi
 
 _LOADED_SHA256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 
 def build_native():
     source=Path(__file__).with_name('image_take.c');ros=Path('/opt/ros/humble')
-    headers=[ros/'include/rmw/rmw/types.h',ros/'include/rcl/rcl/subscription.h']
+    abi=image_abi.require()
     raw=source.read_bytes()
     if hashlib.sha256(Path(__file__).read_bytes()).hexdigest()!=_LOADED_SHA256:raise RuntimeError('Image adapter source changed; restart collector')
-    digest=hashlib.sha256(raw+Path(__file__).read_bytes()+b''.join(p.read_bytes() for p in headers)).hexdigest()
+    digest=hashlib.sha256(raw+Path(__file__).read_bytes()+abi['fingerprint'].encode()).hexdigest()
     root=confined(Path(os.environ['SOARM_INSTANCE_ROOT'])/'native-image-transport'/digest)
     root.mkdir(parents=True,exist_ok=True);library=root/'image_take.so'
+    expected=dict(abi_fingerprint=abi['fingerprint'],source_sha256=hashlib.sha256(raw).hexdigest(),python_source_sha256=_LOADED_SHA256)
     fd=os.open(root/'build.lock',os.O_WRONLY|os.O_CREAT|os.O_NOFOLLOW,0o600)
     try:
         fcntl.flock(fd,fcntl.LOCK_EX)
-        if not library.exists():
+        if library.exists():image_abi.verify_cache(library,root/'build.json',expected)
+        else:
             temporary=root/('image_take.'+uuid.uuid4().hex+'.so')
             staged=root/'image_take.c';fd_source=os.open(staged,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600)
             with os.fdopen(fd_source,'wb') as stream:stream.write(raw)
-            command=['cc','-std=c11','-shared','-fPIC','-O2','-Wall','-Wextra','-Werror',str(staged),'-o',str(temporary)]
-            command += ['-I'+str(ros/'include'/name) for name in
-                ('rcl','rmw','rcutils','rosidl_runtime_c','rosidl_typesupport_interface','rcl_yaml_param_parser','rcl_logging_interface')]
-            command += ['-L'+str(ros/'lib'),'-lrcl','-lrmw','-lrcutils']
+            command=['cc',*image_abi.FLAGS,str(staged),'-o',str(temporary),*image_abi.include_flags(),'-L'+str(ros/'lib'),'-lrcl','-lrmw','-lrcutils']
             try:
                 result=subprocess.run(command,capture_output=True,text=True,timeout=60)
-                atomic_json(root/'build.json',dict(argv=command,returncode=result.returncode,stdout=result.stdout,stderr=result.stderr))
+                atomic_json(root/'build.json',dict(expected,argv=command,returncode=result.returncode,stdout=result.stdout,stderr=result.stderr,library_sha256=hashlib.sha256(temporary.read_bytes()).hexdigest() if temporary.exists() else None))
                 if result.returncode:raise RuntimeError('Native image transport build failed: '+result.stderr)
                 os.replace(temporary,library)
             finally:
                 if temporary.exists():temporary.unlink()
     finally:os.close(fd)
-    return library,dict(source_sha256=hashlib.sha256(raw).hexdigest(),python_source_sha256=_LOADED_SHA256,abi_sha256=digest,
+    image_abi.verify_cache(library,root/'build.json',expected)
+    return library,dict(abi_fingerprint=abi['fingerprint'],abi_manifest_sha256=hashlib.sha256(Path(__file__).with_name('image_transport_abi.json').read_bytes()).hexdigest(),source_sha256=hashlib.sha256(raw).hexdigest(),python_source_sha256=_LOADED_SHA256,abi_sha256=digest,
         library_sha256=hashlib.sha256(library.read_bytes()).hexdigest(),library=str(library),ros_prefix=str(ros))
 
 

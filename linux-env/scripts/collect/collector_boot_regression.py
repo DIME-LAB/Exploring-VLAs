@@ -29,7 +29,9 @@ def main():
     from cup_geometry import PROFILE
     output=confined(args.output);output.mkdir(parents=True,exist_ok=False)
     rclpy.init()
-    native=Node('fake_collector_boot_transport')
+    from rclpy.context import Context
+    native_context=Context();native_context.init()
+    native=Node('fake_collector_boot_transport',context=native_context)
     clock=native.create_publisher(Clock,'/clock',10)
     joint=native.create_publisher(JointState,'/joint_states_measured',10)
     cameras=[native.create_publisher(Image,name,10) for name in ('/wrist_camera_rgb_sim','/workspace_camera_sim')]
@@ -44,7 +46,7 @@ def main():
     queries=[]
     def valid(request,response):queries.append(list(request.robot_state.joint_state.position));response.valid=True;return response
     service=native.create_service(GetStateValidity,'/check_state_validity',valid)
-    executor=MultiThreadedExecutor(num_threads=3);executor.add_node(native)
+    executor=MultiThreadedExecutor(num_threads=3,context=native_context);executor.add_node(native)
     thread=threading.Thread(target=executor.spin);thread.start()
     collector=None;publishers=[];result=dict(passed=False,actual_collector_constructor=True,actual_pick_place_constructor=True)
     stamp=1033333333;frame=dict(epoch=1,sim_ns=stamp,physics_time_s=stamp/1e9,state=[0.]*6,velocity=[0.]*6,
@@ -105,13 +107,13 @@ def main():
             finally:
                 if collector is not None:
                     # Keep fake transport's executor alive until the collector has retired.
-                    with patch.object(implementation.rclpy,'shutdown'):
-                        collector.close()
+                    collector.close()
     except BaseException as exc:
         result['error']=repr(exc);raise
     finally:
         for worker in publishers:worker.join(timeout=6)
-        executor.shutdown(timeout_sec=5);thread.join(timeout=5);native.destroy_node()
+        from ros_lifecycle import retire_executor,shutdown_context
+        retire_executor(executor,thread);native.destroy_node();shutdown_context(rclpy,native_context)
         if rclpy.ok():rclpy.shutdown()
         instance_claim.close()
         atomic_json(output/'validation.json',result)

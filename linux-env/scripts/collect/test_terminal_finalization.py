@@ -26,10 +26,11 @@ class TerminalFinalizationTests(unittest.TestCase):
             first=json.loads((run/'terminal-fault.json').read_text())['events'][0]
             self.assertEqual(len(first['sensor_evidence']['candidates']),2)
             self.assertFalse(json.loads((attempt/'receipt.json').read_text())['accepted'])
-            c.executor=NS(shutdown=lambda **kw:True);c.ros_thread=NS(join=lambda **kw:None,is_alive=lambda:False);c.node.destroy_node=lambda:None
+            c.executor=NS(shutdown=lambda **kw:True,_executor=NS(shutdown=lambda **kw:None,_threads=[]));c.ros_thread=NS(join=lambda **kw:None,is_alive=lambda:False);c.node.destroy_node=lambda:None
+            c.ros_context=NS(destroy=lambda:None)
             c.capture_thread=NS(join=lambda **kw:None,is_alive=lambda:False)
             scope=c.close.__globals__;scope['timeline']=Mock(side_effect=ConnectionError('native cancel unavailable'))
-            scope['mcp']=Mock(return_value=True);scope['rclpy']=NS(shutdown=lambda:None)
+            scope['mcp']=Mock(return_value=True);scope['rclpy']=NS(shutdown=lambda **kw:None,get_default_context=lambda:None)
             with self.assertRaisesRegex(RuntimeError,'finalization failed'):c.close()
             final=json.loads((run/'collector-finalization.json').read_text())
             self.assertFalse(final['passed']);self.assertTrue(any('native cancel unavailable' in e['error'] for e in final['cleanup_errors']))

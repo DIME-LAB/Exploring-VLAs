@@ -85,7 +85,7 @@ class QualityPolicyTests(unittest.TestCase):
     def test_saved_pilot_descent_is_a_typed_physical_deadline_at_the_same_tick(self):
         fixture=json.loads(Path(__file__).with_name('fixtures').joinpath('descent_410019.json').read_text())
         c,r,_=probes.ReviewRegressions().collector();v=c.servo
-        c.generation.epoch=fixture['epoch'];v.reference=list(fixture['reference']);v.reference_epoch=fixture['epoch']
+        c.generation._identity=(fixture['epoch'],c.generation.floor_ns);v.reference=list(fixture['reference']);v.reference_epoch=fixture['epoch']
         duration=round(fixture['planned_duration_s']*1e9)
         point=NS(positions=fixture['reference'][:5],time_from_start=NS(sec=duration//10**9,nanosec=duration%10**9))
         v.plan=dict(epoch=fixture['epoch'],start=fixture['operation_start_sim_ns'],done=threading.Event(),

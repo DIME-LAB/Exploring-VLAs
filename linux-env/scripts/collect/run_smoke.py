@@ -9,6 +9,7 @@ from pathlib import Path
 sys.dont_write_bytecode=True
 from gpu_device import gpu_uuid
 from collection_status import require_finalized
+import clock_status
 from storage import atomic_json,CANONICAL_ROOT,confined
 
 REPO=Path(__file__).resolve().parents[3]
@@ -207,7 +208,7 @@ def main():
         output.mkdir(parents=True,exist_ok=False);atomic_json(output/'plan.json',recipe)
         env=dict(os.environ,ISAACSIM_GPU='0',SOARM_SIM_NICE='10',SOARM_PHYSICS_THREADS='4',
             SOARM_INSTANCE_ROOT=str(runtime),SOARM_COLLECTION_ROOT=str(CANONICAL_ROOT),HF_LEROBOT_HOME=str(CANONICAL_ROOT/'datasets'),
-            PYTHONDONTWRITEBYTECODE='1',OMP_NUM_THREADS='1',OPENBLAS_NUM_THREADS='1',
+            PYTHONDONTWRITEBYTECODE='1',PYTHONFAULTHANDLER='1',OMP_NUM_THREADS='1',OPENBLAS_NUM_THREADS='1',
             SOARM_INSTANCE_CLAIM_FD=str(claim.fd),ISAACSIM_LOG=str(runtime/'isaac.log'),
             CUDA_VISIBLE_DEVICES=assigned_uuid,SOARM_ASSIGNED_GPU_UUID=assigned_uuid)
         for name in ('ISAACSIM_EXTRA_ARGS','ROS_LOCALHOST_ONLY'):env.pop(name,None)
@@ -249,6 +250,8 @@ def main():
         try:
             for item in recipe['stages']:
                 code=stage(item);name=item['name']
+                if name=='clock-sanity':
+                    clock_status.require(output/'clock-sanity.json',stages[-1]['pid'],stages[-1]['started_wall_ns'],code)
                 if name.endswith('-resume'):
                     require_finalized(output/name.split('-')[0],producer_pid=stages[-1]['pid'],not_before_ns=stages[-1]['started_wall_ns'])
                 if name.endswith('-first'):

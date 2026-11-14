@@ -20,20 +20,40 @@ class StepGeneration:
     """
     def __init__(self):
         self.lock = threading.RLock()
-        self.epoch = None
+        self._identity_lock = threading.RLock()
+        self._identity = (None, -1)
         self.last_epoch = -1
-        self.floor_ns = -1
-        self.identity = (None, -1)
         self.retirement_timeout = 15.
         self.stalled = None
         self.on_stall = None
+
+    @property
+    def identity(self):
+        return self._identity
+
+    @property
+    def epoch(self):
+        return self._identity[0]
+
+    @property
+    def floor_ns(self):
+        return self._identity[1]
+
+    @contextmanager
+    def observe_identity(self):
+        # Separate from long motion ownership: sensor callbacks must still run
+        # while capture owns a generation and waits for its images.
+        with self._identity_lock:
+            yield self._identity
+
+    def _invalidate(self):
+        with self._identity_lock:self._identity=(None,self._identity[1])
 
     @contextmanager
     def own(self, label='motion'):
         if not self.lock.acquire(timeout=self.retirement_timeout):
             self.stalled = f'Stalled generation owner during {label}: {self.lock!r}; retirement exceeded {self.retirement_timeout}s; abort required'
-            self.epoch = None
-            self.identity = (None, self.floor_ns)
+            self._invalidate()
             if self.on_stall is not None:
                 self.on_stall(OwnershipStalled(self.stalled), label)
             raise OwnershipStalled(self.stalled)
@@ -47,8 +67,7 @@ class StepGeneration:
     def poison(self, error):
         if self.stalled is None:
             self.stalled = str(error)
-        self.epoch = None
-        self.identity = (None, self.floor_ns)
+        self._invalidate()
 
     def fail(self, error, requester):
         """An unresolved external mutation is terminal, like owner retirement."""
@@ -62,12 +81,12 @@ class StepGeneration:
             if result['epoch']<=newest or result['invalid_through_ns']<self.floor_ns:
                 raise CancelledGeneration('Cancellation epoch or native clock did not advance monotonically')
             self.last_epoch=result['epoch']
-            self.epoch = result['epoch']
-            self.floor_ns = result['invalid_through_ns']
-            self.identity = (self.epoch, self.floor_ns)
+            with self._identity_lock:
+                self._identity = (result['epoch'],result['invalid_through_ns'])
 
     def require(self, epoch, stamp=None):
-        if self.epoch is None or epoch != self.epoch or (stamp is not None and stamp <= self.floor_ns):
+        active,floor=self.identity
+        if self.stalled or active is None or epoch != active or (stamp is not None and stamp <= floor):
             raise CancelledGeneration('Cancelled motion/observation generation')
 
     def cancel(self, native_cancel, retire):
@@ -75,8 +94,7 @@ class StepGeneration:
             # Failure leaves the local generation unusable. The collector's
             # common terminal handler owns setter-free emergency cancellation.
             if self.epoch is not None:self.last_epoch=max(self.last_epoch,self.epoch)
-            self.epoch = None
-            self.identity = (None, self.floor_ns)
+            self._invalidate()
             retire()
             result = native_cancel()
             self.install(result)

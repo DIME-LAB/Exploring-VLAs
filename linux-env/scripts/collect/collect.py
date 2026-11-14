@@ -20,6 +20,7 @@ import threading
 import time
 import uuid
 import collection_status
+from ros_lifecycle import retire_executor,shutdown_context
 from wall_profile import profile_tick,summary as wall_profile_summary,milliseconds,PROFILE_POLICY,joined_profiles
 sys.dont_write_bytecode = True
 
@@ -157,7 +158,13 @@ class Sensors:
             reference['age_sim_ns'] = stamp-reference['stamp_ns']
         return reference
 
-    def put(self, key, msg,info=None):
+    def put(self,key,msg,info=None):
+        if key in ('wrist','top'):
+            with self.generation.observe_identity() as identity:
+                return self._put_frame(key,msg,info,identity)
+        return self._put_frame(key,msg,info)
+
+    def _put_frame(self, key, msg,info=None,identity=None):
         if isinstance(msg,BaseException):
             with self.condition:
                 self.failure=self.failure or msg;self.condition.notify_all()
@@ -169,7 +176,7 @@ class Sensors:
         else:
             raw_stamp = ns(msg.header.stamp)
         if raw_stamp<=0:return
-        if key in ('wrist','top') and (self.generation.epoch is None or raw_stamp<=self.generation.floor_ns+1000):
+        if key in ('wrist','top') and (identity[0] is None or raw_stamp<=identity[1]+1000):
             with self.condition:self.stale_camera_messages[key]+=1
             return
         incoming=frame_identity(key,msg,raw_stamp)
@@ -177,9 +184,9 @@ class Sensors:
         with self.condition:
             if self.failure:return
             if key in ('wrist','top'):
-                if self.generation.epoch is None or raw_stamp<=self.generation.floor_ns+1000:
+                if identity[0] is None or raw_stamp<=identity[1]+1000:
                     self.stale_camera_messages[key]+=1;return
-                incoming['receipt_epoch']=self.generation.epoch
+                incoming['receipt_epoch']=identity[0]
                 try:incoming['publisher']=publisher_identity(info)
                 except SensorAmbiguity as exc:
                     self.failure=exc;self.condition.notify_all();raise
@@ -244,6 +251,14 @@ class Sensors:
             entry[key]=(msg,receive_ns,incoming) if key in ('wrist','top') else (msg,receive_ns)
             while len(self.pending)>240:self.pending.popitem(last=False)
             self.condition.notify_all()
+
+    def prune_durable_camera_history(self):
+        # The caller has atomically published this attempt's receipt. A native
+        # cancellation floor already excludes these frames from future joins.
+        with self.generation.observe_identity() as (_,floor),self.condition:
+            for frames in self.seen_camera_frames.values():
+                for key in [k for k,v in frames.items() if v['stamp_ns']<=floor+1000]:del frames[key]
+            for key in [k for k,v in self.rerender_log.items() if v['stamp_ns']<=floor+1000]:del self.rerender_log[key]
 
     def read(self, timeout=15):
         deadline = time.monotonic() + timeout
@@ -562,6 +577,7 @@ class Collector:
                 execution=SceneExecution('collector', self.motion_effect, self.scene_incomplete, self.callback_failure))
         finally:
             self._constructing_thread = None  # Revoke before either collector thread starts.
+        self.ros_context=self.node.context
         self.node.validity_client=StrictQueryClient(self.node.validity_client,'MoveIt state validity',
             on_failure=lambda exc:self.abort_stalled_owner(exc,'MoveIt validity query'))
         self.node._motion_context = threading.local()
@@ -1405,7 +1421,7 @@ class Collector:
                     raise ValueError(f'Missing dimensions for baseline object {name}')
                 position[2] = self.node._ground_z_var.get() + float(bbox['sz']) / 2
             self.baseline_cup_layout = initial['cup_layout']
-        tracked_sources = ['linux-env/scripts/collect/image_take.c','linux-env/scripts/collect/image_transport.py','isaac/exts/soarm101-dt/so_arm101_dt/extension.py','isaac/exts/soarm101-dt/so_arm101_dt/primitive_colliders.py','linux-env/scripts/collect/cup_geometry.py','linux-env/scripts/collect/pose_math.py','linux-env/scripts/collect/collection_status.py','linux-env/scripts/collect/nvml_processes.py','linux-env/scripts/collect/renderer_device.py','linux-env/scripts/collect/wall_profile.py','linux-env/scripts/collect/gpu_device.py','linux-env/scripts/collect/safe_home.py','linux-env/scripts/collect/frame_join.py','linux-env/scripts/collect/comparisons.py','linux-env/scripts/collect/collect.py', 'linux-env/scripts/collect/contract.py',
+        tracked_sources = ['linux-env/scripts/collect/image_abi.py','linux-env/scripts/collect/image_transport_abi.json','linux-env/scripts/collect/ros_lifecycle.py','linux-env/scripts/collect/protocol.py','linux-env/scripts/collect/image_take.c','linux-env/scripts/collect/image_transport.py','isaac/exts/soarm101-dt/so_arm101_dt/extension.py','isaac/exts/soarm101-dt/so_arm101_dt/primitive_colliders.py','linux-env/scripts/collect/cup_geometry.py','linux-env/scripts/collect/pose_math.py','linux-env/scripts/collect/collection_status.py','linux-env/scripts/collect/nvml_processes.py','linux-env/scripts/collect/renderer_device.py','linux-env/scripts/collect/wall_profile.py','linux-env/scripts/collect/gpu_device.py','linux-env/scripts/collect/safe_home.py','linux-env/scripts/collect/frame_join.py','linux-env/scripts/collect/comparisons.py','linux-env/scripts/collect/collect.py', 'linux-env/scripts/collect/contract.py',
                            'linux-env/scripts/collect/checkpoint.py',
                            'linux-env/scripts/collect/episode_policy.py',
                            'linux-env/scripts/collect/dart.py',
@@ -1673,11 +1689,12 @@ class Collector:
                     receipt['recovery_report']=cycle_result['recovery_report']
                 if cycle_result.get('worker_error'):
                     receipt['cycle_worker_error'] = cycle_result['worker_error']
-                receipt['camera_duplicate_messages'] = {key: value - duplicate_start.get(key, 0) for key, value in self.sensors.duplicate_messages.items()}
-                receipt['camera_publishers']=dict(self.sensors.camera_publishers)
-                receipt['camera_rerenders']={key:value-rerender_start.get(key,0) for key,value in self.sensors.rerender_messages.items()}
-                receipt['camera_stale_boundary_frames']={key:value-stale_camera_start.get(key,0) for key,value in self.sensors.stale_camera_messages.items()}
-                receipt['camera_rerender_log']=[dict(value) for value in self.sensors.rerender_log.values() if value['epoch'] in motion_epochs]
+                with self.sensors.condition:
+                    receipt['camera_duplicate_messages'] = {key: value - duplicate_start.get(key, 0) for key, value in self.sensors.duplicate_messages.items()}
+                    receipt['camera_publishers']=dict(self.sensors.camera_publishers)
+                    receipt['camera_rerenders']={key:value-rerender_start.get(key,0) for key,value in self.sensors.rerender_messages.items()}
+                    receipt['camera_stale_boundary_frames']={key:value-stale_camera_start.get(key,0) for key,value in self.sensors.stale_camera_messages.items()}
+                    receipt['camera_rerender_log']=[dict(value) for value in self.sensors.rerender_log.values() if value['epoch'] in motion_epochs]
                 receipt['root_file_growth'] = root_growth.finish()
                 profiles=getattr(self,'wall_profiles',[])[wall_profile_start:]
                 writes=writer.write_profiles if writer else []
@@ -1698,6 +1715,7 @@ class Collector:
                 atomic_json(path / 'receipt.json',receipt)
                 with (root / 'episodes.jsonl').open('a') as log:
                     log.write(json.dumps(receipt) + '\n')
+                self.sensors.prune_durable_camera_history()
             if receipt['accepted']:
                 accepted += 1
             elif not args.diagnostic:
@@ -1738,7 +1756,9 @@ class Collector:
             fault=self.failure or getattr(self.sensors,'failure',None)
             if fault:self.persist_terminal_fault(fault,source)
         def cleanup(name,callback):
-            try:callback()
+            try:
+                callback()
+                return True
             except BaseException as exc:
                 errors.append(dict(stage=name,error=repr(exc)))
                 self.generation.poison(exc);self.node._qs_abort_evt.set()
@@ -1751,14 +1771,10 @@ class Collector:
             self.capture_thread.join(timeout=frame_capacity_seconds()+5)
             if self.capture_thread.is_alive():raise RuntimeError('Capture worker did not retire')
         cleanup('capture retirement',retire_capture)
-        def retire_executor():
-            result=self.executor.shutdown(timeout_sec=5)
-            if result is not True:raise RuntimeError('ROS executor shutdown did not drain callbacks: '+repr(result))
-            self.ros_thread.join(timeout=5)
-            if self.ros_thread.is_alive():raise RuntimeError('ROS executor spin thread did not retire')
-        cleanup('executor shutdown',retire_executor)
-        cleanup('node destruction',self.node.destroy_node)
-        cleanup('ROS shutdown',rclpy.shutdown)
+        retired=cleanup('executor shutdown',lambda:retire_executor(self.executor,self.ros_thread))
+        if retired:
+            destroyed=cleanup('node destruction',self.node.destroy_node)
+            if destroyed:cleanup('ROS shutdown',lambda:shutdown_context(rclpy,self.ros_context))
         cleanup('post-cleanup terminal status',lambda:note_terminal('after cleanup'))
         cleanup('wall profile persistence',lambda:atomic_json(status_root/'wall-profile-finalization.json',
             dict(ticks=getattr(self,'wall_profiles',[]),capture_failures=self.capture_failures)))

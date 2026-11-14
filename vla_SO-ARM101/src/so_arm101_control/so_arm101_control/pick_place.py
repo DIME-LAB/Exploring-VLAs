@@ -4332,6 +4332,15 @@ class PickPlaceNode(Node):
         event.motion_budget = MotionBudget(event.motion_epoch, parent.motion_budget if parent is not None else None)
         return event
 
+    def destroy_node(self):
+        # Humble Node.destroy_node handles pub/sub QoS waitables, but omits
+        # ActionClients. Their native Node/Context references keep DDS alive.
+        # Callers must first stop and join the executor.
+        for waitable in list(self.waitables):
+            if isinstance(waitable, ActionClient):
+                waitable.destroy()
+        return super().destroy_node()
+
     def _motion_thread(self, target, **kwargs):
         # Capture before starting the worker, never after its planning/waits.
         epoch = self._motion_token()

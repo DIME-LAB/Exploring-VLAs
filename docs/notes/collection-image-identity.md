@@ -45,8 +45,11 @@ existing protected callback and capture terminal paths rather than killing the
 executor. GUI/control executors are unchanged.
 
 The local native helper is compiled using the installed Humble headers/libs,
-with strict warnings, into the canonical runtime cache. A source/header/Python
-fingerprint, C/Python source hashes and loaded library hash identify the adapter.
+with strict warnings, into the canonical runtime cache. A checked-in ABI manifest covers the full compiler header dependency set, loaded
+RCL/RMW/CycloneDDS/rclpy native libraries and their dependency closure, and the
+Humble executor implementation. Unknown or changed inputs refuse startup; cached
+helpers must match both the current fingerprint and their complete build receipt.
+C/Python source hashes and the verified library hash identify the adapter.
 The C compilation input is copied into that owned cache before compiling, so a
 shared-checkout edit cannot change the file while the compiler reads it. Compiler
 errors refuse startup and preserve their traceback. No system library is changed.
