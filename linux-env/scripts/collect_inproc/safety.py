@@ -78,10 +78,11 @@ class Geometry:
         if not self.boxes or not self.joints:raise ValueError('Missing native primitive geometry')
         self.allowed={frozenset(p) for p in spec['allowed_pairs']}
         self.selected=None;self.contact=False;self.carried=None
-        self.snapshot=None
+        self.snapshot=None;self.roots={name:np.asarray(matrix,float) for name,matrix in spec['roots'].items()}
+        self.root_motion={}
 
-    def fk(self,q):
-        links={name:np.asarray(matrix,float) for name,matrix in self.spec['roots'].items()}
+    def fk(self,q,roots=None):
+        links=dict(self.roots if roots is None else roots)
         pending=list(self.joints)
         values=dict(zip(JOINTS,q))
         while pending:
@@ -99,12 +100,24 @@ class Geometry:
         return links
 
     def update(self,snapshot):
-        predicted=self.fk(snapshot['state'])
+        roots={name:np.asarray(snapshot['links'][name],float) for name in self.spec['roots']}
+        motion={}
+        for name,matrix in roots.items():
+            if (matrix.shape!=(4,4) or not np.isfinite(matrix).all() or
+                not np.allclose(matrix[3],[0,0,0,1],rtol=0,atol=1e-7) or
+                not np.allclose(matrix[:3,:3].T@matrix[:3,:3],np.eye(3),rtol=0,atol=1e-6) or
+                not np.isclose(np.linalg.det(matrix[:3,:3]),1.,rtol=0,atol=1e-6)):
+                raise RuntimeError('Invalid measured articulation root: '+name)
+            delta=np.linalg.inv(np.asarray(self.spec['roots'][name],float))@matrix
+            motion[name]=dict(translation_m=float(np.linalg.norm(delta[:3,3])),
+                rotation_rad=float(np.arccos(np.clip((np.trace(delta[:3,:3])-1)/2,-1,1))))
+        predicted=self.fk(snapshot['state'],roots)
         for name,actual in snapshot['links'].items():
             if name not in predicted:raise RuntimeError('Unmapped physical link: '+name)
             if not np.allclose(predicted[name],actual,rtol=0,atol=.0005):
                 raise RuntimeError('USD FK differs from measured physical link: '+name)
-        self.snapshot=snapshot
+        self.roots={name:matrix.copy() for name,matrix in roots.items()}
+        self.root_motion=motion;self.snapshot=snapshot
 
     def bind_carried(self,snapshot):
         link=self.spec['gripper_body']

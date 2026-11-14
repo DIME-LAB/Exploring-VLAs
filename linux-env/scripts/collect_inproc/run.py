@@ -85,6 +85,9 @@ def run(a):
             from playing import Playing
             backend=Playing(a.scene,a.manifest)
         else:backend=Native(a.scene,a.manifest,cameras=not a.physics_only)
+        atomic_json(root/'articulation-audit.json',backend.articulation_audit)
+        if not backend.articulation_audit['fixed_base']:
+            raise RuntimeError('PhysX reports a floating-base articulation; scene correction required')
         # Bind CUDA, renderer settings and current Kit table independently.
         import carb
         import torch

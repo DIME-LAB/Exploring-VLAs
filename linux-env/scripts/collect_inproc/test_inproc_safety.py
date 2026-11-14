@@ -40,6 +40,26 @@ class SafetyTests(unittest.TestCase):
         g.update(s);self.assertFalse(g.check([0.]*6)[0])
         s['links']['arm'][0][3]=.001
         with self.assertRaises(RuntimeError):g.update(s)
+    def test_measured_root_moves_fk_and_sweeps_in_the_world_frame(self):
+        g,s=self.geometry();delta=rotation('Z',.0063);delta[0,3]=.000107
+        s['links']={name:(delta@np.asarray(matrix)).tolist() for name,matrix in s['links'].items()}
+        g.update(s)
+        np.testing.assert_allclose(g.fk(s['state'])['arm'],s['links']['arm'],atol=1e-12)
+        self.assertAlmostEqual(g.root_motion['base']['rotation_rad'],.0063)
+        # Moving the whole robot near a stationary world obstacle changes the
+        # collision answer. Child-only FK errors still fault at the same bound.
+        for matrix in s['links'].values():matrix[0][3]+=.999893
+        g.update(s);self.assertFalse(g.check(s['state'])[0])
+        s['links']['arm'][1][3]+=.001
+        with self.assertRaises(RuntimeError):g.update(s)
+    def test_measured_root_must_be_a_finite_rigid_transform(self):
+        for mutation in ('nan','scale','reflection','homogeneous'):
+            g,s=self.geometry()
+            if mutation=='nan':s['links']['base'][0][3]=float('nan')
+            if mutation=='scale':s['links']['base'][0][0]=1.01
+            if mutation=='reflection':s['links']['base'][0][0]=-1
+            if mutation=='homogeneous':s['links']['base'][3][3]=0
+            with self.assertRaises(RuntimeError):g.update(s)
     def test_only_explicit_pad_contact_allowed(self):
         g,s=self.geometry();s['bodies']['object']['position']=[0,0,1]
         g.selected='object';g.contact=True;g.update(s)

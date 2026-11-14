@@ -108,6 +108,8 @@ class Native:
         self.world.play()
         self.art=Articulation('/World/SO_ARM101',name='inproc_arm',reset_xform_properties=False)
         self.art.initialize()
+        from articulation_audit import readback
+        self.articulation_audit=readback(self.stage,self.art)
         if set(self.art.dof_names)!=set(JOINTS):raise RuntimeError('Native articulation has unexpected degrees of freedom')
         self.indices=[self.art.dof_names.index(n) for n in JOINTS]
         self.bodies={};self.links={}

@@ -93,6 +93,9 @@ def main(a):
         report['checks']['nice_domain']=report['nice']==10 and report['domain']==str(90+a.instance)
         scene=backend.stage.GetPrimAtPath(backend.world.get_physics_context().prim_path)
         report['checks']['cpu_physx']=PhysxSchema.PhysxSceneAPI(scene).GetEnableGPUDynamicsAttr().Get() is False
+        report['articulation_audit']=backend.articulation_audit
+        report['checks']['fixed_base']=backend.articulation_audit['fixed_base']
+        if not report['checks']['fixed_base']:raise RuntimeError('PhysX reports a floating-base articulation')
         geometry=Geometry(backend.manifest['geometry'])
         geometry.update(backend.snapshot());report['checks']['native_fk']=True
         restored=backend.restore(backend.manifest['baseline'])
@@ -146,6 +149,7 @@ def main(a):
                 physical_steps=backend.world.current_time_step_index-old_index,
                 physical_seconds=backend.world.current_time-old_time,render_completions=delta,
                 consumed_pairs=backend.rgb.calls,images=row['camera_identity'],**{**timing,**contract_timing,**pose_phase}))
+            report['frames'][-1]['root_motion']=geometry.root_motion
             if index in (0,a.frames//2,a.frames//2+1,a.frames-1,a.frames+1):
                 from PIL import Image
                 for key,img in images.items():Image.fromarray(img).save(root/(key+'-'+str(index)+'.png'))
@@ -183,6 +187,8 @@ def main(a):
     except BaseException as exc:
         failure=exc;report['error']=repr(exc);report['traceback']=traceback.format_exc()
         if backend and backend.rgb:
+            try:report['failure_snapshot']=backend.snapshot()
+            except BaseException as snapshot_error:report['failure_snapshot_error']=repr(snapshot_error)
             report['failed_playing_frame']=getattr(backend,'last_frame',None)
             report['render_event_samples']=backend.rgb.event_samples
             report['render_completions_total']=dict(backend.rgb.render_events)

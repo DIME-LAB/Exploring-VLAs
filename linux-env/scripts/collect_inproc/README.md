@@ -15,6 +15,15 @@ not establish physical grasp yield, renderer fidelity or throughput. See
 [`docs/notes/inprocess-collector.md`](../../../docs/notes/inprocess-collector.md).
 No shared ROS collector or extension module is changed.
 
+The first primed live boot stabilized and completed16 joined ticks before motion
+exposed a stale exported-base FK assumption. Collision FK now follows measured
+root-link poses while keeping descendant checks unchanged. Both probe and
+collector require native PhysX `fixed_base=true`; a world joint and six joint
+DOFs do not prove it. The export helper records the same readback for the
+production owner. See `docs/notes/inprocess-collector-base-root.md` for the scene
+proposal and the still-pending native flag measurements. No episode should run
+until fixed-base fidelity, paused restore and successful finalization pass.
+
 Run the CPU checks without launching Isaac:
 
 ```bash

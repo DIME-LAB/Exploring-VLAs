@@ -59,6 +59,8 @@ def export_scene(directory,wrist_path=None,top_path=None):
             camera_bindings[key]=dict(link=name,matrix=local.tolist())
         else:camera_bindings[key]=dict(link=None,matrix=world.tolist())
     geometry=stage_geometry(r.stage,r.body_paths,links,baseline)
+    from articulation_audit import readback
+    articulation=readback(r.stage,r.art)
     scene=root/'scene.usdc'
     r.stage.Flatten().Export(str(scene))
     asset_sources={}
@@ -67,7 +69,7 @@ def export_scene(directory,wrist_path=None,top_path=None):
         if p.is_file():asset_sources[p.name]=dict(sha256=hashlib.sha256(p.read_bytes()).hexdigest(),source=str(p))
     manifest=dict(version=1,scene_sha256=hashlib.sha256(scene.read_bytes()).hexdigest(),
         baseline=baseline,body_paths=r.body_paths,link_paths=links,camera_paths=cameras,
-        geometry=geometry,source_assets=asset_sources,camera_bindings=camera_bindings,camera_configuration=configuration,
+        geometry=geometry,articulation_audit=articulation,source_assets=asset_sources,camera_bindings=camera_bindings,camera_configuration=configuration,
         cup_geometry_sha256=hashlib.sha256((shared.REPO/'isaac/exts/soarm101-dt/assets/sorting_collision_geometry.json').read_bytes()).hexdigest())
     atomic_json(root/'manifest.json',manifest)
     return dict(scene=str(scene),manifest=str(root/'manifest.json'),links=len(links))

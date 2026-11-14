@@ -506,3 +506,26 @@ the settled recording boundary. Live boot/motion/paused-reset/pose/success-exit
 acceptance is required before any normal pilot. No further sim launch is authorized
 by the released window. The 5+5 dataset, unchanged exporter/readback, same-seed
 ROS comparison, all renderer fidelity metrics and collector RTF remain pending.
+
+
+## Physical root audit before episodes
+
+The first primed boot at 77c0aa1 stabilized in seven unrecorded updates and
+completed sixteen strict joined ticks. The first physical pan response then
+triggered the stale exported-root FK guard. Measured wrist pose and joints imply
+root motion; root schema placement in both production asset and held export
+suggests a floating articulation with an external world constraint. Native base
+mode is not yet measured. See `inprocess-collector-base-root.md` for digests,
+evidence, the production-owner readback and a proposed scene correction. No
+extension or shared collector module is changed. Collision FK uses measured
+physical roots with the same descendant tolerance, while probe/collector now
+require the native PhysX fixed-base flag before accepting motion/episodes.
+
+Partial boot timing (16 frames, means, milliseconds) was: app update33.62,
+camera read4.91, combined physical/render wrapper38.79, state read0.91, clean
+correction0.32, collision8.78, target write0.28 and join/hash/contract9.65. App
+update and camera read are nested in the wrapper and must not be added again.
+These are diagnostic boot slices, excluding initialization, PNG inspection and
+remaining host work, with no dataset writer. They are not a collector RTF result
+and do not demonstrate the >1x target. Physics/render and proof/collision costs
+still need measured optimization after correctness is established.
