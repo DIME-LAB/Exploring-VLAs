@@ -1,0 +1,236 @@
+# In-process SO-ARM101 collection (ROADMAP 3.1f)
+
+Status: design and CPU contract tests; live acceptance is pending a lead-owned
+simulation window. No throughput or image-equivalence result is claimed here.
+The runtime and prototype live in `linux-env/scripts/collect_inproc/`; the ROS
+collector and `isaac/exts/` remain unchanged.
+
+## Decision and architecture
+
+Use a standalone headless `SimulationApp`, with one main-thread owner of physics,
+expert execution, reset and capture. Keep one stage, articulation and two fixed
+640x480 render products for the whole run. Four 1/120 s CPU PhysX steps precede
+each 1/30 s observation; render while physics is held, read measured state and
+both RGB annotators, compute the expert and DART, check and apply the targets,
+then step again. No wall pacing. Read native clock and physics-step count;
+never assign a clock solely from a row number. Render completion is a barrier,
+not evidence that the camera frame must be current: verify render frame metadata
+and unchanged physical state across capture in the live probe.
+
+An extension callback could reuse the live World, but retains its application
+frame, GUI, ROS graphs and reset/callback ownership costs. Standalone gives an
+explicit stepping entrance and independently owned cleanup. Reuse a flattened
+snapshot of the verified sorting scene, including visual assets, cameras, drives,
+physics materials, primitive colliders and lights. Export it only inside a granted
+window, with a physics baseline, camera paths, source asset digests and code head.
+Remove ROS/action graphs and stale SDG writers only from the private loaded stage.
+Do not enable the digital-twin extension in the standalone app. This avoids both
+hot reload and accidental reuse of a shared articulation. Missing assets, camera
+prims, primitives or an incomplete baseline refuse collection.
+
+The first prototype uses the installed 6.1 core APIs already used by our runtime,
+with imports after SimulationApp boot. Installed source is authoritative for
+signatures; upstream concepts were checked against NVIDIA's
+[standalone Python guide](https://docs.isaacsim.omniverse.nvidia.com/latest/python_scripting/manual_standalone_python.html)
+and [simulation fundamentals](https://docs.isaacsim.omniverse.nvidia.com/latest/physics/simulation_fundamentals.html).
+No shared environment or Isaac installation configuration changes are needed.
+
+## Render alternatives (first-class comparison)
+
+| Mode | Physics pass | Render/write pass | Admission to training |
+| --- | --- | --- | --- |
+| Live Isaac | Physics + expert + DART + two annotators, same held step | Bounded RGB encoding and existing exporter | Baseline recommendation; requires 5 normal + 5 re-grasp accepted episodes and same-seed ROS comparison |
+| Isaac two-pass | Cameras/render products fully absent; log measured joints, drives, all rigid-body/link world transforms, both camera transforms, metadata and labels at every camera tick | Physics disabled; replay exact poses in a separate Kit, one fixed product per camera, sequential history | Only after live/replay pixel and timing proof; no physical verdict is rerun in pass 2 |
+| Browser two-pass | Same pose log | CAD/three.js renderer with calibrated camera, exposure/material compensation | Research option until SO-ARM101 image-gap and throughput are measured; not an interchangeable RTX backend |
+
+Recommend live Isaac for the first accepted dataset, Isaac replay as the next
+throughput experiment, and browser rendering as an explicit domain-randomization
+experiment. These are provisional choices pending measurements, not predictions
+that live rendering wins on total GPU-hours. A faster physics pass alone cannot
+justify two-pass collection: report **physics + replay render + encoding/export +
+startup/shutdown**, and steady pipeline bottleneck throughput separately.
+
+Aldrin's two-pass proposal is appropriate because no expert, DART, re-grasp or
+success decision consumes images. The authoritative physical rows must be kept
+immutable. Record each frame's epoch, native sim ns, World time, measured six
+positions/velocities, drives, body poses/velocities, every robot rigid-link pose
+(including moving jaw and fixed camera mounts), camera world matrices, phase,
+clean/executed labels and success evidence. Record a fixed prim inventory and
+scene/asset digests. Use compact per-tick pose packets initially, with exact row
+hashes; USD animation layers can be derived later. The wrist camera world pose
+must be captured rather than reconstructed from a possibly delayed joint topic.
+No interpolation, frame deletion or artificial timestamp normalization is allowed.
+
+Replay sets both USD time code (seconds * timeCodesPerSecond) and recorded world
+transforms, with consistent xform order and parent-relative conversion. Disable
+physics/articulation updates; writing joint targets alone cannot pose links with
+physics off. Preserve scale and all static visuals. Verify every replayed link,
+object and camera against the recorded matrix before rendering. Do not trust the
+Stage Recorder's time origin/segment codes as the native clock. Replay all prior
+frames within a segment to preserve RTX history; parallelize by whole episode
+first. Frame sharding needs its own temporal warmup/history proof. Motion blur,
+TAA and denoiser history can make images differ despite identical instantaneous
+poses. Appearance variants retain original physical labels but are tagged variants,
+not counted as new independent physical successes.
+
+plan47's read-only evidence: `research/fast-battery-20261018.md`,
+`research/cpu-regime-20261020.md`, `research/fast-battery-all-20261020.md` and
+`research/cpu-regime-probes-20261020/overlay/square_table_arm_battery.py` under
+`~/prompt2assembly/plan-anything`. The warm FR3 battery retained replay digests;
+this does not prove SO-ARM101 determinism. Their record-then-render pointers are
+`setup/anim-layer-take-howto-20261016.md`, `research/anim-layer-take-history-20261016.md`,
+`setup/fmb1-composed-render-20260906.md`, `setup/motionpath-camera-render-20260918.md`,
+plus `sim-instrumentation/.../stage_recording`, `stage_take.py` and `replay.rosbag_pose`.
+Their 1280x720 render measurement is 0.192 s/frame (0.34 with short-pass startup),
+and pixel equality to live RTX is unmeasured. These are priors, not our benchmark.
+
+The browser candidate is the Mac's `~/paper1/site-media/out/isaac-look/`,
+`~/paper1/render-recipes/` and `~/.claude/skills/robo-render/`. Its recovered camera
+matrices and compensation are task-specific inputs, not SO-ARM101 calibration.
+Its CPU result (~420 s / 960 720p frames) does not establish GPU headless-browser
+performance. The experiment must render both 640x480 SO-ARM101 views from the same
+pose log and compare PSNR/SSIM, RGB errors and side-by-side crops (robot silhouette,
+fingers, lego edges, cup interior, glossy table reflections). Reuse CAD and exact
+camera optical settings; disclose unsupported RTX effects and material gaps.
+If training uses browser images, deployment/evaluation must either use this same
+renderer with live measured links/objects and camera calibration, publishing the
+existing RGB ROS topics with original sim stamps and a single publisher each,
+or explicitly train on mixed/augmented RTX + browser data and validate on RTX
+and real observations. Replacing live images with ground-truth-rendered poses at
+real deployment would require a perception system supplying those poses; it is
+not a free replacement for the real cameras. Do not silently switch deployment.
+
+## Data and correctness contract
+
+Reuse by import: `contract.parameters/corrective_action/timing_audit`,
+`dart.SmoothDart/PlannerSchedule/TargetCandidate`, `recovery` geometry/detection/
+receipt checks, `tick_contract.TickContract`, `success.initial_arm` and
+`settled_containment`, `episode_policy` quality/fault policy, `storage`,
+`collection_status`, GPU mapping and `managed_process`. Do not import `collect.py`
+just to get its writer/Servo: that imports the ROS process and planner stack.
+
+Rows remain radians internally, exactly as the current raw collector. Feed the
+unchanged `collect/export.py` accepted attempt layout: `frames.jsonl`, wrist/top
+MP4s, receipt, run config/summary, episodes ledger and affirmative finalization.
+Export uses the pinned LeRobot v3 writer, converting measured state and clean
+action to degrees in deployment order: shoulder_pan, shoulder_lift, elbow_flex,
+wrist_flex, wrist_roll, gripper_joint. Feature names, 30 fps, HWC uint8 RGB inputs,
+task strings and `meta/collection_episodes.json` stay identical. Keep the existing
+full state/action/timestamp readback check as an additional validation step.
+
+A held observation is one immutable snapshot. A clean action is
+`corrective_action(measured_state, clean_reference)`. Execution is the original
+planner reference plus smooth seeded DART, with gripper exactly the clean gripper
+command. Do not execute the clipped clean correction instead of the planner path.
+Use the same per-operation noise seeds, ramps, derivative bounds, quiet tail and
+whole-operation noise scaling. Log both references, offset, filter delta=0,
+velocity provenance and physical target readback. Exactly one main-thread apply
+belongs to each observation; no ACK/DDS transport is necessary. Keep an epoch and
+reset floor, target readback, previous-target persistence and TickContract proofs.
+One-process ownership removes queue races, not stale-image or late-read hazards.
+
+Re-grasp retains the shared 2-4 cm seeded miss geometry and parallel clean/miss IK
+paths. Record clean true-target corrections throughout the deliberately missed
+approach/close/lift, never the injected miss as a label. Confirm the whole close/
+lift window using `recovery.detect_miss` (all objects' peak displacement, jaw close
+and native tick continuity), reopen, refresh the measured scene, and run the
+correct grasp. Populate the exact steps/endpoints/window hashes required by
+`recovery.receipt_error`; a recovery tag alone is insufficient. Pilot quota is
+5 accepted normal + 5 accepted re-grasp; production retains the shared 18% quota.
+
+Use physical containment from `success.py` and current `cup_geometry.py`, based on
+`assets/sorting_collision_geometry.json` (floor top 1.2 mm and twelve tilted box
+wall planes). No old radial/floor profile. Check transformed whole-block corners,
+settled linear/angular speeds and cup uprightness over 15 consecutive proved ticks.
+Require the existing physical lift and home gates. Read fresh geometry/source
+hashes after the lead's concurrent cup fixes land.
+
+A collision/planner rejection or physical nonconvergence is a quality rejection
+only with a valid checked physical window. Stale data, unsupported geometry,
+failed restore, missing camera, corrupted recording or an exception is a terminal
+fault. Keep three-consecutive-same-reason stop behavior. Never resume a run with
+terminal markers; never mark incomplete rendering/export successful. Two-pass
+physics results are provisional until every image exists and re-audits pass.
+
+## Collision safety without per-tick MoveIt RPC
+
+Reuse `grasp_geometry.make_grasp_plan`, `find_reachable_grasp_yaw` and calibrated
+`compute_workspace.geometric_ik`. Use direct linear and retract/pan/settle paths
+with the same original time law. No new Lula robot description is needed for this
+5-DOF chain. A future Lula/OMPL planner is a fallback for rejected paths, not an
+excuse to skip validation. Do not change ROS/deployment planning.
+
+The prototype uses in-process oriented-box collision checks on the current native
+primitive shapes. Derive joint frames and link-local box transforms from the
+loaded USD, install only the SRDF's allowed self pairs and ground-rest allowances,
+and verify FK against measured link poses at startup and capture ticks. Refuse
+unsupported enabled colliders; never substitute a loose visual bbox silently.
+Check self, ground, all cup boxes, all other legos and carried-block volume. Allow
+only designated finger-pad contact with the selected lego during grasp, with an
+explicit phase policy. A carried block is a planning envelope relative to the
+measured gripper, not a simulated fixed joint or teleported object.
+
+Use shared `command_geometry.checked_segment/final_command` to validate both
+measured-state→executed and prior-drive→executed sweeps at <=0.01 rad. Preflight
+the entire arm operation and DART scale before stepping; at each tick refresh
+moving-body obstacles and recheck actual tracking sweeps. This retains target and
+sweep checks while removing service serialization and MoveIt scene round trips.
+Discrete joint samples are not a mathematical continuous-collision proof: retain
+the current spacing, report this limit, and conservatively inflate boxes by a
+link-motion bound between samples before claiming stronger coverage. An unsupported
+shape or unverified joint map is a fault. Collision refusal never clips a command
+or silently eliminates DART on individual ticks.
+
+## Reset, process, GPU and storage ownership
+
+Restore existing bodies in place, all orientations, six arm positions, all arm
+and rigid velocities, drive targets and scene bookkeeping; no new_stage or rigid
+body insertion beside a live articulation. Increment epoch without rewinding the
+native clock. Verify immediate float32 readback and a fresh six-tick stable-home
+window; establish the drive/clock baseline before the first recorded tick. Seed
+Python/numpy and deterministic layout draws independently; record code/input hashes,
+physics knobs, solver settings and seeds. Numerical reproducibility is measured
+by same-seed independent run digests, not promised across platforms.
+
+Launch with a physical GPU UUID in CUDA_VISIBLE_DEVICES and an independently
+resolved Vulkan renderer activeGpu; CUDA visibility does not select Vulkan.
+Disable multiGpu, GPU PhysX and wall rate limiter; verify CPU dynamics and renderer
+readback after World construction. Keep persistent per-GPU shader/OptiX/CUDA caches,
+never clear shared caches or replace HOME. Separate instance tmp/log/run roots.
+No CPU pinning/cgroup changes without a measured benefit; cap worker threads first.
+Use the shared storage floor/output confinement; owned-process records bind PID,
+start ticks and PGID. Encoder children are owned explicitly. SimulationApp exit 0
+is insufficient: require final receipt, export validator and end marker.
+
+## Phases and acceptance experiment
+
+1. Design and CPU tests: clean/executed separation, exact TickContract and reset
+   baseline, skipped ticks/readback refusal, seeded DART, replay digest/inventory/
+   epoch continuity. Run shared success/recovery/safety/timing tests as well.
+   Report design, paths and test proof to `so-arm-101-vla` before live work.
+2. Implement isolated prototype and launch/preflight commands without starting
+   Isaac. Add scene snapshot, direct physical stepping/capture, state replay,
+   collision checks, expert stages and compatible raw writer/receipts. CPU tests
+   are logic verification only; docs must say which adapters remain live-unproved.
+3. Ask lead for an exclusive sim window, after w_scene and ROS smoke. Only then
+   export the baseline and run startup probes, single-pass and physics-only/replay
+   comparisons. Lead must grant the window explicitly; elapsed time is not approval.
+4. Obtain 5 accepted episodes per kind (balanced colors where possible), bounded
+   attempts and physical failures retained. Run the exact exporter, full raw-row
+   timing/recovery audits and LeRobot readback. Compare with ROS on identical seed,
+   starting snapshot and commands where possible; different planner paths are
+   trajectory-distribution comparisons, not pixel-fidelity tests. Save synchronized
+   two-camera contact sheets and videos, same-pose RGB PSNR/SSIM, peak/mean joint
+   tracking, action delta/velocity/acceleration, lift, slip and placement yield.
+5. Benchmark startup, reset/planning, four physics steps, renderer submit/wait,
+   GPU→CPU copy, expert/DART, collision, contracts, encoder queue/write/drain and
+   export separately (median/p95/total). Report stepped and end-to-end RTF including
+   rejected attempts, accepted episodes/hour and GPU memory/load. Target >1 RTF
+   per instance is an acceptance target, not an offline estimate. The 35-42 ms
+   Isaac-frame prior already exceeds a 33.33 ms frame budget; simply deleting
+   orchestration cannot prove >1. Incorporate w_scene results when available.
+6. Only after N=1 correctness, compare N=2 aggregate accepted throughput on the
+   assigned GPU(s). Two-pass/browser results need separate live/replay image proof.
+   Publish artifacts to the Mac's
+   `coursework-eee598/roadmap-2026-11/phase3/3.1f-inprocess-collector/` with README,
+   tests, per-stage JSON, comparison frames and validator reports. No HF upload.
