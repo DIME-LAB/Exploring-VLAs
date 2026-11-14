@@ -1,0 +1,109 @@
+{
+  "version": 1,
+  "host": "en4226769-l",
+  "recorded_wall_ns": 1794664932802668479,
+  "cause": "Ubuntu unattended-upgrade, not an agent/system-setting change",
+  "upgrade": {
+    "package": "glibc",
+    "previous": "2.35-0ubuntu3.15",
+    "current": "2.35-0ubuntu3.18",
+    "local_window": [
+      "2026-11-14 06:18:37 -0700",
+      "2026-11-14 06:19:12 -0700"
+    ],
+    "utc_window": [
+      "2026-11-14T13:18:37Z",
+      "2026-11-14T13:19:12Z"
+    ],
+    "source": "/var/log/apt/history.log"
+  },
+  "package_versions": {
+    "argv": [
+      "dpkg-query",
+      "-W",
+      "-f",
+      "${binary:Package}\t${Version}\n",
+      "libc6:amd64",
+      "libc6:i386",
+      "libc6-dev:amd64",
+      "libc-bin:amd64"
+    ],
+    "stdout": "libc-bin\t2.35-0ubuntu3.15\nlibc6:amd64\t2.35-0ubuntu3.18\nlibc6:i386\t2.35-0ubuntu3.18\nlibc6-dev:amd64\t2.35-0ubuntu3.18\n"
+  },
+  "package_verification": [
+    {
+      "argv": [
+        "dpkg",
+        "-V",
+        "libc6:amd64"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "dpkg",
+        "-V",
+        "libc6:i386"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": ""
+    }
+  ],
+  "old_fingerprint": "64fa3342a657fb3e2c7868f7bc4dcbe9028c9eec4867bc3cd24296ac6d9915a5",
+  "new_fingerprint": "b494b8249ade472ca73bbaeb1149316e8f1aef2b651cc2d570bbb759e9bd3853",
+  "changed_dependencies": [
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+      "previous": {
+        "path": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+        "kind": "library dependency",
+        "sha256": "41daf7836f7fce21a40ca63a00c5caf21b05a35a76ccc075d86f1716212cdf01"
+      },
+      "current": {
+        "path": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+        "kind": "library dependency",
+        "sha256": "a87fec14aeedb537d0b2a80c6a3308b82e774d86541dff4654a75ab1fd22df0a"
+      }
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+      "previous": {
+        "path": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+        "kind": "library dependency",
+        "sha256": "b2cf6c33b74d2f22543b7a469a75b538911e690f769d0b238843a49465b83793"
+      },
+      "current": {
+        "path": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+        "kind": "library dependency",
+        "sha256": "4ebb1967c395ca547dcfeaeeab7a2819724604a331aede44e8a749a7e1a4628e"
+      }
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libm.so.6",
+      "previous": {
+        "path": "/usr/lib/x86_64-linux-gnu/libm.so.6",
+        "kind": "library dependency",
+        "sha256": "3dd5511ae94785c9f921429b0f2b2f7aabb461b6f0e6de6dfdbef15f24bdfee6"
+      },
+      "current": {
+        "path": "/usr/lib/x86_64-linux-gnu/libm.so.6",
+        "kind": "library dependency",
+        "sha256": "045fdb0436a8fb0d651f039e3444a9cbffc011d379c82b979cebf43571053eca"
+      }
+    }
+  ],
+  "comparison_policy": "Exact full fingerprint; no allowlist, tolerance or validation bypass added",
+  "pilot": {
+    "cut": "ef42c1bafed874e969abb16b169276e1bfd9ab61",
+    "receipt": "/mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1-v4/pilot-receipt.json",
+    "passed": true,
+    "mapped_library_evidence": "/mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1-v4/host-abi-change-mappings.json",
+    "note": "Resident collector retained pre-update mappings; all fifty episodes passed contracts"
+  },
+  "system_changes_performed": false,
+  "reboot_performed": false,
+  "fresh_startup_and_clock_qualification": "REQUIRED before any new collection; certificate recorded separately"
+}
