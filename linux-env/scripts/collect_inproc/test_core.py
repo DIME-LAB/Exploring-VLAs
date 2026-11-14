@@ -86,6 +86,30 @@ class CoreTests(unittest.TestCase):
                 self.assertIsNone(c.contract.previous)
                 with self.assertRaises(RuntimeError):c.prepare([0.]*6,[0.]*6,[0.]*6,'hold','joined')
                 self.assertEqual(len(b.applications),1)
+    def test_playing_driver_advances_once_for_immediate_and_delayed_images(self):
+        for delay in (0,1):
+            b,c=self.capture();b.calls=[]
+            original_apply=b.apply
+            def apply(*args):b.calls.append('apply');return original_apply(*args)
+            b.apply=apply
+            b.image_stamp=b.s['sim_ns'] if delay==0 else None
+            b.frame_ready=lambda expected:b.image_stamp==expected['sim_ns']
+            def step():
+                b.calls.append('step');stamp=b.s['sim_ns']
+                b.s.update(sim_ns=stamp+STEP_NS,physics_time_s=b.s['physics_time_s']+1/30,state=[.02]*6)
+                b.image_stamp=b.s['sim_ns'] if delay==0 else stamp
+                return 1.
+            def render(expected):
+                b.calls.append('render')
+                self.assertEqual(b.image_stamp,expected['sim_ns'])
+                stamps=dict(wrist=b.image_stamp,top=b.image_stamp);b.image_stamp=None
+                return self.images(),dict(camera_stamps=stamps)
+            b.step=step;b.render=render
+            row,snapshot,timing,_,_,_=c.playing_tick([.1]*6,[.1]*6,[0.]*6,'move','driver',b.snapshot())
+            self.assertEqual(b.calls,['apply','render','step'] if delay==0 else ['apply','step','render'])
+            self.assertEqual(len(b.applications),1);self.assertEqual(row['state'],[0.]*6)
+            self.assertEqual(timing['image_delay_updates'],delay)
+            self.assertFalse(verify_proof(snapshot['tick_contract']))
     def test_skip_and_bad_drive_readback_refuse(self):
         b, c = self.capture(); b.s['sim_ns'] += STEP_NS
         with self.assertRaises(RuntimeError): c.tick([0.]*6,[0.]*6,[0.]*6,'hold','test')

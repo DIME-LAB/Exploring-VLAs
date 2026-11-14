@@ -118,17 +118,14 @@ def main(a):
                     if index>=a.frames//2:reference[0]+=.12
                 from contract import corrective_action
                 execution=corrective_action(s['state'],reference)
-                token=capture.prepare(reference,execution,[0.]*6,'boot_probe','boot_probe',s)
-                physics_ms=backend.step()
+                row,checked,contract_timing,images,timing,physics_ms=capture.playing_tick(
+                    reference,execution,[0.]*6,'boot_probe','boot_probe',s)
             else:
                 physics_ms=backend.step();s=backend.snapshot()
             report['last_physical_advance']=dict(steps=backend.world.current_time_step_index-old_index,
-                seconds=backend.world.current_time-old_time,sim_ns=s['sim_ns'])
+                seconds=backend.world.current_time-old_time,sim_ns=backend.stamp(),observation_ns=s['sim_ns'])
             save('capture')
-            if a.step_mode=='playing':
-                images,timing=backend.render(expected=s)
-                row,checked,contract_timing=capture.complete(token,images,timing['camera_stamps'])
-            else:
+            if a.step_mode!='playing':
                 images,timing=backend.render()
                 row,checked,contract_timing=capture.tick(s['state'],s['state'],[0.]*6,
                     'boot_probe','boot_probe',images,s,camera_stamps=timing.get('camera_stamps'))
@@ -177,7 +174,7 @@ def main(a):
             moving=report['frames'][:a.frames]
             pan0=backend.manifest['baseline']['state'][0]
             report['checks']['motion_measured']=max(abs(f['observation_state'][0]-pan0) for f in moving)>.01
-            phases=[f['camera_pose_phase']['wrist'] for f in moving]
+            phases=[f['camera_pose_phase']['wrist'] for f in report['frames']]
             report['checks']['camera_pose_phase']=(all(p['before_error']<2e-4 for p in phases)
                 and any(p['after_error']-p['before_error']>1e-4 for p in phases))
         if not all(report['checks'].values()):raise RuntimeError('Boot probe check failed: '+repr(report['checks']))

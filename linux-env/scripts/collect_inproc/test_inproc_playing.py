@@ -2,10 +2,52 @@ import copy
 import unittest
 import json
 from pathlib import Path
-from playing import FrameLedger,capture_settings,CAPTURE_KEYS
+from types import SimpleNamespace
+from unittest.mock import patch,Mock
+from playing import FrameLedger,Playing,capture_settings,CAPTURE_KEYS
+from native import Native
 
 
 class PlayingTests(unittest.TestCase):
+    def test_restore_commits_play_only_when_resuming_a_paused_timeline(self):
+        class Timeline:
+            def __init__(self,playing):self.playing=playing;self.play_calls=0;self.commits=0
+            def is_playing(self):return self.playing
+            def set_auto_update(self,value):self.auto=value
+            def play(self):self.play_calls+=1
+            def commit(self):self.commits+=1;self.playing=True
+            def set_current_time(self,value):self.time=value
+            def get_current_time(self):return getattr(self,'time',1.)
+            def commit_silently(self):pass
+        class Settings:
+            def __init__(self):self.values={}
+            def set_bool(self,key,value):self.values[key]=value
+            def get(self,key):return self.values.get(key)
+        result=dict(epoch=7,invalid_through_ns=1000000000,snapshot=dict(physics_time_s=1.))
+        for playing in (True,False):
+            owner=Playing.__new__(Playing);owner.timeline=Timeline(playing)
+            owner.settings=Settings();owner.frames=FrameLedger()
+            owner.fabric_time=SimpleNamespace(Get=lambda:1.)
+            texture=SimpleNamespace(set_updates_enabled=lambda enabled:None)
+            owner.rgb=SimpleNamespace(products={'wrist':SimpleNamespace(hydra_texture=texture)})
+            with patch.object(Native,'restore',return_value=result) as restore:
+                owner.restore('baseline')
+                restore.assert_called_once_with('baseline',manage_timeline=False)
+            self.assertEqual(owner.timeline.play_calls,0 if playing else 1)
+            self.assertEqual(owner.timeline.commits,0 if playing else 1)
+            self.assertTrue(owner.timeline.is_playing());self.assertTrue(owner.timeline.auto)
+
+    def test_aligned_native_clock_does_not_scrub_the_timeline(self):
+        owner=Playing.__new__(Playing);owner.fabric_time=SimpleNamespace(Get=lambda:1.)
+        owner.timeline=Mock();owner.timeline.get_current_time.return_value=1.
+        owner.align_timeline()
+        owner.timeline.set_current_time.assert_not_called()
+        owner.timeline.commit_silently.assert_not_called()
+        owner.timeline.get_current_time.return_value=.5
+        owner.align_timeline()
+        owner.timeline.set_current_time.assert_called_once_with(1.)
+        owner.timeline.commit_silently.assert_called_once_with()
+
     def ledger(self):
         value=FrameLedger();value.reset(1,1000000000,1.)
         return value
@@ -17,6 +59,17 @@ class PlayingTests(unittest.TestCase):
                 for key in ('wrist','top')})
     def test_exact_app_frame_and_pair(self):
         ledger=self.ledger();ledger.accept(self.packet());ledger.accept(self.packet(2))
+    def test_synchronous_native_frame_can_be_buffered_for_its_own_observation(self):
+        ledger=self.ledger()
+        for index in (1,2):
+            packet=self.packet(index)
+            packet.update(image_delay_updates=0,observation_ns=packet['sim_ns'])
+            for camera in packet['cameras'].values():camera['stamp_ns']=packet['sim_ns']
+            ledger.accept(packet)
+        packet=self.packet(3)
+        packet['observation_ns']=ledger.previous['observation_ns']
+        for camera in packet['cameras'].values():camera['stamp_ns']=packet['observation_ns']
+        with self.assertRaises(RuntimeError):ledger.accept(packet)
     def test_camera_clock_is_retained_and_agreement_bound_applies(self):
         p=self.packet();p['cameras']['wrist']['stamp_ns']+=167
         ledger=self.ledger();ledger.accept(p)

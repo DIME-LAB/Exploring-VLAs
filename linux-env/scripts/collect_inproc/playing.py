@@ -49,9 +49,14 @@ class FrameLedger:
     def accept(self,packet):
         previous=self.previous or self.boundary
         self.check_advance(packet,previous)
+        delay=packet.get('image_delay_updates',1)
+        if delay not in (0,1):raise RuntimeError('Image delivery exceeds the one-update bound')
+        expected=packet['sim_ns'] if delay==0 else previous['sim_ns']
         if (packet['observation_epoch']!=packet['epoch'] or not matches(
-                packet['observation_ns'],previous['sim_ns'],'native_ns')):
-            raise RuntimeError('Image join lacks its preceding physical observation')
+                packet['observation_ns'],expected,'native_ns')):
+            raise RuntimeError('Image join lacks its measured physical observation')
+        if self.previous and not matches(packet['observation_ns']-self.previous['observation_ns'],STEP_NS,'native_ns'):
+            raise RuntimeError('Image observation stamp repeated or skipped')
         cameras=packet['cameras']
         if set(cameras)!={'wrist','top'}:raise RuntimeError('Playing frame lacks a camera')
         frame_ids=[]
@@ -90,6 +95,9 @@ class PlayingRGB:
         rep.orchestrator.set_capture_on_play(True)
         for key,path in paths.items():
             product=rep.create.render_product(path,(640,480))
+            # app/Replicator async flags do not express the texture's own
+            # render-thread preference. This owner requests a synchronous draw.
+            product.hydra_texture.set_async(False)
             # The known-good w_31f/record.py consumes CPU RGB directly. Keep the
             # in-process host copy explicit; the GPU-buffer variant is unverified.
             annotation=rep.AnnotatorRegistry.get_annotator('rgb',device='cpu')
@@ -191,6 +199,8 @@ class Playing(Native):
             '/exts/omni.replicator.srtx/enabled','/exts/omni.replicator.core/Orchestrator/enabled',
             '/omni/replicator/asyncRendering','/app/asyncRendering','/rtx/hydra/supportMultiTickRate',
             '/omni/replicator/disableAnnotatorGate','/rtx/rendermode')}
+        self.pipeline_settings['hydra_texture_async']={key:p.hydra_texture.get_async()
+            for key,p in self.rgb.products.items()}
         self.restore(self.manifest['baseline'])
 
     def create_cameras(self):
@@ -230,8 +240,9 @@ class Playing(Native):
             result=super().restore(baseline,manage_timeline=False)
             # An episode's final cancellation may already have paused the World.
             # Commit play directly; World.play() would pump another app update.
-            self.timeline.play()
-            self.timeline.commit()
+            if not self.timeline.is_playing():
+                self.timeline.play()
+                self.timeline.commit()
             self.align_timeline()
         finally:
             self.timeline.set_auto_update(True)
@@ -244,8 +255,10 @@ class Playing(Native):
         # World play/pause pumps updates without physics, and float32 PhysX dt
         # accumulates differently from the timeline's 1/30. Own their alignment
         # without another app update; never rewrite the camera's original stamp.
-        self.timeline.set_current_time(self.native_time())
-        self.timeline.commit_silently()
+        native=self.native_time()
+        if not matches(round(self.timeline.get_current_time()*1e9),round(native*1e9),'native_ns'):
+            self.timeline.set_current_time(native)
+            self.timeline.commit_silently()
 
     def native_time(self):
         value=self.fabric_time.Get()
@@ -282,21 +295,37 @@ class Playing(Native):
             raise RuntimeError('Fabric renderer clock is unavailable or non-finite')
         self.last_frame['fabric_time_s']=float(fabric_time)
         self.frames.check_advance(self.last_frame,observation)
-        if not recording:
+        completions=list(self.last_frame['render_completions'].values())
+        if all(count==0 for count in completions) and not recording:
             # The first advance after restore establishes the first observation.
             # Any camera delivery at/before that reset floor remains unconsumed.
             self.frames.reset(snapshot['epoch'],snapshot['sim_ns'],snapshot['physics_time_s'])
             return (time.perf_counter_ns()-start)/1e6
+        if any(count!=1 for count in completions):raise RuntimeError('Expected exactly one new render for both cameras')
         images,cameras,copy_ms=self.rgb.read(before)
+        if not recording and all(v['stamp_ns']<=self.floor+1000 for v in cameras.values()):
+            self.frames.reset(snapshot['epoch'],snapshot['sim_ns'],snapshot['physics_time_s'])
+            return (time.perf_counter_ns()-start)/1e6
+        matches_clock=[(stamp,delay) for stamp,delay in ((snapshot['sim_ns'],0),(observation['sim_ns'],1))
+            if all(matches(v['stamp_ns'],stamp,'stamp_ns') for v in cameras.values())]
+        if len(matches_clock)!=1:raise RuntimeError('Camera clocks are outside the bounded native observation window')
+        target,delay=matches_clock[0]
         packet=dict(self.last_frame,cameras=cameras,observation_epoch=observation['epoch'],
-            observation_ns=observation['sim_ns']);self.last_frame=packet
+            observation_ns=target,image_delay_updates=delay);self.last_frame=packet
         self.frames.accept(packet)
         profile=dict(app_update_ms=(update_end-start)/1e6,camera_read_ms=copy_ms,
             camera_stamps={k:v['stamp_ns'] for k,v in cameras.items()},playing_frame=packet,
-            image_delay_updates=1,
-            synchronization='native stamp join, bounded to one app update; drawable and copy counters')
+            image_delay_updates=delay,
+            synchronization='native stamp join, zero or one app update; drawable and copy counters')
         self.pending=(images,profile)
         return (time.perf_counter_ns()-start)/1e6
+
+    def frame_ready(self,expected):
+        if self.pending is None:return False
+        packet=self.pending[1]['playing_frame']
+        if expected['epoch']!=packet['observation_epoch'] or expected['sim_ns']!=packet['observation_ns']:
+            raise RuntimeError('An unconsumed camera frame belongs to another observation')
+        return True
 
     def render(self,expected=None):
         if self.pending is None:raise RuntimeError('No new playing frame is ready')

@@ -110,6 +110,7 @@ def run(a):
             * (shared.REPO/'linux-env/scripts/collect').glob('*.py'),
             shared.REPO/'isaac/exts/soarm101-dt/assets/sorting_collision_geometry.json']
         config=dict(version=1,instance=a.instance,fps=30,backend='inprocess',physics='cpu',
+            native_pipeline_settings=getattr(backend,'pipeline_settings',{}),
             physics_only=a.physics_only,step_mode=a.step_mode,window=a.window,normal_target=a.per_kind,regrasp_target=a.per_kind,
             scene_sha256=hashlib.sha256(a.scene.read_bytes()).hexdigest(),gpu_start=gpu_start,
             fixture_sha256={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in a.fixture},
@@ -135,10 +136,8 @@ def run(a):
                 s=backend.snapshot();images=None;render_profile={}
                 transforms,cameras=backend.transforms(s)
                 if a.step_mode=='playing':
-                    token=capture.prepare(reference,executed,offset,phase,episode_id,s)
-                    physics_ms=backend.step()
-                    images,render_profile=backend.render(expected=s)
-                    row,snapshot,timing=capture.complete(token,images,render_profile['camera_stamps'])
+                    row,snapshot,timing,images,render_profile,physics_ms=capture.playing_tick(
+                        reference,executed,offset,phase,episode_id,s)
                 else:
                     if not a.physics_only:images,render_profile=backend.render()
                     row,snapshot,timing=capture.tick(reference,executed,offset,phase,episode_id,images,s,

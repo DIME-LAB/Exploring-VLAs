@@ -1,11 +1,12 @@
 # In-process SO-ARM101 collection (ROADMAP 3.1f)
 
 Status: scene export, native GPU/CPU/FK/restore and real two-camera RGB readback
-are verified. A diagnostic trace measured eight consecutive four-substep updates,
-each delivering one camera pair for the preceding native timestamp (within 1 ns).
-The bounded timestamp join is implemented and offline-tested; its boot acceptance
-and the 5+5 episode bar still require a window. No accepted dataset, throughput or
-image-equivalence result is claimed.
+are verified. Eight steady diagnostic updates delivered one camera pair for the
+preceding timestamp (within 1 ns), but the first joined boot failed: its first
+commanded update delivered no frame, followed by a two-completion burst. The
+one-update bound correctly refused it. Texture render-thread preference and
+redundant timeline-event changes are offline-tested hypotheses; joined boot,
+5+5 episodes, export, throughput and image-equivalence acceptance remain pending.
 The runtime and prototype live in `linux-env/scripts/collect_inproc/`; the ROS
 collector and `isaac/exts/` remain unchanged.
 
@@ -17,9 +18,11 @@ expert execution, reset and capture. Keep one stage, articulation and two fixed
 timeline playing and executes one application update per 1/30 s observation,
 containing four 1/120 s CPU PhysX steps. At native time t, freeze the measured
 state, compute expert/DART, collision-check and apply targets, retaining the real
-ACK stamped t. One update advances physics to t+1/30 and delivers images originally
-stamped t. Join those images to the frozen observation and ACK; only then run the
-unchanged TickContract and write the row. No wall pacing or render polling while
+ACK stamped t. If an immutable frame stamped t is already buffered, validate the
+row at t, then advance once. Otherwise advance once and join the delivered frame
+stamped t. Both branches return only after one physical advance; only then may
+the caller pass the proof to gates or the writer. Native delivery may be zero or
+one update late, while camera stamps remain original. No wall pacing or render polling while
 the expert runs. Read native clock and unconditional physics callbacks; never
 assign time from a row number. Require one completion per product, fresh drawable
 frame numbers and consecutive RGB compute counts, with original camera timestamps
@@ -294,7 +297,8 @@ rounding differences. Whether these native fields reliably identify both pixels
 after every update is still a live-verification requirement. Experimental replay
 and held writer-gate capture remain non-exportable until verified.
 
-The offline suite has 41 tests, including the measured eight-frame latency trace,
+The offline suite has 45 tests, including immediate/delayed control-image order,
+the measured eight-frame latency trace,
 2,000 float32 World/native-clock frames, earlier-ACK/frozen-state preservation and
 late/missing/duplicate/epoch-crossing join refusal. The probe uses its own
 BOOT_PROBE_FINISHED marker with episodes=0; collection export is not admitted.
@@ -395,7 +399,7 @@ rows or episodes were accepted during the window.
 
 `Capture.prepare` retains the measured state, clean/executed labels, geometry
 evidence and actual target ACK at t. `Capture.complete` joins original camera
-stamps to that retained state after one update and invokes the same shared row
+stamps to that retained state within one update and invokes the same shared row
 validator. It cannot issue the command twice or finalize a pending/reset-crossing
 ticket. Expert/home/recovery calls still return the pre-update observation after
 advancing once, preserving control ordering. The initial advance after restore
@@ -422,3 +426,48 @@ green_2x3_0); re-grasp fixtures are pending. The earlier designated fixture root
 was not created. A normal pilot can use these two seeds after boot acceptance;
 it does not fulfill 5+5. Retries exclude already accepted seeds, and summaries
 record accepted seed sets so a repeated success cannot fill a distinct-seed quota.
+
+## First joined boot result
+
+`c4f6396` was exercised in an explicitly granted boot-first/normal-pilot window.
+The worker failed after 26.95 s at its first commanded join: observation
+4.066666667 s advanced physically to 4.1 s with four substeps, but both cameras
+still held RefTime 4.0 s and copy count120, with zero new completions. The next
+fault-only diagnostic update produced two completions per camera and copy count122
+(latest RefTime4.099999999 s), followed by seven regular one-completion updates.
+Only the latest buffer of the burst was read, so no unique timestamp sequence is
+claimed for the two individual deliveries. No pending row was finalized, no
+normal pilot started, and the motion/reset/success-exit gates were not reached.
+
+Sim released early at 09:13:08Z on 2026-11-14. Proof is
+`inproc/joined-window-20261114-cleanup.json`: one owned group stopped, remaining=[],
+ports8781/8782 closed, no owned NVML contexts/errors, GPU0 at21 MiB. The earlier
+steady trace does not establish a uniform startup bound.
+
+The next probe explicitly requests `hydra_texture.set_async(False)` before
+annotator attach, retaining `get_async()` after warmup. Installed API documents
+this as a render-thread preference; readback alone cannot prove synchronous
+delivery. App/Replicator async settings did not establish the texture preference
+in the failed run. Restore now emits play/commit only when paused, and timeline
+alignment avoids no-op current-time writes while the native clocks already agree.
+These changes retain the same strict join and are not claimed to fix the burst.
+A new granted probe must establish actual delivery, motion pixel phase, paused
+reset and successful exit before episodes. If variable-latency bursts remain,
+polling only the latest annotator buffer cannot admit them; per-frame immutable
+capture and a broader bounded control/image queue would need a separate design
+and contract review. No delay is hidden by dropping or restamping a frame.
+
+The bounded join also retains a frame already delivered at its own native time,
+because a synchronous render preference may change delivery phase. Such a frame
+is consumed after its actual command ACK at the same native tick; the tick still
+advances physics exactly once before returning. The measured delayed phase
+continues to join after that one advance. Tests exercise both orders and reject
+duplicate or skipped observation stamps. Neither timing mode is assumed to work
+live from the preference readback alone. The next sim window is queued after the
+ROS collector's 50-episode pilot; no new launch is authorized by this document.
+
+The lead has supplied a newer read-only fixture source with five accepted normal
+episodes: `datasets/smoke-primitive-reset-v4/` under canonical storage. Use its
+completed receipts and the pilot output when the lead grants the episode window;
+re-grasp input provenance remains to be supplied. Older v3 seed fixtures remain
+comparison evidence, not a requirement to use superseded reset behavior.

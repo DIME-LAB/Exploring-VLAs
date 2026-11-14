@@ -102,6 +102,19 @@ class Capture:
         if images is None:raise ValueError('A live image join requires both camera arrays')
         return self._complete(token,images,camera_stamps)
 
+    def playing_tick(self,reference,executed_reference,offset,phase,episode_id,snapshot):
+        """One control advance, whether its original image arrives now or next update."""
+        token=self.prepare(reference,executed_reference,offset,phase,episode_id,snapshot)
+        if self.backend.frame_ready(snapshot):
+            images,profile=self.backend.render(expected=snapshot)
+            row,checked,timing=self.complete(token,images,profile['camera_stamps'])
+            advance_ms=self.backend.step()
+        else:
+            advance_ms=self.backend.step()
+            images,profile=self.backend.render(expected=snapshot)
+            row,checked,timing=self.complete(token,images,profile['camera_stamps'])
+        return row,checked,timing,images,profile,advance_ms
+
     def _complete(self,token,images,camera_stamps,physics_only=False):
         start=time.perf_counter_ns()
         if self.pending is None or token!=self.pending['token']:raise RuntimeError('Stale or duplicated image join')

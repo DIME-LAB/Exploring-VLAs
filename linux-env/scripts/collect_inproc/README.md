@@ -5,8 +5,9 @@ success gate, tick audit, fault policy and exporter. The first boot window verif
 scene export, GPU/CPU assignment, native FK and immediate restore. Held-time RGB
 failed. Playing now reads both camera buffers; an eight-update trace shows one
 camera pair delivered for the preceding native timestamp on every update.
-The bounded timestamp join is offline-tested and awaits a lead-granted boot
-acceptance window. No episodes or dataset rows have been accepted. CPU checks do not
+The first joined boot rejected a zero/two-completion startup burst. Texture-level
+synchronous-render preference and timeline no-op guards are prepared offline for
+the next granted probe. No episodes or dataset rows have been accepted. CPU checks do not
 establish physical grasp yield, camera freshness, renderer fidelity or throughput. See
 [`docs/notes/inprocess-collector.md`](../../../docs/notes/inprocess-collector.md).
 No shared ROS collector or extension module is changed.
@@ -103,10 +104,14 @@ checked, because Orchestrator.reset copies the former over the latter. The probe
 records both flag readbacks, CPU RGB buffer shapes/compute counts and Fabric's
 external physics time. The internal empty-list annotation filter is bypassed;
 the collector verifies the original stamp, drawable frame and copy count itself.
+Texture async preferences are explicitly disabled and read back after warmup;
+actual one-update delivery is still a required live check.
 The timeline follows the native Fabric clock; World time is checked independently
 for four-substep progression. `Capture.prepare` issues the actual command at t;
-after one update `Capture.complete` joins the camera frames stamped t to the
-retained measured state and ACK. No row or proof is accepted before this join.
+`Capture.complete` joins the camera frames stamped t to the retained state and
+ACK within zero or one update. An already buffered frame may complete before the
+advance; the caller still returns only after exactly one advance. No row reaches
+gates or the writer before both join and advance succeed.
 `probe.json` records physical advance, paired consumption, two post-reset
 frames and no progress during CPU work between updates. A successful probe
 finalizes with `BOOT_PROBE_FINISHED`, `kind=boot_probe`, episodes=0;
