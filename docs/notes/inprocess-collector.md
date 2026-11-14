@@ -234,3 +234,36 @@ is insufficient: require final receipt, export validator and end marker.
    Publish artifacts to the Mac's
    `coursework-eee598/roadmap-2026-11/phase3/3.1f-inprocess-collector/` with README,
    tests, per-stage JSON, comparison frames and validator reports. No HF upload.
+
+## Prototype status and review
+
+The isolated prototype includes scene export, CPU stepping, native state/drive
+readback, synchronized RGB capture, scripted normal/re-grasp stages, primitive
+collision sweeps, raw MP4/JSONL recording, full numeric LeRobot readback, an owned
+launcher/watchdog and experimental pose replay/comparison commands. It consumes
+ROS `initial_physical` receipts to match seeded layouts; autonomous layout generation
+is not implemented. Direct paths are implemented; retract/pan/settle and OMPL
+fallback remain proposed if measured yield requires them. No live success or speed
+result is implied by these entrances.
+
+The first independent source review found fast shutdown would bypass finalization,
+and collider extraction would lose the mm→m body scale. Both are corrected:
+SimulationApp uses `fast_shutdown=False` with an external owned-process watchdog,
+and box extraction retains inherited scale in a rigid metre body frame. Regression
+checks cover millimetre bodies, real FFmpeg encode/decode, and zero-exit workers
+without certificates. The review also prompted exact ROS DART seed/phase rules,
+measured pause/encoder-retirement fields, recovery audit for physics candidates,
+and camera poses derived from measured parent links.
+
+Camera freshness uses the installed Replicator writer synchronization gate, whose
+execution dependencies include each RGB producer. A single global `ReferenceTime`
+annotator cannot prove both RGB buffers are current. The capture callback requires
+both product arrays, the stamped rational time and exactly one delivery, copies
+arrays before reuse, and checks unchanged physics around rendering. The same path
+serves live capture and replay. Its graph behavior still needs the granted-window
+probe. Experimental replay remains non-exportable until the fidelity review.
+
+The wall watchdog accepts 900 s startup, 120 s without collection progress and
+180 s graceful shutdown, with pidfd cleanup and an affirmative producer-bound
+finalization check. Heartbeat touching adds no fsync per frame. No existing Isaac
+or prompt2assembly process is adopted or stopped.
