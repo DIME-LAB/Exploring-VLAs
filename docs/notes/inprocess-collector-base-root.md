@@ -1,9 +1,18 @@
 # SO-ARM101 articulation base: diagnostic proposal
 
-Status: proposal only; no extension or shared collector changes. The native PhysX
-fixed-base flag has not yet been read from either the owned standalone or the next
-live production scene. Do not accept motion episodes until those reads and the
-resulting scene decision are resolved.
+The production robot asset authors ArticulationRootAPI on its world fixed joint
+root_joint. The asset-only correction preserves all joint names, limits, drives,
+gains, colliders, visuals, masses, transforms and external references. Its offline
+reproducer is `isaac/fix_articulation_root.py`; repeated application is idempotent.
+The extension load and GUI code are unchanged.
+
+Live production verification on 2026-11-14 confirms native fixed_base=true, zero
+root DOFs, six joint DOFs and eleven links. The exact six-name positional order is
+unchanged. Six ROS pan/lift goals passed through the production subscriber and
+ArticulationController; 272 actual physics callback samples measured maximum base
+drift 0 m and 0 rad. The shared collector runtime initialized with the same six
+joint names, and a fresh held fixed-base scene was exported. The standalone
+joined/reset/success-exit probe on that export is a separate acceptance gate.
 
 ## Evidence
 
@@ -67,27 +76,39 @@ r = collection_runtime.runtime()
 result = readback(r.stage, r.art)
 ```
 
-The lead has asked the production owner to include that result in its smoke
-receipt. A separately granted <=5-minute owned standalone boot will capture the
-other flag; it stops before motion if floating. Neither measurement is claimed
-by the offline tests.
+The production runtime readback was captured after installing the shared collector
+runtime in the owned production sim. The earlier owned export audit independently
+confirmed the pre-fix floating flag. Keep this readback in future smoke receipts.
+Offline tests do not replace either measurement.
 
-## Proposed scene correction if floating is confirmed
+## Asset correction and verification
 
-Have the scene owner relocate ArticulationRootAPI from base_link to the enabled
-world fixed joint root_joint (or an appropriate ancestor encompassing that joint),
-preserving the six drives, geometry and robot path. Validate wrapper/view discovery
-at `/World/SO_ARM101` after reparsing. Do not merely stiffen the external joint or
-increase FK tolerances. This affects production ROS collection too, so update the
-asset through its owner, regenerate the held export/manifest, and collect fresh
-fixtures against the corrected physics. Existing scene/asset digests must refuse
-mixing old fixtures and new geometry.
+The production asset moves only the root API from base_link to root_joint.
+Independent full Sdf serialization comparison found exactly four differing API
+schema lines; all other opinions and relative references are identical. This
+choice preserves extension loading, joint controller wiring and GUI behavior.
+The corrected asset SHA256 is
+`5fab6704255a2f1fa3b52a1fe710b332dc2456fa20657b2c78d46bda2c4f6123`.
+The native production flag was read directly; before correction the owned export
+returned fixed_base=false with six joint DOFs, eleven links and six root DOFs
+derived from that flag. After correction the production runtime returns
+fixed_base=true with the same joint DOFs/links and root DOFs zero.
+
+ROS verification published deployment-order JointState messages on domain92 and
+checked the actual subscriber output, ArticulationController indices[0..5], native
+applied drive targets and measured convergence for pan+/−0.12/home and
+lift+/−0.12/home. Native base poses were sampled on every physical callback during
+the sweep. Report: `inproc/fixed-root-verification-20261114/ros-pan-lift-sweep.json`.
+Runtime installation and held export receipts are beside it. The new held export
+is `inproc/scene-fixed-root-20261114/{scene.usdc,manifest.json}`; its manifest
+contains the production native articulation audit. Existing primitive collider
+rest/contact offsets also read back unchanged. Independent CPU checks passed56
+collector tests,12 GUI parity tests and6 geometry parity tests.
 
 Before accepting either collector: prove native fixed_base=true, six joint DOFs,
 zero physical root response under the bounded pan motion, unchanged descendant FK,
 reset/root restoration, and camera phase. Run the ROS smoke again on the corrected
-scene and then the in-process boot and matched-seed episodes. The proposed API
-relocation is not applied by this worker.
+scene and then the in-process boot and matched-seed episodes. The lead will perform the live GUI check before merging to main.
 
 ## Collision FK follows measured physical roots
 
@@ -98,3 +119,13 @@ existing maximum-entry tolerance 0.0005. Invalid/nonrigid roots and inconsistent
 child FK remain terminal. Root motion relative to the export is reported, rather
 than hidden by a larger tolerance. This improves geometric correspondence but
 does not establish fixed-base physics fidelity or permit floating-base episodes.
+
+
+The standalone probe on the corrected export completed32 tick proofs with native
+fixed base, measured motion, successful priming at both epochs and the explicit
+paused second restore. It refused overall acceptance because moving wrist view
+metadata lagged the retained physical pose by a further tick despite matching
+ReferenceTime. That camera synchronization problem is independent of the fixed
+root correction; no episodes or successful producer finalization are claimed.
+Production and standalone owned groups were both released at 11:13:15Z, with
+identity-bound remaining=[], closed ports and no owned NVML contexts/errors.

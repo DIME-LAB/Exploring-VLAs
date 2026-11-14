@@ -1,14 +1,14 @@
 # In-process SO-ARM101 collection (ROADMAP 3.1f)
 
-Status: scene export, native GPU/CPU/FK/restore and real two-camera RGB readback
-are verified. Eight steady diagnostic updates delivered one camera pair for the
-preceding timestamp (within 1 ns), but the first joined boot failed: its first
-commanded update delivered no frame, followed by a two-completion burst. The
-one-update bound correctly refused it. Texture render-thread preference and
-redundant timeline-event changes are offline-tested hypotheses; joined boot,
-5+5 episodes, export, throughput and image-equivalence acceptance remain pending.
-The runtime and prototype live in `linux-env/scripts/collect_inproc/`; the ROS
-collector and `isaac/exts/` remain unchanged.
+Status: bounded camera priming passed live and sixteen strict joined boot ticks
+proved original-stamp correspondence before exposing a floating-base scene.
+The production asset now authors its root API on the world fixed joint; native
+production readback confirms fixed_base=true with six unchanged joint DOFs, and
+ROS pan/lift sweeps measured zero root drift. A fresh held scene is exported.
+Standalone motion/reset/success-exit acceptance,5+5 episodes, export, throughput
+and image-equivalence acceptance remain pending. Runtime/prototype files live in
+`linux-env/scripts/collect_inproc/`. Shared ROS collector and extension code are
+unchanged; the production robot asset's two root API opinions are corrected.
 
 ## Decision and architecture
 
@@ -514,10 +514,9 @@ The first primed boot at 77c0aa1 stabilized in seven unrecorded updates and
 completed sixteen strict joined ticks. The first physical pan response then
 triggered the stale exported-root FK guard. Measured wrist pose and joints imply
 root motion; root schema placement in both production asset and held export
-suggests a floating articulation with an external world constraint. Native base
-mode is not yet measured. See `inprocess-collector-base-root.md` for digests,
+suggests a floating articulation with an external world constraint. Native production base mode is now verified fixed after the asset correction. See `inprocess-collector-base-root.md` for digests,
 evidence, the production-owner readback and a proposed scene correction. No
-extension or shared collector module is changed. Collision FK uses measured
+extension code or shared collector module is changed. Collision FK uses measured
 physical roots with the same descendant tolerance, while probe/collector now
 require the native PhysX fixed-base flag before accepting motion/episodes.
 
@@ -529,3 +528,14 @@ These are diagnostic boot slices, excluding initialization, PNG inspection and
 remaining host work, with no dataset writer. They are not a collector RTF result
 and do not demonstrate the >1x target. Physics/render and proof/collision costs
 still need measured optimization after correctness is established.
+
+
+On the corrected export,32 tick proofs passed native cadence, paired camera
+freshness, measured motion and the paused second reset. The camera-pose gate
+refused the moving frames: at frame16 wrist view matched the preceding physical
+pose rather than the state bearing its original ReferenceTime (maximum view
+error0.030706). Subsequent motion and post-reset motion confirmed the extra pose
+lag. Matching timestamps/counters do not establish physical pixel correspondence.
+The whole probe remains rejected; no episodes or successful finalization. The
+next investigation must synchronize physical transforms into renderer Fabric
+before the update, retaining original stamps and the same pose gate.

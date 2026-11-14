@@ -1,28 +1,25 @@
 # In-process SO-ARM101 prototype
 
-This standalone collector imports the existing geometry, DART, recovery, physical
-success gate, tick audit, fault policy and exporter. The first boot window verified
-scene export, GPU/CPU assignment, native FK and immediate restore. Held-time RGB
-failed. Playing now reads both camera buffers; an eight-update trace shows one
-camera pair delivered for the preceding native timestamp on every update.
-Joined boot probes still reject a zero/two-completion startup burst; requesting
-synchronous textures did not remove it. A bounded unrecorded priming phase after
-each restore holds the restored drive targets and requires three consecutive
-previous-tick camera pairs within 30 updates. It preserves raw restore and priming
-evidence before opening the strict recording ledger. This priming path has not yet
-passed a live probe. No episodes or dataset rows have been accepted. CPU checks do
-not establish physical grasp yield, renderer fidelity or throughput. See
-[`docs/notes/inprocess-collector.md`](../../../docs/notes/inprocess-collector.md).
-No shared ROS collector or extension module is changed.
+This standalone collector reuses shared geometry, DART, recovery, physical success,
+tick audit, fault policy and export. Bounded unrecorded priming stabilized the
+camera pipeline live; sixteen joined ticks passed before revealing a floating-base
+scene. The production asset now places its root API on the world fixed joint.
+Native production readback verifies fixed_base=true and unchanged six-name joint
+order; ROS pan/lift sweeps measured zero root drift over272 physics samples.
+The shared collector runtime initializes, and a fresh fixed-base held scene is
+available. Standalone completed32 tick proofs including motion and paused reset but failed
+the moving-camera pose gate (one extra physical pose of lag). Its finalization
+and the5+5 dataset acceptance remain pending; no episodes have been accepted.
 
-The first primed live boot stabilized and completed16 joined ticks before motion
-exposed a stale exported-base FK assumption. Collision FK now follows measured
-root-link poses while keeping descendant checks unchanged. Both probe and
-collector require native PhysX `fixed_base=true`; a world joint and six joint
-DOFs do not prove it. The export helper records the same readback for the
-production owner. See `docs/notes/inprocess-collector-base-root.md` for the scene
-proposal and the still-pending native flag measurements. No episode should run
-until fixed-base fidelity, paused restore and successful finalization pass.
+Collision FK uses measured rigid root transforms and unchanged descendant checks;
+probe/collector refuse a floating native base flag. See
+[`inprocess-collector.md`](../../../docs/notes/inprocess-collector.md) and
+[`inprocess-collector-base-root.md`](../../../docs/notes/inprocess-collector-base-root.md).
+Shared ROS collector and extension code remain unchanged; the asset correction
+preserves all opinions other than the two root API fields. The offline reproducer
+is `isaac/fix_articulation_root.py` and the owned ROS verification entrance is
+`fixed_root_validation.py --port OWNED_PORT --output OWNED_REPORT` from a sourced
+ROS environment. It requires the owner's running production scene and sim grant.
 
 Run the CPU checks without launching Isaac:
 
