@@ -61,7 +61,8 @@ def verify(observed,expected):
 
 
 def require():
-    expected=json.loads(Path(__file__).with_name('image_transport_abi.json').read_text())
+    from host_config import profile
+    expected=json.loads((Path(__file__).parent/profile()['image_abi_manifest']).read_text())
     observed=observe();verify(observed,expected)
     return observed
 
