@@ -34,6 +34,15 @@ def arguments(argv=None):
     return p.parse_args(argv)
 
 
+def fixture_pools(fixtures,kinds,per_kind):
+    pools={kind:[f for f in fixtures if f['params'].get('recovery','none')==
+        ('regrasp' if kind=='regrasp' else 'none')] for kind in kinds}
+    for kind,pool in pools.items():
+        if len({f['params']['seed'] for f in pool})<per_kind:
+            raise ValueError('At least per-kind distinct '+kind+' fixture seeds are required for matched ROS comparisons')
+    return pools
+
+
 def run(a):
     import threading
     import numpy as np
@@ -51,8 +60,8 @@ def run(a):
             value=json.loads(path.read_text())
             if not {'params','initial_physical'}<=value.keys():raise ValueError('Fixture lacks original physical snapshot and seed')
             fixtures.append(value)
-        if len({f['params']['seed'] for f in fixtures})<a.per_kind:
-            raise ValueError('Acceptance quota requires at least per-kind distinct fixture seeds')
+        kinds=['normal','regrasp'] if a.kind=='both' else [a.kind]
+        pools=fixture_pools(fixtures,kinds,a.per_kind);kind_attempts={k:0 for k in kinds}
         from isaacsim import SimulationApp
         app=SimulationApp(dict(headless=True,hide_ui=True,active_gpu=int(os.environ['SOARM_RENDERER_GPU_INDEX']),
             physics_gpu=0,multi_gpu=False,disable_viewport_updates=True,fast_shutdown=False,
@@ -96,13 +105,13 @@ def run(a):
             source_sha256={str(p.relative_to(shared.REPO)):hashlib.sha256(p.read_bytes()).hexdigest() for p in source_files},
             git_commit=subprocess.check_output(['git','-C',str(shared.REPO),'rev-parse','HEAD'],text=True).strip())
         atomic_json(root/'run.json',config)
-        streak=FailureStreak();kinds=['normal','regrasp'] if a.kind=='both' else [a.kind]
+        streak=FailureStreak()
         for trial in range(a.max_attempts):
             if all(counts[k]>=a.per_kind for k in kinds):break
             if stopped.is_set():raise RuntimeError('Collection interrupted')
             wait_for_storage(root,stopped)
             kind=next(k for k in kinds if counts[k]<a.per_kind)
-            fixture=fixtures[trial%len(fixtures)]
+            fixture=pools[kind][kind_attempts[kind]%len(pools[kind])];kind_attempts[kind]+=1
             p=parameters(fixture['params']['seed'],fixture['params']['color'],
                 split=fixture['params'].get('split','train'),regrasp=kind=='regrasp')
             np.random.seed(p['seed']%2**32)

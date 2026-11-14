@@ -30,10 +30,14 @@ def main():
     uuid=gpu_uuid(args.gpu);rows,source=read_table(args.renderer_log)
     renderer=resolve(rows,inventory(),uuid)
     if not rest or rest[0]!='--':raise ValueError('Pass run.py arguments after --')
-    from run import arguments
+    from run import arguments,fixture_pools
     parsed=arguments([*rest[1:],'--window',args.window or 'PENDING'])
     missing=[str(path) for path in [parsed.scene,parsed.manifest,*parsed.fixture] if not path.is_file()]
     if parsed.output.exists():missing.append('Output already exists: '+str(parsed.output))
+    if not missing:
+        try:fixture_pools([json.loads(path.read_text()) for path in parsed.fixture],
+            ['normal','regrasp'] if parsed.kind=='both' else [parsed.kind],parsed.per_kind)
+        except (KeyError,ValueError) as exc:missing.append(str(exc))
     command=[str(args.python),'-u',str(Path(__file__).with_name('run.py')),*rest[1:]]
     info=dict(command=command,assigned_gpu_uuid=uuid,renderer=renderer,prior_log=source,
         caches=cache_paths(uuid),runtime=str(runtime),window=args.window,

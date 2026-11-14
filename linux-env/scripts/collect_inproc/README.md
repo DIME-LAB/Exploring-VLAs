@@ -19,10 +19,11 @@ OPENBLAS_NUM_THREADS=1 ~/env_isaacsim61/bin/python -m unittest discover \
 ## Scene input and window
 
 The first experiment consumes recorded ROS receipts (`params`, `initial_physical`)
-to reproduce their exact seeded initial scene. Supply at least five distinct seed
-fixtures for the acceptance experiment. This prototype does not reproduce the
+to reproduce their exact seeded initial scene. Supply at least five distinct normal
+and five distinct re-grasp fixtures for the combined acceptance experiment. The
+runner selects fixtures of the same recovery kind, preserving the ROS comparison
+seeds even when an earlier attempt is rejected. This prototype does not reproduce the
 extension's random-layout generator: original ROS snapshots are required inputs.
-The same fixture can drive a normal and a re-grasp trial with the shared seed spec.
 Old receipts with different body inventories refuse restore. Do not use superseded
 pilot receipts as evidence of correctness; they are useful only as pose fixtures.
 
