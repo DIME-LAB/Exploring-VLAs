@@ -1,4 +1,4 @@
-"""Per-frame training selection for normal motion and capped recovery prefixes."""
+"""Per-frame training selection for normal motion and corrective recovery episodes."""
 from comparisons import native_frame
 
 PHASES=dict(normal=0,miss_prefix=1,corrective=2)
@@ -15,6 +15,9 @@ def observed_phase(recovery,epoch,completed_epoch):
 
 def phase_code(row,receipt,required=False):
     if receipt['params'].get('recovery','none')=='none':expected='normal'
+    elif receipt['recovery_report'].get('strategy')=='synthetic_post_miss_reset':
+        if native_frame(row)['sim_ns']<=receipt['recovery_report']['record_after_sim_ns']:raise ValueError('Synthetic setup frame cannot be recorded')
+        expected='corrective'
     else:
         end=receipt['recovery_report']['clearance_end_sim_ns']
         expected='miss_prefix' if native_frame(row)['sim_ns']<=end else 'corrective'
@@ -25,13 +28,3 @@ def phase_code(row,receipt,required=False):
 
 
 def feature():return dict(dtype='int64',shape=(1,),names=['phase'])
-
-
-def stored_phase_codes(dataset):
-    # HF column iteration can squeeze a one-element feature to a scalar.
-    result=[]
-    for value in dataset.hf_dataset[FEATURE]:
-        scalar=value.item();code=int(scalar)
-        if code!=scalar or code not in PHASES.values():raise ValueError('Invalid stored phase code')
-        result.append(code)
-    return result

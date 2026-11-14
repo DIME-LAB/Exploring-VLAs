@@ -1519,7 +1519,629 @@
         ]
       }
     },
-    "sha256": "d827945e75e0bcbd4ba242d89c395f741c228b149947d4af3a85156f0135ed2a"
+    "all_robot_boxes": [
+      {
+        "path": "/World/SO_ARM101/base_link/collisions/primitives/foot",
+        "body": "/World/SO_ARM101/base_link",
+        "center_link": [
+          0.004305,
+          0.0,
+          0.0144
+        ],
+        "rotation_link": [
+          [
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "half_extents_m": [
+          0.043505001813173294,
+          0.055470000952482224,
+          0.014399999752640724
+        ]
+      },
+      {
+        "path": "/World/SO_ARM101/base_link/collisions/primitives/housing",
+        "body": "/World/SO_ARM101/base_link",
+        "center_link": [
+          -0.0058,
+          -0.00019500000000000073,
+          0.050405000000000005
+        ],
+        "rotation_link": [
+          [
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "half_extents_m": [
+          0.042010001838207245,
+          0.025505000725388527,
+          0.021604999899864197
+        ]
+      },
+      {
+        "path": "/World/SO_ARM101/shoulder_link/collisions/primitives/sts3215_03a_v1",
+        "body": "/World/SO_ARM101/shoulder_link",
+        "center_link": [
+          -0.030399201021588423,
+          2.224167110660008e-05,
+          -0.041700001774228196
+        ],
+        "rotation_link": [
+          [
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "half_extents_m": [
+          0.012400154024362564,
+          0.01980004645884037,
+          0.022700047120451927
+        ]
+      },
+      {
+        "path": "/World/SO_ARM101/shoulder_link/collisions/primitives/motor_holder_so101_base_v1",
+        "body": "/World/SO_ARM101/shoulder_link",
+        "center_link": [
+          -0.03155053265422875,
+          0.0011625898055429712,
+          -0.023999876482200477
+        ],
+        "rotation_link": [
+          [
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "half_extents_m": [
+          0.019048677757382393,
+          0.027540292590856552,
+          0.01400007028132677
+        ]
+      },
+      {
+        "path": "/World/SO_ARM101/shoulder_link/collisions/primitives/rotation_pitch_so101_v1",
+        "body": "/World/SO_ARM101/shoulder_link",
+        "center_link": [
+          -0.01769919972866775,
+          2.20900961190474e-05,
+          0.004100000318701065
+        ],
+        "rotation_link": [
+          [
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "half_extents_m": [
+          0.029899999499320984,
+          0.02300015091896057,
+          0.04210008308291435
+        ]
+      },
+      {
+        "path": "/World/SO_ARM101/upper_arm_link/collisions/primitives/sts3215_03a_v1",
+        "body": "/World/SO_ARM101/upper_arm_link",
+        "center_link": [
+          -0.11257000166098552,
+          -0.01549999974668392,
+          0.018300000578166335
+        ],
+        "rotation_link": [
+          [
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "half_extents_m": [
+          0.012400132603943348,
+          0.022700045257806778,
+          0.019800031557679176
+        ]
+      },
+      {
+        "path": "/World/SO_ARM101/upper_arm_link/collisions/primitives/upper_arm_so101_v1",
+        "body": "/World/SO_ARM101/upper_arm_link",
+        "center_link": [
+          -0.05908500030636788,
+          -0.0002499946316744722,
+          0.02015003128544654
+        ],
+        "rotation_link": [
+          [
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "half_extents_m": [
+          0.07108499109745026,
+          0.012250085361301899,
+          0.033650029450654984
+        ]
+      },
+      {
+        "path": "/World/SO_ARM101/lower_arm_link/collisions/primitives/under_arm_so101_v1",
+        "body": "/World/SO_ARM101/lower_arm_link",
+        "center_link": [
+          -0.05334989726543429,
+          3.2076162099700656e-09,
+          0.020199919950044096
+        ],
+        "rotation_link": [
+          [
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "half_extents_m": [
+          0.06534990668296814,
+          0.012000082060694695,
+          0.032200030982494354
+        ]
+      },
+      {
+        "path": "/World/SO_ARM101/lower_arm_link/collisions/primitives/motor_holder_so101_wrist_v1",
+        "body": "/World/SO_ARM101/lower_arm_link",
+        "center_link": [
+          -0.1046998044475913,
+          0.0034499937369615744,
+          0.01999557157934101
+        ],
+        "rotation_link": [
+          [
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "half_extents_m": [
+          0.0139999995008111,
+          0.018450070172548294,
+          0.02819553017616272
+        ]
+      },
+      {
+        "path": "/World/SO_ARM101/lower_arm_link/collisions/primitives/sts3215_03a_v1",
+        "body": "/World/SO_ARM101/lower_arm_link",
+        "center_link": [
+          -0.12240000069141128,
+          0.005199999000085121,
+          0.018300000578166338
+        ],
+        "rotation_link": [
+          [
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "half_extents_m": [
+          0.022700032219290733,
+          0.012400108389556408,
+          0.019800031557679176
+        ]
+      },
+      {
+        "path": "/World/SO_ARM101/wrist_link/collisions/primitives/sts3215_03a_no_horn_v1",
+        "body": "/World/SO_ARM101/wrist_link",
+        "center_link": [
+          -1.446402585376927e-09,
+          -0.04279999807476733,
+          0.030600000204646004
+        ],
+        "rotation_link": [
+          [
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "half_extents_m": [
+          0.012400154024362564,
+          0.01980004645884037,
+          0.022700047120451927
+        ]
+      },
+      {
+        "path": "/World/SO_ARM101/wrist_link/collisions/primitives/wrist_roll_pitch_so101_v2",
+        "body": "/World/SO_ARM101/wrist_link",
+        "center_link": [
+          -0.002170134813936587,
+          -0.026915347128850006,
+          0.022149992796289854
+        ],
+        "rotation_link": [
+          [
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "half_extents_m": [
+          0.017830129712820053,
+          0.038913097232580185,
+          0.03115006722509861
+        ]
+      },
+      {
+        "path": "/World/SO_ARM101/gripper_link/collisions/primitives/frame",
+        "body": "/World/SO_ARM101/gripper_link",
+        "center_link": [
+          -0.002400000000000001,
+          0.0,
+          -0.0345
+        ],
+        "rotation_link": [
+          [
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "half_extents_m": [
+          0.03280000016093254,
+          0.024000000208616257,
+          0.03550000116229057
+        ]
+      },
+      {
+        "path": "/World/SO_ARM101/gripper_link/collisions/primitives/pad_tip",
+        "body": "/World/SO_ARM101/gripper_link",
+        "center_link": [
+          -0.01145,
+          0.0,
+          -0.0989125
+        ],
+        "rotation_link": [
+          [
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "half_extents_m": [
+          0.0035500000230968,
+          0.003000000026077032,
+          0.004487500060349703
+        ]
+      },
+      {
+        "path": "/World/SO_ARM101/gripper_link/collisions/primitives/pad_middle",
+        "body": "/World/SO_ARM101/gripper_link",
+        "center_link": [
+          -0.014950000000000001,
+          0.0,
+          -0.089425
+        ],
+        "rotation_link": [
+          [
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "half_extents_m": [
+          0.005049999803304672,
+          0.00570000009611249,
+          0.004999999888241291
+        ]
+      },
+      {
+        "path": "/World/SO_ARM101/gripper_link/collisions/primitives/pad_upper",
+        "body": "/World/SO_ARM101/gripper_link",
+        "center_link": [
+          -0.018799999999999997,
+          0.0,
+          -0.0772125
+        ],
+        "rotation_link": [
+          [
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "half_extents_m": [
+          0.007199999876320362,
+          0.007000000216066837,
+          0.007212500087916851
+        ]
+      },
+      {
+        "path": "/World/SO_ARM101/moving_jaw_so101_v1_link/collisions/primitives/hinge",
+        "body": "/World/SO_ARM101/moving_jaw_so101_v1_link",
+        "center_link": [
+          -0.00115,
+          -0.0195,
+          0.0189
+        ],
+        "rotation_link": [
+          [
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "half_extents_m": [
+          0.011149999685585499,
+          0.029500000178813934,
+          0.024000000208616257
+        ]
+      },
+      {
+        "path": "/World/SO_ARM101/moving_jaw_so101_v1_link/collisions/primitives/pad_tip",
+        "body": "/World/SO_ARM101/moving_jaw_so101_v1_link",
+        "center_link": [
+          -0.00915,
+          -0.0765,
+          0.0189
+        ],
+        "rotation_link": [
+          [
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "half_extents_m": [
+          0.0031500000040978193,
+          0.0044999998062849045,
+          0.003000000026077032
+        ]
+      },
+      {
+        "path": "/World/SO_ARM101/moving_jaw_so101_v1_link/collisions/primitives/pad_middle",
+        "body": "/World/SO_ARM101/moving_jaw_so101_v1_link",
+        "center_link": [
+          -0.00415,
+          -0.067,
+          0.0189
+        ],
+        "rotation_link": [
+          [
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "half_extents_m": [
+          0.006149999797344208,
+          0.004999999888241291,
+          0.00570000009611249
+        ]
+      },
+      {
+        "path": "/World/SO_ARM101/moving_jaw_so101_v1_link/collisions/primitives/pad_upper",
+        "body": "/World/SO_ARM101/moving_jaw_so101_v1_link",
+        "center_link": [
+          -0.00165,
+          -0.0555,
+          0.0189
+        ],
+        "rotation_link": [
+          [
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "half_extents_m": [
+          0.006649999879300594,
+          0.006500000134110451,
+          0.007000000216066837
+        ]
+      }
+    ],
+    "sha256": "fd699fa2f235d884324605047471c4afbc45da8920cf4fc7b0f389f7ba6fd008"
   },
   "shape_offsets": {
     "red_2x3_0": {
@@ -1687,5 +2309,6 @@
       }
     ],
     "helper_sha256": "f00e99123b8d9b879a1d303d73be5b26077ac39c4c04bb4fae9f2e5272572948"
-  }
+  },
+  "authored_full_robot_geometry": "Anonymous production USD composition + primitive_colliders.robot; no native dynamics/offset qualification"
 }

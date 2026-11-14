@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 import numpy as np
-from contract import COLORS,JOINTS,parameters,corrective_action
+from contract import COLORS,JOINTS,parameters as current_parameters,corrective_action
 from checkpoint import progress
 from recovery import REGRASP_POLICY,regrasp_slot,recovery_parameters,recovery_geometry,detect_miss,receipt_error,recovery_summary
 from recovery_search import SEARCH_POLICY,PlanningWallBudget,choose as choose_recovery_plan
@@ -23,6 +23,19 @@ import test_review_regressions as probes
 
 ROOT=Path(__file__).resolve().parents[3]
 sys.path.insert(0,str(ROOT/'vla_SO-ARM101/src/so_arm101_control'))
+
+
+
+def parameters(*args,**kwargs):
+    # Historical physical-prefix fixtures retain their original receipt schema.
+    value=current_parameters(*args,**kwargs)
+    value['regrasp'].pop('strategy',None)
+    return value
+
+
+def progress(*args,**kwargs):
+    from checkpoint import progress as checked_progress
+    with patch('checkpoint.parameters',parameters):return checked_progress(*args,**kwargs)
 
 
 def snapshot(stamp=10**9,epoch=1):

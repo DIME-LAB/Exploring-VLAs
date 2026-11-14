@@ -4,7 +4,7 @@ from comparisons import matches,native_frame
 from dataset_phase import phase_code
 from tick_contract import digest,frame_digest,row_errors,STEP_NS
 
-REGRASP_POLICY=dict(version=3,share=.18,offset_min_m=.02,offset_max_m=.04,
+REGRASP_POLICY=dict(version=4,strategy='synthetic_post_miss_reset',share=.18,offset_min_m=.026,offset_max_m=.038,
     verification_lift_m=.03,object_motion_max_m=.003,jaw_close_tolerance_rad=.008)
 
 
@@ -15,7 +15,7 @@ def regrasp_slot(accepted_index):
 def recovery_parameters(seed,enabled):
     if not enabled:return dict(kind='none')
     rng=random.Random(seed ^ 0xA3B5C7)
-    return dict(kind='regrasp',signed_offset_m=rng.uniform(.02,.04)*rng.choice((-1,1)),
+    return dict(kind='regrasp',strategy='synthetic_post_miss_reset',signed_offset_m=rng.uniform(.026,.038)*rng.choice((-1,1)),
                 lift_m=.03,seed=seed ^ 0xA3B5C7)
 
 
@@ -63,6 +63,12 @@ def detect_miss(window,object_name,close_target):
 def receipt_error(receipt,rows=None):
     """Bind a measured miss to this episode's actual raw rows, epochs and poses."""
     if receipt.get('params',{}).get('recovery')!='regrasp':return None
+    strategy=receipt.get('params',{}).get('regrasp',{}).get('strategy')
+    if strategy=='synthetic_post_miss_reset' and receipt.get('recovery_report',{}).get('strategy')!=strategy:
+        return 'synthetic request lacks a synthetic reset certificate'
+    if receipt.get('recovery_report',{}).get('strategy')=='synthetic_post_miss_reset':
+        from recovery_start import receipt_error as synthetic_error
+        return synthetic_error(receipt,rows)
     try:
         report=receipt['recovery_report'];episode_id=receipt['episode_id']
         if not rows:return 'recovery rows are required'
@@ -112,9 +118,14 @@ def receipt_error(receipt,rows=None):
 
 
 def recovery_summary(manifest):
-    counts={'none':0,'regrasp':0};offsets=[]
+    counts={'none':0,'regrasp':0};offsets=[];phenotypes={};synthetic=0
     for receipt in manifest:
         kind=receipt['params'].get('recovery','none');counts[kind]+=1
-        if kind=='regrasp':offsets.append(abs(receipt['params']['regrasp']['signed_offset_m']))
+        if kind=='regrasp':
+            report=receipt.get('recovery_report',{})
+            if report.get('strategy')=='synthetic_post_miss_reset':
+                spec=report['selection']['spec'];offsets.append(spec['distance_m']);synthetic+=1
+                phenotypes[spec['phenotype']]=phenotypes.get(spec['phenotype'],0)+1
+            else:offsets.append(abs(receipt['params']['regrasp']['signed_offset_m']))
     return dict(counts=counts,share=counts['regrasp']/max(1,len(manifest)),offsets_m=offsets,
-                metadata_path='meta/collection_episodes.json')
+                synthetic_starts=synthetic,phenotype_counts=phenotypes,metadata_path='meta/collection_episodes.json')

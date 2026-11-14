@@ -23,11 +23,11 @@ def transform(position,quaternion):
     return t
 
 
-def read_model(stage,root='/World/SO_ARM101',effective_finger_offsets=None,effective_block_offsets=None):
+def read_model(stage,root='/World/SO_ARM101',effective_finger_offsets=None,effective_block_offsets=None,include_all_links=False):
     """Serialize joint frames and enabled native primitive finger shapes."""
     from pxr import Usd,UsdGeom,UsdPhysics
     def quat(q):return [q.GetReal(),*q.GetImaginary()]
-    base=root+'/base_link';joints=[];boxes=[];cache=UsdGeom.XformCache()
+    base=root+'/base_link';joints=[];boxes=[];all_boxes=[];cache=UsdGeom.XformCache()
     parent=stage.GetPrimAtPath(root)
     if not parent.IsValid():raise ValueError('Missing robot root for finger model')
     for p in Usd.PrimRange(parent):
@@ -43,7 +43,9 @@ def read_model(stage,root='/World/SO_ARM101',effective_finger_offsets=None,effec
         if not p.HasAPI(UsdPhysics.CollisionAPI) or not UsdPhysics.CollisionAPI(p).GetCollisionEnabledAttr().Get():continue
         body=p
         while body.IsValid() and not body.HasAPI(UsdPhysics.RigidBodyAPI):body=body.GetParent()
-        if not body.IsValid() or body.GetName() not in ('gripper_link','moving_jaw_so101_v1_link'):continue
+        if not body.IsValid():raise ValueError('Robot collider has no rigid body: '+str(p.GetPath()))
+        is_finger=body.GetName() in ('gripper_link','moving_jaw_so101_v1_link')
+        if not is_finger and not include_all_links:continue
         if not p.IsA(UsdGeom.Cube):raise ValueError('Unexpected non-box finger collision geometry: '+str(p.GetPath()))
         relative,reset=cache.ComputeRelativeTransform(p,body)
         if reset:raise ValueError('Finger collider resets its parent transform')
@@ -51,9 +53,12 @@ def read_model(stage,root='/World/SO_ARM101',effective_finger_offsets=None,effec
         lengths=np.linalg.norm(relative[:3,:3],axis=0);R=relative[:3,:3]/lengths
         if not np.isfinite(relative).all() or min(lengths)<=0 or not np.allclose(R.T@R,np.eye(3),atol=1e-9):raise ValueError('Sheared finger box')
         size=float(UsdGeom.Cube(p).GetSizeAttr().Get())
-        boxes.append(dict(path=str(p.GetPath()),body=str(body.GetPath()),center_link=relative[:3,3].tolist(),
-            rotation_link=R.tolist(),half_extents_m=(lengths*size/2).tolist()))
+        shape=dict(path=str(p.GetPath()),body=str(body.GetPath()),center_link=relative[:3,3].tolist(),
+            rotation_link=R.tolist(),half_extents_m=(lengths*size/2).tolist())
+        if is_finger:boxes.append(shape)
+        all_boxes.append(shape)
     model=dict(version=1,root_body=base,joints=joints,robot_boxes=boxes)
+    if include_all_links:model['all_robot_boxes']=all_boxes
     if effective_finger_offsets is not None:model['effective_finger_offsets']=effective_finger_offsets
     if effective_block_offsets is not None:model['effective_block_offsets']=effective_block_offsets
     FingerModel(model)
@@ -62,7 +67,7 @@ def read_model(stage,root='/World/SO_ARM101',effective_finger_offsets=None,effec
 
 
 class FingerModel:
-    def __init__(self,model):
+    def __init__(self,model,include_all=False):
         if not isinstance(model,dict):raise ValueError('Native finger model is required')
         self.root=model['root_body'];self.joints=[];self.shapes=[]
         if 'sha256' in model:
@@ -79,15 +84,17 @@ class FingerModel:
         if len({j['name'] for j in self.joints})!=len(self.joints) or len({j['body1'] for j in self.joints})!=len(self.joints):raise ValueError('Ambiguous finger-model joint tree')
         moving=[j['name'] for j in self.joints if j['axis']]
         if len(moving)!=6 or set(moving)!=set(JOINTS):raise ValueError('Finger model must contain the six named joints')
-        for s in model['robot_boxes']:
-            if not any('/'+n+'/' in s['path'] for n in ('gripper_link','moving_jaw_so101_v1_link')):continue
+        shapes=model['all_robot_boxes'] if include_all else model['robot_boxes']
+        if not shapes:raise ValueError('Robot collision boxes are required')
+        for s in shapes:
+            if not include_all and not any('/'+n+'/' in s['path'] for n in ('gripper_link','moving_jaw_so101_v1_link')):continue
             if 'center_link' in s:
                 body=s['body'];center=np.asarray(s['center_link']);R=np.asarray(s['rotation_link']);half=np.asarray(s['half_extents_m'])
             else:
                 body=s['path'].split('/collisions/')[0];lo=np.asarray(s['low']);hi=np.asarray(s['high']);center=(lo+hi)/2;R=np.eye(3);half=(hi-lo)/2
             if any(v.shape!=(3,) or not np.isfinite(v).all() for v in (center,half)) or min(half)<=0 or R.shape!=(3,3) or not np.allclose(R.T@R,np.eye(3),atol=1e-9):raise ValueError('Malformed finger box')
             self.shapes.append((s['path'],body,center,R,half))
-        if {body.rsplit('/',1)[-1] for _,body,*_ in self.shapes}!={'gripper_link','moving_jaw_so101_v1_link'}:raise ValueError('Both finger shapes are required')
+        if not {'gripper_link','moving_jaw_so101_v1_link'}.issubset({body.rsplit('/',1)[-1] for _,body,*_ in self.shapes}):raise ValueError('Both finger shapes are required')
         connected=self.poses([0.]*6)
         if any(body not in connected for _,body,*_ in self.shapes):raise ValueError('Finger collision body is disconnected')
 

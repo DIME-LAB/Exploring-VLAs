@@ -589,7 +589,7 @@ def install(mode='collect'):
     articulation=audit_module.readback(_RUNTIME.stage,_RUNTIME.art)
     articulation['helper_sha256']=hashlib.sha256(helper.read_bytes()).hexdigest()
     if mode=='collect' and articulation['fixed_base'] is not True:raise RuntimeError('Collection requires verified fixed_base=true: '+repr(articulation))
-    finger_model=read_model(_RUNTIME.stage,effective_finger_offsets=_RUNTIME.effective_finger_offsets())
+    finger_model=read_model(_RUNTIME.stage,effective_finger_offsets=_RUNTIME.effective_finger_offsets(),include_all_links=True)
     _LOADED_DEPENDENCIES=loaded_sources(Path(__file__).resolve().parent,previous=_LOADED_DEPENDENCIES)
     return dict(native_miss_fault_path=_RUNTIME.native_miss_fault_path,mode=mode, physics_config=physics,joint_names=_RUNTIME.art.dof_names,articulation_audit=articulation,
                 joint_index_mapping=dict(zip(JOINTS,_RUNTIME.indices)),finger_model=finger_model,

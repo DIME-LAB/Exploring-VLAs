@@ -588,78 +588,59 @@ come from the new epoch; samples are never mixed across a reset.
 
 Re-grasp recovery occupies 18% of **accepted slots**, evenly spread through
 colour rotation (9/50; 162/900, or 54 per colour). Retrying a rejected slot keeps
-its recovery type and colour but logs a new seed. Recovery selects the first of up to
-sixteen direction/magnitude candidates passing complete clean/executed segment
-preflight, retaining refusal contacts. `--regrasp-only` makes every
-slot a recovery for the dedicated smoke. A seeded 2–4 cm displacement affects
-only the executed first approach/descent. Both clean and displaced paths use the
-shared calibrated IK and waypoint collision checks. Their time laws share a
-common duration; the clean teacher reference stays independent of execution.
-The final-command geometry checks also cover this deliberate displacement. The first
-close has no synthetic MoveIt attachment. Across every tick of the close and 3 cm verification-lift window,
-measured same-epoch snapshots must show no lego moving more than 3 mm, including
-transient lifts that return to their initial position, and the
-jaw reaching its close command within 0.008 rad. This is an object-motion miss
-check, not a claim about an analytical empty-jaw width. An accidentally held
-object is released and the episode rejected.
+its recovery type and colour but logs a new seed. `--regrasp-only` makes every
+slot a recovery for the dedicated smoke.
 
-The arm then reopens, refreshes the full planning scene from measured poses and
-runs the shared Quickstart corrective pick/drop. The final containment/lift gate
-is unchanged. Before any reset arm motion, the collector opens the gripper,
-detaches through the strict scene path and reconciles from a fresh physical tick.
-Recovery holds belong to the command's immutable epoch and install only after
-its physical ACK. Collector collision-query unavailability, timeout or missing
-response poisons collection; it cannot become a planner quality refusal.
+Recovery starts from a **synthetic post-miss reset**. Seeded requests sample
+26–38 mm TCP offsets around the true grasp, small yaw deviations (up to 12°),
+and three jaw phenotypes: 50% closed, 30% partly closed, 20% open with a higher
+hover. The sampler retains its phenotype while trying up to 24 reachable poses.
+Receipts record the requested distribution, selected pose/jaw, every refused
+candidate and its MoveIt contact pairs. Accepted proportions can differ from
+the requested mix and must be reported.
 
-Deliberate misses additionally check the target that MoveIt omits for intended
-expert contact. A per-tick independent-joint reachable box, using the measured
-state and a read-back native velocity cap, protects the entire next physical
-tick including close/reopen; nominal straight-line preflight alone cannot
-certify it. Kickoff advances get the same check. Effective native finger/block
-contact/rest offsets are bound into the model hash and margin verification.
-Caps apply only to the miss prefix (0.5 rad/s open, 0.1 high approach, 0.05 near
-block), are logged on/off with values per tick, and are restored/read-verified
-before the normal-speed corrective grasp. Partial native writes are marked
-dirty before dispatch and restore/read-verify the original limits on failure;
-failed rollback stays terminal and cannot report off. Finger/block offsets are
-freshly compared at every guarded episode start. The target's measured linear
-and angular speeds must remain below 0.1 mm/s and 0.005 rad/s at each guarded
-advance. Per-joint substep excess is logged against the declared 5 urad pad;
-**the owned live smoke, not CPU tests or limit readback, must qualify the solver
-residual**. Any observed violation rejects the episode and stops the run. Native
-fault samples must be durably written before rollback (after pausing), with at
-most three publication attempts. Persistent journal failure blocks rollback,
-cancel/reset retirement and continuation with dirty/unknown limits; storage
-repair permits cleanup, never revival. Fault evidence is copied into receipts
-even if cancellation fails. Receipts quantify the temporary operation retiming. All miss stages require measured velocity <=0.0125 rad/s
-before completion; ordinary collector/GUI completion is unchanged.
-A recovery jaw already within 0.0005 rad of its target completes under the
-same clearance/cap proof and a held-state ACK, without advancing physics or
-recording stationary frames. Its duration is zero in the step receipt; export
-checks the ACK, epoch, measured jaw and corresponding held kickoff.
-Native limit writes require a committed pause: the main-thread Timeline
-`commit()` flushes pending state/callbacks, then `is_playing()` must be false.
-The acknowledgement is bounded to three commits and one wall second; a failure
-refuses native writes and retains the unresolved fault/limit state.
-See [target-clearance and evidence contracts](docs/notes/regrasp-target-clearance.md).
+Before writing any native state, the calibrated shared IK and joint limits,
+MoveIt full-scene validity **with the target present**, and independent native
+robot-box checks must all pass. The native model covers every enabled robot
+collision box. Robot boxes require 1.02 mm clearance from all dynamic block/cup
+primitives; finger boxes also require that clearance from the floor. The 1 mm
+margin covers the measured 0.1 mm finger + 0.1 mm target contact offsets, with
+20 um arithmetic allowance. MoveIt retains self-collision and ground policy.
+Finger/block effective offsets are freshly read and verified per episode.
+
+The existing held native restore sets all six named joint positions, matching
+drive targets and zero velocity, with immediate readback and epoch/command-history
+rebasing. Six unrecorded normal-dynamics hold ticks then verify the complete
+pipeline contract, static geometry, and an undisturbed target (corner movement
+<=0.2 mm, linear speed <=0.1 mm/s, angular speed <=0.005 rad/s). The writer starts
+only after these checks and scene synchronization. The shared Quickstart then
+performs the correction at normal speed and dynamics. Setup failures are terminal
+with durable native evidence; exhausted collision-clear candidates are planner
+quality refusals. Receipt replay restores the recorded selected joints and
+refuses a pose that is no longer clear.
 
 Every exported frame carries int64 `collection_phase` (shape `[1]`): **0 normal,
-1 miss_prefix, 2 corrective**. `meta/collection_phases.json` documents the mapping
-and counts; export checks every flag against the native reopen boundary and
-reads every stored value back. For 3.2 training, include **normal + corrective**
-frames by default and exclude/mask **miss_prefix**, because that prefix uses
-temporary slower dynamics. Miss-prefix actions remain the clean expert's
-correction toward the true target; the deliberately offset executed command is
-stored separately in audit rows. State/action/camera deployment features are
-unchanged; the phase column is training-selection metadata, not a policy input.
+1 miss_prefix, 2 corrective**. All frames from synthetic-reset recovery are
+**2 corrective**, with clean expert actions recomputed from measured state and
+ordinary smooth DART applied only to execution. Setup/reset/settle frames are
+unrecorded. Train on normal and corrective frames; the phase column is selection
+metadata, not a deployed policy input. The exporter retains support for historical
+phase flags and refuses setup frames or a physical-prefix receipt under the
+current synthetic-start policy.
 
-Frames and receipts carry `recovery: regrasp`; exported datasets retain full
-per-episode recovery/seed evidence in `meta/collection_episodes.json` without
-changing deployment features. Acceptance, resume and export recheck the measured
-miss and completed reopen/scene-refresh evidence against the raw episode ID,
-epoch, stage stamps, physical states/poses and whole-miss row hashes (excluding separately audited
-post-capture wall profiles). Export reports the achieved
-share/offset distribution and prefers recovery episodes for sample videos.
+These episodes are state augmentation, labelled **synthetic post-miss resets**;
+they do not claim a physically observed failed grasp. They target the established
+single-observation policy. A policy conditioned on motion history would require
+reconsidering the reset distribution. The unchanged final lift/containment,
+timing/command/epoch audits and success-only retention apply. See
+[recovery start and evidence contracts](docs/notes/regrasp-target-clearance.md).
+
+Frames and receipts carry `recovery: regrasp`; datasets retain the full
+per-episode request, geometry, restore and checked settle evidence in
+`meta/collection_episodes.json`. Acceptance, resume and export revalidate the
+synthetic-start certificate against the corrective rows and phase boundary.
+No native velocity limits or gravity settings change during synthetic setup.
+
 Smooth DART and re-grasp require a validated smoke at the current scene/cut; their physical yield and
 side-by-side/recovery videos require targeted review and a newly authorized
 smoke before a fresh pilot. The stopped pilot-v2 ledger remains diagnostic.
@@ -895,14 +876,15 @@ ROS_DOMAIN_ID=99 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
   python3 -B linux-env/scripts/collect/collector_boot_regression.py --instance 9 \
   --output /mnt/a4500-backup/exploring-vlas/runtime/instance-9/bootstrap-check
 
-# Full fake attempt: six miss stages, actual shared corrective cycle and finalization.
+# Full fake attempt: synthetic reset, settle, shared corrective cycle and finalization.
 # Use fresh output paths. The late-fault variant proves durable failure finalization.
 ROS_DOMAIN_ID=99 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
   CYCLONEDDS_URI="file://$PWD/linux-env/cyclonedds.xml" CUDA_VISIBLE_DEVICES='' \
   OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
   python3 -B linux-env/scripts/collect/collector_boot_regression.py --instance 9 \
   --full-regrasp --output /mnt/a4500-backup/exploring-vlas/runtime/instance-9/regrasp-check
-# Repeat with --inject-native-fault and a different output path to test terminal cleanup.
+# Repeat separately with --inject-native-fault, --inject-restore-failure or
+# --inject-moving-target and fresh output paths to test terminal cleanup.
 python3 -B linux-env/scripts/collect/process_ownership_regression.py \
   --output /mnt/a4500-backup/exploring-vlas/runtime/instance-0/process-ownership-check
 ```

@@ -12,14 +12,20 @@ def main():
     parser.add_argument('--output',required=True,type=Path)
     parser.add_argument('--instance',type=int,default=0)
     parser.add_argument('--full-regrasp',action='store_true')
-    parser.add_argument('--inject-native-fault',action='store_true')
+    parser.add_argument('--replay-synthetic-receipt',type=Path)
+    faults=parser.add_mutually_exclusive_group()
+    faults.add_argument('--inject-native-fault',action='store_true')
+    faults.add_argument('--inject-restore-failure',action='store_true')
+    faults.add_argument('--inject-moving-target',action='store_true')
+    faults.add_argument('--inject-replay-bounds',action='store_true')
     args=parser.parse_args()
     if not 0<=args.instance<=9:raise ValueError('Test instance must be 0–9')
     if os.environ.get('ROS_DOMAIN_ID')!=str(90+args.instance):raise ValueError('Test domain must equal 90 + instance')
+    if args.inject_replay_bounds and not args.replay_synthetic_receipt:raise ValueError('Replay bounds regression requires a source receipt')
     if args.full_regrasp:
         from offline_regrasp import run_full
         return run_full(args)
-    if args.inject_native_fault:raise ValueError('Fault injection requires --full-regrasp')
+    if args.inject_native_fault or args.inject_restore_failure or args.inject_moving_target or args.inject_replay_bounds or args.replay_synthetic_receipt:raise ValueError('Fault injection requires --full-regrasp')
     runtime=prepare_environment(args.instance)
     from run_smoke import InstanceClaim
     instance_claim=InstanceClaim(runtime)

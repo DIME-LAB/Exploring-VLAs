@@ -70,7 +70,7 @@ class ComparisonTests(unittest.TestCase):
         import test_recovery as recovery_probes
         from contract import parameters
         from recovery import receipt_error
-        c,_=recovery_probes.RecoveryTests().driver();params=parameters(1,'red',regrasp=True);report={}
+        c,_=recovery_probes.RecoveryTests().driver();params=recovery_probes.parameters(1,'red',regrasp=True);report={}
         c.regrasp_prefix(params,1,report)
         rows=copy.deepcopy(c.test_rows)
         for row in rows:

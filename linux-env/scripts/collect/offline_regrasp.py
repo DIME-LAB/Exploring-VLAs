@@ -1,4 +1,4 @@
-"""Full collector attempt with fake ROS/Kit transports; never imports Isaac or CUDA.
+"""Full synthetic-reset recovery with fake ROS/Kit transports; no Isaac or CUDA.
 
 The robot/controller/recorder code is real. Physics is an ideal bounded position
 adapter, and MoveIt validity answers are deliberately collision-free. This is
@@ -55,14 +55,26 @@ def run_full(args):
     output=confined(args.output);output.mkdir(parents=True,exist_ok=False)
     (output/'TEST_ONLY_NOT_TRAINING_DATA').write_text('CPU fake transports; no native physics qualification.\n')
     fixture_path=HERE/'fixtures/regrasp-boot.json';fixture=json.loads(fixture_path.read_text())
+    from recovery import recovery_parameters
+    fixture['params']['regrasp']=recovery_parameters(fixture['params']['seed'],True)
     reference=output/'reference';reference.mkdir()
     atomic_json(reference/'run.json',dict(baseline=fixture['baseline'],baseline_cup_layout=fixture['baseline_cup_layout']))
-    (reference/'attempt-0000').mkdir();replay=reference/'attempt-0000/receipt.json';atomic_json(replay,fixture)
+    (reference/'attempt-0000').mkdir();replay=reference/'attempt-0000/receipt.json'
+    source_receipt=None
+    if args.replay_synthetic_receipt:
+        source=confined(args.replay_synthetic_receipt);source_receipt=json.loads(source.read_text())
+        assert source_receipt['accepted'] and source_receipt['recovery_report']['strategy']=='synthetic_post_miss_reset'
+        if args.inject_replay_bounds:
+            source_receipt['recovery_report']['selection']['joints'][0]+=2*np.pi
+            atomic_json(replay,source_receipt)
+        else:replay.write_bytes(source.read_bytes())
+        fixture['params']=copy.deepcopy(source_receipt['params'])
+    else:atomic_json(replay,fixture)
     clock_topic='/offline_regrasp_clock_'+output.name.replace('-','_')
     clock_args=['--ros-args','-r','/clock:='+clock_topic]
     rclpy.init(args=clock_args);context=Context();context.init(args=clock_args)
     result=dict(passed=False,scope=__doc__,fixture_sha256=source_digest(fixture_path),domain=90+args.instance,
-        physical_qualification=False,isaac_started=False,gpu_started=False,inject_native_fault=args.inject_native_fault)
+        physical_qualification=False,isaac_started=False,gpu_started=False,inject_native_fault=args.inject_native_fault,inject_restore_failure=args.inject_restore_failure,inject_moving_target=args.inject_moving_target,inject_replay_bounds=args.inject_replay_bounds)
     native=Node('fake_regrasp_transports',context=context);group=ReentrantCallbackGroup()
     clock_pub=native.create_publisher(Clock,'/clock',64)
     cameras={key:native.create_publisher(Image,topic,64) for key,topic in
@@ -82,11 +94,19 @@ def run_full(args):
     initial=copy.deepcopy(fixture['initial_physical'])
     q=np.asarray([initial['state']],dtype=np.float32);v=np.zeros((1,6),np.float32)
     targets=np.asarray([initial['drive_targets']],dtype=np.float32);limits=np.full((1,6),10.,np.float32)
-    writes=[]
+    writes=[];preparing=[False];restore_fault_sent=[False];static_checks=[];validity_targets=[]
     def set_limits(values,joint_indices):
         if r.timeline.is_playing():raise AssertionError('Native limit write preceded pause commit')
         limits[:,joint_indices]=values;writes.append(dict(values=limits[0].tolist(),epoch=r.epoch,stamp=r.stamp(),held=True))
-    def set_q(values,joint_indices):q[:,joint_indices]=values
+    def set_q(values,joint_indices):
+        if preparing[0]:
+            assert collector.writer is None,'Reset happened after recording began'
+            assert static_checks and static_checks[-1]['passed'] and np.allclose(values[0],static_checks[-1]['joints'],atol=1e-6,rtol=0.)
+            assert validity_targets and np.allclose(values[0],validity_targets[-1],atol=1e-6,rtol=0.)
+            result['static_validated_before_native_write']=True
+        q[:,joint_indices]=values
+        if args.inject_restore_failure and preparing[0] and not restore_fault_sent[0]:
+            restore_fault_sent[0]=True;raise RuntimeError('Injected partial synthetic joint restore')
     def set_v(values,joint_indices):v[:,joint_indices]=values
     r.art=NS(dof_names=list(JOINTS),get_joint_positions=lambda:q.copy(),get_joint_velocities=lambda:v.copy(),
         get_joint_max_velocities=lambda joint_indices:limits[:,joint_indices].copy(),set_max_joint_velocities=set_limits,
@@ -192,7 +212,7 @@ def run_full(args):
                 response.scene.robot_state.joint_state.position=q[0].tolist()
         return response
     validity_calls=[]
-    def valid(request,response):validity_calls.append(1);response.valid=True;return response
+    def valid(request,response):validity_calls.append(1);validity_targets.append(list(request.robot_state.joint_state.position));response.valid=True;return response
     def plan(request,response):
         wanted=dict(zip(JOINTS,q[0].tolist()))
         for constraint in request.motion_plan_request.goal_constraints[0].joint_constraints:wanted[constraint.joint_name]=constraint.position
@@ -213,6 +233,8 @@ def run_full(args):
                 with lock:
                     if not r.busy:continue
                     for _ in range(4):
+                        if args.inject_moving_target and collector is not None and getattr(collector.node,'_last_motion_tag',None)=='synthetic_start_settle':
+                            body_data[fixture['params']['object']]['velocity']=[.0002,0.,0.,0.,0.,0.]
                         r.check_miss_substep(1/120)
                         delta=np.clip(targets-q,-limits/120,limits/120);q[:]=q+delta;v[:]=delta*120
                         r.world.current_time+=1/120
@@ -248,7 +270,11 @@ def run_full(args):
             replay_receipt=replay,wait_rtf_floor=.1,episode_deadline=180,diagnostic=True,instance=args.instance)
         def gpu(self):
             self.last_gpu_footprint=dict(passed=True,test_double=True,scope='No GPUs in this test');return self.last_gpu_footprint
-        with patch.dict(sys.modules,{'collection_runtime':proxy}),patch.object(implementation,'mcp',mcp),\
+        from recovery_start import StaticClearance
+        original_static=StaticClearance.state
+        def static(self,*a,**k):
+            answer=original_static(self,*a,**k);static_checks.append(copy.deepcopy(answer));return answer
+        with patch.object(StaticClearance,'state',static),patch.dict(sys.modules,{'collection_runtime':proxy}),patch.object(implementation,'mcp',mcp),\
              patch.object(implementation,'gpu_uuid',lambda index:'fake-cpu-only'),patch.dict(os.environ,{'SOARM_RENDERER_GPU_INDEX':'0'}),\
              patch.object(implementation.Collector,'gpu_footprint',gpu):
             collector=implementation.Collector(config)
@@ -257,6 +283,16 @@ def run_full(args):
                 pose=collector.node._mat_to_pose7(tcp_transform())
                 return NS(transform=NS(translation=NS(x=pose[0],y=pose[1],z=pose[2]),rotation=NS(x=pose[3],y=pose[4],z=pose[5],w=pose[6])))
             collector.node._tf_buffer.lookup_transform=transform
+            original_prepare=collector.prepare_regrasp_start
+            def prepare(params,result):
+                # The fixture supplies initial scene poses only; exercise fresh
+                # seeded synthetic sampling rather than replaying a prior recovery.
+                saved=collector.args.replay_receipt
+                if source_receipt is None:collector.args.replay_receipt=None
+                preparing[0]=True
+                try:return original_prepare(params,result)
+                finally:collector.args.replay_receipt=saved;preparing[0]=False
+            collector.prepare_regrasp_start=prepare
             original_cycle=collector.node.run_cycle
             def corrective(name):
                 result['corrective_handover']=dict(limits=limits[0].tolist(),cap=r.miss_cap_state(),held=not r.timeline.is_playing())
@@ -273,31 +309,56 @@ def run_full(args):
         receipt_path=output/'run/attempt-0000/receipt.json'
         if not receipt_path.exists():raise RuntimeError('Fake startup failed before an attempt: '+result.get('run_error','No receipt'))
         receipt=json.loads(receipt_path.read_text())
-        report=receipt['recovery_report'];stages=[s['stage'] for s in report['steps']]
-        expected=['regrasp_miss_open','regrasp_miss_approach','regrasp_miss_descent','regrasp_miss_close','regrasp_miss_lift','regrasp_reopen']
-        assert stages==expected
-        assert report['steps'][0]['completion']['already_at_target'] and report['kickoffs'][0]['ack']['held']
-        assert result['corrective_handover']['cap']['on'] is False
-        assert not receipt.get('finalization_errors'),receipt.get('finalization_errors')
-        if args.inject_native_fault:
-            assert receipt['accepted'] is False and receipt['native_miss_faults']
+        report=receipt['recovery_report']
+        if args.inject_replay_bounds:assert not result.get('static_validated_before_native_write'),'Invalid replay wrote native joints'
+        else:assert result['static_validated_before_native_write']
+        if source_receipt is not None:
+            assert report['selection']['joints']==source_receipt['recovery_report']['selection']['joints']
+            assert report['replay_source_sha256']==hashlib.sha256(replay.read_bytes()).hexdigest()
+            if args.inject_replay_bounds:result['replay_refused_before_native_write']=True
+            else:
+                for field in ('state','drive_targets','velocity'):
+                    assert report['restore']['snapshot'][field]==source_receipt['recovery_report']['restore']['snapshot'][field]
+                result['replayed_joints_exact']=True
+        setup_failure=args.inject_restore_failure or args.inject_moving_target or args.inject_replay_bounds
+        if setup_failure:
+            assert receipt['accepted'] is False and receipt['native_miss_faults'],receipt
+            assert not report['passed'] and 'original_setup_error' in report
+            frames_path=receipt_path.parent/'frames.jsonl'
+            assert not frames_path.exists() or frames_path.stat().st_size==0,'Setup failure recorded training frames'
+            assert 'corrective_handover' not in result,'Corrective cycle ran after invalid setup'
+            assert not receipt.get('finalization_errors'),receipt.get('finalization_errors')
+            result['setup_refusal_verified']=True
         else:
-            assert receipt['accepted'] is True,receipt.get('error')
-            assert 'run_error' not in result and 'close_error' not in result,result
-            from recovery import receipt_error
-            rows=[json.loads(line) for line in (receipt_path.parent/'frames.jsonl').read_text().splitlines()]
-            altered=copy.deepcopy(receipt)
-            altered['recovery_report']['steps'][0]['completion']['ack']['held']=False
-            assert receipt_error(altered,rows) is not None,'Unacknowledged no-op stage was accepted'
-            altered=copy.deepcopy(receipt)
-            altered['recovery_report']['kickoffs'][0]['snapshot']['state'][5]+=.001
-            assert receipt_error(altered,rows) is not None,'No-op outside jaw tolerance was accepted'
-            assert report['steps'][0]['miss_planned_duration_s']==0.
-            result['noop_verifier_regressions']=True
+            assert report['strategy']=='synthetic_post_miss_reset' and report['passed']
+            assert len(report['settle_snapshots'])==6
+            assert result['corrective_handover']['cap']['on'] is False
+            assert writes==[],'Synthetic reset wrote native velocity limits'
+            result['synthetic_start']=dict(phenotype=report['selection']['spec']['phenotype'],settle_ticks=6,writer_after_settle=True)
+            assert not receipt.get('finalization_errors'),receipt.get('finalization_errors')
+            if args.inject_native_fault:
+                assert receipt['accepted'] is False and receipt['native_miss_faults']
+            else:
+                assert receipt['accepted'] is True,receipt.get('error')
+                assert 'run_error' not in result and 'close_error' not in result,result
+                from recovery import receipt_error
+                rows=[json.loads(line) for line in (receipt_path.parent/'frames.jsonl').read_text().splitlines()]
+                assert all(row['collection_phase']=='corrective' and row['pose_stamp_ns']>report['record_after_sim_ns'] for row in rows)
+                altered=copy.deepcopy(receipt);altered['recovery_report']['restore']['snapshot']['state'][0]+=.001
+                assert receipt_error(altered,rows) is not None,'Incorrect reset readback was accepted'
+                altered=copy.deepcopy(receipt);altered['recovery_report']['settle_snapshots'][0]['bodies'][fixture['params']['object']]['velocity'][0]=.01
+                assert receipt_error(altered,rows) is not None,'Moving target was accepted'
+                altered=copy.deepcopy(receipt);altered['recovery_report']['selection']['proof']['static']['boxes'][0]['separation_m']+=1e-12
+                assert receipt_error(altered,rows) is None,'Independent arithmetic producer rounding was refused'
+                altered['recovery_report']['selection']['proof']['static']['boxes'][0]['separation_m']+=1e-5
+                assert receipt_error(altered,rows) is not None,'Changed static geometry proof was accepted'
+                changed=copy.deepcopy(rows);changed[0]['collection_phase']='miss_prefix'
+                assert receipt_error(receipt,changed) is not None,'Synthetic prefix row was accepted'
+                result['synthetic_verifier_regressions']=True
         certificate=json.loads((output/'run/collector-finalization.json').read_text())
         assert certificate['completed'] and not certificate['cleanup_errors'],certificate
-        if not args.inject_native_fault:assert certificate['passed'],certificate
-        result.update(passed=True,stages=stages,first_stage_noop=True,accepted=receipt['accepted'],
+        if not args.inject_native_fault and not setup_failure:assert certificate['passed'],certificate
+        result.update(passed=True,accepted=receipt['accepted'],
             finalization_completed=certificate['completed'],finalization_cleanup_errors=certificate['cleanup_errors'],
             pause_commits=r.timeline.commits,native_limit_writes=len(writes),validity_queries=len(validity_calls))
     except BaseException as exc:result['error']=repr(exc);raise

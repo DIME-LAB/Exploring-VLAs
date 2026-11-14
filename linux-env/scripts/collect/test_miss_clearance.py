@@ -24,7 +24,8 @@ def context(seed):
 class MissClearanceTests(unittest.TestCase):
     def test_reviewed_original_and_small_fallbacks_cannot_pass_target_free_oracle(self):
         seed=next(s for s in FIXTURE['seeds'] if s['seed']==350007)
-        requested=parameters(340000,'red',regrasp=True)['regrasp'];p=seed['params']
+        requested=dict(signed_offset_m=-0.02595740229527009,lift_m=.03,seed=340000 ^ 0xA3B5C7);p=seed['params']
+        # Retained physical-prefix counterexample, independent of synthetic sampling.
         settings=dict(current_wrist_roll=-1.5220963,approach_height=p['approach_height_m'],approach_offset=p['approach_offset_m'])
         guard=MissClearance(MODEL,context(seed),seed['object'])
         original=recovery_geometry(seed['pose'],seed['bbox'],requested,**settings)

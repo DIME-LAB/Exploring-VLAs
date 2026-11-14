@@ -19,17 +19,15 @@ class DatasetPhaseTests(unittest.TestCase):
             with self.assertRaises(ValueError):phase_code(bad,receipt,required=True)
         with self.assertRaises(ValueError):phase_code(dict(row,collection_phase=None),receipt)
 
+    def test_synthetic_setup_is_unrecorded_and_all_recovery_frames_are_corrective(self):
+        receipt=dict(params=dict(recovery='regrasp'),recovery_report=dict(strategy='synthetic_post_miss_reset',record_after_sim_ns=100))
+        row=dict(epoch=1,pose_stamp_ns=101,sim_ns=101,state_source='isaac_articulation',state=[0.]*6,physical_bodies={},collection_phase='corrective')
+        self.assertEqual(phase_code(row,receipt,required=True),2)
+        with self.assertRaises(ValueError):phase_code(dict(row,pose_stamp_ns=100),receipt,required=True)
+        with self.assertRaises(ValueError):phase_code(dict(row,collection_phase='miss_prefix'),receipt,required=True)
+
     def test_normal_legacy_export_is_compatible_but_new_missing_flags_refuse(self):
         receipt=dict(params=dict(recovery='none'))
         self.assertEqual(phase_code({},receipt),0)
         with self.assertRaises(ValueError):phase_code({},receipt,required=True)
         with self.assertRaises(ValueError):phase_code(dict(collection_phase='miss_prefix'),receipt)
-
-    def test_scalar_and_length_one_hf_columns_round_trip_without_indexing_scalar(self):
-        import numpy as np
-        from types import SimpleNamespace as NS
-        from dataset_phase import stored_phase_codes
-        dataset=NS(hf_dataset={FEATURE:[np.asarray(0),np.asarray([1]),np.asarray(2)]})
-        self.assertEqual(stored_phase_codes(dataset),[0,1,2])
-        dataset.hf_dataset[FEATURE]=[np.asarray(1.5)]
-        with self.assertRaises(ValueError):stored_phase_codes(dataset)

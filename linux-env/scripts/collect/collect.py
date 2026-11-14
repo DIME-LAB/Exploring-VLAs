@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ROS sim-tick collector. Run with system Humble Python; export with pixi separately."""
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager,nullcontext
 from dataclasses import replace
 import copy
 import hashlib
@@ -56,6 +56,7 @@ from cup_geometry import PROFILE,CUP,PRIMITIVES,primitive_world_poses
 from diagnostics import final_stills
 from query_service import StrictQueryClient
 from recovery import REGRASP_POLICY, recovery_geometry, detect_miss
+from recovery_start import POLICY as SYNTHETIC_START_POLICY
 from recovery_search import SEARCH_POLICY,PlanningWallBudget,choose as choose_recovery_plan
 from dart import DEFAULT_NOISE, SmoothDart, ClearanceDart, TargetCandidate, PlannerSchedule
 from command_geometry import choose_noise_scale, final_command, QUERY_POLICY, frame_capacity_seconds,CommandCollision
@@ -1278,6 +1279,104 @@ class Collector:
         snapshot=self.advance_ticks(1)[0]
         self.sync_scene(snapshot=snapshot)
 
+    def prepare_regrasp_start(self,params,result):
+        try:return self._prepare_regrasp_start(params,result)
+        except QualityReject:raise
+        except Exception as error:
+            report=result.setdefault('recovery_report',{})
+            report['original_setup_error']=repr(error)
+            try:
+                native=self.mutate_kit('run_python',{'code':'import collection_runtime as c\nr=c.runtime()\nr.fail_miss_motion(RuntimeError('+repr(str(error))+'))\nresult={"epoch":r.epoch,"fault":r._miss_motion_fault}'})
+                report['fault_epoch']=native['epoch']
+            except Exception as publication_error:report['native_fault_publication_error']=repr(publication_error)
+            self.abort_stalled_owner(error,'synthetic start verification')
+            raise
+
+    def _prepare_regrasp_start(self,params,result):
+        """Create an unrecorded synthetic miss state, then hand over normal dynamics."""
+        from recovery_start import POLICY as START_POLICY,STRATEGY,StaticClearance,choose
+        if self.writer is not None:raise RuntimeError('Synthetic reset cannot run while recording')
+        epoch=self.generation.epoch;self.generation.require(epoch)
+        before=self.held_snapshot(epoch);name=params['object'];bbox=self.node._lookup_bbox(name)
+        if not bbox:raise ValueError('Synthetic recovery target has no dimensions')
+        with self.node.objects_lock:pose=dict(self.node.objects_data[name])
+        settings=dict(cross=self.node._grasp_cross_var.get() if hasattr(self.node,'_grasp_cross_var') else False,
+            current_wrist_roll=before['state'][4],tcp_clearance=self.node._tcp_clearance_var.get()/1000,
+            approach_height=params['approach_height_m'],approach_offset=params['approach_offset_m'])
+        report=dict(strategy=STRATEGY,origin=START_POLICY['origin'],policy=START_POLICY,
+            episode_id=self.current_episode_id,epoch=epoch,passed=False,baseline=copy.deepcopy(before),
+            request=dict(pose=pose,bbox=bbox,settings=settings))
+        result['recovery_report']=report
+        # Keep the target and every other obstacle in the synchronized planning scene.
+        self.sync_scene(snapshot=before,epoch=epoch)
+        with self.generation.own('synthetic start offset readback'):
+            self.generation.require(epoch,before['sim_ns'])
+            fresh=self.mutate_kit('run_python',{'code':'import collection_runtime as c\nresult=c.runtime().guarded_episode_offsets(*'+repr((name,epoch,before['sim_ns'],self.native_finger_model['effective_finger_offsets'],self.native_shape_offsets[name]))+')'})
+        model=bind_target_offsets(self.native_finger_model,fresh['block_offsets'])
+        if fresh['finger_offsets']!=model['effective_finger_offsets'] or fresh['block_offsets']!=self.native_shape_offsets[name]:raise RuntimeError('Synthetic start effective offsets differ')
+        report.update(model=model,fresh_offsets=fresh)
+        oracle=StaticClearance(model,before,name)
+        if not oracle.target_state(before)['passed']:raise RuntimeError('Synthetic start requires a stationary target')
+        def check(q):
+            self.generation.require(epoch)
+            answer=self.node._check_state_valid_with_contacts(dict(zip(JOINTS,q)))
+            self.generation.require(epoch)
+            return answer
+        if self.args.replay_receipt:
+            replay=json.loads(self.args.replay_receipt.read_text())
+            previous=replay.get('recovery_report',{})
+            if previous.get('strategy')!=STRATEGY or not previous.get('passed') or previous.get('policy')!=START_POLICY:
+                raise ValueError('Replay requires a certified synthetic-start receipt')
+            selection=copy.deepcopy(previous['selection'])
+            report['selection']=selection
+            report['request']=copy.deepcopy(previous['request'])
+            report['replay_source_sha256']=hashlib.sha256(self.args.replay_receipt.read_bytes()).hexdigest()
+            from command_geometry import checked_segment
+            q=selection['joints'];preflight=checked_segment(q,q,check,[JOINT_LIMITS[n] for n in JOINTS]);static=oracle.state(q)
+            report['replay_preflight']=dict(scene=preflight,static=static)
+            if not preflight['passed'] or not static['passed']:raise RuntimeError('Recorded synthetic pose is no longer statically clear or in joint limits')
+            selection['proof']=dict(passed=True,joints=q,static=static,contacts=[])
+        else:
+            selection=choose(pose,bbox,params['regrasp'],settings,oracle,check,
+                lambda:self.generation.require(epoch),[JOINT_LIMITS[n] for n in JOINTS])
+        report['selection']=selection
+        if not selection.get('proof',{}).get('passed'):
+            self.reject_quality('planner_reject',dict(stage='synthetic_start',attempts=selection['attempts']),[before])
+        # No physics occurs between this final static check and the held restore.
+        requested=copy.deepcopy(before);requested['state']=list(selection['joints']);requested['drive_targets']=list(selection['joints']);requested['velocity']=[0.]*6
+        with self.generation.own('synthetic static reset'):
+            self.generation.require(epoch,before['sim_ns'])
+            restored=self.restore_physical('import collection_runtime as c\nr=c.runtime()\nassert r.epoch=='+repr(epoch)+'\nresult=r.restore('+repr(requested)+',arm=True)')
+        report['restore']=restored;epoch=restored['epoch'];report['epoch']=epoch
+        with self.generation.own('synthetic restored hold'):
+            self.generation.require(epoch)
+            with self.servo.lock:
+                self.servo.reference=list(restored['snapshot']['drive_targets']);self.servo.reference_epoch=epoch
+                self.servo.executed_hold=None;self.servo.previous_executed=None
+            self.node._last_motion_tag='synthetic_start_settle'
+        checks=[];snapshots=[];report['settle_checks']=checks;report['settle_snapshots']=snapshots
+        for _ in range(START_POLICY['settle_ticks']):
+            snapshot=self.advance_ticks(1)[0];require_snapshots([snapshot]);snapshots.append(snapshot)
+            self.generation.require(epoch,snapshot['sim_ns'])
+            static=oracle.state(snapshot['state'],snapshot);target=oracle.target_state(snapshot)
+            valid,contacts=self.node._check_state_valid_with_contacts(dict(zip(JOINTS,snapshot['state'])))
+            self.generation.require(epoch,snapshot['sim_ns'])
+            proof=dict(static=static,target=target,scene_valid=valid,
+                contacts=[dict(body_1=c.contact_body_1,body_2=c.contact_body_2,depth=c.depth) for c in contacts])
+            checks.append(proof)
+            if not static['passed'] or not target['passed'] or not valid:
+                error=RuntimeError('Synthetic reset settle verification failed: '+repr(proof))
+                raise error
+        require_snapshots(snapshots)
+        current=snapshots[-1];self.sync_scene(snapshot=current,epoch=epoch)
+        with self.generation.own('synthetic corrective handover'):
+            self.generation.require(epoch,current['sim_ns'])
+            self.recovery_prefix_done_epoch=epoch
+            self.episode_start_physical=current
+            report.update(passed=True,record_after_sim_ns=current['sim_ns'],scene_after_reset=self.scene_pose_check,
+                corrective_attempt='shared Quickstart; normal dynamics and speed; synthetic setup unrecorded')
+        return report
+
     def regrasp_prefix(self, params, epoch, result,planning_budget=None):
         """Execute the miss while labels follow the separate true-target plan."""
         self.generation.require(epoch)
@@ -1561,25 +1660,37 @@ class Collector:
             self.node._cup_collision_names=[co.id for co in scene.world.collision_objects]
             self.node._acm_allow_ground_rest(self.node._cup_collision_names)
 
-    def sync_scene(self,snapshot=None):
+    def sync_scene(self,snapshot=None,*,epoch=None):
         snapshot=self.episode_start_physical if snapshot is None else snapshot
-        self.update_pose_cache(snapshot)
-        cleared = self.scene_reset.clear()
-        self.node._cmd_toggle_ground_plane()
-        self.node._add_cup_collision_objects(cups_dict=dict(self.node._drop_data))
-        self.scene_reset.rebuild_legos(snapshot)
-        world_ids = ['ground_plane'] + list(self.node._cup_collision_names) + list(self.node._lego_collision_names)
-        with self.node._motion_guard():
-            self.scene_reset.set_policy(world_ids)
-        deadline = time.monotonic() + 15
-        while True:
-            check = self.scene_reset.verify(snapshot, JOINTS)
-            if check['passed']:
-                self.scene_pose_check = dict(check, cleared=cleared)
-                return
-            if time.monotonic() > deadline:
-                raise TimeoutError(f'Full planning scene reset verification failed: {check}')
-            self.stop.wait(.05)
+        def synchronize():
+            if epoch is None:self.update_pose_cache(snapshot)
+            else:
+                with self.generation.own('synthetic scene pose cache'):
+                    self.generation.require(epoch,snapshot['sim_ns'])
+                    self.update_pose_cache(snapshot)
+            cleared = self.scene_reset.clear()
+            self.node._cmd_toggle_ground_plane()
+            self.node._add_cup_collision_objects(cups_dict=dict(self.node._drop_data))
+            self.scene_reset.rebuild_legos(snapshot)
+            world_ids = ['ground_plane'] + list(self.node._cup_collision_names) + list(self.node._lego_collision_names)
+            with self.node._motion_guard():
+                self.scene_reset.set_policy(world_ids)
+            deadline = time.monotonic() + 15
+            while True:
+                if epoch is not None:self.generation.require(epoch,snapshot['sim_ns'])
+                check = self.scene_reset.verify(snapshot, JOINTS)
+                if check['passed']:
+                    if epoch is None:self.scene_pose_check = dict(check, cleared=cleared)
+                    else:
+                        with self.generation.own('synthetic scene proof'):
+                            self.generation.require(epoch,snapshot['sim_ns'])
+                            self.scene_pose_check = dict(check, cleared=cleared)
+                    return
+                if time.monotonic() > deadline:
+                    raise TimeoutError(f'Full planning scene reset verification failed: {check}')
+                self.stop.wait(.05)
+        if epoch is None:return synchronize()
+        return self.motion_call(synchronize,epoch=epoch)
 
     def failed_finalization(self,receipt,error,motion_epochs,duplicate_start,rerender_start,stale_camera_start,profiles,writes):
         original=getattr(self.sensors,'failure',None) or receipt.get('error') or self.failure or error
@@ -1721,7 +1832,7 @@ class Collector:
             atomic_json(root / 'run.json',dict(instance=args.instance, host=socket.gethostname(), gpu_index=int(os.getenv('ISAACSIM_GPU', '0')),
             wall_profile_policy=PROFILE_POLICY,recording_version=7,frame_phase_policy=PHASE_POLICY,camera_selection_policy=CAMERA_SELECTION_POLICY,image_transport=self.executor.image_take.metadata, gpu_isolation_initial=initial_gpu_footprint,transport_config=transport_config, observation_state_topic='/joint_states_measured',
             diagnostic=args.diagnostic, success_profile=PROFILE,
-            motion_wait_policy=wait_policy, tick_clock_policy=CLOCK_POLICY,geometry_query_policy=QUERY_POLICY,quality_policy=POLICY,regrasp_policy=REGRASP_POLICY,regrasp_search_policy=SEARCH_POLICY,regrasp_only=args.regrasp_only,normal_only=args.normal_only,recovery_mode=mode,
+            motion_wait_policy=wait_policy, tick_clock_policy=CLOCK_POLICY,geometry_query_policy=QUERY_POLICY,quality_policy=POLICY,regrasp_policy=REGRASP_POLICY,synthetic_start_policy=SYNTHETIC_START_POLICY,regrasp_search_policy=SEARCH_POLICY,regrasp_only=args.regrasp_only,normal_only=args.normal_only,recovery_mode=mode,
             application_contract='Held at observation tick; read-back verified PhysX targets before one-frame advance; maximum one sim tick latency',
             clock_config=clock_config, domain=90 + args.instance,
             bridge_port=8777 + 2 * args.instance, fps=30, baseline=baseline, baseline_cup_layout=self.baseline_cup_layout, eval_seeds=EVAL_SEEDS,
@@ -1812,19 +1923,23 @@ class Collector:
                 receipt['initial_restore_check'] = {k:v for k,v in self.scene_restore.items() if k != 'snapshot'}
                 receipt['initial_restore_error_m'] = self.scene_restore['max_position_error_m']
                 receipt['initial_expert_reference'] = list(self.servo.reference)
-                writer = EpisodeWriter(path, 30)
-                with self.writer_lock:
-                    self.writer = writer
-                cycle_result = {}
+                if params.get('recovery')=='regrasp':
+                    self.prepare_regrasp_start(params,cycle_result)
+                    motion_epochs.add(self.generation.epoch)
+                    receipt['episode_start_physical']=self.episode_start_physical
+                with (self.generation.own('writer boundary') if params.get('recovery')=='regrasp' else nullcontext()):
+                    if params.get('recovery')=='regrasp':self.generation.require(cycle_result['recovery_report']['epoch'])
+                    writer = EpisodeWriter(path, 30)
+                    with self.writer_lock:
+                        self.writer = writer
                 with self.generation.own('cycle request'):
+                    if params.get('recovery')=='regrasp':self.generation.require(cycle_result['recovery_report']['epoch'])
                     cycle_epoch = self.generation.epoch
                     motion_epochs.add(cycle_epoch)
                 planning_budget=PlanningWallBudget()
                 def run_cycle(object_name=params['object'], epoch=cycle_epoch,planning_budget=planning_budget):
                     try:
                         def run_and_verdict():
-                            if params.get('recovery')=='regrasp':
-                                self.regrasp_prefix(params,epoch,cycle_result,planning_budget)
                             ok=self.node.run_cycle(object_name)
                             event=self.node._current_motion_event()
                             return dict(ok=ok, verdict=self.node._motion_verdict(event),
@@ -1925,13 +2040,18 @@ class Collector:
                     receipt['measured_support_contacts']=[dict(epoch=r['epoch'],sim_ns=r['sim_ns'],proof=p['measured_start_contact'])
                         for r in (writer.rows if writer else []) for p in r.get('execution_geometry',{}).get('paths',[]) if 'measured_start_contact' in p]
                     receipt['planner_refusals']=self.planner_evidence(receipt)
+                    if cycle_result.get('recovery_report',{}).get('fault_epoch') is not None:
+                        motion_epochs.add(cycle_result['recovery_report']['fault_epoch'])
                     faults=list(getattr(self,'native_miss_faults',[]));fault_path=getattr(self,'native_miss_fault_path',None)
                     if fault_path and fault_path.exists():
                         fd=os.open(fault_path,os.O_RDONLY|os.O_NOFOLLOW)
                         with os.fdopen(fd) as stream:faults.append(json.load(stream))
                         receipt['native_miss_fault_file']=str(fault_path)
                     receipt['native_miss_faults']=list({digest(f):copy.deepcopy(f) for f in faults if f.get('epoch') in motion_epochs}.values())
-                    if params.get('recovery')=='regrasp':receipt['miss_solver_residuals']=residual_summary(writer.rows if writer else [],receipt['native_miss_faults'])
+                    if cycle_result.get('recovery_report',{}).get('strategy')=='synthetic_post_miss_reset':
+                        receipt['recovery_execution']=dict(strategy='synthetic_post_miss_reset',setup_recorded=False,
+                            native_velocity_limit_writes_requested=False,gravity_writes_requested=False,recorded_dynamics='normal')
+                    elif params.get('recovery')=='regrasp':receipt['miss_solver_residuals']=residual_summary(writer.rows if writer else [],receipt['native_miss_faults'])
                     sensor_failure=getattr(self.sensors,'failure',None)
                     if isinstance(sensor_failure,SensorAmbiguity):
                         if receipt.get('error'):receipt['secondary_error']=receipt['error']

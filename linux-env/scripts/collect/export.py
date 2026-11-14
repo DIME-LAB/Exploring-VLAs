@@ -11,7 +11,7 @@ from tick_contract import camera_tick_errors
 from collection_status import require_finalized
 from checkpoint import require_recovery_mode,require_episode_mode
 from recovery import receipt_error, recovery_summary
-from dataset_phase import FEATURE,PHASES,POLICY as PHASE_POLICY,phase_code,feature,stored_phase_codes
+from dataset_phase import FEATURE,PHASES,POLICY as PHASE_POLICY,phase_code,feature
 from storage import atomic_json,confined, prepare_environment
 
 
@@ -35,6 +35,8 @@ def main():
     for path in sorted(run.glob('attempt-*/receipt.json')):
         receipt=json.loads(path.read_text())
         require_episode_mode(receipt['params'],config.get('regrasp_only',False),config.get('normal_only',False))
+        if config.get('regrasp_policy',{}).get('strategy')=='synthetic_post_miss_reset' and receipt['params'].get('recovery')=='regrasp' and receipt.get('accepted'):
+            if receipt.get('recovery_report',{}).get('strategy')!='synthetic_post_miss_reset':raise ValueError('Current recovery policy requires a certified synthetic post-miss reset')
     prepare_environment(config['instance'])
     import cv2
     import torch
@@ -110,8 +112,8 @@ def main():
     assert loaded.features['action']['names'] == names
     assert loaded.features['observation.state']['names'] == names
     first, last = loaded[0], loaded[len(loaded) - 1]
-    assert np.asarray(first[FEATURE]).size==1
-    assert stored_phase_codes(loaded)==phase_values
+    assert tuple(first[FEATURE].shape)==(1,)
+    assert [int(value[0]) for value in loaded.hf_dataset[FEATURE]]==phase_values
     assert tuple(first['observation.state'].shape) == (6,)
     assert tuple(first['observation.images.wrist'].shape) == (3, 480, 640)
     assert tuple(last['observation.images.top'].shape) == (3, 480, 640)
