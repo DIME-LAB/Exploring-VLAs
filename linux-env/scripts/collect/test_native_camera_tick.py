@@ -78,3 +78,15 @@ class NativeCameraTickTests(unittest.TestCase):
         self.assertTrue(any('"rule": "copy"' in error for error in camera_tick_errors(changed,required=True)))
         changed=copy.deepcopy(row);changed['camera_identity']['wrist']['stamp_ns']-=1
         self.assertTrue(any('"rule": "copy"' in error for error in camera_tick_errors(changed,required=True)))
+
+    def test_second_native_tick_at_opposite_header_bound_is_immediately_terminal(self):
+        for direction in (-1,1):
+            with self.subTest(direction=direction):
+                s,tick=setup();native(s,tick)
+                first=tick-direction*1000;other=tick+direction*1000
+                s.put('wrist',image(first,11),publisher_info());s.put('wrist',image(other,22),publisher_info())
+                s.put('top',image(tick,33),publisher_info(2));s.put('joint',message(tick));s.read(timeout=0)
+                # A second native tick can be3us from the selected header and
+                # still be within1us of a retained alternate. It is ambiguous.
+                with self.assertRaises(SensorAmbiguity) as error:native(s,tick+direction*2000)
+                self.assertEqual(len(error.exception.evidence['native_ticks']),2)

@@ -218,7 +218,7 @@ class Sensors:
             if not hasattr(self,'seen_camera_frames'):self.seen_camera_frames={'wrist':{},'top':{}}
             if key=='tick':
                 for camera,frames in self.seen_camera_frames.items():
-                    for bucket in range(raw_stamp//int(TOLERANCES['stamp_ns'])-2,raw_stamp//int(TOLERANCES['stamp_ns'])+3):
+                    for bucket in range(raw_stamp//int(TOLERANCES['stamp_ns'])-3,raw_stamp//int(TOLERANCES['stamp_ns'])+4):
                         if bucket in frames:self.camera_native_tick(camera,frames[bucket])
             if key in self.seen_camera_frames:
                 publisher=incoming['publisher'];bound=self.camera_publishers.get(key)
