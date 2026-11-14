@@ -73,6 +73,7 @@ def run(a):
         from writer import Writer
         from replay_contract import packet
         from so_arm101_control.grasp_geometry import _grasp_home_data_target
+        heartbeat('native initialization',900.)
         if a.step_mode=='playing':
             from playing import Playing
             backend=Playing(a.scene,a.manifest)

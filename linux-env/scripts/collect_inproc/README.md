@@ -3,8 +3,9 @@
 This standalone collector imports the existing geometry, DART, recovery, physical
 success gate, tick audit, fault policy and exporter. The first boot window verified
 scene export, GPU/CPU assignment, native FK and immediate restore. Held-time RGB
-failed; no valid image pairs or episodes were accepted. The playing-timeline
-adapter is offline-tested and awaits a new lead-granted window. CPU checks do not
+failed. Playing produced render events and a four-substep advance but empty RGB
+buffers; no image pairs or episodes were accepted. Capture-on-play and Fabric
+readbacks are prepared offline and await a new lead-granted window. CPU checks do not
 establish physical grasp yield, camera freshness, renderer fidelity or throughput. See
 [`docs/notes/inprocess-collector.md`](../../../docs/notes/inprocess-collector.md).
 No shared ROS collector or extension module is changed.
@@ -78,7 +79,7 @@ The boot probe needs no ROS episode fixtures. Preflight is safe outside a window
 python3 linux-env/scripts/collect_inproc/launch.py preflight --probe \
   --runtime /mnt/a4500-backup/exploring-vlas/runtime/inproc-playing-next \
   --gpu 0 \
-  --renderer-log /mnt/a4500-backup/exploring-vlas/runtime/inproc-probe2-v8/kit.log -- \
+  --renderer-log /mnt/a4500-backup/exploring-vlas/runtime/inproc-playing-20261114-v4/kit.log -- \
   --scene /mnt/a4500-backup/exploring-vlas/inproc/scene-window-20261114/scene.usdc \
   --manifest /mnt/a4500-backup/exploring-vlas/inproc/scene-window-20261114/manifest.json \
   --output /mnt/a4500-backup/exploring-vlas/inproc/probe-playing-next \
@@ -89,6 +90,10 @@ Only after a new grant, replace `preflight` with `start --window WINDOW_ID`. Thi
 plays the timeline at 30 Hz, using four CPU physics substeps per app update and
 retaining the existing paused viewport's Hydra engine. It refuses missing/extra
 render completions, old producer identities and mismatched clocks without polling.
+Both persistent and runtime capture-on-play flags are explicitly enabled and
+checked, because Orchestrator.reset copies the former over the latter. The probe
+records both flag readbacks, CPU RGB buffer shapes/compute counts and Fabric's
+external physics time. The flags/Fabric correction has not run live yet.
 The timeline is aligned to World without an app update after restore and before
 each step; the producer clock is checked against the timeline sampled after the
 update. `probe.json` records physical advance, paired consumption, two post-reset

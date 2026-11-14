@@ -1,6 +1,6 @@
 import copy
 import unittest
-from playing import FrameLedger
+from playing import FrameLedger,capture_settings,CAPTURE_KEYS
 
 
 class PlayingTests(unittest.TestCase):
@@ -9,7 +9,7 @@ class PlayingTests(unittest.TestCase):
         return value
     def packet(self,index=1):
         stamp=round((1+index/30)*1e9)
-        return dict(epoch=1,sim_ns=stamp,timeline_ns=stamp,physics_time_s=1+index/30,native_physics_steps=4,world_step_count=4,
+        return dict(epoch=1,sim_ns=stamp,timeline_ns=stamp,fabric_time_s=1+index/30,physics_time_s=1+index/30,native_physics_steps=4,world_step_count=4,
             cameras={key:dict(swh_frame_number=index,copy_compute_count=index,stamp_ns=stamp,completions=1)
                 for key in ('wrist','top')})
     def test_exact_app_frame_and_pair(self):
@@ -57,12 +57,31 @@ class PlayingTests(unittest.TestCase):
             p=self.packet(index)
             physical=1+index*4*float(np.float32(1/120))
             p['physics_time_s']=physical;p['sim_ns']=round(physical*1e9)
+            p['fabric_time_s']=physical
             p['timeline_ns']=round((1+(index-1)*4*float(np.float32(1/120))+1/30)*1e9)
             for camera in p['cameras'].values():camera['stamp_ns']=p['timeline_ns']
             ledger.accept(p)
         p=self.packet(2001);p['physics_time_s']=1+2001*4*float(np.float32(1/120))
         p['sim_ns']=round(p['physics_time_s']*1e9)
         with self.assertRaises(RuntimeError):ledger.accept(p)
+
+    def test_both_capture_settings_survive_a_runtime_reset(self):
+        class Settings:
+            def __init__(self):self.values={key:False for key in CAPTURE_KEYS}
+            def get(self,key):return self.values[key]
+            def set_bool(self,key,value):self.values[key]=value
+        settings=Settings()
+        with self.assertRaises(RuntimeError):capture_settings(settings)
+        capture_settings(settings,enable=True)
+        # Installed Orchestrator.reset copies the persistent flag to runtime.
+        settings.values[CAPTURE_KEYS[1]]=settings.values[CAPTURE_KEYS[0]]
+        self.assertTrue(all(capture_settings(settings).values()))
+        settings.values[CAPTURE_KEYS[1]]=False
+        with self.assertRaises(RuntimeError):capture_settings(settings)
+
+    def test_fabric_clock_must_match_the_native_step(self):
+        p=self.packet();p['fabric_time_s']-=1/30
+        with self.assertRaises(RuntimeError):self.ledger().accept(p)
 
 
 if __name__=='__main__':unittest.main()

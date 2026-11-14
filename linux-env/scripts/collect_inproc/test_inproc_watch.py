@@ -5,12 +5,24 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import shared
 from storage import CANONICAL_ROOT
 
 
 @unittest.skipUnless(sys.platform=='linux' and CANONICAL_ROOT.exists(),'Linux canonical output root required')
 class WatchTests(unittest.TestCase):
+    def test_boot_configuration_uses_persistent_driver_cache(self):
+        environment=dict(SOARM_INSTANCE_ROOT='/runtime/private',SOARM_RENDERER_GPU_INDEX='0',
+            SOARM_CURRENT_KIT_LOG='/runtime/private/kit.log',SOARM_SHADER_CACHE_DIR='/cache/card/shaders')
+        with patch.dict(os.environ,environment),patch.object(sys,'argv',['probe.py','--already-parsed']):
+            config=shared.app_config()
+            self.assertIn('--/rtx/shaderDb/driverShaderCachePath=/cache/card/vulkan-driver',config['extra_args'])
+            for key in ('/persistent/omni/replicator/captureOnPlay','/omni/replicator/captureOnPlay'):
+                self.assertIn('--'+key+'=true',config['extra_args'])
+            self.assertEqual(sys.argv,['probe.py','--portable-root','/runtime/private/portable'])
+            self.assertTrue(config['fast_shutdown']);self.assertFalse(config['multi_gpu'])
+
     def test_failure_readiness_without_a_summary_is_retained(self):
         parent=CANONICAL_ROOT/'inproc/offline-tests';parent.mkdir(parents=True,exist_ok=True)
         with tempfile.TemporaryDirectory(dir=parent) as directory:

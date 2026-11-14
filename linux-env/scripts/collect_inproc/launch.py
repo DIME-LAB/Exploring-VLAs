@@ -63,6 +63,7 @@ def main():
     card=cache_paths(uuid)
     os.environ['XDG_CACHE_HOME']=card['root']
     os.environ['SOARM_SHADER_CACHE_DIR']=card['shaders']
+    (Path(card['root'])/'vulkan-driver').mkdir(parents=True,exist_ok=True)
     watched=['nice','-n','10',sys.executable,str(Path(__file__).with_name('watch.py')),'--',*command]
     print(json.dumps(dict(info,supervisor_pid=start(pidfile,runtime/'console.log',watched)),indent=2))
 

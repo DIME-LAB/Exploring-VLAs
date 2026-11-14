@@ -46,11 +46,16 @@ def main(a):
         import carb
         import numpy as np
         from pxr import PhysxSchema
-        heartbeat('probe',120.);save('native_init')
+        heartbeat('native initialization',900.);save('native_init')
         if a.step_mode=='playing':
             from playing import Playing
             backend=Playing(a.scene,a.manifest)
         else:backend=Native(a.scene,a.manifest)
+        heartbeat('probe',120.)
+        report['warmup_rgb']=getattr(backend,'warmup_rgb',None)
+        report['warmup_capture_settings']=getattr(backend,'warmup_capture_settings',None)
+        report['cache_settings']={key:carb.settings.get_settings().get('/rtx/shaderDb/'+key)
+            for key in ('shaderCachePath','driverShaderCachePath')}
         own=identity(os.getpid());cards=inventory();assigned=os.environ['SOARM_ASSIGNED_GPU_UUID']
         gpu=audit_sample(assigned,{own['pid']:own},cards,sample(cards))
         rows,source=read_table(Path(os.environ['SOARM_CURRENT_KIT_LOG']))
@@ -121,6 +126,7 @@ def main(a):
     except BaseException as exc:
         failure=exc;report['error']=repr(exc);report['traceback']=traceback.format_exc()
         if backend and backend.rgb:
+            report['failed_playing_frame']=getattr(backend,'last_frame',None)
             report['render_event_samples']=backend.rgb.event_samples
             report['render_completions_total']=dict(backend.rgb.render_events)
             report['failed_capture_callbacks']=backend.rgb.calls

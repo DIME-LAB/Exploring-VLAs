@@ -1,9 +1,10 @@
 # In-process SO-ARM101 collection (ROADMAP 3.1f)
 
-Status: scene export and native GPU/CPU/FK/restore checks passed in the first
-lead-granted boot window. Held-time RGB failed in eight probes; zero image pairs
-or episodes were accepted. The playing-timeline adapter has offline tests only
-and requires another window. No throughput or image-equivalence result is claimed.
+Status: scene export and native GPU/CPU/FK/restore checks passed. Eight held-time
+and four playing-window attempts accepted zero RGB pairs or episodes. Playing
+produced render completions and a measured four-substep advance, but RGB compute
+counts stayed zero. Capture-setting/Fabric diagnostics are prepared offline for
+the next lead-granted window. No throughput or image-equivalence result is claimed.
 The runtime and prototype live in `linux-env/scripts/collect_inproc/`; the ROS
 collector and `isaac/exts/` remain unchanged.
 
@@ -270,7 +271,7 @@ and camera poses derived from measured parent links.
 
 `playing.py` follows the verified camera setup in `~/w_31f/bench.py`: retain the
 existing active viewport with updates disabled (create an invisible one only if
-absent), apply OmniSensorAPI tickRate 30, GPU RGB annotators, RenderingManager dt
+absent), apply OmniSensorAPI tickRate 30, CPU RGB annotators as in `record.py`, RenderingManager dt
 1/30 and timeline target 30, play and warm up. Installed SimulationContext.step
 with render=True delegates to one app.update at these nonzero dt values. The
 adapter refuses extra/missing physics steps or renders rather than polling a stale
@@ -281,7 +282,7 @@ rounding differences. Whether these native fields reliably identify both pixels
 after every update is still a live-verification requirement. Experimental replay
 and held writer-gate capture remain non-exportable until verified.
 
-The offline suite has 30 tests, including 2,000 aligned float32-dt frames and a
+The offline suite has 33 tests, including 2,000 aligned float32-dt frames and a
 case where camera lag cancels a timeline offset. The probe uses its own
 BOOT_PROBE_FINISHED marker with episodes=0; collection export is not admitted.
 
@@ -316,3 +317,43 @@ explicit episode window. Cleanup proof is
 `/mnt/a4500-backup/exploring-vlas/inproc/window-20261114-cleanup.json`: nine owned
 groups stopped, remaining=[], ports 8781/8782 closed, no owned NVML contexts,
 GPU0 at 21 MiB. The companion Mac report contains raw probe receipts and logs.
+
+## Playing-window result and capture settings
+
+The second boot-only window ended at 08:00:26Z on 2026-11-14, with all four owned
+groups stopped, ports closed and no owned NVML contexts. The v2/v3/v4 probes
+observed respectively 109/121/120 render completions per camera. No RGB pair
+passed: both GPU and CPU read paths returned empty uint8 buffers, with RGB node
+compute count zero. The v4 warmup diagnostic was empty before its final restore,
+so this cannot be explained solely by the post-reset camera state. v3/v4 retained
+one actual four-PhysX-callback/four-World-step advance; World time was
+4.066666878759861 s and timeline 4.066666877 s. This is partial physical evidence,
+not a complete cadence/freshness acceptance or renders-per-tick result.
+
+Cold v2 startup took 343 s, including about five minutes of RTX compilation.
+The installed GPU-foundation source defaults `driverShaderCachePath` to the private
+portable directory; the launcher now pins it to a persistent per-GPU directory.
+Owned stopped-v2 cache contents were retained there. Later v3/v4 runs ended in
+22/25 s; these are startup/fault wall measurements, not collector throughput or a
+controlled cache ablation. Native initialization receives its own 900 s heartbeat,
+followed by the 120 s progress timeout. Product updates and timeline auto-update
+are disabled across restore's pause/play updates, preventing unrecorded reset
+renders. This guard did not repair the RGB computation failure.
+
+The lead's capture-on-play hypothesis has direct source support: installed
+`Orchestrator.reset()` copies `/persistent/omni/replicator/captureOnPlay` into
+`/omni/replicator/captureOnPlay`. The prototype previously set only the runtime
+flag; the failed probes did not record either readback, so overwrite is not yet
+an established cause. Set both flags true at boot and before camera attach/play,
+verify both before every recorded step, and retain warmup readbacks. Private Kit
+settings remain isolated; no default user configuration is edited. Tests cover
+the persistent-to-runtime reset behavior and refusal when a flag turns off.
+
+Set RenderingManager dt before products create Fabric histories. Following the
+working `~/w_31f/replay.py`, ensure `/ExternalSimulationTime` exists and record its
+`omni:time` value. During live physics the simulation manager owns that value:
+read it, require agreement with measured World time, and never assign a fabricated
+physics clock. Kinematic replay may explicitly stamp it only with physics off.
+The new flag and Fabric checks are offline-tested; native verification waits for
+the next grant after the ROS smoke. First require 12 paired frames plus two after
+reset and successful owned exit before attempting any episodes.
