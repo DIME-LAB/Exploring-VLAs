@@ -64,16 +64,13 @@ class MotionOperationTests(unittest.TestCase):
         poses=(('approach',.2,0.,.04),('final',.2,0.,.02))
         joints={name:value for name in ARM}
         node._jaw_open_clearance_var=NS(get=lambda:5.);node._jaw_close_clearance_var=NS(get=lambda:0.)
-        def selected_plan(*args,**kwargs):
-            candidate=dict(geometry=dict(poses=poses,tcp=[.2,0.,.02]),chosen_yaw=0.,requested_yaw=0.,opening_rad=.2,
-                projected_width_m=.02,solutions={stage:[dict(joints)] for stage,*_ in poses})
-            validation=kwargs['candidate_validator'](candidate)
-            return dict(candidate,chosen_yaw=0. if validation['passed'] else None,validation=validation,attempts=[dict(debug=[],validation=validation)])
         scope=dict(self=node,operation=operation,evt=operation.event,poses_to_check=poses,
                    ground_z=0.,obj_yaw=0.,approach_h=.02,math=math,
                    json=__import__('json'),pos={},grasp_bbox={},grasp_settings={},
-                   make_reachable_grasp_plan=selected_plan,
-                   check_grasp_reachable=lambda *a,**k:(True,''))
+                   make_reachable_grasp_plan=lambda *a,**k:dict(geometry=dict(poses=poses),chosen_yaw=0.,
+                       solutions={stage:[dict(joints)] for stage,*_ in poses},attempts=[dict(debug=[])]),
+                   check_grasp_reachable=lambda *a,**k:(True,''),
+                   find_reachable_grasp_yaw=lambda *a:(0.,{stage:[dict(joints)] for stage,*_ in poses},[]))
         exec(compile(ast.Module(body=[fn],type_ignores=[]),str(SHARED),'exec'),scope)
         return scope['_prevalidate_and_execute']
 

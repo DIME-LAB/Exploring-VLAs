@@ -8,6 +8,7 @@ from finger_geometry import FingerModel,separation
 from test_miss_clearance import MODEL
 
 SHARED=motions.SHARED
+BASELINE_AST={'_get_grip_width': '02d87339d2b2ca44c84b8af3bfb58bd4914a8828456abb6752d83219600433e1', '_gripper_angle_for_object': '32f10e40f153ce4332b6146a2458b3811b112d17d34f9118cfe19b644faba0ad', '_cmd_gripper_open_for_object': '31a4d6f0d4477a83ceac7e9d29cb5e3fe56c55d5e9be3b3ef8b6b2a823337385', '_cmd_gripper_close_for_object': '5fc1d26fa373a15221e8f2e42d6f3c71747ad6690557fa64b38e19b4f5f45110', '_cmd_grasp_move': '348a47409f318d966f5ffa9733a43ceb87cbdf563b9e1feb6c280ff431b913be'}
 
 
 class GraspExecutionTests(unittest.TestCase):
@@ -40,37 +41,43 @@ class GraspExecutionTests(unittest.TestCase):
         n._ik_apply_and_act=dispatch
         return n,sent,dispatched,queries,initial,threads
 
-    def test_jaw_commands_match_selected_plan_for_both_dimension_orders_and_cross_settings(self):
+    def test_normal_and_gui_jaw_commands_keep_bbox_min_max_policy_without_pose(self):
         for sx,sy in ((.032,.016),(.016,.032)):
             for cross in (False,True):
-                with self.subTest(sx=sx,cross=cross):
-                    n,sent,plans,queries,_,threads=self.entrance(dict(sx=sx,sy=sy,sz=.0128),cross)
-                    n._cmd_gripper_open_for_object();self.assertTrue(n._current_motion_event().wait(3))
-                    n._cmd_grasp_move();self.assertTrue(n._current_motion_event().wait(3));self.assertTrue(plans)
-                    spec=json.loads(plans[0][0].grasp_spec_json)
-                    n._cmd_gripper_close_for_object();self.assertTrue(n._current_motion_event().wait(3))
-                    for t in threads:t.join(1);self.assertFalse(t.is_alive())
-                    self.assertEqual(sent[0],spec['opening_rad'])
-                    self.assertEqual(sent[-1],spec['closing_rad'])
-                    self.assertTrue(all(abs(q['gripper_joint']-spec['opening_rad'])<1e-12 for q in queries))
-                    yaw=spec['chosen_yaw'];width=spec['projected_width_m'];dx,dy=gg.jaw_offset(width,yaw)
-                    self.assertAlmostEqual(spec['geometry']['tcp'][0],.2+dx,places=12)
-                    self.assertAlmostEqual(spec['geometry']['tcp'][1],dy,places=12)
-                    self.assertEqual(plans[0][1].grasp_spec_json,plans[0][0].grasp_spec_json)
-                    joints=plans[0][1].joints();q=[joints[name] for name in gg.ARM_JOINT_NAMES]+[sent[0]]
-                    target=dict(rotation=[[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]],center_world=[.2,0.,.0064],half_extents_m=[sx/2,sy/2,.0064])
-                    boxes=FingerModel(MODEL).boxes(q)
-                    self.assertGreater(min(separation(b,target) for b in boxes),0.)
-                    self.assertGreater(min(b['min_z_m'] for b in boxes),.0012)
+                n,sent,plans,queries,_,threads=self.entrance(dict(sx=sx,sy=sy,sz=.0128),cross)
+                expected=gg.gripper_angles(max(sx,sy) if cross else min(sx,sy),.001,.005,0.)
+                n.objects_data.clear()  # Legacy jaw commands need bbox, not pose.
+                self.assertEqual(n._gripper_angle_for_object('block'),expected)
+                n._cmd_gripper_open_for_object();self.assertTrue(n._current_motion_event().wait(3))
+                n._cmd_gripper_close_for_object();self.assertTrue(n._current_motion_event().wait(3))
+                for thread in threads:thread.join(1);self.assertFalse(thread.is_alive())
+                self.assertEqual(sent,list(expected))
 
-    def test_collision_rejection_tries_equivalent_yaw_through_actual_grasp_entrance(self):
-        n,sent,plans,queries,initial,threads=self.entrance(dict(sx=.031,sy=.0206,sz=.0128),reject_requested=True)
-        n._cmd_grasp_move();self.assertTrue(n._current_motion_event().wait(3))
-        for t in threads:t.join(1);self.assertFalse(t.is_alive())
-        self.assertTrue(plans)
-        spec=json.loads(plans[0][0].grasp_spec_json)
-        self.assertAlmostEqual(abs(spec['chosen_yaw']-spec['requested_yaw']),math.pi)
-        self.assertFalse(spec['attempts'][0]['validation']['passed'])
-        self.assertTrue(spec['attempts'][-1]['validation']['passed'])
-        self.assertNotEqual(spec['geometry']['tcp'],initial['geometry']['tcp'])
-        self.assertTrue(n._current_motion_event().verdict['ok'])
+    def test_gui_gate_c_uses_actual_jaw_and_original_dispatch_route(self):
+        from so_arm101_control.scene_transactions import SceneExecution
+        for only_closed_is_valid in (False,True):
+            n,sent,plans,queries,initial,threads=self.entrance(dict(sx=.031,sy=.0206,sz=.0128))
+            n.execution=SceneExecution();n._actual_positions['gripper_joint']=.9
+            actual_queries=[]
+            def valid(arm):
+                # Real _check_state_valid fills omitted joints from the measured state.
+                q=dict(n._actual_positions,**arm);actual_queries.append(q)
+                return (q['gripper_joint']<.5)==only_closed_is_valid
+            n._check_state_valid=valid
+            n._cmd_grasp_move();self.assertTrue(n._current_motion_event().wait(3))
+            for thread in threads:thread.join(1);self.assertFalse(thread.is_alive())
+            self.assertTrue(actual_queries);self.assertEqual(sent,[])
+            self.assertTrue(all(q['gripper_joint']==.9 for q in actual_queries))
+            self.assertEqual(bool(plans),not only_closed_is_valid)
+            self.assertEqual(n._current_motion_event().verdict['ok'],not only_closed_is_valid)
+
+    def test_shared_execution_methods_match_verified_baseline_ast(self):
+        import ast,hashlib
+        # The normalized AST hashes pin the established actual-jaw call route.
+        expected=BASELINE_AST
+        tree=ast.parse(SHARED.read_text())
+        cls=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='PickPlaceNode')
+        for method in cls.body:
+            if isinstance(method,ast.FunctionDef) and method.name in expected:
+                actual=hashlib.sha256(ast.get_source_segment(SHARED.read_text(),method).encode()).hexdigest()
+                self.assertEqual(actual,expected[method.name],method.name)

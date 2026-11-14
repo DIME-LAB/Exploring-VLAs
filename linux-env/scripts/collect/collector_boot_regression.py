@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Construct the actual collector and reach a contract-valid held tick without Isaac."""
-import argparse,json,os,sys,threading,time
+import argparse,json,os,sys,threading,time,uuid
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
@@ -30,9 +30,11 @@ def main():
     from tick_contract import require_snapshots
     from cup_geometry import PROFILE
     output=confined(args.output);output.mkdir(parents=True,exist_ok=False)
-    rclpy.init()
+    clock_topic='/offline_collector_clock_'+uuid.uuid4().hex
+    clock_args=['--ros-args','-r','/clock:='+clock_topic]
+    rclpy.init(args=clock_args)
     from rclpy.context import Context
-    native_context=Context();native_context.init()
+    native_context=Context();native_context.init(args=clock_args)
     native=Node('fake_collector_boot_transport',context=native_context)
     clock=native.create_publisher(Clock,'/clock',10)
     joint=native.create_publisher(JointState,'/joint_states_measured',10)
@@ -50,9 +52,17 @@ def main():
     service=native.create_service(GetStateValidity,'/check_state_validity',valid)
     executor=MultiThreadedExecutor(num_threads=3,context=native_context);executor.add_node(native)
     thread=threading.Thread(target=executor.spin);thread.start()
-    collector=None;publishers=[];result=dict(passed=False,actual_collector_constructor=True,actual_pick_place_constructor=True,domain=90+args.instance,instance=args.instance)
+    collector=None;publishers=[];result=dict(clock_topic=clock_topic,passed=False,actual_collector_constructor=True,actual_pick_place_constructor=True,domain=90+args.instance,instance=args.instance)
     stamp=1033333333;frame=dict(epoch=1,sim_ns=stamp,physics_time_s=stamp/1e9,state=[0.]*6,velocity=[0.]*6,
         drive_targets=[0.]*6,bodies={},base_world_pose=dict(position=[0.,0.,0.],orientation=[1.,0.,0.,0.]),state_source='isaac_articulation')
+    original_clock_join=implementation.Collector.wait_tick_clock
+    def clock_join(self,stamp,epoch):
+        try:return original_clock_join(self,stamp,epoch)
+        except Exception:
+            result['clock_join_failure']=dict(stamp=stamp,epoch=epoch,ros_ns=self.node.get_clock().now().nanoseconds,
+                use_sim_time=self.node.get_parameter('use_sim_time').value,
+                clock_publishers=[dict(node=p.node_name,gid=list(p.endpoint_gid)) for p in self.node.get_publishers_info_by_topic(clock_topic)])
+            raise
     class HeldTickReached(Exception):pass
     def fake_mcp(tool,params=None):
         code=(params or {}).get('code','')
@@ -97,7 +107,7 @@ def main():
     try:
         config=NS(output=output/'run',episodes=5,max_attempts=1,resume=False,seed=1,regrasp_only=False,normal_only=True,replay_receipt=None,wait_rtf_floor=.1,episode_deadline=180,diagnostic=True,instance=args.instance)
         with patch.object(implementation,'mcp',fake_mcp),patch.object(implementation,'timeline',native_tick),\
-             patch.object(implementation.Collector,'wait_ready',first_held_tick):
+             patch.object(implementation.Collector,'wait_ready',first_held_tick),patch.object(implementation.Collector,'wait_tick_clock',clock_join):
             try:
                 collector=implementation.Collector(config)
                 # Before run installs an epoch the constructor-only allowance has already expired.

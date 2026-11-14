@@ -21,7 +21,7 @@ class RecoverySearchTests(unittest.TestCase):
     def clearance(self):
         # These probes isolate the scene oracle's results; actual box clearance
         # and retained-pose counterexamples are exercised by test_miss_clearance.
-        return NS(state=lambda *a,**k:dict(passed=True),segment=lambda *a,**k:dict(passed=True))
+        return NS(state=lambda *a,**k:dict(passed=True),nominal_path=lambda *a,**k:dict(passed=True))
 
     def test_seeded_directions_and_magnitudes_are_bounded_and_original_first(self):
         p=parameters(340000,'red',regrasp=True)['regrasp'];specs=candidate_specs(p)

@@ -1,6 +1,7 @@
 """Transport-independent re-grasp geometry, quotas and measured miss checks."""
 import math,random
 from comparisons import matches,native_frame
+from dataset_phase import phase_code
 from tick_contract import digest,frame_digest,row_errors,STEP_NS
 
 REGRASP_POLICY=dict(version=3,share=.18,offset_min_m=.02,offset_max_m=.04,
@@ -65,6 +66,7 @@ def receipt_error(receipt,rows=None):
     try:
         report=receipt['recovery_report'];episode_id=receipt['episode_id']
         if not rows:return 'recovery rows are required'
+        for row in rows:phase_code(row,receipt,required=True)
         if not episode_id or report['episode_id']!=episode_id or any(r['episode_id']!=episode_id for r in rows):return 'recovery episode identity differs'
         if any(r['epoch']!=report['epoch'] for r in rows):return 'recovery epoch differs from recorded episode'
         if not report['miss_confirmed']:return 'first grasp did not miss'

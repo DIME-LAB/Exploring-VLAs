@@ -135,7 +135,7 @@ from so_arm101_control.grasp_geometry import (
     ARM_JOINT_NAMES,
     GRIPPER_JOINT_NAME,
     ALL_JOINT_NAMES,
-    object_grip_width, jaw_offset, gripper_angles, make_grasp_plan,make_reachable_grasp_plan,grasp_jaw_plan,
+    object_grip_width, jaw_offset, gripper_angles, make_grasp_plan,make_reachable_grasp_plan,
     JOINT_LIMITS,
     _grasp_home_data_target,
     BASELINE_JAW_GAP,
@@ -3807,17 +3807,11 @@ class PickPlaceNode(Node):
 
 
     def _gripper_angle_for_object(self, obj_name):
+        width = self._get_grip_width(obj_name) if obj_name else None
         tcp = self._tcp_clearance_var.get() / 1000 if hasattr(self, '_tcp_clearance_var') else TCP_CLEARANCE_M
         opening = self._jaw_open_clearance_var.get() / 1000 if hasattr(self, '_jaw_open_clearance_var') else JAW_OPEN_CLEARANCE_M
         closing = self._jaw_close_clearance_var.get() / 1000 if hasattr(self, '_jaw_close_clearance_var') else JAW_CLOSE_CLEARANCE_M
-        if not obj_name:return gripper_angles(None,tcp,opening,closing)
-        bbox=self._lookup_bbox(obj_name)
-        with self.objects_lock:pose=dict(self.objects_data[obj_name]) if obj_name in self.objects_data else None
-        if bbox and pose is None:raise ValueError('Selected object pose is required for jaw commands')
-        spec=grasp_jaw_plan(pose or dict(x=0.,y=0.,z=0.),bbox,
-            cross=bool(self._grasp_cross_var.get()),tcp_clearance=tcp,open_clearance=opening,close_clearance=closing)
-        return spec['opening_rad'],spec['closing_rad']
-
+        return gripper_angles(width, tcp, opening, closing)
 
 
     def _cmd_gripper_open_for_object(self):
@@ -3946,7 +3940,7 @@ class PickPlaceNode(Node):
                 f'for {gw:.0f}mm grip{"[cross]" if cross else ""}')
 
         self._append_log(
-            f'Grasp requested: {action} "{obj_name}" at '
+            f'Grasp: {action} "{obj_name}" at '
             f'({tx:.3f}, {ty:.3f}, {target_z:.3f})'
             f'{" [cross]" if cross else ""}')
 
@@ -3967,56 +3961,117 @@ class PickPlaceNode(Node):
         # Pre-validate ALL stages before moving the arm
         def _prevalidate_and_execute():
             self._require_operation(operation)
-            validations=[]
-            def validate_candidate(candidate):
-                self._require_operation(operation)
-                gate_a=[];gate_c=[];validated={}
-                for stage,px,py,pz in candidate['geometry']['poses']:
-                    ok,reason=check_grasp_reachable(px,py,pz,ground_z=ground_z)
-                    gate_a.append(dict(stage=stage,x=px,y=py,z=pz,ok=ok,reason=reason))
-                    if not ok:return dict(passed=False,reason='workspace',stage=stage,gate_a=gate_a,gate_c=gate_c)
-                    for i,sol in enumerate(candidate['solutions'][stage]):
-                        self._require_operation(operation)
-                        # The candidate's projected opening owns both TCP and jaws.
-                        query=dict(sol,gripper_joint=candidate['opening_rad'])
-                        if self.execution.collector:
-                            valid,contacts=self._check_state_valid_with_contacts(query)
-                            contact_rows=[dict(a=c.contact_body_1,b=c.contact_body_2,depth_mm=c.depth*1000.) for c in contacts]
-                        else:valid,contact_rows=self._check_state_valid(query),[]
-                        self._require_operation(operation)
-                        gate_c.append(dict(stage=stage,config='elbow-up' if i==0 else 'elbow-down',
-                            sol=dict(sol),opening_rad=candidate['opening_rad'],valid=bool(valid),contacts=contact_rows))
-                        if valid:validated[stage]=dict(sol);break
-                    if stage not in validated:
-                        return dict(passed=False,reason='collision',stage=stage,gate_a=gate_a,gate_c=gate_c)
-                return dict(passed=True,validated=validated,gate_a=gate_a,gate_c=gate_c)
-            def validator(candidate):
-                result=validate_candidate(candidate);validations.append(result);return result
             selected_grasp=make_reachable_grasp_plan(pos,grasp_bbox,
                 open_clearance=self._jaw_open_clearance_var.get()/1000,
-                close_clearance=self._jaw_close_clearance_var.get()/1000,
-                candidate_validator=validator,**grasp_settings)
+                close_clearance=self._jaw_close_clearance_var.get()/1000,**grasp_settings)
             poses_to_check=tuple(tuple(p) for p in selected_grasp['geometry']['poses'])
+
+            # Workspace bbox check first — fast reject for clearly-out-of-reach.
+            gate_a_results = []
+            for stage, px, py, pz in poses_to_check:
+                ok, reason = check_grasp_reachable(px, py, pz, ground_z=ground_z)
+                gate_a_results.append({
+                    'stage': stage, 'x': px, 'y': py, 'z': pz,
+                    'ok': ok, 'reason': reason,
+                })
+                if not ok:
+                    self._append_log(
+                        f'Grasp rejected ({stage}): {reason} '
+                        f'({px:.3f}, {py:.3f}, {pz:.3f})', 'warn')
+                    # Phase 9: grasp failed — restore lego to world scene
+                    self._add_lego_collision_objects()
+                    self._trace('event', 'gate_a_done', per_stage=gate_a_results)
+                    self._trace('close_cycle', 'grasp_unreachable_workspace',
+                                       stage=stage, reason=reason,
+                                       target=(px, py, pz))
+                    self._set_motion_status({
+                        'ok': False, 'outcome': 'grasp_unreachable_workspace',
+                        'msg': (f'Gate A reject @ {stage} '
+                                f'({px:.3f}, {py:.3f}, {pz:.3f}): {reason}')}, event=evt)
+                    evt.set()
+                    return
+            self._trace('event', 'gate_a_done', per_stage=gate_a_results)
+
+            # Find a yaw where geometric_ik returns solutions for BOTH stages.
+            # Using a single yaw across stages avoids mid-grasp wrist twists.
             yaw_used=selected_grasp['chosen_yaw'];stage_sols=selected_grasp['solutions']
             dbg_lines=[line for attempt in selected_grasp['attempts'] for line in attempt.get('debug',[])]
-            self._trace('event','gate_a_done',per_stage=[a for v in validations for a in v['gate_a']])
-            self._trace('event','gate_b_done',yaw_requested=obj_yaw,yaw_used=yaw_used,
-                stage_sols={k:[dict(q) for q in v] for k,v in stage_sols.items()},dbg_lines=dbg_lines)
-            gate_c_attempts=[c for v in validations for c in v['gate_c']]
-            validated=selected_grasp.get('validation',{}).get('validated',{})
-            self._trace('event','gate_c_done',attempts=gate_c_attempts,validated=validated)
+            self._trace('event', 'gate_b_done',
+                         yaw_requested=obj_yaw,
+                         yaw_used=yaw_used,
+                         stage_sols={k: [dict(s) for s in v]
+                                     for k, v in (stage_sols or {}).items()},
+                         dbg_lines=list(dbg_lines or []))
             if yaw_used is None:
-                reason=validations[-1]['reason'] if validations else 'ik'
-                outcome={'workspace':'grasp_unreachable_workspace','collision':'gate_c_all_collide','ik':'grasp_unreachable_ik'}[reason]
-                self._append_log('Grasp unreachable: all narrow-face equivalents refused ('+reason+')','warn')
+                self._append_log(
+                    f'Grasp unreachable: no geometric IK at any yaw for '
+                    f'{[s[0] for s in poses_to_check]} stages', 'warn')
+                for line in dbg_lines:
+                    self._append_log(line, 'warn')
                 self._add_lego_collision_objects()
-                self._trace('close_cycle',outcome,candidate_attempts=selected_grasp['attempts'])
-                self._set_motion_status(dict(ok=False,outcome=outcome,msg=reason),event=evt);evt.set();return
-            if yaw_used!=obj_yaw:
-                self._append_log(f'Grasp yaw fallback: {math.degrees(obj_yaw):.1f}° → {math.degrees(yaw_used):.1f}°')
-            chosen_tcp=selected_grasp['geometry']['tcp']
-            self._append_log(f'Grasp chosen TCP: ({chosen_tcp[0]:.4f}, {chosen_tcp[1]:.4f}, {chosen_tcp[2]:.4f}), '
-                f'opening={math.degrees(selected_grasp["opening_rad"]):.2f}°, width={(selected_grasp["projected_width_m"] or 0.)*1000:.2f}mm')
+                self._trace('close_cycle', 'grasp_unreachable_ik',
+                                   dbg_lines=list(dbg_lines or []))
+                self._set_motion_status({
+                    'ok': False, 'outcome': 'grasp_unreachable_ik',
+                    'msg': (f'Gate B reject: no geometric IK at any yaw for '
+                            f'stages {[s[0] for s in poses_to_check]}')}, event=evt)
+                evt.set()
+                return
+            if yaw_used != obj_yaw:
+                self._append_log(
+                    f'Grasp yaw fallback: '
+                    f'{math.degrees(obj_yaw):.1f}° → '
+                    f'{math.degrees(yaw_used):.1f}° '
+                    f'(Δ{math.degrees(yaw_used - obj_yaw):+.1f}°)')
+
+            # Collision-check each stage's solutions, stop at first valid.
+            validated = {}
+            gate_c_attempts = []
+            for stage, px, py, pz in poses_to_check:
+                found = False
+                for i, sol in enumerate(stage_sols[stage]):
+                    config = 'elbow-up' if i == 0 else 'elbow-down'
+                    if self.execution.collector:
+                        valid, contacts = self._check_state_valid_with_contacts(sol)
+                        contact_rows = [dict(a=c.contact_body_1, b=c.contact_body_2,
+                                             depth_mm=c.depth*1000.) for c in contacts]
+                    else:
+                        valid, contact_rows = self._check_state_valid(sol), []
+                    gate_c_attempts.append({
+                        'stage': stage, 'config': config,
+                        'sol': dict(sol), 'valid': bool(valid),
+                        **({'contacts': contact_rows} if self.execution.collector else {}),
+                    })
+                    if valid:
+                        validated[stage] = sol
+                        self._append_log(
+                            f'  {stage}: {config}, '
+                            f'wrist_roll={math.degrees(sol["wrist_roll"]):.1f}°')
+                        found = True
+                        break
+                    self._append_log(
+                        f'  {stage}: {config} collides'+
+                        (f': {contact_rows}' if self.execution.collector else ''), 'warn')
+                if not found:
+                    self._append_log(
+                        f'Grasp unreachable ({stage}): all solutions collide '
+                        f'({px:.3f}, {py:.3f}, {pz:.3f})', 'warn')
+                    self._add_lego_collision_objects()
+                    self._trace('event', 'gate_c_done',
+                                 attempts=gate_c_attempts,
+                                 validated={k: dict(v) for k, v in validated.items()})
+                    self._trace('close_cycle', 'gate_c_all_collide',
+                                       stage=stage, target=(px, py, pz))
+                    self._set_motion_status({
+                        'ok': False, 'outcome': 'gate_c_all_collide',
+                        'msg': (f'Gate C reject @ {stage} '
+                                f'({px:.3f}, {py:.3f}, {pz:.3f}): '
+                                f'all IK solutions collide')}, event=evt)
+                    evt.set()
+                    return
+            self._trace('event', 'gate_c_done',
+                         attempts=gate_c_attempts,
+                         validated={k: dict(v) for k, v in validated.items()})
 
             # Publish only immutable operation-owned results after planning.
             self._require_operation(operation)

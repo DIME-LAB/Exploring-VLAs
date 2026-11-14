@@ -31,11 +31,12 @@ from tick_contract import world_step_errors
 from contract import JOINTS
 from protocol import CommandLedger
 from finger_geometry import read_model
+from miss_clearance import POLICY as MISS_POLICY,velocity_cap
 
 _RUNTIME = None
 _LOADED_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 _LOADED_DEPENDENCIES = {name:hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-                        for name in ('contract.py', 'protocol.py','comparisons.py','tick_contract.py','finger_geometry.py')}
+                        for name in ('contract.py', 'protocol.py','comparisons.py','tick_contract.py','finger_geometry.py','miss_clearance.py')}
 
 
 class Runtime:
@@ -61,6 +62,13 @@ class Runtime:
         self.robot_base=RigidPrim('/World/SO_ARM101/base_link',name='collection_robot_base_readback',
             reset_xform_properties=False,prepare_contact_sensors=False)
         self.robot_base.initialize()
+        self._miss_cap=None;self._miss_saved_limits=None;self._miss_last_position=None
+        self._miss_substeps=0;self._miss_max_velocity=0.;self._miss_max_displacement=0.
+        self.world.add_physics_callback('collection_miss_velocity_check',self.check_miss_substep)
+        self.finger_views={}
+        for name in ('gripper_link','moving_jaw_so101_v1_link'):
+            view=RigidPrim('/World/SO_ARM101/'+name,name='collection_finger_'+name,reset_xform_properties=False,prepare_contact_sensors=False)
+            view.initialize();self.finger_views[name]=view
         self.body_paths = {}
         for root in ('/World/Objects', '/World/Containers'):
             parent = self.stage.GetPrimAtPath(root)
@@ -155,8 +163,68 @@ class Runtime:
             result[name] = dict(contact_m=contact[0],rest_m=rest[0])
         return result
 
+    def effective_finger_offsets(self):
+        result={}
+        for name,view in self.finger_views.items():
+            contact=view._physics_view.get_contact_offsets().tolist();rest=view._physics_view.get_rest_offsets().tolist()
+            if len(contact)!=1 or len(rest)!=1 or len(contact[0])!=4 or len(rest[0])!=4 or not np.isfinite(contact[0]+rest[0]).all():
+                raise RuntimeError('Unverified effective finger offsets: '+name)
+            result[name]=dict(contact_m=contact[0],rest_m=rest[0])
+        return result
+
+    def set_miss_velocity_cap(self,cap):
+        if self.busy or self.timeline.is_playing():raise RuntimeError('Velocity-cap handover requires a held simulation')
+        active=getattr(self,'_miss_cap',None)
+        if cap is None:
+            if active is not None:
+                saved=self._miss_saved_limits
+                self.art.set_max_joint_velocities(np.asarray([saved],dtype=np.float32),joint_indices=self.indices)
+                actual=self.art.get_joint_max_velocities(joint_indices=self.indices)[0]
+                if not matches(actual.tolist(),saved,'float32_readback'):raise RuntimeError('Miss velocity limit restore failed')
+                self._miss_cap=None;self._miss_saved_limits=None;self._miss_last_position=None
+            return dict(on=False,values_rad_s=None)
+        if cap!=velocity_cap(cap.get('phase')):raise ValueError('Unknown miss velocity-cap policy')
+        measured=self.art.get_joint_velocities()[0,self.indices]
+        if not np.isfinite(measured).all() or np.any(abs(measured)>np.asarray(cap['values_rad_s'])+MISS_POLICY['joint_numeric_allowance_rad']):
+            raise RuntimeError('Measured velocity exceeds requested miss cap before advance')
+        if active is None:
+            saved=self.art.get_joint_max_velocities(joint_indices=self.indices)[0]
+            if saved.shape!=(6,) or not np.isfinite(saved).all() or np.any(saved<=0):raise RuntimeError('Original joint velocity limits are unverified')
+            self._miss_saved_limits=saved.tolist()
+        self.art.set_max_joint_velocities(np.asarray([cap['values_rad_s']],dtype=np.float32),joint_indices=self.indices)
+        actual=self.art.get_joint_max_velocities(joint_indices=self.indices)[0]
+        if not matches(actual.tolist(),cap['values_rad_s'],'float32_readback'):raise RuntimeError('Native miss velocity limit readback failed')
+        self._miss_cap=dict(cap);self._miss_last_position=self.art.get_joint_positions()[0,self.indices].copy()
+        self._miss_substeps=0;self._miss_max_velocity=0.;self._miss_max_displacement=0.
+        return dict(cap)
+
+    def check_miss_substep(self,step):
+        try:
+            cap=getattr(self,'_miss_cap',None)
+            if cap is None:return
+            limits=self.art.get_joint_max_velocities(joint_indices=self.indices)[0]
+            velocity=self.art.get_joint_velocities()[0,self.indices]
+            position=self.art.get_joint_positions()[0,self.indices]
+            bound=np.asarray(cap['values_rad_s']);eps=MISS_POLICY['joint_numeric_allowance_rad']
+            if not matches(limits.tolist(),cap['values_rad_s'],'float32_readback') or not np.isfinite([velocity,position]).all() or np.any(abs(velocity)>bound+eps):
+                raise RuntimeError('Native recovery velocity constraint failed')
+            delta=abs(position-self._miss_last_position)
+            if np.any(delta>bound*float(step)+eps):raise RuntimeError('Native recovery substep displacement exceeded velocity envelope')
+            self._miss_last_position=position.copy();self._miss_substeps+=1
+            self._miss_max_velocity=max(self._miss_max_velocity,float(max(abs(velocity))))
+            self._miss_max_displacement=max(self._miss_max_displacement,float(max(delta)))
+        except Exception as exc:
+            self.failure=repr(exc);self.timeline.pause();self.busy=False
+            raise
+
+    def miss_cap_state(self):
+        cap=getattr(self,'_miss_cap',None)
+        return dict(cap,substep_checks=self._miss_substeps,max_measured_velocity_rad_s=self._miss_max_velocity,
+                    max_substep_displacement_rad=self._miss_max_displacement) if cap else dict(on=False,values_rad_s=None)
+
     def snapshot(self):
         state_read_start=time.monotonic_ns()
+        if getattr(self,'_miss_cap',None):self.check_miss_substep(1/120)
         self.require_scene()
         positions = self.art.get_joint_positions()[0, self.indices]
         velocities = self.art.get_joint_velocities()[0, self.indices]
@@ -181,7 +249,7 @@ class Runtime:
         base_pos,base_quat=self.robot_base.get_world_poses()
         if not all(np.all(np.isfinite(v)) for v in (base_pos,base_quat)):raise RuntimeError('Non-finite native robot base pose')
         robot_base=dict(position=list(map(float,base_pos[0])),orientation=list(map(float,base_quat[0])))
-        return dict(wall_profile_native=dict(state_read_ms=(time.monotonic_ns()-state_read_start)/1e6),base_world_pose=base_pose,
+        return dict(miss_velocity_cap=self.miss_cap_state(),wall_profile_native=dict(state_read_ms=(time.monotonic_ns()-state_read_start)/1e6),base_world_pose=base_pose,
                     robot_base_world_pose=robot_base,robot_base_pose_source='physx_rigid_body',epoch=self.epoch, sim_ns=self.stamp(), physics_time_s=self.world.current_time,
                     state=list(map(float, positions)), velocity=list(map(float, velocities)),
                     drive_targets=list(map(float, targets)),
@@ -214,11 +282,23 @@ class Runtime:
             raise RuntimeError('PhysX did not accept the executed targets')
         return dict(application_stamp_ns=self.stamp(), applied_command=list(map(float, applied)))
 
+    def start_miss_hold(self,epoch,stamp,cap,state,drive_targets):
+        if epoch!=self.epoch or stamp<=self.invalid_through_ns or not matches(stamp,self.stamp(),'stamp_ns'):
+            raise RuntimeError('Stale miss kickoff identity')
+        actual=self.art.get_joint_positions()[0,self.indices]
+        drives=self.art.get_applied_actions().joint_positions[0,self.indices]
+        if not matches(actual.tolist(),state,'target_rad') or not matches(drives.tolist(),drive_targets,'target_rad'):
+            raise RuntimeError('Miss kickoff state/drive baseline differs')
+        applied=self.set_miss_velocity_cap(cap)
+        result=self.advance()
+        return dict(epoch=epoch,observation_stamp_ns=stamp,command_miss_velocity_cap=applied,advance=result)
+
     def advance(self):
         if self.failure:
             raise RuntimeError(self.failure)
         if self.mode != 'collect' or self.busy:
             raise RuntimeError('An advancing frame is already pending or mode is not collect')
+        if getattr(self,'_miss_cap',None):self.check_miss_substep(1/120)
         self.start_time = self.world.current_time
         self.busy = True
         self.step_start_ns=time.monotonic_ns()
@@ -228,6 +308,7 @@ class Runtime:
     def cancel(self):
         self.timeline.pause()
         self.busy = False
+        self.set_miss_velocity_cap(None)
         self.epoch += 1
         self.invalid_through_ns = self.stamp()
         self.ledger = CommandLedger()
@@ -243,7 +324,12 @@ class Runtime:
                 raise ValueError('Observation predates cancellation/reset barrier')
             if self.mode != 'collect':
                 raise RuntimeError('Collection command refused in deployment mode')
-            ack = self.ledger.process(payload, self.apply, self.advance)
+            def apply(command,stamp):
+                cap=payload.get('miss_velocity_cap')
+                if cap is None and getattr(self,'_miss_cap',None) is None:return self.apply(command,stamp)
+                applied=self.set_miss_velocity_cap(cap)
+                return dict(self.apply(command,stamp),command_miss_velocity_cap=applied)
+            ack = self.ledger.process(payload, apply, self.advance)
         except Exception as exc:
             ack = dict(epoch=payload.get('epoch'), observation_stamp_ns=payload.get('observation_stamp_ns'), error=repr(exc))
             if payload.get('epoch') == self.epoch:
@@ -354,7 +440,7 @@ def install(mode='collect'):
     articulation['helper_sha256']=hashlib.sha256(helper.read_bytes()).hexdigest()
     if mode=='collect' and articulation['fixed_base'] is not True:raise RuntimeError('Collection requires verified fixed_base=true: '+repr(articulation))
     return dict(mode=mode, physics_config=physics,joint_names=_RUNTIME.art.dof_names,articulation_audit=articulation,
-                joint_index_mapping=dict(zip(JOINTS,_RUNTIME.indices)),finger_model=read_model(_RUNTIME.stage),
+                joint_index_mapping=dict(zip(JOINTS,_RUNTIME.indices)),finger_model=read_model(_RUNTIME.stage,effective_finger_offsets=_RUNTIME.effective_finger_offsets()),
                 epoch=_RUNTIME.epoch, invalid_through_ns=_RUNTIME.invalid_through_ns,
                 loaded_sha256=_LOADED_SHA256,
                 loaded_dependencies=_LOADED_DEPENDENCIES,

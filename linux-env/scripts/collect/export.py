@@ -11,6 +11,7 @@ from tick_contract import camera_tick_errors
 from collection_status import require_finalized
 from checkpoint import require_recovery_mode,require_episode_mode
 from recovery import receipt_error, recovery_summary
+from dataset_phase import FEATURE,PHASES,POLICY as PHASE_POLICY,phase_code,feature,stored_phase_codes
 from storage import atomic_json,confined, prepare_environment
 
 
@@ -49,11 +50,13 @@ def main():
     features = {key: dict(dtype='float32', shape=(6,), names=names) for key in ('observation.state', 'action')}
     features.update({f'observation.images.{key}': dict(dtype='video', shape=(480, 640, 3),
                     names=['height', 'width', 'channels']) for key in ('wrist', 'top')})
+    features[FEATURE]=feature()
     dataset_root = run / 'dataset'
     dataset = LeRobotDataset.create(args.repo_id, fps=fps, root=dataset_root,
         features=features, robot_type='so_follower', vcodec='h264', encoder_threads=1,
         image_writer_threads=2, tolerance_s=.001)
     audits, manifest, thumbs = [], [], []
+    phase_counts={name:0 for name in PHASES};phase_values=[]
     accepted_paths = []
     for path in sorted(run.glob('attempt-*')):
         receipt = json.loads((path / 'receipt.json').read_text())
@@ -71,9 +74,12 @@ def main():
         captures = {key: cv2.VideoCapture(str(path / f'{key}.mp4')) for key in ('wrist', 'top')}
         first_stamp = rows[0]['sim_ns']
         for index, row in enumerate(rows):
+            code=phase_code(row,receipt,required='frame_phase_policy' in config)
+            phase_values.append(code)
+            phase_counts[next(name for name,value in PHASES.items() if value==code)]+=1
             frame = {'observation.state': np.rad2deg(np.array(row['state'], dtype=np.float32)),
                      'action': np.rad2deg(np.array(row['action'], dtype=np.float32)),
-                     'task': receipt['params']['task']}
+                     'task': receipt['params']['task'],FEATURE:np.asarray([code],dtype=np.int64)}
             for key, capture in captures.items():
                 ok, image = capture.read()
                 if not ok:
@@ -98,11 +104,14 @@ def main():
     dataset.finalize()
     recovery=recovery_summary(manifest)
     atomic_json(dataset_root/'meta/collection_episodes.json',manifest)
+    atomic_json(dataset_root/'meta/collection_phases.json',dict(PHASE_POLICY,counts=phase_counts))
     loaded = LeRobotDataset(args.repo_id, root=dataset_root, video_backend='pyav', tolerance_s=.001)
     assert loaded.fps == 30 and loaded.num_episodes == len(manifest)
     assert loaded.features['action']['names'] == names
     assert loaded.features['observation.state']['names'] == names
     first, last = loaded[0], loaded[len(loaded) - 1]
+    assert np.asarray(first[FEATURE]).size==1
+    assert stored_phase_codes(loaded)==phase_values
     assert tuple(first['observation.state'].shape) == (6,)
     assert tuple(first['observation.images.wrist'].shape) == (3, 480, 640)
     assert tuple(last['observation.images.top'].shape) == (3, 480, 640)
@@ -119,7 +128,7 @@ def main():
         subprocess.run(['ffmpeg', '-v', 'error', '-y', '-i', str(path / 'top.mp4'), '-i', str(path / 'wrist.mp4'),
             '-filter_complex', '[0:v][1:v]hstack=inputs=2', '-c:v', 'libx264', '-threads', '2', '-crf', '20',
             str(report / f'sample-{color}.mp4')], check=True)
-    validation = dict(recovery=recovery,loaded=True, fps=loaded.fps, episodes=loaded.num_episodes,
+    validation = dict(frame_phases=dict(policy=PHASE_POLICY,counts=phase_counts,all_values_read_back=True),recovery=recovery,loaded=True, fps=loaded.fps, episodes=loaded.num_episodes,
                      frames=len(loaded), features=loaded.features, timing_passed=all(a['passed'] for a in audits),
                      color_counts={color: sum(e['params']['color'] == color for e in manifest) for color in ('red', 'green', 'blue')})
     atomic_json(report / 'validation.json',validation)

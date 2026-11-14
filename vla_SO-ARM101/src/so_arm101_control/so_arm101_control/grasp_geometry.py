@@ -309,7 +309,8 @@ def make_grasp_plan(pose, bbox, *, cross=False, current_wrist_roll=None,
     width=object_grip_width(bbox,cross)
     if yaw_override is not None:
         yaw=float(yaw_override)
-        width=projected_grip_width(pose,bbox,yaw)
+        object_yaw=math.atan2(2*qw*qz,1-2*qz*qz)
+        if bbox:width=abs(bbox['sx']*math.sin(yaw-object_yaw))+abs(bbox['sy']*math.cos(yaw-object_yaw))
     dx, dy = jaw_offset(width, yaw, tcp_clearance, bbox_enabled)
     x, y = pose['x'] + dx, pose['y'] + dy
     height = float((bbox or {}).get('sz', 0.0))
@@ -328,18 +329,6 @@ def make_grasp_plan(pose, bbox, *, cross=False, current_wrist_roll=None,
 
 
 
-def grasp_jaw_plan(pose,bbox,*,cross=False,tcp_clearance=TCP_CLEARANCE_M,
-                   open_clearance=JAW_OPEN_CLEARANCE_M,close_clearance=JAW_CLOSE_CLEARANCE_M):
-    """Jaw commands and candidate TCP centering share this projected-width rule.
-
-    The admitted requested/+pi/-pi axes have identical projected width, so
-    jaw commands are determined even before collision-aware axis selection.
-    """
-    geometry=make_grasp_plan(pose,bbox,cross=cross)
-    yaw=geometry['yaw'];width=projected_grip_width(pose,bbox,yaw)
-    opening,closing=gripper_angles(width,tcp_clearance,open_clearance,close_clearance)
-    return dict(projected_width_m=width,opening_rad=opening,closing_rad=closing,yaw=yaw)
-
 def make_reachable_grasp_plan(pose,bbox,*,open_clearance=JAW_OPEN_CLEARANCE_M,
                               close_clearance=JAW_CLOSE_CLEARANCE_M,additional_poses=None,candidate_validator=None,**settings):
     """Keep narrow-face grasps aligned and recompute centering for each yaw.
@@ -349,9 +338,11 @@ def make_reachable_grasp_plan(pose,bbox,*,open_clearance=JAW_OPEN_CLEARANCE_M,
     """
     requested=make_grasp_plan(pose,bbox,**settings)
     requested_yaw=requested['yaw'];attempts=[]
+    object_yaw=math.atan2(2*pose.get('qw',1.)*pose.get('qz',0.),1-2*pose.get('qz',0.)**2)
     for offset in (0.,math.pi,-math.pi):
         yaw=requested_yaw+offset
-        width=projected_grip_width(pose,bbox,yaw)
+        width=(abs(bbox['sx']*math.sin(yaw-object_yaw))+abs(bbox['sy']*math.cos(yaw-object_yaw))) if bbox else None
+        if candidate_validator is not None:width=projected_grip_width(pose,bbox,yaw)
         tcp=settings.get('tcp_clearance',TCP_CLEARANCE_M)
         opening,closing=gripper_angles(width,tcp,open_clearance,close_clearance)
         margin=BASELINE_JAW_GAP+JAW_GAP_RATE*opening-width if width is not None else None

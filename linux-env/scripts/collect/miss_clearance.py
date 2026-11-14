@@ -10,12 +10,33 @@ from finger_geometry import FingerModel,body_box,separation,rotation
 from tick_contract import digest,frame_digest,snapshot_contracts,STEP_NS
 from comparisons import comparison
 
-POLICY=dict(version=1,executed_margin_m=.001,clean_open_margin_m=.0002,
+POLICY=dict(version=2,executed_margin_m=.001,clean_open_margin_m=.0002,
     geometric_error_m=.00002,refinement_floor_motion_m=.00025,max_segment_checks=50000,
     target_corner_motion_max_m=.0002,
+    step_s=1/30+1e-6,joint_numeric_allowance_rad=1e-6,reachable_numeric_allowance_rad=5e-6,settled_velocity_rad_s=.0125,
+    velocity_caps_rad_s=dict(regrasp_miss_open=.5,regrasp_miss_approach=.1,
+        regrasp_miss_descent=.05,regrasp_miss_close=.05,regrasp_miss_lift=.05,regrasp_reopen=.05),
     joint_point_radius_bounds_m=[.55,.55,.40,.25,.15,.10],
     source='held USD enabled finger boxes, fixed-base named-joint kinematics',
     clean_contact='clean close/lift can intentionally aim at the target; never executed on the miss')
+
+def bind_target_offsets(model,offsets):
+    FingerModel(model)  # Verify the transport's geometry/finger-offset identity first.
+    value=copy.deepcopy(model);value.pop('sha256',None);value['effective_block_offsets']=copy.deepcopy(offsets)
+    value['sha256']=digest(value)
+    return value
+
+
+def planning_margin(stage):
+    phase=dict(open='regrasp_miss_open',approach_executed='regrasp_miss_approach',descent_executed='regrasp_miss_descent',
+        close='regrasp_miss_close',lift_executed='regrasp_miss_lift',reopen='regrasp_reopen')[stage]
+    cap=velocity_cap(phase)
+    return POLICY['executed_margin_m']+sum(r*(v*POLICY['step_s']+POLICY['reachable_numeric_allowance_rad']) for r,v in zip(POLICY['joint_point_radius_bounds_m'],cap['values_rad_s']))
+
+
+def velocity_cap(phase):
+    if phase not in POLICY['velocity_caps_rad_s']:raise ValueError('Unknown deliberate-miss phase: '+str(phase))
+    return dict(on=True,phase=phase,values_rad_s=[POLICY['velocity_caps_rad_s'][phase]]*6,policy_version=POLICY['version'])
 
 
 class MissClearance:
@@ -28,6 +49,18 @@ class MissClearance:
         self.name=name;self.baseline=snapshot;self.body=snapshot['bodies'][name];self.corners=snapshot['local_corners'][name]
         self.box=body_box(self.body,self.corners);self.base=snapshot['robot_base_world_pose']
         self.model_sha256=digest(model)
+        self.offsets=model.get('effective_finger_offsets')
+        if self.offsets is None:raise ValueError('Effective native finger offsets are required')
+        contact=[];rest=[]
+        for value in self.offsets.values():
+            contact+=value['contact_m'];rest+=value['rest_m']
+            if len(value['contact_m'])!=4 or len(value['rest_m'])!=4:raise ValueError('Four shapes per finger are required')
+        if len(contact)!=8 or not np.isfinite(contact+rest).all() or min(contact)<0 or max(abs(v) for v in rest)>1e-9:raise ValueError('Unverified finger contact/rest offsets')
+        block=model.get('effective_block_offsets')
+        if not block or not block['contact_m'] or len(block['contact_m'])!=len(block['rest_m']) or not np.isfinite(block['contact_m']+block['rest_m']).all():raise ValueError('Effective target offsets are required')
+        if min(block['contact_m'])<0 or max(abs(v) for v in block['rest_m'])>1e-9:raise ValueError('Unverified target contact/rest offsets')
+        skin=max(contact)+max(block['contact_m'])+POLICY['geometric_error_m']
+        if POLICY['executed_margin_m']<skin or POLICY['clean_open_margin_m']+POLICY['geometric_error_m']<skin:raise ValueError('Miss margin does not cover effective pair offsets')
 
     def state(self,q,margin=None,body=None,base=None):
         box=self.box if body is None else body_box(body,self.corners)
@@ -37,7 +70,48 @@ class MissClearance:
         return dict(passed=gap>=required+POLICY['geometric_error_m'],finger=path,target=self.name,
             separation_m=gap,required_margin_m=required,geometric_error_m=POLICY['geometric_error_m'],joints=list(q))
 
+    def joint_box(self,low,high,margin=None,require_epoch=lambda:None,body=None,base=None):
+        """Certify every combination of joint positions, not one shared fraction.
+
+        A fixed separating axis at each cell centre loses at most the summed
+        per-joint point-displacement bound anywhere in that cell. Recursively
+        split the largest weighted coordinate; finite unresolved cells refuse.
+        """
+        low=np.asarray(low,dtype=float);high=np.asarray(high,dtype=float)
+        if low.shape!=(6,) or high.shape!=(6,) or not np.isfinite([low,high]).all() or np.any(high<low):raise ValueError('Invalid independent-joint box')
+        required=POLICY['executed_margin_m'] if margin is None else margin
+        radii=np.asarray(POLICY['joint_point_radius_bounds_m'])
+        checks=0;minimum=math.inf;certified=math.inf;max_radius=0.;failure=None
+        def certify(lo,hi):
+            nonlocal checks,minimum,certified,max_radius,failure
+            require_epoch()
+            if checks>=POLICY['max_segment_checks']:raise RuntimeError('Miss clearance geometric capacity exceeded')
+            middle=(lo+hi)/2;proof=self.state(middle,required,body,base);checks+=1
+            minimum=min(minimum,proof['separation_m'])
+            weighted=(hi-lo)*radii/2;radius=float(sum(weighted))
+            if not proof['passed']:
+                failure=dict(reason='independent-joint posture violates clearance',proof=proof);return False
+            gap=proof['separation_m']-radius
+            if gap>=required+POLICY['geometric_error_m']:
+                certified=min(certified,gap);max_radius=max(max_radius,radius);return True
+            if radius<=POLICY['refinement_floor_motion_m']:
+                failure=dict(reason='independent-joint box unresolved at finite resolution',
+                    center_separation_m=proof['separation_m'],motion_bound_m=radius);return False
+            index=int(np.argmax(weighted));left=hi.copy();left[index]=middle[index];right=lo.copy();right[index]=middle[index]
+            return certify(lo,left) and certify(right,hi)
+        passed=certify(low,high)
+        return dict(passed=passed,kind='independent_joint_box',low_rad=low.tolist(),high_rad=high.tolist(),
+            checks=checks,minimum_separation_m=minimum,required_margin_m=required,
+            minimum_certified_separation_m=certified if passed else None,
+            inter_sample_motion_bound_m=max_radius,rejection=failure)
+
     def segment(self,start,end,margin=None,require_epoch=lambda:None,body=None,base=None):
+        # Planning checks include every independent progress combination, too.
+        return self.joint_box(np.minimum(start,end),np.maximum(start,end),margin,require_epoch,body,base)
+
+    def nominal_path(self,start,end,margin=None,require_epoch=lambda:None,body=None,base=None):
+        # Nominal planning preflight only; actual stepping additionally requires
+        # the native-cap reachable-box certificate in command().
         motion=sum(abs(a-b)*r for a,b,r in zip(start,end,POLICY['joint_point_radius_bounds_m']))
         required=POLICY['executed_margin_m'] if margin is None else margin
         checks=0;minimum=math.inf;certified=math.inf;max_radius=0.;failure=None
@@ -84,10 +158,26 @@ class MissClearance:
         identity=dict(epoch=snapshot['epoch'],sim_ns=snapshot['sim_ns'],target=list(target),model_sha256=self.model_sha256,
             measured_target_body=copy.deepcopy(body),measured_robot_base_pose=copy.deepcopy(base))
         if not movement['passed']:return dict(identity,passed=False,reason='target moved during deliberate miss',motion=movement)
-        for source in (state,previous if previous is not None else state):
-            p=self.segment(source,target,require_epoch=require_epoch,body=body,base=base);paths.append(p)
-            if not p['passed']:return dict(identity,passed=False,reason='finger violates deliberate-miss target clearance',paths=paths,motion=movement)
-        return dict(identity,passed=True,paths=paths,motion=movement)
+        velocity=snapshot.get('velocity')
+        phase=snapshot.get('miss_phase','regrasp_miss_descent')
+        cap=velocity_cap(phase)
+        identity['velocity_cap']=cap
+        if velocity is None or len(velocity)!=6 or not np.isfinite(velocity).all():
+            return dict(identity,passed=False,reason='native measured velocity is required',motion=movement)
+        if any(abs(v)>lim+POLICY['joint_numeric_allowance_rad'] for v,lim in zip(velocity,cap['values_rad_s'])):
+            return dict(identity,passed=False,reason='measured velocity exceeds recovery cap before application',measured_velocity_rad_s=list(velocity),motion=movement)
+        # Native max-joint-velocity constraints, verified before advancing, bound
+        # arbitrary progress and overshoot during the entire next simulated tick.
+        # Position completion tolerance is not a tracking/zero-velocity assumption.
+        half=np.asarray(cap['values_rad_s'])*POLICY['step_s']+POLICY['reachable_numeric_allowance_rad']
+        reach=self.joint_box(np.asarray(state)-half,np.asarray(state)+half,require_epoch=require_epoch,body=body,base=base)
+        identity['reachable_box']=reach;identity['measured_velocity_rad_s']=list(velocity)
+        if not reach['passed']:return dict(identity,passed=False,reason='next-tick independent-joint motion is not clear',motion=movement)
+        endpoint=self.state(target,body=body,base=base)
+        identity['command_endpoint']=endpoint
+        if not endpoint['passed']:return dict(identity,passed=False,reason='command endpoint violates target clearance',motion=movement)
+        return dict(identity,passed=True,motion=movement)
+
 
 
 def proof_differences(recorded,actual,path='miss_target_clearance'):
@@ -114,17 +204,29 @@ def receipt_error(receipt,rows):
         initial=receipt['episode_start_physical']
         if any(not matches(baseline[k],initial[k]) for k in ('epoch','sim_ns','state','bodies','robot_base_world_pose')):return 'miss anchor differs from initial episode snapshot'
         guard=MissClearance(spec['model'],baseline,spec['target'])
+        if report.get('velocity_cap_restore')!=dict(on=False,values_rad_s=None):return 'miss velocity cap was not restored before corrective recovery'
+        kickoffs=report['kickoffs']
+        phases=[item['proof']['velocity_cap']['phase'] for item in kickoffs]
+        if phases!=list(POLICY['velocity_caps_rad_s']):return 'miss kickoff stages differ'
+        for item in kickoffs:
+            snapshot=item['snapshot'];proof=item['proof'];ack=item['ack'];cap=proof['velocity_cap']
+            actual=guard.command(snapshot['state'],snapshot['drive_targets'],snapshot['drive_targets'],dict(snapshot,miss_phase=cap['phase']))
+            if not actual['passed'] or proof_differences(proof,actual):return 'miss kickoff clearance differs'
+            if ack.get('command_miss_velocity_cap')!=cap or ack.get('epoch')!=baseline['epoch'] or not matches(ack.get('observation_stamp_ns'),snapshot['sim_ns'],'stamp_ns'):return 'miss kickoff cap was not acknowledged'
         window=[r for r in rows if baseline['sim_ns']<=native_frame(r)['sim_ns']<=end]
         if not window or [frame_digest(r) for r in window]!=report['all_miss_frame_sha256s']:return 'whole miss row hashes differ'
         first_delta=native_frame(window[0])['sim_ns']-baseline['sim_ns']
         if not (matches(first_delta,0) or matches(first_delta,STEP_NS,'native_ns')):return 'First miss row skipped its held anchor'
         if not matches(native_frame(window[-1])['sim_ns'],end):return 'miss final tick is missing'
         for row in window:
-            if not row['phase'].startswith('regrasp_'):continue
+            if 'miss_target_clearance' not in row.get('execution_geometry',{}):
+                if matches(native_frame(row)['sim_ns'],baseline['sim_ns']) and not row['phase'].startswith('regrasp_'):continue
+                return 'miss tick lacks physical clearance proof'
             proof=row['execution_geometry']['miss_target_clearance']
             actual=guard.command(row['state'],row['physics_drive_targets'],row['executed_action'],
-                dict(native_frame(row),robot_base_world_pose=row['robot_base_world_pose']))
+                dict(native_frame(row),robot_base_world_pose=row['robot_base_world_pose'],velocity=row['physics_velocity'],miss_phase=row['command_miss_velocity_cap']['phase']))
             if not proof['passed'] or not actual['passed']:return 'recorded miss target-clearance did not pass'
+            if row.get('command_miss_velocity_cap')!=actual['velocity_cap']:return 'miss velocity cap was not acknowledged'
             differences=proof_differences(proof,actual)
             if differences:return 'recorded miss target-clearance proof differs: '+json.dumps(differences[:3])
     except (KeyError,TypeError,ValueError,IndexError):return 'miss target-clearance evidence is incomplete'

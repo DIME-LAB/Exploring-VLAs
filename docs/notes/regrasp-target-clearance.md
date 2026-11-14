@@ -1,87 +1,132 @@
 # Deliberate-miss target clearance
 
 A recovery miss must leave the target untouched. MoveIt omits the target while
-planning the clean corrective expert, because its intended grasp includes
-contact. That omission does not authorize contact on the separate executed miss.
-The collector therefore uses a second, read-only finger-box oracle for that target.
+planning the clean corrective expert, because its intended grasp includes contact.
+A separate native finger-box oracle checks the executed miss against that target.
+Normal collection and GUI execution keep their established grasp/jaw behavior.
 
-`collection_runtime.install` serializes all enabled native finger cubes and their
-joint frames from the held USD stage. `finger_geometry` maps the six joints by
-name, normalizes authored quaternions, rejects unsupported finger geometry, and
-extracts collider transforms relative to their rigid body. The model's hash is
-independent of the body's current USD pose. It includes both finger frames,
-hinges and all pad pieces, not just tip endpoints. No stage/drive/body setter is
-part of this reader. The fixed-base audit remains a separate native prerequisite.
+The held-stage reader serializes the six named joint frames and every enabled
+native cube on both fingers. It normalizes quaternions, uses body-local collider
+transforms and refuses unknown geometry. Native `RigidPrim` shape tensors supply
+all four effective contact/rest offsets on each finger. The selected block's
+native offsets are added to this model; both sets participate in its hash.
+Missing/unresolved offsets, nonzero rest offsets, or a skin sum exceeding the
+clearance policy refuse recovery. The 1 mm executed margin exceeds the measured
+0.1 mm + 0.1 mm contact skin plus 20 um geometric allowance. The 0.2 mm clean-open
+margin includes the separate 20 um geometric allowance. No force is inferred.
+The fixed-base articulation audit is a prerequisite.
 
-A bounded search tries the seeded 2–4 cm direction/magnitude candidates. For each,
-it tries requested and +/-180-degree equivalent grasp yaws, rebuilding TCP
-centering, projected width and jaw angles. Each equivalent must pass IK, MoveIt
-endpoint/path checks and target clearance before it can be selected. The actual
-measured-jaw-to-open sweep is checked too. All executed approach, descent, close,
-lift and reopen segments need **1 mm target clearance**, plus **20 um numerical
-allowance**. This is deliberately larger than two 0.1 mm contact offsets; it is
-an engineering separation margin, not an inferred force threshold. The clean
-open-jaw approach/descent also need 0.2 mm plus numerical allowance. Clean closed
-corrections may intentionally aim to grasp the target and are labels, never the
-physical miss's trajectory; they retain their separate MoveIt checks.
+Search tries the seeded 2–4 cm offset first, then bounded direction/magnitude
+alternatives. Requested and +/-180-degree yaws are checked in order, with each
+candidate's projected width, jaw angles and TCP compensation recomputed together.
+Every physical stage, including initial open, close and reopen, needs MoveIt
+endpoint/path preflight and a nominal target-clearance path check. The planned
+physical path is buffered by the next-tick reach radius at that stage. Clean
+open-jaw labels are checked separately; closed corrective labels intentionally
+aim at the block and never become the miss's executed trajectory.
 
-The SAT gap is a lower bound on Euclidean box separation. A triangle-inequality
-bound for every finger point under joint motion lets the checker certify a whole
-linear commanded interval from its nearest sampled endpoint. Uncertain intervals
-are bisected; an interval that cannot prove the margin at 0.25 mm motion resolution
-is refused. A per-segment check-count ceiling is terminal capacity failure.
-Conservative joint-point radius bounds are verified against the serialized joint
-tree, including gripper rotation. This certifies commanded rigid geometry, not a
-force model or an unobserved physical trajectory between feedback ticks.
+The physical certificate does **not** assume common interpolation progress or
+position convergence implies rest. Before each command, it constructs the joint
+box `q_measured +/- (v_limit * (1/30 s + 1 us) + 5e-6 rad)` independently in all
+six coordinates. This includes arbitrary drive progress, opposite-direction
+motion and overshoot within the next tick under the verified native speed limit.
+The 5 urad pad covers four per-physics-step 1 urad displacement allowances plus
+readback rounding; measured speed must already be within the new limit plus
+1 urad/s before it can be installed. A high inward velocity cannot be relabelled
+as a low cap. Command endpoints are independently checked, too.
 
-During execution, an immutable epoch-bound guard checks the exact final command,
-both measured-state and previous-target segments, and the current target pose at
-every held tick before publication. Cancellation retires the guard. Current
-native target/base poses and checks survive in both successful and failed proofs;
-`miss_clearance_ms` is separately profiled, including failure ticks. A missing or
-invalid geometry response cannot be converted to a candidate refusal and retried.
+For each joint-box cell, the SAT separating-axis gap at its centre is reduced by
+`sum(joint_point_radius * half_joint_interval)`. The radius bounds are checked
+against the actual serialized chain. This is a bound on every finger point, so
+a fixed separating axis certifies every combination of positions in the cell.
+Uncertain cells split on their largest weighted coordinate. A cell unresolved
+at 0.25 mm motion resolution refuses; a count limit is an explicit capacity
+failure. The nominal planner path is only preflight. The per-tick reachable box,
+not a nominal common-fraction segment, authorizes physical stepping.
 
-Target movement is anchored **before opening/approach**, not after descent.
-Maximum corner displacement must stay within 0.2 mm throughout the entire miss,
-including rotation. This small contact-band ceiling tolerates rest/float residuals
-but refuses a displaced block even if it subsequently stays still. The separate
-empty-lift detector examines every recorded miss tick through lift. Its row-window
-starts at the first recorded tick; the held pre-miss anchor may be unrecorded, but
-must have its own pipeline proof and be either that tick or exactly one native
-frame earlier. Reopen is also covered by the guard and whole-miss row hashes.
+The recovery-only native caps are 0.5 rad/s for initial opening, 0.1 rad/s for
+high approach, and 0.05 rad/s for descent, close, lift and reopen. They cover the
+entire deliberate-miss prefix because initial opening/approach and residual
+motion between operations can also contact the target. The higher initial caps
+avoid applying the near-block rate to all of that prefix. Arm operation duration
+is `max(original duration, 2 * maximum joint displacement / stage cap)`;
+gripper duration uses the same rule with a 3 s original duration. This asks the
+planner for at most half the physical cap to leave tracking headroom. Receipts
+record each original/new duration and their ratio; these are simulated planned
+costs, not a measured wall-throughput claim. Retained seed 340000 gives a CPU planned-prefix estimate of 17.50 ->33.38 simulated
+seconds (1.91x), with approach 2.83 ->10.32, descent 2.83 ->6.09 and lift
+2.83 ->7.96 s; this uses fixture offsets and fake target-free MoveIt answers,
+not live throughput. No cap applies to the corrective
+shared Quickstart grasp/drop or the rest of the episode.
 
-Hashes use tick fields excluding the separately audited post-capture `wall_profile`.
-Copied native identities/poses remain exact. Independently recomputed geometry
-uses the shared 1e-9 arithmetic rule, with structured field/value/rule differences,
-so Python/NumPy export round-off cannot create a false proof mismatch. Model,
-policy, epoch, episode, stage and initial-snapshot evidence remain bound to the
-recorded episode; export recomputes the physical clearance from raw rows.
+Caps use the installed Isaac Articulation `set_max_joint_velocities` and
+`get_joint_max_velocities`, with name-based DOF indices. These wrap the native
+PhysX DOF maximum-velocity tensors (installed source: `isaacsim.core.prims/impl/
+articulation.py`, methods around lines 2163–2240 in 6.1).
+[PhysX joint schema](https://docs.omniverse.nvidia.com/kit/docs/omni_physics/107.3/dev_guide/schemas/physxschema.html)
+documents the articulation joint-space impulses enforcing `maxJointVelocity`.
+The solver constraint is an explicit runtime assumption that must be verified
+on the owned live scene before recovery data qualify. Every physics substep
+checks the native cap, measured velocity and measured displacement; violations
+are terminal. This is not an independent validated PhysX force model.
 
-Jaw commands share the same projected-width rule as yaw-specific TCP compensation.
-The admitted +/-pi equivalents have exactly the same canonical projection, so
-opening before yaw selection and closing afterward use the selected plan's angles.
-Tests enter the actual shared grasp/open/close methods for both bbox dimension
-orders and both cross settings, verify native-box/table clearance, and exercise
-collision-rejected yaw fallback. Legacy 1,000-case math parity is separate from
-these execution tests.
+The cap is installed/read back while held before targets and advancing; its
+state must match the command ACK. Starting an operation also has a checked
+kickoff: the unchanged prior drive target is certified from the held snapshot,
+then the native runtime validates epoch/stamp/state/drives and installs the cap
+before the first advance. All six kickoff proofs/ACKs are retained. Arm/gripper
+completion in miss stages additionally requires all measured speeds <=0.0125
+rad/s; the ordinary collector/GUI completion rules remain unchanged. Cancellation
+restores the original native limits, and successful reopen restores/read-verifies
+them before normal corrective planning. There are no gain, torque, collider or
+asset changes.
 
-Two retained failures exercise the guard: the review's seed 350007 overlap, and
-the actual seed 340000 smoke miss. The latter requested a 4.12 mm finger/target
-intersection, reconstructed 1.54 mm at its held state, and displaced a target corner
-4.98 mm from the pre-miss pose. The first miss never reached acceptance. These are
-rigid-box and measured-state observations; contact forces were not recorded.
+Each row records `measured_miss_velocity_cap` (on/off, values and substep checks)
+and `command_miss_velocity_cap` (the cap acknowledged for the next step). Normal
+rows explicitly report off. Full recovery metadata includes policy, model/hash,
+phase, original/new operation durations, kickoff boundaries and cap restoration.
+The training merge can audit which deliberate-miss steps ran under a cap.
+The dataset itself also carries int64 `collection_phase` (`[1]`): 0 normal,
+1 miss_prefix, 2 corrective; `meta/collection_phases.json` records its mapping and
+counts. Export checks flags against the native reopen boundary and reads all
+stored values back. Train on normal/corrective by default, masking/excluding the
+slowed miss prefix. Miss-prefix actions still mean clean expert corrections
+toward the true target, not the intentionally offset executed commands. The
+phase feature is selection metadata, not a deployed policy observation.
 
-Offline checks (no Isaac app):
+Target movement is anchored before opening/approach. All eight target corners
+must remain within 0.2 mm of that anchor throughout the miss. The empty-lift
+check examines every close/lift tick, including transient lifts returning to the
+original pose. Reopen remains guarded. Epoch, episode, model/policy hashes,
+physical poses and whole-miss row hashes bind evidence to the recorded episode;
+export recomputes command and kickoff proofs. Hashes exclude only separately
+audited post-capture wall profiles. Copied identities/poses remain exact;
+independently computed geometry uses the shared 1e-9 arithmetic comparison.
+
+Selected-plan jaw authority and collision-rejected equivalent-yaw search are
+restricted to the deliberate recovery path that actually commands those angles.
+Shared `_cmd_grasp_move` uses its original actual-jaw validity route. Shared
+object jaw commands retain the min/max bbox-width rule, including swapped bbox
+dimensions and operation without an object pose. Default pure geometry outputs
+remain unchanged. Entry-point tests cover both GUI validity predicates with an
+actual jaw different from the candidate opening, both bbox orders/cross modes,
+and pin the verified shared methods' source text.
+
+Retained regressions include the 350007/340000 target overlaps, the reviewed
+mixed independent-joint reopen posture (nominal lines pass, intermediate overlap
+0.271 mm), a 2.28 rad/s inward hold, full close/reopen sweeps, cap application and
+restoration, substep violations, and changed/missing effective offsets.
+
+Offline checks (no Isaac app or GPU):
 
 ```bash
-OPENBLAS_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 \
-  python3 -m unittest discover -s linux-env/scripts/collect -p 'test_*.py'
-~/env_isaacsim61/bin/python -B linux-env/scripts/collect/finger_model_probe.py \
-  --output /mnt/a4500-backup/exploring-vlas/runtime/instance-5/finger-model-check.json
+env CUDA_VISIBLE_DEVICES='' NVIDIA_VISIBLE_DEVICES=none ROS_DOMAIN_ID=96 \
+  ROS_LOCALHOST_ONLY=1 OPENBLAS_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 \
+  python3 -B -m unittest discover -s linux-env/scripts/collect -p 'test_*.py'
 ```
 
-The USD probe uses anonymous session opinions only; it does not emulate effective
-PhysX offsets. A new owned live recovery smoke must verify those, physical miss
-clearance/target stability, recovery success, dataset readback and cleanup before
-recovery episodes qualify. The normal-only pilot at its frozen cut is independent
-of this worktree repair.
+The anonymous-session USD reader probe tests authored geometry only. It cannot
+supply effective PhysX offsets or demonstrate the speed constraint. A separately
+authorized live recovery smoke must freshly read both, verify the physical
+no-contact corridor and cap restoration, inspect miss/recovery videos, validate
+the dataset and prove owned cleanup before recovery episodes qualify.

@@ -10,7 +10,7 @@ from checkpoint import progress
 from recovery import REGRASP_POLICY,regrasp_slot,recovery_parameters,recovery_geometry,detect_miss,receipt_error,recovery_summary
 from recovery_search import SEARCH_POLICY,PlanningWallBudget,choose as choose_recovery_plan
 from query_service import StrictQueryClient
-from miss_clearance import MissClearance
+from miss_clearance import MissClearance,velocity_cap,bind_target_offsets
 from command_geometry import CommandCollision
 from test_miss_clearance import MODEL
 import itertools
@@ -155,7 +155,7 @@ class RecoveryTests(unittest.TestCase):
         c,v,event,clean,miss=self.dual_servo();q=[0.]*6;seen=[]
         for i in range(300):
             stamp=10**9+round(i/30*1e9);c.node.get_clock=lambda:NS(now=lambda:NS(nanoseconds=stamp))
-            output=v.tick(stamp,q,drive_targets=q)
+            output=v.tick(stamp,q,drive_targets=q,velocity=[0.]*6)
             action,executed,_,_,reference,_,completed,_,candidate=output
             self.assertEqual(action,corrective_action(q,reference))
             self.assertEqual(executed[5],action[5]);seen.append(abs(action[0]-executed[0]))
@@ -166,6 +166,22 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(v.reference[:5],clean);self.assertEqual(v.executed_hold,(1,tuple(miss)))
         output=v.tick(stamp+33333333,q,drive_targets=q)
         self.assertGreater(output[0][0],q[0]);self.assertAlmostEqual(output[1][0],q[0],delta=.008)
+
+    def test_reopen_and_arm_completion_require_measured_velocity_in_miss_only(self):
+        for phase in ('regrasp_miss_lift','regrasp_reopen'):
+            c,v,event,clean,miss=self.dual_servo();v.phase=phase
+            q=list(miss)+[0.]
+            if phase=='regrasp_reopen':
+                v.plan=None;v.grip_plan=dict(target=0.,duration=1.,done=event,start=10**9,initial=0.,epoch=1)
+            else:v.plan['start']=10**9
+            stamp=3*10**9;c.node.get_clock=lambda:NS(now=lambda:NS(nanoseconds=stamp))
+            for velocity in (None,[2.28]+[0.]*5):
+                self.assertNotIn(event,v.tick(stamp,q,drive_targets=q,velocity=velocity)[6])
+            self.assertIn(event,v.tick(stamp,q,drive_targets=q,velocity=[0.]*6)[6])
+        # GUI is separate; ordinary collector motion retains its position-only completion rule.
+        c,v,event,clean,miss=self.dual_servo();v.phase='normal';v.plan['start']=10**9
+        c.node.get_clock=lambda:NS(now=lambda:NS(nanoseconds=3*10**9))
+        self.assertIn(event,v.tick(3*10**9,list(miss)+[0.],drive_targets=list(miss)+[0.])[6])
 
     def test_old_ack_cannot_install_executed_hold_after_cancel(self):
         c,v,event,_,_=self.dual_servo()
@@ -213,27 +229,36 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(events[:4],['select','open','detach','fresh measured tick'])
         self.assertEqual(events[4],('scene',snap))
 
-    def driver(self,followed=False,cancel_at=None,params=None,record_anchor=True):
+    def driver(self,followed=False,cancel_at=None,params=None,record_anchor=True,bbox=None,cross=False):
         c,r,_,_,_=motions.MotionOperationTests().setup_motion();node=c.node
-        scope=c.regrasp_prefix.__func__.__globals__;scope.update(MissClearance=MissClearance,recovery_geometry=recovery_geometry,detect_miss=detect_miss,SEARCH_POLICY=SEARCH_POLICY,PlanningWallBudget=PlanningWallBudget,choose_recovery_plan=choose_recovery_plan)
+        scope=c.regrasp_prefix.__func__.__globals__;scope.update(bind_target_offsets=bind_target_offsets,velocity_cap=velocity_cap,MissClearance=MissClearance,recovery_geometry=recovery_geometry,detect_miss=detect_miss,SEARCH_POLICY=SEARCH_POLICY,PlanningWallBudget=PlanningWallBudget,choose_recovery_plan=choose_recovery_plan)
         params=parameters(1,'red',regrasp=True) if params is None else params
         c.current_episode_id='recovery-test';c.test_rows=[];c.episode_snapshots=[];audit=TickContract()
+        bbox=dict(sx=.031,sy=.0206,sz=.0128) if bbox is None else bbox
         name=params['object'];now=[snapshot(10**9)];now[0]['bodies'][name]=dict(position=[.20,0.,.0064])
-        c.native_finger_model=MODEL
+        c.native_finger_model=MODEL;c.native_shape_offsets={name:MODEL['effective_block_offsets']}
+        def bridge(tool,params):
+            if 'start_miss_hold' not in params['code']:return dict(on=False,values_rad_s=None)
+            import ast
+            args=ast.literal_eval(params['code'].split('start_miss_hold(*',1)[1][:-1])
+            epoch,stamp,cap,state,drives=args
+            return dict(epoch=epoch,observation_stamp_ns=stamp,command_miss_velocity_cap=cap)
+        c.mutate_kit=bridge
         now[0].update(robot_base_world_pose=dict(position=[0.,0.,0.],orientation=[1.,0.,0.,0.]),robot_base_pose_source='physx_rigid_body',
-            local_corners={name:list(map(list,itertools.product(*[(-v/2,v/2) for v in (.031,.0206,.0128)])))})
+            local_corners={name:list(map(list,itertools.product(*[(-v/2,v/2) for v in (bbox['sx'],bbox['sy'],bbox['sz'])])))})
         def record_tick():
             now[0]['physics_time_s']=now[0]['sim_ns']/1e9
             s=checked_window([dict(now[0],episode_id=c.current_episode_id,phase=getattr(node,'_last_motion_tag','fixture'))])[0]
-            row=s['tick_contract']['row']
+            row=s['tick_contract']['row'];row['collection_phase']='miss_prefix'
             if audit.previous:row['physics_drive_targets']=list(audit.previous['applied_command'])
             row['command_velocity']=[(a-b)*30 for a,b in zip(row['executed_action'][:5],row['physics_drive_targets'][:5])]
             active=getattr(c,'active_miss_clearance',None)
             if active is not None:
-                proof=active[1].command(row['state'],row['physics_drive_targets'],row['executed_action'],s)
+                proof=active[1].command(row['state'],row['physics_drive_targets'],row['executed_action'],dict(s,velocity=row['physics_velocity'],miss_phase=active[2]))
                 if not proof['passed']:raise CommandCollision(proof)
+                row['command_miss_velocity_cap']=proof['velocity_cap']
                 row['execution_geometry']['miss_target_clearance']=proof
-            s['tick_contract']=audit.finish(row);now[0]=s
+            s['tick_contract']=audit.finish(row);s['drive_targets']=list(row['applied_command']);s['velocity']=list(row['physics_velocity']);now[0]=s
             row['wall_profile']=dict(stage='complete',recorded=True,tick_total_ms=150.)
             c.test_rows.append(row);c.episode_snapshots.append(copy.deepcopy(s))
         record_tick()
@@ -241,7 +266,8 @@ class RecoveryTests(unittest.TestCase):
         if not record_anchor:c.test_rows.clear();c.episode_snapshots.clear()
         events=[];node.objects_lock=threading.Lock()
         node.objects_data={name:dict(x=.20,y=0.,z=.0064,qz=0.,qw=1.)}
-        node._lookup_bbox=lambda name:dict(sx=.031,sy=.0206,sz=.0128)
+        node._lookup_bbox=lambda name:dict(bbox)
+        node._grasp_cross_var=NS(get=lambda:cross)
         node._tcp_clearance_var=NS(get=lambda:1.);node._gripper_angle_for_object=lambda name:(.2,.1)
         node._remove_single_lego_from_world=lambda name:events.append(('remove',name))
         node._check_state_valid_with_contacts=lambda target:(True,[])
@@ -252,6 +278,7 @@ class RecoveryTests(unittest.TestCase):
         node._plan_linear_joint_path=path
         c.held_snapshot=lambda epoch:dict(copy.deepcopy(now[0]),epoch=epoch)
         def execute(clean,event,**kwargs):
+            c.timeline(True)
             events.append(('arm',node._last_motion_tag,copy.deepcopy(clean.points[-1].positions),copy.deepcopy(kwargs['executed_trajectory'].points[-1].positions)))
             now[0]['sim_ns']+=33333333;now[0]['state'][:5]=kwargs['executed_trajectory'].points[-1].positions
             if followed and node._last_motion_tag=='regrasp_miss_lift':now[0]['bodies'][name]['position'][2]+=.03
@@ -259,11 +286,32 @@ class RecoveryTests(unittest.TestCase):
             event.verdict=dict(ok=True);event.set()
         c.servo.execute=execute
         def grip(target,duration,blocking,phase):
+            c.timeline(True)
             events.append(('grip',phase));now[0]['sim_ns']+=33333333;now[0]['state'][5]=target;record_tick();return True
         c.servo.gripper=grip
         def sync(**kwargs):events.append(('sync',));c.scene_pose_check=dict(passed=True)
         c.sync_scene=sync
         return c,events
+
+    def test_actual_prefix_uses_selected_jaws_for_both_bbox_orders_and_cross_modes(self):
+        from so_arm101_control.grasp_geometry import jaw_offset
+        passed=0
+        for sx,sy in ((.032,.016),(.016,.032)):
+            for cross in (False,True):
+                with self.subTest(sx=sx,cross=cross):
+                    c,events=self.driver(bbox=dict(sx=sx,sy=sy,sz=.0128),cross=cross);result={}
+                    try:c.regrasp_prefix(parameters(1,'red',regrasp=True),1,result)
+                    except QualityReject as exc:
+                        self.assertEqual(exc.kind,'planner_reject')
+                        self.assertFalse(any(e[0] in ('arm','grip') for e in events));continue
+                    passed+=1;report=result['recovery_report'];spec=report['geometry']['grasp_spec']
+                    jaws=[s['target'] for s in report['steps'] if 'target' in s]
+                    self.assertEqual(jaws,[spec['opening_rad'],spec['closing_rad'],spec['opening_rad']])
+                    dx,dy=jaw_offset(spec['projected_width_m'],spec['chosen_yaw'],.001,True)
+                    self.assertAlmostEqual(spec['geometry']['tcp'][0],.2+dx,places=12)
+                    self.assertAlmostEqual(spec['geometry']['tcp'][1],dy,places=12)
+                    self.assertFalse(report['velocity_cap_restore']['on'])
+        self.assertGreaterEqual(passed,2)
 
     def test_driver_misses_reopens_then_rebuilds_from_measured_poses_without_attach(self):
         c,events=self.driver();result={}

@@ -23,7 +23,7 @@ def transform(position,quaternion):
     return t
 
 
-def read_model(stage,root='/World/SO_ARM101'):
+def read_model(stage,root='/World/SO_ARM101',effective_finger_offsets=None,effective_block_offsets=None):
     """Serialize joint frames and enabled native primitive finger shapes."""
     from pxr import Usd,UsdGeom,UsdPhysics
     def quat(q):return [q.GetReal(),*q.GetImaginary()]
@@ -54,6 +54,8 @@ def read_model(stage,root='/World/SO_ARM101'):
         boxes.append(dict(path=str(p.GetPath()),body=str(body.GetPath()),center_link=relative[:3,3].tolist(),
             rotation_link=R.tolist(),half_extents_m=(lengths*size/2).tolist()))
     model=dict(version=1,root_body=base,joints=joints,robot_boxes=boxes)
+    if effective_finger_offsets is not None:model['effective_finger_offsets']=effective_finger_offsets
+    if effective_block_offsets is not None:model['effective_block_offsets']=effective_block_offsets
     FingerModel(model)
     model['sha256']=hashlib.sha256(json.dumps(model,sort_keys=True,separators=(',',':')).encode()).hexdigest()
     return model

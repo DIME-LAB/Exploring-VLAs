@@ -5,6 +5,7 @@ from command_geometry import QueryBudget,QUERY_POLICY,checked_segment
 from contract import JOINTS
 from recovery import recovery_geometry
 from tick_contract import digest
+from miss_clearance import planning_margin
 
 SEARCH_POLICY=dict(version=2,max_candidates=16,max_queries=16000,
     directions_rad=[0.,math.pi,math.pi/2,-math.pi/2],magnitudes_m=[.02,.03,.04],
@@ -48,7 +49,8 @@ def preflight(geometry,state,opening,closing,check,limits,require_epoch,budget,c
             q=[target[n] for n in JOINTS[:5]]+[jaw]
             proof=checked_segment(q,q,check,limits,budget)
             if proof['passed']:
-                target_proof=clearance.state(q,margin=None if stage.startswith('miss_') else .0002)
+                margin=planning_margin(dict(miss_approach='approach_executed',miss_final='close',miss_lift='reopen')[stage]) if stage.startswith('miss_') else .0002
+                target_proof=clearance.state(q,margin=margin)
                 proof['target_clearance']=target_proof
                 proof['passed']=target_proof['passed']
             endpoint_checks.append(dict(stage=stage,target=q,proof=proof))
@@ -71,8 +73,8 @@ def preflight(geometry,state,opening,closing,check,limits,require_epoch,budget,c
         # A clean closed-jaw correction intentionally aims to grasp the block;
         # it is a label, never the physical trajectory of the miss.
         if proof['passed'] and stage!='lift_clean':
-            target_proof=clearance.segment(start,target,
-                margin=.0002 if stage in ('approach_clean','descent_clean') else None,require_epoch=require_epoch)
+            target_proof=clearance.nominal_path(start,target,
+                margin=.0002 if stage in ('approach_clean','descent_clean') else planning_margin(stage),require_epoch=require_epoch)
             proof['target_clearance']=target_proof;proof['passed']=target_proof['passed']
         checked.append(dict(stage=stage,proof=proof))
         if not proof['passed']:return None,dict(passed=False,stage=stage,endpoints=endpoint_checks,paths=checked)

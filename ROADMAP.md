@@ -216,6 +216,11 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       path is supplemented by native-box finger clearance, a pre-approach target-motion anchor,
       full jaw sweeps, yaw rejection fallback and shared projected-width jaw commands.
       Targeted review and all-regrasp smoke remain required.
+      Recovery review fixes: independent-joint next-tick bounds with native speed-cap readback,
+      kickoff/close/reopen proofs, measured velocity completion, and effective finger offsets in
+      the model hash; cap on/off is logged per tick and restored before normal corrective motion.
+      Normal/GUI jaw commands and validity checks retain ef42 behavior. Offline tests/review and
+      a separately authorized live recovery smoke remain prerequisites.
       Later option: policy-in-the-loop interventions (DAgger/HIL-style), with the scripted expert taking over when
       the trained policy misses.
 - [ ] 3.1j Simpler physics and a deeper grasp (Aldrin, 2026-11-14): the gripper barely grips the lego. Lego -> box

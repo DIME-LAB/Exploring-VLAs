@@ -320,8 +320,9 @@ and smoke. The lead schedules the full run.
 
 Grasp execution uses a yaw-consistent narrow-face plan: TCP centering, projected
 width and opening margin are recomputed for each admissible +/-180-degree
-orientation. Collision-rejected candidates try the remaining equivalents, and
-actual jaw commands use that same projected width for either bbox dimension order.
+orientation. The deliberate recovery search tries collision-valid equivalents
+and commands the selected plan's jaws. Normal/GUI jaw commands and actual-jaw
+collision checks keep the verified min/max bbox rule and execution route.
 It approaches from above inside the open-jaw corridor. Near-block
 DART remains nonzero with a smaller clearance-bounded budget and fades for final
 contact; receipts report amplitude by phase. Only micrometre support contact at a
@@ -611,13 +612,27 @@ its physical ACK. Collector collision-query unavailability, timeout or missing
 response poisons collection; it cannot become a planner quality refusal.
 
 Deliberate misses additionally check the target that MoveIt omits for intended
-expert grasp contact. Native finger-box kinematics certify all executed miss
-segments, including initial opening and closing sweeps, with a 1 mm margin.
-A per-tick guard rechecks final commands and target corner movement against a
-pre-approach held anchor. The clean open-jaw paths are checked separately;
-closed corrective labels may intentionally aim at the target. The full model,
-refusals, current target/base poses, numeric rules and timing are logged.
+expert contact. A per-tick independent-joint reachable box, using the measured
+state and a read-back native velocity cap, protects the entire next physical
+tick including close/reopen; nominal straight-line preflight alone cannot
+certify it. Kickoff advances get the same check. Effective native finger/block
+contact/rest offsets are bound into the model hash and margin verification.
+Caps apply only to the miss prefix (0.5 rad/s open, 0.1 high approach, 0.05 near
+block), are logged on/off with values per tick, and are restored/read-verified
+before the normal-speed corrective grasp. Receipts quantify the temporary
+operation retiming. All miss stages require measured velocity <=0.0125 rad/s
+before completion; ordinary collector/GUI completion is unchanged.
 See [target-clearance and evidence contracts](docs/notes/regrasp-target-clearance.md).
+
+Every exported frame carries int64 `collection_phase` (shape `[1]`): **0 normal,
+1 miss_prefix, 2 corrective**. `meta/collection_phases.json` documents the mapping
+and counts; export checks every flag against the native reopen boundary and
+reads every stored value back. For 3.2 training, include **normal + corrective**
+frames by default and exclude/mask **miss_prefix**, because that prefix uses
+temporary slower dynamics. Miss-prefix actions remain the clean expert's
+correction toward the true target; the deliberately offset executed command is
+stored separately in audit rows. State/action/camera deployment features are
+unchanged; the phase column is training-selection metadata, not a policy input.
 
 Frames and receipts carry `recovery: regrasp`; exported datasets retain full
 per-episode recovery/seed evidence in `meta/collection_episodes.json` without

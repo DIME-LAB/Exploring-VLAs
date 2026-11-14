@@ -58,7 +58,8 @@ from recovery import REGRASP_POLICY, recovery_geometry, detect_miss
 from recovery_search import SEARCH_POLICY,PlanningWallBudget,choose as choose_recovery_plan
 from dart import DEFAULT_NOISE, SmoothDart, ClearanceDart, TargetCandidate, PlannerSchedule
 from command_geometry import choose_noise_scale, final_command, QUERY_POLICY, frame_capacity_seconds,CommandCollision
-from miss_clearance import MissClearance
+from miss_clearance import MissClearance,velocity_cap,bind_target_offsets,POLICY as MISS_POLICY
+from dataset_phase import observed_phase,POLICY as PHASE_POLICY
 import support_contact
 from base_drift import summary as base_drift_summary
 from tick_contract import TickContract, TickContractError, require_snapshots, digest, verify_proof, CLOCK_POLICY, STEP_NS
@@ -534,7 +535,7 @@ class Servo:
         with self.generation.own('collector motion'):
             self.generation.require(epoch)
             with self.lock:
-                if abs(self.node._actual_positions['gripper_joint'] - position) < .0005:
+                if abs(self.node._actual_positions['gripper_joint'] - position) < .0005 and not phase.startswith('regrasp_'):
                     if self.reference is None:
                         self.reference = [self.node._actual_positions[name] for name in JOINTS]
                     self.reference_epoch = epoch
@@ -574,7 +575,7 @@ class Servo:
             previous = point
         return list(points[-1].positions)
 
-    def tick(self, stamp, state, drive_targets=None):
+    def tick(self, stamp, state, drive_targets=None, velocity=None):
         completed=[]
         margin=getattr(getattr(self.node,'_motion_waiter',None),'sim_margin',5.)
         with self.lock:
@@ -582,6 +583,8 @@ class Servo:
             if self.reference is None:
                 self.reference=list(state);self.reference_epoch=self.generation.epoch
             self.generation.require(self.reference_epoch)
+            miss_stage=self.phase.startswith('regrasp_')
+            settled=(not miss_stage or (velocity is not None and len(velocity)==6 and all(math.isfinite(v) and abs(v)<=MISS_POLICY['settled_velocity_rad_s'] for v in velocity)))
             active=self.plan is not None or self.grip_plan is not None
             noise=[0.]*6;arm_ready=False;arm_elapsed=arm_duration=0.
             hold=getattr(self,'executed_hold',None)
@@ -602,14 +605,14 @@ class Servo:
                 execution_reference=list(execution_positions)+[self.reference[5]]
                 if 'noise' not in plan:plan['noise']=self.noise_program(arm_duration,self.phase)
                 noise=[v*plan.get('noise_scale',1.) for v in plan['noise'].sample(arm_elapsed+1/30)]
-                arm_ready=(arm_elapsed>arm_duration and max(abs(a-b) for a,b in zip(state[:5],execution_reference[:5]))<.008)
+                arm_ready=(settled and arm_elapsed>arm_duration and max(abs(a-b) for a,b in zip(state[:5],execution_reference[:5]))<.008)
             if self.grip_plan:
                 grip=self.grip_plan
                 if grip['start'] is None:grip['start']=stamp;grip['initial']=state[5]
                 elapsed=(stamp-grip['start'])/1e9
                 alpha=min(1.,(elapsed+1/30)/grip['duration'])
                 self.reference[5]=grip['initial']+alpha*(grip['target']-grip['initial'])
-                if elapsed>grip['duration'] and abs(state[5]-grip['target'])<.008:
+                if settled and elapsed>grip['duration'] and abs(state[5]-grip['target'])<.008:
                     completed.append(grip['done']);self.grip_plan=None
                 elif elapsed>grip['duration']+margin:
                     raise ConvergenceFailure('gripper_nonconvergence',epoch=grip['epoch'],stamp_ns=stamp,
@@ -886,6 +889,17 @@ class Collector:
             return self.cancel_owner(lambda: timeline(False))
         with self.generation.own('advance'):
             self.generation.require(self.generation.epoch)
+            active=getattr(self,'active_miss_clearance',None)
+            if active is not None:
+                epoch,guard,phase=active;snapshot=self.held_snapshot(epoch)
+                proof=guard.command(snapshot['state'],snapshot['drive_targets'],snapshot['drive_targets'],dict(snapshot,miss_phase=phase),lambda:self.generation.require(epoch))
+                if not proof['passed']:raise CommandCollision(proof)
+                args=(epoch,snapshot['sim_ns'],proof['velocity_cap'],snapshot['state'],snapshot['drive_targets'])
+                ack=self.mutate_kit('run_python',{'code':'import collection_runtime as c\nresult=c.runtime().start_miss_hold(*'+repr(args)+')'})
+                if ack.get('command_miss_velocity_cap')!=proof['velocity_cap'] or ack.get('epoch')!=epoch or not matches(ack.get('observation_stamp_ns'),snapshot['sim_ns'],'stamp_ns'):
+                    raise RuntimeError('Miss kickoff bound was not acknowledged')
+                self.miss_kickoffs.append(dict(snapshot=copy.deepcopy(snapshot),proof=proof,ack=ack))
+                return ack
             return timeline(True)
 
     def restore_physical(self, code):
@@ -968,12 +982,13 @@ class Collector:
             result=final_command(candidate,state,previous,check,[JOINT_LIMITS[n] for n in JOINTS],allow_measured_start=allow)
             active=getattr(self,'active_miss_clearance',None)
             if active is not None:
-                origin,clearance=active
+                origin,clearance,*scope_phase=active
                 self.generation.require(origin,candidate.stamp_ns)
                 if origin!=candidate.epoch or snapshot is None:raise RuntimeError('Miss clearance belongs to another epoch')
                 start=time.monotonic_ns()
                 try:
-                    proof=clearance.command(state,previous,list(candidate.positions),snapshot,
+                    proof=clearance.command(state,previous,list(candidate.positions),
+                        dict(snapshot,miss_phase=scope_phase[0] if scope_phase else 'regrasp_miss_descent'),
                         lambda:self.generation.require(origin,candidate.stamp_ns))
                 finally:timing['miss_clearance_ms']=milliseconds(start,time.monotonic_ns())
                 result['miss_target_clearance']=proof
@@ -1032,7 +1047,7 @@ class Collector:
                     preparation_start=time.monotonic_ns()
                     mapped=dict(zip(joint.name,joint.position));mapped_v=dict(zip(joint.name,joint.velocity))
                     state=[mapped[n] for n in JOINTS];velocity=[mapped_v[n] for n in JOINTS]
-                    row=dict(tick_contract_version=1,observation_epoch=snapshot['epoch'],expert_epoch=epoch,epoch=epoch,
+                    row=dict(collection_phase=observed_phase(self.servo.params.get('recovery','none'),epoch,getattr(self,'recovery_prefix_done_epoch',None)),tick_contract_version=1,observation_epoch=snapshot['epoch'],expert_epoch=epoch,epoch=epoch,
                         invalid_through_ns=self.generation.floor_ns,sim_ns=stamp,wall_ns=time.monotonic_ns(),
                         joint_stamp_ns=ns(joint.header.stamp),joint_receive_ns=received,
                         wrist_stamp_ns=ns(entry['wrist'][0].header.stamp),top_stamp_ns=ns(entry['top'][0].header.stamp),
@@ -1040,6 +1055,7 @@ class Collector:
                         state=state,velocity=velocity,state_source=snapshot['state_source'],
                         physics_state=snapshot['state'],physics_velocity=snapshot['velocity'],
                         physics_drive_targets=snapshot['drive_targets'],pose_stamp_ns=snapshot['sim_ns'],
+                        measured_miss_velocity_cap=copy.deepcopy(snapshot.get('miss_velocity_cap',dict(on=False,values_rad_s=None))),
                         physics_time_s=snapshot['physics_time_s'],physical_bodies=copy.deepcopy(snapshot['bodies']),
                         episode_id=getattr(self,'current_episode_id',None),
                         camera_identity={key:copy.deepcopy(entry[key][2]) for key in ('wrist','top')},
@@ -1059,7 +1075,7 @@ class Collector:
                     profile['stage']='expert_dart_compute'
                     compute_start=time.monotonic_ns()
                     try:
-                        clean,executed,active,phase,reference,command_clock,completed,advance,candidate=self.servo.tick(stamp,state,snapshot['drive_targets'])
+                        clean,executed,active,phase,reference,command_clock,completed,advance,candidate=self.servo.tick(stamp,state,snapshot['drive_targets'],velocity=velocity)
                     except ConvergenceFailure as exc:
                         physical_failure=exc;reference=list(self.servo.reference)
                         clean=corrective_action(state,reference);executed=list(snapshot['drive_targets'])
@@ -1078,10 +1094,16 @@ class Collector:
                     command_start=time.monotonic_ns()
                     self.servo.publish_reference(executed)
                     self.generation.require(epoch,stamp)
-                    self.command_pub.publish(String(data=json.dumps(dict(epoch=epoch,observation_stamp_ns=stamp,command=executed,advance=advance))))
+                    payload=dict(epoch=epoch,observation_stamp_ns=stamp,command=executed,advance=advance)
+                    bound=geometry.get('miss_target_clearance',{}).get('velocity_cap')
+                    if bound is not None:payload['miss_velocity_cap']=bound
+                    self.command_pub.publish(String(data=json.dumps(payload)))
                     ack=self.sensors.read_ack(epoch,stamp)
                     profile['command_publish_ack_ms']=milliseconds(command_start,time.monotonic_ns())
                     self.generation.require(epoch,stamp)
+                    if bound is not None and ack.get('command_miss_velocity_cap')!=bound:raise RuntimeError('Native miss velocity cap was not acknowledged')
+                    if bound is None and ack.get('command_miss_velocity_cap',{}).get('on'):raise RuntimeError('Native miss cap persisted into normal execution')
+                    row.update(command_miss_velocity_cap=ack.get('command_miss_velocity_cap',dict(on=False,values_rad_s=None)))
                     row.update(action=clean,executed_action=executed,expert_reference=reference,
                         expert_observation_stamp_ns=stamp,command_clock_ns=command_clock,executing=active,phase=phase,
                         planned_noise_offset=list(candidate.noise_offset),command_filter_delta=list(candidate.filter_delta),
@@ -1208,7 +1230,7 @@ class Collector:
         name=params['object'];bbox=self.node._lookup_bbox(name)
         if not bbox:raise ValueError('Re-grasp target has no dimensions')
         with self.node.objects_lock:pose=dict(self.node.objects_data[name])
-        settings=dict(current_wrist_roll=before['state'][4],tcp_clearance=self.node._tcp_clearance_var.get()/1000,
+        settings=dict(cross=self.node._grasp_cross_var.get() if hasattr(self.node,'_grasp_cross_var') else False,current_wrist_roll=before['state'][4],tcp_clearance=self.node._tcp_clearance_var.get()/1000,
             approach_height=params['approach_height_m'],approach_offset=params['approach_offset_m'])
         report=dict(epoch=epoch,episode_id=self.current_episode_id,kind='regrasp',miss_confirmed=False,
             request=dict(pose=pose,bbox=bbox,params=params['regrasp'],settings=settings),candidate_attempts=[],steps=[])
@@ -1216,7 +1238,7 @@ class Collector:
         # The expert aims at the true target, so MoveIt omits intended grasp
         # contact. The independent native-box oracle keeps the executed miss
         # clear of that target throughout approach, close, lift and reopen.
-        clearance=MissClearance(self.native_finger_model,before,name)
+        clearance=MissClearance(bind_target_offsets(self.native_finger_model,self.native_shape_offsets[name]),before,name)
         report['clearance']=copy.deepcopy(clearance.spec)
         self.node._remove_single_lego_from_world(name)
         planning_budget=planning_budget or PlanningWallBudget()
@@ -1233,35 +1255,47 @@ class Collector:
         selected=selection['targets']
         duration=2.5
         def tag(value):
-            with self.node._motion_guard():self.node._last_motion_tag=value
+            with self.node._motion_guard():
+                self.node._last_motion_tag=value
+                self.active_miss_clearance=(epoch,clearance,value)
         def arm(stage,clean_key,executed_key):
             self.generation.require(epoch)
             snapshot=self.held_snapshot(epoch)
             current=dict(zip(JOINTS[:5],snapshot['state'][:5]))
             clean_target=dict(selected[clean_key]);executed_target=dict(selected[executed_key])
-            clean_path=self.node._plan_linear_joint_path(current,clean_target,duration/params['speed_scale'])
-            executed_path=self.node._plan_linear_joint_path(current,executed_target,duration/params['speed_scale'])
+            cap=velocity_cap(stage)['values_rad_s'][0]
+            original_duration=duration/params['speed_scale']
+            motion_duration=max(original_duration,2*max(abs(executed_target[n]-current[n]) for n in JOINTS[:5])/cap)
+            clean_path=self.node._plan_linear_joint_path(current,clean_target,motion_duration)
+            executed_path=self.node._plan_linear_joint_path(current,executed_target,motion_duration)
             self.generation.require(epoch)
             if clean_path is None or executed_path is None:
                 self.reject_quality('planner_reject',dict(stage=stage,reason='regrasp path collision'))
             tag(stage)
             event=self.node._new_motion_event();self.node._begin_motion(event)
-            operation=self.node._operation(clean_target,event,duration_s=duration)
+            operation=self.node._operation(clean_target,event,duration_s=motion_duration)
             self.servo.execute(clean_path,event,operation=operation,executed_trajectory=executed_path,hold_executed=True)
             if not self.node._wait_motion_event(event,60.) or not event.verdict or not event.verdict.get('ok'):
                 raise RuntimeError('Recovery arm execution failed')
             self.generation.require(epoch)
             report['steps'].append(dict(stage=stage,clean_target=clean_target,executed_target=executed_target,
-                start_sim_ns=snapshot['sim_ns'],end_sim_ns=self.held_snapshot(epoch)['sim_ns']))
+                start_sim_ns=snapshot['sim_ns'],end_sim_ns=self.held_snapshot(epoch)['sim_ns'],
+                normal_planned_duration_s=original_duration,miss_planned_duration_s=motion_duration,
+                velocity_cap_rad_s=cap,planned_duration_ratio=motion_duration/original_duration))
         opening,closing=selection['opening_rad'],selection['closing_rad']
         with self.generation.own('install miss target clearance'):
             self.generation.require(epoch)
-            self.active_miss_clearance=(epoch,clearance)
+            self.miss_kickoffs=[];report['kickoffs']=self.miss_kickoffs
+            self.active_miss_clearance=(epoch,clearance,'regrasp_miss_open')
         def grip(stage,target):
             tag(stage)
-            if not self.servo.gripper(target,3.,True,phase=stage):raise RuntimeError('Recovery gripper execution failed')
+            snapshot=self.held_snapshot(epoch);cap=velocity_cap(stage)['values_rad_s'][5]
+            motion_duration=max(3.,2*abs(snapshot['state'][5]-target)/cap)
+            if not self.servo.gripper(target,motion_duration,True,phase=stage):raise RuntimeError('Recovery gripper execution failed')
             self.generation.require(epoch)
-            report['steps'].append(dict(stage=stage,target=target,sim_ns=self.held_snapshot(epoch)['sim_ns']))
+            report['steps'].append(dict(stage=stage,target=target,sim_ns=self.held_snapshot(epoch)['sim_ns'],
+                normal_planned_duration_s=3.,miss_planned_duration_s=motion_duration,velocity_cap_rad_s=cap,
+                planned_duration_ratio=motion_duration/3.))
         grip('regrasp_miss_open',opening)
         arm('regrasp_miss_approach','true_approach','miss_approach')
         arm('regrasp_miss_descent','true_final','miss_final')
@@ -1292,6 +1326,9 @@ class Collector:
         with self.generation.own('finish deliberate miss'):
             self.generation.require(epoch)
             self.active_miss_clearance=None
+            report['velocity_cap_restore']=self.mutate_kit('run_python',{'code':'import collection_runtime as c\nresult=c.runtime().set_miss_velocity_cap(None)'})
+            if report['velocity_cap_restore']!=dict(on=False,values_rad_s=None):raise RuntimeError('Miss velocity-cap restoration was not verified')
+            self.recovery_prefix_done_epoch=epoch
         self.sync_scene(snapshot=current)
         report['scene_after_reopen']=self.scene_pose_check
         report['corrective_attempt']='shared Quickstart cycle from fresh measured poses'
@@ -1552,6 +1589,7 @@ class Collector:
         self.native_finger_model=transport_config.get('finger_model')
         expected_bodies = set(transport_config['local_corners']) | {'cup_red','cup_green','cup_blue'}
         offsets = transport_config['effective_shape_offsets']
+        self.native_shape_offsets=copy.deepcopy(offsets)
         if set(offsets) != expected_bodies:
             raise RuntimeError('Effective shape offsets missing bodies')
         for name, values in offsets.items():
@@ -1655,7 +1693,7 @@ class Collector:
             atomic_json(root / 'run.json',previous)
         else:
             atomic_json(root / 'run.json',dict(instance=args.instance, host=socket.gethostname(), gpu_index=int(os.getenv('ISAACSIM_GPU', '0')),
-            wall_profile_policy=PROFILE_POLICY,recording_version=6,camera_selection_policy=CAMERA_SELECTION_POLICY,image_transport=self.executor.image_take.metadata, gpu_isolation_initial=initial_gpu_footprint,transport_config=transport_config, observation_state_topic='/joint_states_measured',
+            wall_profile_policy=PROFILE_POLICY,recording_version=7,frame_phase_policy=PHASE_POLICY,camera_selection_policy=CAMERA_SELECTION_POLICY,image_transport=self.executor.image_take.metadata, gpu_isolation_initial=initial_gpu_footprint,transport_config=transport_config, observation_state_topic='/joint_states_measured',
             diagnostic=args.diagnostic, success_profile=PROFILE,
             motion_wait_policy=wait_policy, tick_clock_policy=CLOCK_POLICY,geometry_query_policy=QUERY_POLICY,quality_policy=POLICY,regrasp_policy=REGRASP_POLICY,regrasp_search_policy=SEARCH_POLICY,regrasp_only=args.regrasp_only,normal_only=args.normal_only,recovery_mode=mode,
             application_contract='Held at observation tick; read-back verified PhysX targets before one-frame advance; maximum one sim tick latency',
