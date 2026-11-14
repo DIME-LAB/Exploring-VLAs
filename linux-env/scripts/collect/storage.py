@@ -17,6 +17,22 @@ def confined(path):
     return resolved
 
 
+
+def atomic_json(path,value):
+    """Publish a complete document; readers see the previous value or the next one."""
+    path=confined(path);temporary=path.with_name('.'+path.name+'.'+uuid.uuid4().hex+'.tmp')
+    try:
+        fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        with os.fdopen(fd,'w') as stream:
+            json.dump(value,stream,indent=2);stream.flush();os.fsync(stream.fileno())
+        os.replace(temporary,path)
+        directory=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY)
+        try:os.fsync(directory)
+        finally:os.close(directory)
+    finally:
+        if temporary.exists():temporary.unlink()
+
+
 def prepare_environment(instance):
     """Apply confinement before imports that create ROS/trace/temp/cache files."""
     import sys

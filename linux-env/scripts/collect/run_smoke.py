@@ -7,7 +7,7 @@ smoke window; independent review may run concurrently and can supersede the data
 import argparse,ctypes,fcntl,json,os,re,select,shutil,signal,socket,subprocess,sys,time
 from pathlib import Path
 sys.dont_write_bytecode=True
-from storage import CANONICAL_ROOT,confined
+from storage import atomic_json,CANONICAL_ROOT,confined
 
 REPO=Path(__file__).resolve().parents[3]
 SCOPES=('linux-env/scripts/collect','linux-env/scripts/collect_sim.sh','linux-env/scripts/isaac/isaacsim_launch.sh',
@@ -85,7 +85,13 @@ class OwnedProcesses:
             for row in self.remaining():
                 if row['state']!='Z':self.send(row['pid'],sig)
             end=time.monotonic()+seconds
-            while self.remaining() and time.monotonic()<end:self.scan();time.sleep(.1)
+            while time.monotonic()<end:
+                self.scan()
+                if not self.remaining():break
+                if sig==signal.SIGKILL:
+                    for row in self.remaining():
+                        if row['state']!='Z':self.send(row['pid'],sig)
+                time.sleep(.1)
         self.scan()  # Include children reparented while their last owner exited.
         result=dict(tracked=list(self.known.values()),remaining=self.remaining())
         for fd in self.handles.values():os.close(fd)
@@ -134,10 +140,20 @@ class StartupFailure(RuntimeError):
         super().__init__('Collector startup failed before an attempt receipt ('+stage+'):\n'+self.diagnostic['traceback'])
 
 
+
+def pending_receipt(path):
+    # Legacy writers may expose a partial document. While the producer is alive
+    # this is pending, never a reason to tear down its instance mid-finalization.
+    try:return json.loads(path.read_text())
+    except (FileNotFoundError,json.JSONDecodeError):return None
+
+
 def first_receipt(run, stage, code, log):
     path=run/'attempt-0000/receipt.json'
     if not path.exists():raise StartupFailure(stage,code,log)
-    return json.loads(path.read_text())
+    try:return json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        raise RuntimeError('Final attempt receipt is invalid after collector exit: '+str(path)+'; '+log.read_text()) from exc
 
 
 def main():
@@ -159,14 +175,14 @@ def main():
             sock.settimeout(.3)
             if sock.connect_ex(('127.0.0.1',port))==0:raise RuntimeError('Private instance port is already live: '+str(port))
     if shutil.disk_usage('/').free<20*1024**3 or shutil.disk_usage(CANONICAL_ROOT).free<50*1024**3:raise RuntimeError('Smoke disk gate failed')
-    output.mkdir(parents=True,exist_ok=False);(output/'plan.json').write_text(json.dumps(recipe,indent=2))
+    output.mkdir(parents=True,exist_ok=False);atomic_json(output/'plan.json',recipe)
     env=dict(os.environ,ISAACSIM_GPU='0',SOARM_SIM_NICE='10',SOARM_PHYSICS_THREADS='4',
         SOARM_INSTANCE_ROOT=str(runtime),SOARM_COLLECTION_ROOT=str(CANONICAL_ROOT),HF_LEROBOT_HOME=str(CANONICAL_ROOT/'datasets'),
         PYTHONDONTWRITEBYTECODE='1',OMP_NUM_THREADS='1',OPENBLAS_NUM_THREADS='1',
         SOARM_INSTANCE_CLAIM_FD=str(claim.fd),ISAACSIM_LOG=str(runtime/'isaac.log'))
     for name in ('CUDA_VISIBLE_DEVICES','ISAACSIM_EXTRA_ARGS','ROS_LOCALHOST_ONLY'):env.pop(name,None)
     ledger=OwnedProcesses(runtime,time.time_ns());stages=[];attempt_times=[];seen=set();complete=False;error=None;startup_failure=None
-    (output/'runner-identity.json').write_text(json.dumps(identity(os.getpid()),indent=2))
+    atomic_json(output/'runner-identity.json',identity(os.getpid()))
     def stopped(signum,frame):raise KeyboardInterrupt('Smoke stop requested')
     signal.signal(signal.SIGTERM,stopped)
     def stage(item):
@@ -178,12 +194,14 @@ def main():
                 ledger.scan()
                 for path in sorted(output.glob('*/attempt-*/receipt.json')):
                     if str(path) not in seen:
-                        receipt=json.loads(path.read_text());end=path.stat().st_mtime_ns
+                        receipt=pending_receipt(path)
+                        if receipt is None:continue
+                        end=path.stat().st_mtime_ns
                         attempt_times.append(dict(path=str(path),stage=item['name'],accepted=receipt['accepted'],
                             error=receipt.get('error'),wall_interval_s=(end-last)/1e9));last=end;seen.add(str(path))
                 time.sleep(.2)
             ledger.scan();row=dict(name=item['name'],pid=process.pid,returncode=process.returncode,wall_s=(time.time_ns()-start)/1e9)
-            stages.append(row);(output/'stages.json').write_text(json.dumps(stages,indent=2));(output/'attempt-times.json').write_text(json.dumps(attempt_times,indent=2))
+            stages.append(row);atomic_json(output/'stages.json',stages);atomic_json(output/'attempt-times.json',attempt_times)
             print(json.dumps(row),flush=True);return process.returncode
     try:
         for item in recipe['stages']:
@@ -194,14 +212,14 @@ def main():
                 if code not in (0,1) or not receipt['accepted'] or not receipt['timing']['passed'] or not scene['passed']:
                     raise RuntimeError(name+' did not pass; no next attempt is permitted')
                 shutil.copy2(run/'first-reset-scene.json',output/(kind+'-first-reset-initial.json'))
-                restored=restore_for_next_process(receipt);(output/(kind+'-between-process-restore.json')).write_text(json.dumps(restored,indent=2))
+                restored=restore_for_next_process(receipt);atomic_json(output/(kind+'-between-process-restore.json'),restored)
             elif code:raise RuntimeError(name+' failed; inspect its log and retained videos')
             if name.endswith('-resume'):
                 run=output/name.split('-')[0];summary=json.loads((run/'summary.json').read_text())
                 if not summary.get('complete') or summary.get('episodes')!=5:raise RuntimeError('Incomplete smoke receipt')
                 if name.startswith('normal'):
                     receipt=json.loads((run/'attempt-0000/receipt.json').read_text())
-                    (output/'before-regrasp-restore.json').write_text(json.dumps(restore_for_next_process(receipt),indent=2))
+                    atomic_json(output/'before-regrasp-restore.json',restore_for_next_process(receipt))
         for kind in ('normal','regrasp'):
             validation=json.loads((output/kind/'report/validation.json').read_text())
             if not validation['loaded'] or validation['fps']!=30 or validation['episodes']!=5 or not validation['timing_passed']:
@@ -219,7 +237,7 @@ def main():
         result=dict(collection_complete=complete,error=error,startup_failure=startup_failure,cleanup=cleanup,ports_listening=ports,
                     passed=complete and not cleanup['remaining'] and not any(ports.values()),
                     visual_review_pending=True,independent_review_pending=True,pilot_started=False,cut=args.cut)
-        (output/'smoke-receipt.json').write_text(json.dumps(result,indent=2))
+        atomic_json(output/'smoke-receipt.json',result)
         (output/'END').write_text('SMOKE_COLLECTION_FINISHED\n' if result['passed'] else 'SMOKE_STOPPED\n')
         if not cleanup['remaining'] and not any(ports.values()):print('Private instance and tracked children are down',flush=True)
         claim.close()

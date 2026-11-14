@@ -6,7 +6,7 @@ STEP_NS=round(1e9/30)
 PHYSICS_DT=1/120
 PHYSICS_STEPS=4
 FLOAT32_DT=struct.unpack('f',struct.pack('f',PHYSICS_DT))[0]
-CLOCK_POLICY=dict(version=3,agreement_rules=TOLERANCES,native_step_ns=STEP_NS,physics_dt=PHYSICS_DT,
+CLOCK_POLICY=dict(version=3,agreement_rules=TOLERANCES,cadence_clock='pose_stamp_ns',native_step_ns=STEP_NS,physics_dt=PHYSICS_DT,
     physics_steps_per_frame=PHYSICS_STEPS,world_delta_min_tolerance_s=1e-6,
     world_delta_ulp_factor=8,absolute_world_native_equality=False)
 
@@ -41,6 +41,8 @@ def vector(value,size):
 
 def observation_errors(row,previous=None):
     errors=[]
+    if previous is not None:
+        errors.extend('Previous tick: '+error for error in observation_errors(previous))
     stamp=row.get('sim_ns',0);epoch=row.get('epoch')
     if not isinstance(stamp,int) or stamp<=0:return ['Missing positive native sim stamp']
     if epoch is None or any(row.get(k)!=epoch for k in ('observation_epoch','expert_epoch')):errors.append('Tick epoch mismatch')
@@ -66,7 +68,7 @@ def observation_errors(row,previous=None):
     for key in ('wall_ns','joint_receive_ns','wrist_receive_ns','top_receive_ns'):
         if not isinstance(row.get(key),int) or row[key]<=0:errors.append('Missing wall receipt '+key)
     if previous and previous.get('epoch')==epoch:
-        if not matches(stamp-previous['sim_ns'],STEP_NS,'native_ns'):errors.append('Repeated or skipped physical tick')
+        if not matches(row['pose_stamp_ns']-previous['pose_stamp_ns'],STEP_NS,'native_ns'):errors.append('Repeated or skipped physical tick')
         errors.extend(world_step_errors(physical,previous.get('physics_time_s')))
         for key in ('wall_ns','wrist_receive_ns','top_receive_ns'):
             if row.get(key,0)<=previous.get(key,0):errors.append('Non-monotonic '+key)
@@ -80,7 +82,7 @@ def observation_errors(row,previous=None):
         if not vector(baseline.get('drive_targets'),6):errors.append('Drive baseline is incomplete')
         elif vector(row.get('physics_drive_targets'),6) and not matches(row['physics_drive_targets'],baseline['drive_targets'],'target_rad'):
             errors.append('Physical targets differ from the boundary baseline')
-        if not matches(stamp-baseline.get('sim_ns',stamp),STEP_NS,'stamp_ns'):errors.append('First frame skipped the drive baseline')
+        if not matches(row.get('pose_stamp_ns',stamp)-baseline.get('sim_ns',stamp),STEP_NS,'native_ns'):errors.append('First frame skipped the drive baseline')
         if baseline.get('physics_time_s') is not None:errors.extend(world_step_errors(physical,baseline['physics_time_s']))
     return errors
 
@@ -119,7 +121,8 @@ class TickContract:
     def install_boundary(self,result,restore=False,pause_targets=None):
         epoch=result['epoch'];stamp=result['invalid_through_ns'];previous=self.previous
         anchor=previous or self.anchor or self.boundary
-        if anchor and (epoch<=anchor['epoch'] or stamp<anchor['sim_ns']-10):
+        anchor_stamp=anchor.get('pose_stamp_ns',anchor['sim_ns']) if anchor else None
+        if anchor and (epoch<=anchor['epoch'] or stamp<anchor_stamp-10):
             raise TickContractError(['Cancellation/restore rewound the native clock or replayed an epoch'])
         if restore:
             baseline=copy.deepcopy(result['command_baseline']);snapshot=result['snapshot']
@@ -135,7 +138,7 @@ class TickContract:
             world=baseline['physics_time_s']
         else:
             targets=previous['applied_command'] if previous else pause_targets
-            world=(previous['physics_time_s'] if previous and matches(stamp,previous['sim_ns'],'stamp_ns') else None)
+            world=(previous['physics_time_s'] if previous and matches(stamp,previous.get('pose_stamp_ns',previous['sim_ns']),'native_ns') else None)
             clock=result.get('clock_baseline')
             if clock is not None:
                 world=clock.get('physics_time_s')
@@ -145,7 +148,7 @@ class TickContract:
             baseline=(dict(epoch=epoch,sim_ns=stamp,physics_time_s=world,drive_targets=list(targets),kind='pause') if targets is not None else None)
         clock_anchor=dict(epoch=epoch,sim_ns=stamp,physics_time_s=world)
         if anchor:
-            delta=stamp-anchor['sim_ns']
+            delta=stamp-anchor_stamp
             if not matches(delta,0,'native_ns') and not matches(delta,STEP_NS,'native_ns'):
                 raise TickContractError(['Cancellation boundary skipped native frames'])
             old_world=anchor.get('physics_time_s')
@@ -161,10 +164,10 @@ class TickContract:
         errors=observation_errors(row,self.previous)
         if self.previous is None and self.anchor is not None:
             if row['epoch']!=self.anchor['epoch']:errors.append('First tick belongs to another boundary epoch')
-            if not matches(row['sim_ns']-self.anchor['sim_ns'],STEP_NS,'native_ns'):errors.append('First tick skipped the retained clock anchor')
+            if not matches(row['pose_stamp_ns']-self.anchor['sim_ns'],STEP_NS,'native_ns'):errors.append('First tick skipped the retained clock anchor')
             if self.anchor.get('physics_time_s') is not None:
                 errors.extend(world_step_errors(row['physics_time_s'],self.anchor['physics_time_s']))
-        if (not self.previous or self.previous['epoch']!=row['epoch']) and not matches(row['sim_ns']-row['invalid_through_ns'],STEP_NS,'stamp_ns'):
+        if (not self.previous or self.previous['epoch']!=row['epoch']) and not matches(row['pose_stamp_ns']-row['invalid_through_ns'],STEP_NS,'native_ns'):
             errors.append('First physical tick skipped its reset boundary')
         if errors:raise TickContractError(errors,dict(row=copy.deepcopy(row),comparisons=row_comparisons(row,self.previous)))
     def finish(self,row):
@@ -206,8 +209,11 @@ def row_comparisons(row,previous=None):
             record.update(source_left=current,source_right=old,expected_delta_s=PHYSICS_STEPS*PHYSICS_DT)
             record['passed']=record['passed'] and current>old and tolerance<PHYSICS_DT/4
             records.append(record)
-        records.append(comparison('sim_ns step',stamp-previous['sim_ns'],STEP_NS,'native_ns'))
+        records.append(comparison('native pose_stamp_ns step',row['pose_stamp_ns']-previous['pose_stamp_ns'],STEP_NS,'native_ns'))
         records.append(comparison('physics_drive_targets vs prior ACK',row.get('physics_drive_targets'),previous.get('applied_command'),'target_rad'))
+    if previous is not None:
+        for record in row_comparisons(previous):
+            records.append(dict(record,field='previous.'+record['field']))
     return [record for record in records if not record['passed']]
 
 

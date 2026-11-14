@@ -49,3 +49,10 @@ owner holds the instance claim, four production close/restart/down claim refusal
 and five production entrypoint refusals of foreign PID-only files. The CPU suite
 adds missing-receipt, reused-PID and mismatched-group cases. It starts no ROS,
 Isaac or GPU work.
+
+A final escalation also drains newly discovered proven descendants within its
+bounded deadline. If any recorded descendant survives that deadline, the
+supervisor keeps `cleanup_failed` and its identities. Missing supervisor/marker
+alone never proves cleanup: status/down/start refuse while any recorded birth
+identity remains, including an unresolved late orphan. They become available
+only after those identities are proven gone; no retry silently adopts them.

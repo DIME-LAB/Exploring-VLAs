@@ -35,3 +35,21 @@ class ManagedProcessTests(unittest.TestCase):
         path,record,current=self.fixture(dict(supervisor=dict(pid=41234,start_ticks='old',pgid=41234),state='stopped'))
         with patch('managed_process.record_path',return_value=record),patch('managed_process.identity',return_value=None):
             self.assertEqual(managed_process.stop(path),dict(stopped=True,already_down=True))
+
+    def test_failed_cleanup_survives_missing_supervisor_and_blocks_status_stop_and_start_check(self):
+        old=dict(pid=51234,start_ticks='child',pgid=777,state='S')
+        receipt=dict(supervisor=dict(pid=41234,start_ticks='owner',pgid=41234),state='cleanup_failed',
+                     cleanup=dict(tracked=[old],remaining=[old]))
+        path,record,_=self.fixture(receipt)
+        def live(pid):return old if pid==51234 else None
+        with patch('managed_process.record_path',return_value=record),patch('managed_process.identity',side_effect=live),\
+             patch('managed_process.socket.socket') as network:
+            with self.assertRaisesRegex(RuntimeError,'Unresolved cleanup'):managed_process.verified(path)
+            with self.assertRaisesRegex(RuntimeError,'Unresolved cleanup'):managed_process.stop(path)
+            network.assert_not_called()
+            from contextlib import nullcontext
+            with patch('managed_process.claim',return_value=nullcontext()),patch('managed_process.subprocess.Popen') as spawn:
+                with self.assertRaisesRegex(RuntimeError,'Unresolved cleanup'):managed_process.start(path,Mock(),['unused'])
+                spawn.assert_not_called()
+        with patch('managed_process.record_path',return_value=record),patch('managed_process.identity',return_value=None):
+            self.assertEqual(managed_process.stop(path),dict(stopped=True,already_down=True))

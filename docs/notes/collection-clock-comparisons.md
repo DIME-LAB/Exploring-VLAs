@@ -8,11 +8,11 @@ physical requirements, separate from numeric agreement tolerances.
 
 | Comparison / entrance | Rule and reason |
 | --- | --- |
-| Sensors join: camera, measured JointState and native pose stamp | `stamp_ns`: absolute 1,000 ns; the capture contract's existing bound for independent ROS camera/native producers. The coarse join bucket is only an index; the full stamps are checked afterward. |
+| Sensors join: camera, measured JointState and native pose stamp | `stamp_ns`: absolute 1,000 ns; the capture contract's existing bound for independent ROS camera/native producers. Raw-stamp candidates are matched within this bound; exactly one compatible candidate is required. Adjacent rounded microseconds have no admission role. Ambiguity fails. |
 | Sensors controller-reference diagnostic / ROS held-clock join | `stamp_ns`; the diagnostic retains original stamp/epoch and age. Future clocks beyond this bound fail. |
 | Capture state / velocity versus native articulation snapshot | `state_rad`: absolute 1e-7 in the quantity's units, preserving the original capture bound. State is radians; velocity is radians/s. |
-| Consecutive native or camera ticks | `native_ns`: 10 ns about 1/30 s, allowing integer-nanosecond quantization. Strictly positive ordering; missing/duplicate frames fail. |
-| First camera frame after reset | `stamp_ns` about one 1/30 s step from the native floor; subsequent frames use the tighter same-producer increment rule. |
+| Consecutive native pose ticks | `native_ns`: 10 ns about 1/30 s, allowing integer-nanosecond quantization. Cadence is checked against copied native pose stamps, independently of camera offset variations. Strictly positive ordering; missing/duplicate frames fail. |
+| First captured frame after reset | Its native `pose_stamp_ns` must be one 1/30 s step after the native floor under `native_ns`; its independent camera stamps must agree within `stamp_ns`. |
 | World time progression | `world_s`: minimum 1 microsecond, plus the existing four float32-substep and double-ULP accumulation bound. Positive progression, exactly four physics steps per camera frame; a frozen, backward, missing or extra substep fails. Absolute World/native equality is deliberately absent. |
 | Runtime after-update / TickContract / trailing-verdict World progression | The same `world_step_errors` calculation and shared numeric comparator; no separate 100 ns native-runtime bound. |
 | Native command apply versus camera observation stamp | `stamp_ns`: these are independent producers. A stale or future observation outside 1 microsecond is refused while held. |
@@ -24,7 +24,7 @@ physical requirements, separate from numeric agreement tolerances.
 | Derived command velocity | `velocity_rad_s`: absolute 1e-4, preserving the original provenance check. |
 | Restore baseline stamp, World value, targets versus its returned snapshot | `copy`: these fields are assigned from that same readback. No tolerance hides receipt substitution. |
 | Pause baseline versus pause result | `copy` for epoch/stamp identity. World/native progression is reconciled against the last row or last boundary; repeated boundaries cannot erase that anchor. |
-| Held cancellation versus previous held boundary | `native_ns` for native clock quantization; `world_s` for independent World accumulation. Epoch strictly increases, native time cannot rewind; at most the one already-in-flight frame may finish, with matching World progression. Multi-frame gaps fail. |
+| Held cancellation versus previous held boundary | `native_ns` for native clock quantization, selecting the previous row’s native `pose_stamp_ns` rather than its camera `sim_ns`; `world_s` for World accumulation. Epoch strictly increases, native time cannot rewind; at most the one already-in-flight frame may finish, with matching World progression. Multi-frame gaps fail. |
 | Restore physical positions/orientations/zero velocities | `float32_readback`: absolute 1e-6 in the field's units; quaternion comparison also admits q/-q. Six arm positions and velocities are read back. These are float32 write/read agreements, not the geometric success envelope. |
 | Snapshot native stamp versus row.pose_stamp_ns | `copy`: both are copied from that native snapshot. This replaces the incorrect exact comparison to the camera row stamp. |
 | Snapshot native stamp versus camera row stamp | `stamp_ns`, as in capture. The row retains both original values. |
@@ -64,3 +64,20 @@ native cancel stamp was 12,416,666,667 ns, but that alone cannot reconstruct the
 sample's joint values or camera stamp. The new 2 ns fixtures reproduce the
 producer-boundary failure without claiming to reconstruct that missing live
 tick. V3 must verify the physical run; retained v2 files remain diagnostic only.
+
+## Full producer-tolerance entrances
+
+`test_sensor_join.py` exercises actual Sensors.put/read with the retained raw
+stamps 1,033,333,333 / 1,033,333,500 ns, both tolerance endpoints, duplicate
+messages, next frames, ambiguity and out-of-range negatives. Actual restore,
+capture and cancel paths accept camera offsets -1000, -500, -11, 0, 11, 500,
+1000 ns while native rewind/missed-frame and >1000 ns offsets still fail. A
+changing per-frame camera offset cannot alter native cadence. The actual ROS
+Collector construction regression now uses the adjacent-microsecond 167 ns case.
+
+Collector and runner JSON documents publish through `storage.atomic_json`
+(file fsync, rename, directory fsync); streaming frame/episode JSONL is consumed
+only after its producer retires. A live receipt watcher defers partial/missing
+legacy documents. A final malformed receipt after producer exit is terminal and
+preserves the collector log. The controlled concurrent encoder regression proves
+200 reads see only the old complete document or no document until publication.

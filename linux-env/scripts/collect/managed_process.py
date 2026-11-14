@@ -29,14 +29,32 @@ def save(path,value):
     os.replace(temporary,path)
 
 
+def recorded_remaining(row):
+    recorded={}
+    for old in [*row.get('children',[]),*row.get('cleanup',{}).get('tracked',[]),*row.get('cleanup',{}).get('remaining',[])]:
+        recorded[(old['pid'],old['start_ticks'])]=old
+    remaining=[]
+    for old in recorded.values():
+        current=identity(old['pid'])
+        if current and current['start_ticks']==old['start_ticks']:remaining.append(current)
+    return remaining
+
+
 def verified(path):
-    if not path.exists():return None
-    pid=int(read_leaf(path));current=identity(pid);receipt=record_path(path)
-    if not receipt.exists():
+    receipt=record_path(path)
+    row=json.loads(read_leaf(receipt)) if receipt.exists() else None
+    if not path.exists():
+        if row and recorded_remaining(row):raise RuntimeError('Unresolved cleanup: missing supervisor marker; see '+str(receipt))
+        return None
+    pid=int(read_leaf(path));current=identity(pid)
+    if row is None:
         if current:raise RuntimeError('Refusing live PID without a launcher identity receipt: '+str(path))
         return None
-    row=json.loads(read_leaf(receipt));old=row['supervisor']
+    old=row['supervisor']
     if pid!=old['pid']:raise RuntimeError('PID file differs from its ownership receipt: '+str(path))
+    if row.get('state')=='cleanup_failed' or current is None or current['state']=='Z':
+        remaining=recorded_remaining(row)
+        if remaining:raise RuntimeError('Unresolved cleanup: recorded descendants still alive '+repr(remaining)+'; see '+str(receipt))
     if current is None:return None
     if any(current[key]!=old[key] for key in ('pid','start_ticks','pgid')):
         raise RuntimeError('Refusing foreign/reused launcher PID: '+str(path))

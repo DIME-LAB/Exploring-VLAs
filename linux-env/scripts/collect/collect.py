@@ -38,7 +38,7 @@ from so_arm101_control.motion_wait import MotionWaiter, MotionWaitTimeout
 from comparisons import comparison,matches,interval,native_frame
 from contract import COLORS, JOINTS, EVAL_SEEDS, corrective_action, parameters, timing_audit
 from checkpoint import progress
-from storage import CANONICAL_ROOT, RootFileGrowth, SceneSafetyMarker, confined, prepare_environment, wait_for_storage
+from storage import atomic_json,CANONICAL_ROOT, RootFileGrowth, SceneSafetyMarker, confined, prepare_environment, wait_for_storage
 from protocol import StepGeneration, CancelledGeneration, OwnershipStalled
 from scene_sync import physical_pose_caches, collision_pose_errors
 from scene_reconcile import SceneReconciler, ros_messages
@@ -143,23 +143,27 @@ class Sensors:
             raw_stamp = msg['sim_ns']
         else:
             raw_stamp = ns(msg.header.stamp)
-        # Native image and rclpy clocks round the same sim tick by up to a few ns.
-        stamp = round(raw_stamp / 1000)
         if raw_stamp <= 0:
             return
         with self.condition:
-            if stamp <= self.last:
-                if key in ('wrist', 'top'):
-                    self.duplicate_messages[key] += 1
+            if self.last >= 0 and raw_stamp <= self.last+1000:
+                if key in ('wrist','top'):self.duplicate_messages[key]+=1
                 return
-            entry = self.pending.setdefault(stamp, {})
-            if key in entry and key != 'joint':
-                self.duplicate_messages[key] += 1
+            candidates=[]
+            for anchor,entry in self.pending.items():
+                stamps=[value[0]['sim_ns'] if name=='tick' else ns(value[0].header.stamp)
+                        for name,value in entry.items()]
+                if all(matches(raw_stamp,stamp,'stamp_ns') for stamp in stamps):candidates.append(anchor)
+            if len(candidates)>1:
+                self.failure='Ambiguous camera/state sim-tick join: '+str(dict(stamp_ns=raw_stamp,candidates=candidates))
+                self.condition.notify_all();return
+            anchor=candidates[0] if candidates else raw_stamp
+            entry=self.pending.setdefault(anchor,{})
+            if key in entry and key!='joint':
+                self.duplicate_messages[key]+=1
                 return
-            entry[key] = (msg, time.monotonic_ns())
-            # Bound outstanding joins; paused cameras can repeat their last stamp.
-            while len(self.pending) > 240:
-                self.pending.popitem(last=False)
+            entry[key]=(msg,time.monotonic_ns())
+            while len(self.pending)>240:self.pending.popitem(last=False)
             self.condition.notify_all()
 
     def read(self, timeout=15):
@@ -168,19 +172,19 @@ class Sensors:
             while True:
                 if self.failure:
                     raise RuntimeError(self.failure)
-                ready = sorted(k for k, v in self.pending.items() if len(v) == 4 and k > self.last)
+                ready = sorted(k for k,v in self.pending.items() if len(v)==4)
                 if ready:
                     stamp = ready[0]
                     entry = self.pending.pop(stamp)
-                    self.last = stamp
+                    self.last = ns(entry['wrist'][0].header.stamp)
                     for old in list(self.pending):
-                        if old < stamp:
+                        if old <= self.last+1000:
                             del self.pending[old]
                     return ns(entry['wrist'][0].header.stamp), entry
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     counts = collections.Counter(key for v in self.pending.values() for key in v)
-                    raise TimeoutError(f'No exact camera/state sim-tick match: {dict(counts)}')
+                    raise TimeoutError(f'No unique camera/state sim-tick match within 1 us: {dict(counts)}')
                 self.condition.wait(min(remaining, .5))
 
     @staticmethod
@@ -1124,7 +1128,7 @@ class Collector:
         self.wait_ready()
         self.episode_start_physical = self.last_snapshot
         self.sync_scene()
-        (root / 'first-reset-scene.json').write_text(json.dumps(self.scene_pose_check, indent=2))
+        atomic_json(root / 'first-reset-scene.json',self.scene_pose_check)
         self.timeline(False)
         if previous:
             baseline = previous['baseline']
@@ -1195,16 +1199,16 @@ class Collector:
             if previous['instance'] != args.instance or previous['clock_config'] != clock_config:
                 raise ValueError('Resume instance/clock configuration differs')
             previous.setdefault('resume_sessions', []).append(provenance)
-            (root / 'run.json').write_text(json.dumps(previous, indent=2))
+            atomic_json(root / 'run.json',previous)
         else:
-            (root / 'run.json').write_text(json.dumps(dict(instance=args.instance, host=socket.gethostname(), gpu_index=int(os.getenv('ISAACSIM_GPU', '0')),
+            atomic_json(root / 'run.json',dict(instance=args.instance, host=socket.gethostname(), gpu_index=int(os.getenv('ISAACSIM_GPU', '0')),
             recording_version=3, transport_config=transport_config, observation_state_topic='/joint_states_measured',
             diagnostic=args.diagnostic, success_profile=PROFILE,
             motion_wait_policy=wait_policy, tick_clock_policy=CLOCK_POLICY,geometry_query_policy=QUERY_POLICY,quality_policy=POLICY,regrasp_policy=REGRASP_POLICY,regrasp_only=args.regrasp_only,
             application_contract='Held at observation tick; read-back verified PhysX targets before one-frame advance; maximum one sim tick latency',
             clock_config=clock_config, domain=90 + args.instance,
             bridge_port=8777 + 2 * args.instance, fps=30, baseline=baseline, baseline_cup_layout=self.baseline_cup_layout, eval_seeds=EVAL_SEEDS,
-            **{k: v for k, v in provenance.items() if k != 'start_trial'}), indent=2))
+            **{k: v for k, v in provenance.items() if k != 'start_trial'}))
         start = time.monotonic()
         for trial in range(attempted, args.max_attempts):
             if accepted >= args.episodes:
@@ -1396,7 +1400,7 @@ class Collector:
                 receipt['accepted'] = receipt['disposition']['kind']=='accepted'
                 receipt['failure_streak'] = streak.observe(receipt['disposition'])
                 path.mkdir(parents=True, exist_ok=True)
-                (path / 'receipt.json').write_text(json.dumps(receipt, indent=2))
+                atomic_json(path / 'receipt.json',receipt)
                 with (root / 'episodes.jsonl').open('a') as log:
                     log.write(json.dumps(receipt) + '\n')
             if receipt['accepted']:
@@ -1413,18 +1417,18 @@ class Collector:
             if receipt['failure_streak']['stop']:
                 stopped=dict(complete=False,episodes=accepted,attempts=attempted,wall_seconds=elapsed,
                     stop=receipt['disposition'],failure_streak=receipt['failure_streak'],end_marker='COLLECTION_STOPPED')
-                (root/'summary.json').write_text(json.dumps(stopped,indent=2))
+                atomic_json(root/'summary.json',stopped)
                 self.stop.set();self.node._qs_abort_evt.set()
                 self.generation.poison(RuntimeError(repr(stopped['stop'])))
                 raise RuntimeError('Collection stopped: '+repr(stopped['stop']))
-            (root / 'summary.json').write_text(json.dumps(dict(complete=False, episodes=accepted,
+            atomic_json(root / 'summary.json',dict(complete=False, episodes=accepted,
                 attempts=attempted, wall_seconds=elapsed, disk_wait_seconds=disk_wait,
-                end_marker='COLLECTION_IN_PROGRESS'), indent=2))
+                end_marker='COLLECTION_IN_PROGRESS'))
         summary = dict(complete=accepted == args.episodes, episodes=accepted, attempts=attempted,
             yield_fraction=accepted / max(attempted, 1), wall_seconds=previous_wall + time.monotonic() - start,
             disk_wait_seconds=disk_wait,
             episodes_per_wall_hour=accepted * 3600 / max(previous_wall + time.monotonic() - start, 1), end_marker='COLLECTION_FINISHED')
-        (root / 'summary.json').write_text(json.dumps(summary, indent=2))
+        atomic_json(root / 'summary.json',summary)
         print(json.dumps(summary), flush=True)
         if not summary['complete']:
             raise RuntimeError('Attempt budget exhausted before the requested success count')

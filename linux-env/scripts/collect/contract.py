@@ -56,7 +56,7 @@ def timing_audit(rows, fps):
     wall = [(b['wall_ns'] - a['wall_ns']) / 1e9 for a, b in zip(rows, rows[1:])]
     received = [max(r['wrist_receive_ns'],r['top_receive_ns']) for r in rows]
     camera_wall = [(b-a)/1e9 for a,b in zip(received,received[1:])]
-    sim = [b['sim_ns'] - a['sim_ns'] for a, b in zip(rows, rows[1:])]
+    sim = [b.get('pose_stamp_ns',b['sim_ns'])-a.get('pose_stamp_ns',a['sim_ns']) for a,b in zip(rows,rows[1:])]
     if any(t <= 0 for t in wall):
         errors.append('Non-monotonic wall clock')
     if any(t <= 0 for t in camera_wall):

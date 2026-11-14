@@ -632,7 +632,7 @@ remain separate from collection completion:
 
 ```bash
 python3 -B linux-env/scripts/collect/run_smoke.py --cut <full-commit> \
-  --output /mnt/a4500-backup/exploring-vlas/datasets/smoke-clock-restore-v3 --plan
+  --output /mnt/a4500-backup/exploring-vlas/datasets/smoke-clock-restore-v4 --plan
 # In the granted window, use the identical command with --go instead of --plan.
 ```
 

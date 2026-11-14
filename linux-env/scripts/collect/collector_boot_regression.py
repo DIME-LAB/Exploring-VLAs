@@ -47,7 +47,7 @@ def main():
     executor=MultiThreadedExecutor(num_threads=3);executor.add_node(native)
     thread=threading.Thread(target=executor.spin);thread.start()
     collector=None;publishers=[];result=dict(passed=False,actual_collector_constructor=True,actual_pick_place_constructor=True)
-    stamp=10**9;frame=dict(epoch=1,sim_ns=stamp,physics_time_s=1.,state=[0.]*6,velocity=[0.]*6,
+    stamp=1033333333;frame=dict(epoch=1,sim_ns=stamp,physics_time_s=stamp/1e9,state=[0.]*6,velocity=[0.]*6,
         drive_targets=[0.]*6,bodies={},base_world_pose=dict(position=[0.,0.,0.],orientation=[1.,0.,0.,0.]),state_source='isaac_articulation')
     class HeldTickReached(Exception):pass
     def fake_mcp(tool,params=None):
@@ -56,23 +56,23 @@ def main():
         if 'result=c.install()' in code:
             offsets={name:{key+'_m':[PROFILE['effective_offsets_m']['cup_'+key]] for key in ('contact','rest')}
                      for name in ('cup_red','cup_green','cup_blue')}
-            return dict(epoch=1,invalid_through_ns=966666667,local_corners={},effective_shape_offsets=offsets)
+            return dict(epoch=1,invalid_through_ns=1000000000,local_corners={},effective_shape_offsets=offsets)
         if 'count_subscribers' in code:return [2,1,1]
         if 'rateLimitFrequency' in code:return True
         raise AssertionError('Unexpected fake Kit request: '+code)
     def native_tick(play):
         if not play:return dict(held=True,failure=None,epoch=2,invalid_through_ns=stamp,
-                                clock_baseline=dict(epoch=2,sim_ns=stamp,physics_time_s=1.))
+                                clock_baseline=dict(epoch=2,sim_ns=stamp,physics_time_s=stamp/1e9))
         def publish_frame():
             end=time.monotonic()+5
             while min([joint.get_subscription_count(),tick.get_subscription_count(),ack.get_subscription_count(),
                        *[p.get_subscription_count() for p in cameras]])<1:
                 if time.monotonic()>end:raise TimeoutError('Fake native publisher discovery failed')
                 threading.Event().wait(.01)
-            c=Clock();c.clock.sec=1;clock.publish(c)
-            j=JointState();j.header.stamp.sec=1;j.name=list(JOINTS);j.position=[0.]*6;j.velocity=[0.]*6;joint.publish(j)
+            c=Clock();c.clock.sec=1;c.clock.nanosec=33333333;clock.publish(c)
+            j=JointState();j.header.stamp.sec=1;j.header.stamp.nanosec=33333333;j.name=list(JOINTS);j.position=[0.]*6;j.velocity=[0.]*6;joint.publish(j)
             for pub in cameras:
-                msg=Image();msg.header.stamp.sec=1;msg.header.stamp.nanosec=2;msg.encoding='rgb8';msg.width=640;msg.height=480;msg.step=1920;msg.data=bytes(921600);pub.publish(msg)
+                msg=Image();msg.header.stamp.sec=1;msg.header.stamp.nanosec=33333500;msg.encoding='rgb8';msg.width=640;msg.height=480;msg.step=1920;msg.data=bytes(921600);pub.publish(msg)
             tick.publish(String(data=json.dumps(frame)))
         t=threading.Thread(target=publish_frame);publishers.append(t);t.start()
         return dict(start_ns=966666667,target_ns=stamp)
@@ -87,7 +87,7 @@ def main():
             with self.motion_effect(None):raise AssertionError('Unowned effect accepted after bootstrap')
         except CancelledGeneration:pass
         result.update(passed=True,first_tick=self.last_snapshot,commands=commands,validity_queries=len(queries),
-                      bootstrap_revoked=True,camera_native_skew_ns=2,wall_watchdog_margin_s=self.node._motion_waiter.wall_margin,executor_alive=self.ros_thread.is_alive(),capture_alive=self.capture_thread.is_alive())
+                      bootstrap_revoked=True,camera_native_skew_ns=167,wall_watchdog_margin_s=self.node._motion_waiter.wall_margin,executor_alive=self.ros_thread.is_alive(),capture_alive=self.capture_thread.is_alive())
         raise HeldTickReached()
     try:
         config=NS(output=output/'run',episodes=5,max_attempts=1,resume=False,seed=1,regrasp_only=False,replay_receipt=None,wait_rtf_floor=.1,episode_deadline=180,diagnostic=True,instance=0)

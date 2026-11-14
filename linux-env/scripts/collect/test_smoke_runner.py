@@ -75,3 +75,42 @@ class SmokeRunnerTests(unittest.TestCase):
              patch('run_smoke.fcntl.flock',side_effect=BlockingIOError),patch('run_smoke.os.close') as close:
             with self.assertRaisesRegex(RuntimeError,'already claimed'):run_smoke.InstanceClaim(Path('/unused'))
             close.assert_called_once_with(77)
+
+    def test_live_reader_defers_partial_and_missing_then_reads_complete_receipt(self):
+        from unittest.mock import Mock
+        path=Mock();path.read_text.side_effect=['',FileNotFoundError(),'{"accepted":true}']
+        self.assertIsNone(run_smoke.pending_receipt(path))
+        self.assertIsNone(run_smoke.pending_receipt(path))
+        self.assertEqual(run_smoke.pending_receipt(path),dict(accepted=True))
+
+    def test_final_invalid_receipt_is_terminal_and_keeps_collector_log(self):
+        from unittest.mock import MagicMock,Mock
+        run=MagicMock();path=run.__truediv__.return_value;path.exists.return_value=True;path.read_text.return_value='{"accepted":'
+        log=Mock();log.read_text.return_value='original collector error'
+        with self.assertRaisesRegex(RuntimeError,'Final attempt receipt is invalid') as failure:
+            run_smoke.first_receipt(run,'normal-first',1,log)
+        self.assertIn('original collector error',str(failure.exception))
+
+    def test_final_escalation_signals_an_orphan_discovered_after_its_parent_exits(self):
+        from types import SimpleNamespace as NS
+        owned=run_smoke.OwnedProcesses(Path('/unused'),0)
+        parent=dict(pid=11,start_ticks='parent',ppid=1,pgid=11,state='S')
+        child=dict(pid=12,start_ticks='child',ppid=1,pgid=777,state='S')
+        live={11:True,12:False};clock=[0.];signals=[]
+        owned.known={11:parent};owned.handles={11:77}
+        def scan():
+            if live[12]:owned.known[12]=child;owned.handles[12]=78
+        owned.scan=scan
+        def send(fd,sig):
+            signals.append((fd,sig))
+            if sig==run_smoke.signal.SIGKILL:
+                if fd==77:live[11]=False;live[12]=True
+                elif fd==78:live[12]=False
+        def now():clock[0]+=.01;return clock[0]
+        with patch('run_smoke.identity',side_effect=lambda pid:({11:parent,12:child}[pid] if live.get(pid) else None)),\
+             patch('run_smoke.signal.pidfd_send_signal',side_effect=send,create=True),\
+             patch('run_smoke.select.select',return_value=([],[],[])),patch('run_smoke.os.close'),\
+             patch('run_smoke.time',NS(monotonic=now,sleep=lambda dt:clock.__setitem__(0,clock[0]+dt))):
+            result=owned.stop()
+        self.assertEqual(result['remaining'],[])
+        self.assertIn((78,run_smoke.signal.SIGKILL),signals)

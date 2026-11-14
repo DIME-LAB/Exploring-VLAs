@@ -139,7 +139,8 @@ class IndependentClockTests(unittest.TestCase):
 
     def test_native_gap_is_rejected_even_when_world_advances_normally(self):
         rows=checked_window([dict(sim_ns=10**9,physics_time_s=1.),dict(sim_ns=1033333333,physics_time_s=1.+4*FLOAT32_DT)])
-        row=copy.deepcopy(rows[-1]['tick_contract']['row']);row['sim_ns']+=STEP_NS
+        row=copy.deepcopy(rows[-1]['tick_contract']['row'])
+        for key in ('sim_ns','pose_stamp_ns','joint_stamp_ns','wrist_stamp_ns','top_stamp_ns'):row[key]+=STEP_NS
         self.assertIn('Repeated or skipped physical tick',observation_errors(row,rows[0]['tick_contract']['row']))
 
 
