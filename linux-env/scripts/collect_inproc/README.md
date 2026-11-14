@@ -197,3 +197,11 @@ is a collision envelope, never a physical attachment. Continuous collision proof
 beyond the existing 0.01 rad sampling policy is not claimed. The expert currently
 tries direct joint paths and rejects blocked paths; retract/pan/settle or OMPL
 fallback is a proposed extension if live yield requires it.
+
+
+Playing mode explicitly enables PhysX Fabric pose publication before reset and
+records the extension and USD-writeback settings. It publishes current measured
+physics transforms before the single app update, requiring that the publication
+itself performs no physics, clock advance or render. Camera stamps are unchanged.
+The live motion/reset/pixel-phase gate must validate this synchronization path
+before any episode; CPU tests alone do not establish image correspondence.

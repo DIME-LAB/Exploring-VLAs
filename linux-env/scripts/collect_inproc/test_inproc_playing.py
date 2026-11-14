@@ -4,11 +4,24 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch,Mock
-from playing import FrameLedger,Playing,capture_settings,CAPTURE_KEYS
+from playing import FrameLedger,Playing,capture_settings,CAPTURE_KEYS,flush_physics_to_fabric
 from native import Native
 
 
 class PlayingTests(unittest.TestCase):
+    def test_fabric_publication_uses_physical_clock_without_stepping_or_rendering(self):
+        interface=Mock()
+        world=SimpleNamespace(_physx_fabric_interface=interface,current_time=1.25,
+            current_time_step_index=150,get_physics_dt=lambda:1/120)
+        flush_physics_to_fabric(world)
+        interface.force_update.assert_called_once_with(1/120,1.25)
+        self.assertEqual(world.current_time_step_index,150)
+        interface.force_update.side_effect=lambda *args:setattr(world,'current_time_step_index',154)
+        with self.assertRaisesRegex(RuntimeError,'advanced physical time'):flush_physics_to_fabric(world)
+        world._physx_fabric_interface=None;world._extension_manager=Mock()
+        world._extension_manager.is_extension_enabled.return_value=False
+        with self.assertRaisesRegex(RuntimeError,'requires enabled'):flush_physics_to_fabric(world)
+
     def test_restore_commits_play_only_when_resuming_a_paused_timeline(self):
         class Timeline:
             def __init__(self,playing):self.playing=playing;self.play_calls=0;self.commits=0

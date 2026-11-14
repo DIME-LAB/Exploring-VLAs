@@ -28,6 +28,7 @@ class PrimingTests(unittest.TestCase):
             owner.s.update(sim_ns=stamp,physics_time_s=1+owner.counter/30)
             count=counts[min(owner.counter-1,len(counts)-1)];owner.copy_count+=count
             owner.last_frame=dict(owner.clock(),timeline_ns=stamp,fabric_time_s=stamp/1e9,
+                fabric_sync_ms=0.,
                 native_physics_steps=4,world_step_count=4,
                 render_completions={key:count for key in ('wrist','top')})
             owner.frames.check_advance(owner.last_frame,before)

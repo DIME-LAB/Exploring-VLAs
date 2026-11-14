@@ -539,3 +539,16 @@ lag. Matching timestamps/counters do not establish physical pixel correspondence
 The whole probe remains rejected; no episodes or successful finalization. The
 next investigation must synchronize physical transforms into renderer Fabric
 before the update, retaining original stamps and the same pose gate.
+
+
+The playing adapter explicitly enables the native PhysX Fabric pose path before
+reset/articulation initialization and reads back extension enabled=true,
+physics/updateToUsd=false and physics/updateVelocitiesToUsd=false. Physical state
+and collision transforms come from tensor snapshots; USD supplies static assets,
+materials and calibrated camera bindings. Before each existing app update it calls
+the same physics-to-Fabric publication used in installed SimulationContext.render
+without that method's extra held app update. Guards require no change to physical
+clock/index, native clock/epoch, physics callbacks or render counters during the
+publication. Its cost is reported separately as fabric_sync_ms. The original stamp
+join and moving-camera pose gate remain unchanged. This is an unverified render
+synchronization hypothesis, not a claim that the extra pose lag is solved.

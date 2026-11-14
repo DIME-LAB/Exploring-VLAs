@@ -16,6 +16,23 @@ from comparisons import matches
 CAPTURE_KEYS=('/persistent/omni/replicator/captureOnPlay','/omni/replicator/captureOnPlay')
 
 
+def flush_physics_to_fabric(world):
+    """Publish the measured pre-update pose without a render or physical step."""
+    if world._physx_fabric_interface is None:
+        if not world._extension_manager.is_extension_enabled('omni.physx.fabric'):
+            raise RuntimeError('Playing capture requires enabled omni.physx.fabric')
+        from omni.physxfabric import get_physx_fabric_interface
+        world._physx_fabric_interface=get_physx_fabric_interface()
+    before=(world.current_time,world.current_time_step_index)
+    started=time.perf_counter_ns()
+    # Same publication as installed SimulationContext.render(), without its
+    # extra held app update. World.step(render=True) omits this explicit flush.
+    world._physx_fabric_interface.force_update(world.get_physics_dt(),world.current_time)
+    if (world.current_time,world.current_time_step_index)!=before:
+        raise RuntimeError('Fabric publication advanced physical time')
+    return (time.perf_counter_ns()-started)/1e6
+
+
 def capture_settings(settings,enable=False):
     if enable:
         for key in CAPTURE_KEYS:settings.set_bool(key,True)
@@ -180,7 +197,7 @@ class Playing(Native):
         self.timeline=omni.timeline.get_timeline_interface()
         self.pending=None;self.frames=FrameLedger();self.priming_reports=[]
         self.prime_on_restore=False
-        super().__init__(scene,manifest,cameras=True)
+        super().__init__(scene,manifest,cameras=True,use_fabric=True)
         import omni.physx
         import carb
         from isaacsim.core.rendering_manager import RenderingManager
@@ -200,7 +217,13 @@ class Playing(Native):
         self.pipeline_settings={key:settings.get(key) for key in (
             '/exts/omni.replicator.srtx/enabled','/exts/omni.replicator.core/Orchestrator/enabled',
             '/omni/replicator/asyncRendering','/app/asyncRendering','/rtx/hydra/supportMultiTickRate',
-            '/omni/replicator/disableAnnotatorGate','/rtx/rendermode')}
+            '/omni/replicator/disableAnnotatorGate','/rtx/rendermode',
+            '/physics/updateToUsd','/physics/updateVelocitiesToUsd')}
+        self.pipeline_settings['physx_fabric_enabled']=self.world._extension_manager.is_extension_enabled('omni.physx.fabric')
+        if (not self.pipeline_settings['physx_fabric_enabled'] or
+            self.pipeline_settings['/physics/updateToUsd'] is not False or
+            self.pipeline_settings['/physics/updateVelocitiesToUsd'] is not False):
+            raise RuntimeError('Playing collector requires the explicit physics-to-Fabric pose path')
         self.pipeline_settings['hydra_texture_async']={key:p.hydra_texture.get_async()
             for key,p in self.rgb.products.items()}
         # The caller restores its own baseline after inspecting initialization.
@@ -330,12 +353,15 @@ class Playing(Native):
         self.align_timeline()
         start=time.perf_counter_ns();old_steps=self.actual_physics_steps
         index=self.world.current_time_step_index;before=dict(self.rgb.render_events)
+        fabric_sync_ms=flush_physics_to_fabric(self.world)
+        if self.clock()!=observation or self.actual_physics_steps!=old_steps or dict(self.rgb.render_events)!=before:
+            raise RuntimeError('Fabric publication changed the native clock or rendered a frame')
         self.world.step(render=True)
         update_end=time.perf_counter_ns()
         timeline_ns=round(self.timeline.get_current_time()*1e9)
         snapshot=self.clock()
         self.last_frame=dict(epoch=snapshot['epoch'],sim_ns=snapshot['sim_ns'],timeline_ns=timeline_ns,
-            capture_settings=flags,
+            capture_settings=flags,fabric_sync_ms=fabric_sync_ms,
             render_completions={p.path:self.rgb.render_events[p.path]-before.get(p.path,0)
                 for p in self.rgb.products.values()},
             physics_time_s=snapshot['physics_time_s'],native_physics_steps=self.actual_physics_steps-old_steps,
@@ -368,7 +394,7 @@ class Playing(Native):
             # Even this discarded boundary image must pass the strict ledger.
             self.frames.reset(snapshot['epoch'],snapshot['sim_ns'],snapshot['physics_time_s'],cameras)
             return update_ms+(time.perf_counter_ns()-start)/1e6
-        profile=dict(app_update_ms=update_ms,camera_read_ms=copy_ms,
+        profile=dict(app_update_ms=update_ms-packet['fabric_sync_ms'],fabric_sync_ms=packet['fabric_sync_ms'],camera_read_ms=copy_ms,
             camera_stamps={k:v['stamp_ns'] for k,v in cameras.items()},playing_frame=packet,
             image_delay_updates=delay,
             synchronization='native stamp join, zero or one app update; drawable and copy counters')

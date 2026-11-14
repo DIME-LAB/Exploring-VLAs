@@ -78,7 +78,7 @@ def stage_geometry(stage,body_paths,links,baseline):
 
 
 class Native:
-    def __init__(self,scene,manifest,cameras=True):
+    def __init__(self,scene,manifest,cameras=True,use_fabric=False):
         from pxr import Usd,UsdGeom,UsdPhysics,PhysxSchema
         import omni.usd
         import carb
@@ -101,6 +101,7 @@ class Native:
         self.world=World(physics_dt=1/120,rendering_dt=1/30,stage_units_in_meters=1.,backend='numpy',device='cpu')
         physics=self.world.get_physics_context()
         physics.enable_gpu_dynamics(False);physics.set_broadphase_type('MBP')
+        if use_fabric:physics.enable_fabric(True)
         self.settings=carb.settings.get_settings()
         self.settings.set('/app/runLoops/main/rateLimitEnabled',False)
         self.settings.set('/app/player/useFixedTimeStepping',True)
