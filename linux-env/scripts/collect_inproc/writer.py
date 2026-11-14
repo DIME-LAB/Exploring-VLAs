@@ -33,7 +33,8 @@ class Writer:
 
     def work(self):
         try:
-            with (self.path/'frames.jsonl').open('w') as frames,(self.path/'poses.jsonl').open('w') as poses:
+            with (self.path/'frames.jsonl').open('w') as frames,(self.path/'poses.jsonl').open('w') as poses, \
+                    (self.path/'write-profiles.jsonl').open('w') as timings:
                 while True:
                     item=self.queue.get()
                     if item is None:break
@@ -43,8 +44,10 @@ class Writer:
                     frames.write(json.dumps(row,allow_nan=False)+'\n')
                     poses.write(json.dumps(pose,allow_nan=False)+'\n')
                     self.rows.append(row)
-                    self.profiles.append(dict(profile,queue_ms=(start-enqueued)/1e6,
-                        write_ms=(time.perf_counter_ns()-start)/1e6))
+                    measured=dict(sim_ns=row['sim_ns'],queue_ms=(start-enqueued)/1e6,
+                        write_ms=(time.perf_counter_ns()-start)/1e6)
+                    self.profiles.append(dict(profile,**measured))
+                    timings.write(json.dumps(measured,allow_nan=False)+'\n')
                 frames.flush();poses.flush()
         except BaseException as exc:self.failure=exc
 

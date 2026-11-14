@@ -22,6 +22,9 @@ class WriterTests(unittest.TestCase):
             writer.close()
             self.assertEqual([json.loads(line) for line in (output/'frames.jsonl').read_text().splitlines()],expected)
             self.assertEqual(len((output/'poses.jsonl').read_text().splitlines()),3)
+            profiles=[json.loads(line) for line in (output/'write-profiles.jsonl').read_text().splitlines()]
+            self.assertEqual([p['sim_ns'] for p in profiles],[r['sim_ns'] for r in expected])
+            self.assertTrue(all(p['write_ms']>=0 and p['queue_ms']>=0 for p in profiles))
             for key in images:
                 raw=subprocess.check_output(['ffmpeg','-v','error','-i',str(output/(key+'.mp4')),
                     '-f','rawvideo','-pix_fmt','rgb24','-'])

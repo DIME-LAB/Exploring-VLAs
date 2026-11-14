@@ -186,8 +186,10 @@ def run(a):
             finally:
                 record=False
                 if writer:
+                    drain_start=time.perf_counter_ns()
                     try:writer.close()
                     except BaseException as exc:receipt['writer_error']=repr(exc);error=exc
+                    receipt['writer_drain_ms']=(time.perf_counter_ns()-drain_start)/1e6
                     receipt['timing']=timing_audit(writer.rows,30)
                     receipt['accepted']=receipt['accepted'] and receipt['timing']['passed']
                 else:path.mkdir(parents=True,exist_ok=True)

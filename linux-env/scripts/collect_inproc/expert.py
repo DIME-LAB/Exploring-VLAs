@@ -1,6 +1,7 @@
 """Sequential scripted expert using the shared SO-ARM101 geometry and time law."""
 from types import SimpleNamespace as NS
 import math
+import time
 import numpy as np
 import shared
 from contract import JOINTS
@@ -53,6 +54,7 @@ class Expert:
         raise QualityReject(kind,evidence,contract)
 
     def arm(self,target,phase,duration=3.,executed_target=None,hold=False,noise=True):
+        preflight_start=time.perf_counter_ns()
         start=self.backend.snapshot();q0=start['state'][:5]
         clean=schedule(q0,target,duration/self.params['speed_scale'])
         executed=schedule(q0,target if executed_target is None else executed_target,clean.duration)
@@ -72,7 +74,8 @@ class Expert:
             scale,proof=choose_noise_scale(executed,program,self.reference[5],self.geometry.check,
                 self.limits,lambda: self.require_epoch(start['epoch']))
         except CommandCollision as exc:self.reject('planner_reject',exc.evidence)
-        self.noise_specs.append(dict(phase=phase,scale=scale,preflight=proof,**program.spec))
+        self.noise_specs.append(dict(phase=phase,scale=scale,preflight=proof,
+            preflight_wall_ms=(time.perf_counter_ns()-preflight_start)/1e6,**program.spec))
         self.operation+=1;first=self.backend.stamp()
         for _ in range(math.ceil((clean.duration+5)*30)+2):
             s=self.backend.snapshot();elapsed=(s['sim_ns']-first)/1e9
