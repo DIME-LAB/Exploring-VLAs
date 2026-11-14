@@ -12,7 +12,8 @@ unchanged. Six ROS pan/lift goals passed through the production subscriber and
 ArticulationController; 272 actual physics callback samples measured maximum base
 drift 0 m and 0 rad. The shared collector runtime initialized with the same six
 joint names, and a fresh held fixed-base scene was exported. The standalone
-joined/reset/success-exit probe on that export is a separate acceptance gate.
+joined/reset/success-exit probe on that export passed at 9d4762c after using the
+authoritative SDG camera metadata. Dataset acceptance remains separate.
 
 ## Evidence
 
@@ -121,7 +122,7 @@ than hidden by a larger tolerance. This improves geometric correspondence but
 does not establish fixed-base physics fidelity or permit floating-base episodes.
 
 
-The standalone probe on the corrected export completed32 tick proofs with native
+The initial standalone probe on the corrected export completed 32 tick proofs with native
 fixed base, measured motion, successful priming at both epochs and the explicit
 paused second restore. It refused overall acceptance because moving wrist view
 metadata lagged the retained physical pose by a further tick despite matching
@@ -129,3 +130,12 @@ ReferenceTime. That camera synchronization problem is independent of the fixed
 root correction; no episodes or successful producer finalization are claimed.
 Production and standalone owned groups were both released at 11:13:15Z, with
 identity-bound remaining=[], closed ports and no owned NVML contexts/errors.
+
+
+The final corrected admission probe at 9d4762c passed all 32 SDG-gated ticks,
+initial and paused-reset priming, motion, native physics-handle validation and
+successful owner finalization. SDK metadata is retained only for diagnosis;
+SDG post-render camera matrices matched physical observation poses to 1.71e-7.
+Sim released at 2026-11-14T11:55:40.342814Z with all 6 owned PIDs retired, closed
+ports 8781/8782 and no owned NVML contexts/errors. The 5+5 dataset and live GUI check
+remain separate acceptance steps.

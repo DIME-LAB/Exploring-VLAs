@@ -7,8 +7,7 @@ camera matrix matches the retained native observation (maximum error 1.71e-7) an
 its compute counter stays aligned with RGB. SDK drawable matrices are one update
 older and are retained only as diagnostics. The corrected admission path requires
 fresh post-render metadata and checks camera pose on every row before finalizing
-its tick proof. Its final native boot/success-exit check is queued after the ROS
-smoke. No 5+5 episodes, export/readback or collector RTF are accepted yet.
+its tick proof. Its final native boot and successful owner finalization passed at 9d4762c. No 5+5 episodes, export/readback or collector RTF are accepted yet.
 Runtime/prototype files live in `linux-env/scripts/collect_inproc/`. Shared ROS
 collector and extension code are unchanged; the production robot asset's two
 root API opinions are corrected.
@@ -316,8 +315,8 @@ refuse substituting its older SDK view. No image or timestamp was changed.
 For probe reports, `camera_pose_phase` now means the authoritative SDG comparison;
 `drawable_pose_phase` retains the SDK comparison. Historical reports before this
 change used `camera_pose_phase` for SDK metadata, and are not directly comparable
-by field name. The final native boot must still pass the corrected gate and prove
-successful owner-side finalization.
+by field name. The final native boot at 9d4762c passed the corrected gate and proved successful
+owner-side finalization.
 
 The production asset now authors its root API on the world fixed joint. Native
 production verification confirms fixed_base=true, root DOFs0, joint DOFs6, links 11
@@ -344,18 +343,28 @@ Partial diagnostic timing from16 boot ticks (means,ms) was app update33.62,
 camera read4.91, combined physics/render wrapper38.79, state0.91, clean correction
 0.32, collision8.78, target write0.28 and join/hash/contract9.65. App/camera values
 are nested in the wrapper and must not be added again. This excludes startup,
-remaining host work and the dataset writer: no end-to-end collector RTF or>1x
+remaining host work and the dataset writer: no end-to-end collector RTF or >1x
 result is claimed. Full profiles, accepted throughput and all three render modes
 still need measurement.
 
 ## Remaining acceptance work
 
-GPU 0is currently owned by the fixed-base ROS smoke. The final corrected boot and
-episode window require a fresh lead grant after it finishes. Read-only fresh
-fixtures appear under `datasets/smoke-descent-clearance-fixed-v1/`; accepted normal
-attempts 0000/0001 use seeds 330000/330001. Check completed receipts and provenance
+GPU 0 allocation remains lead-owned. The final corrected boot has passed. The
+episode window follows the ROS 50-episode pilot (approximately 2–2.5 hours) and requires a fresh lead grant. Read-only fresh
+fixtures appear under `datasets/smoke-descent-clearance-fixed-v1/`; the final normal set has five accepted receipts, attempts 0000–0004,
+seeds 330000–330004. Check completed receipts and provenance
 when selecting fixtures; do not modify them. Earlier floating-base fixtures do
 not fulfill the corrected-physics acceptance experiment. Re-grasp fixtures remain
-pending. No native successful finalization,5+5accepted dataset, unchanged
+pending. Native successful finalization is verified. No 5+5 accepted dataset, unchanged
 export/readback, same-seed ROS frame comparison, renderer-gap metrics or collector
 RTF has yet been accepted. The lead retains a live GUI check before merging main.
+
+
+The final boot at 9d4762c completed 32 SDG-gated ticks with every boot check true,
+including motion, initial/paused-reset priming and valid physical handles.
+Maximum authoritative camera view error was 1.7003e-7. The owner watchdog passed,
+worker returncode was 0, the completed/passed finalization certificate matched the
+BOOT_PROBE_FINISHED summary and producer invocation, and no cleanup errors were
+recorded. Sim released at 2026-11-14T11:55:40.342814Z; all 6 owned PIDs retired,
+ports 8781/8782 closed and no owned NVML contexts/errors. This is a boot proof with
+episodes=0, not the 5+5 dataset acceptance.

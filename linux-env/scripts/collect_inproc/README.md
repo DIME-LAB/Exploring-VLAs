@@ -12,8 +12,8 @@ The 32-tick diagnostic proves that SDG CameraParams matches the retained native
 observation through motion/reset; SDK drawable camera metadata is older. Admission
 now requires fresh CameraParams and checks its render-camera pose against the
 frozen physical snapshot on every capture before finalizing a tick. Invalid
-physics handles are terminal. The final native boot and successful producer exit
-are still pending. No accepted episodes, 5+5 dataset, export/readback or collector
+physics handles are terminal. The final native boot passed 32 SDG-gated ticks, a paused second reset and
+successful owner finalization at 9d4762c; see the final-native probe receipt. No accepted episodes, 5+5 dataset, export/readback or collector
 RTF result is claimed. See [design](../../../docs/notes/inprocess-collector.md)
 and [fixed-base evidence](../../../docs/notes/inprocess-collector-base-root.md).
 
@@ -62,8 +62,8 @@ The prototype uses exact ROS receipts (`params`, `initial_physical`) for seeded
 layout reproduction; it has no autonomous layout generator. Fresh read-only
 fixed-base fixtures appear under
 `/mnt/a4500-backup/exploring-vlas/datasets/smoke-descent-clearance-fixed-v1/`.
-Accepted normal attempts 0000/0001 use seeds 330000/330001. Re-grasp fixtures are
-pending. Supply at least five distinct accepted comparison seeds per kind for the
+The final normal set has five accepted receipts, attempts 0000–0004,
+seeds 330000–330004. Re-grasp fixtures are pending. Supply at least five distinct accepted comparison seeds per kind for the
 combined acceptance experiment. Earlier floating-base receipts do not fulfill it.
 Never write into the ROS output root.
 
@@ -86,7 +86,8 @@ python3 linux-env/scripts/collect_inproc/launch.py preflight --probe \
 After a grant, replace `preflight` with `start --window WINDOW_ID`. Always use fresh
 runtime/output paths. Instance 2 uses domain92 and ports 8781/8782, GPU 0UUID plus
 independent Vulkan renderer pinning, CPU PhysX, nice10, persistent caches and
-identity-bound process cleanup. GPU 1 belongs to other users. `status` and `stop`
+identity-bound process cleanup. GPU 1 is reserved for other agents by the lead, even when all processes share
+the same Unix user; a process is owned only through this launcher's identity receipt. `status` and `stop`
 require only the owned `--runtime`; they never adopt or stop another instance.
 
 Playing mode retains one paused viewport engine, two fixed render products,
@@ -107,18 +108,19 @@ belongs to each frozen state, and image T joins within zero or one update. The
 caller returns only after exactly one four-substep advance; gates/writers never
 receive a row before both pose-checked image join and advance succeed.
 
-The motion probe requires32proved frames,0.12rad collision-checked pan motion,
-measured physical response, native fixed-base mode, paired capture without held
-CPU work generating renders, and two further frames after an explicit paused
-restore. Inspect the boundary PNGs. `camera_pose_phase` now compares SDG camera
-metadata to physical poses; `drawable_pose_phase` retains SDK metadata. Historical
-reports before the SDG correction used `camera_pose_phase` for SDK and must not be
-compared by key alone.
+With `--frames 30`, the probe proves 32 frames total: 30 before an explicit paused
+restore and 2 after. It requires collision-checked 0.12 rad pan motion, measured
+physical response, native fixed-base mode and paired capture without CPU work
+between updates generating renders. Inspect the boundary PNGs. `camera_pose_phase`
+compares SDG metadata to physical poses; `drawable_pose_phase` retains SDK metadata.
+Historical reports before the SDG correction used `camera_pose_phase` for SDK and
+must not be compared by key alone.
 
 A successful probe must have `BOOT_PROBE_FINISHED`, `kind=boot_probe`, episodes=0,
 a successful `inproc-watchdog.json`, affirmative finalized certificate and retired
-owned descendants. A worker exit 0 alone is insufficient. The current final boot is
-queued after the ROS smoke; no episode launch is admitted by this README.
+owned descendants. A worker exit 0 alone is insufficient. The final boot at 9d4762c passed with all these records. Episode collection still
+requires its own lead grant; the next window is after the ROS 50-episode pilot
+(approximately 2–2.5 hours). No episode launch is admitted by this README.
 
 ## Episodes and unchanged export
 
@@ -130,7 +132,7 @@ five re-grasp receipts; accepted seeds are excluded from retries. Example pilot:
 ```bash
 python3 linux-env/scripts/collect_inproc/launch.py preflight \
   --runtime /mnt/a4500-backup/exploring-vlas/runtime/inproc-normal-fixed-next \
-  --gpu 0 --renderer-log /PATH/TO/PASSING/OWNED/BOOT/kit.log -- \
+  --gpu 0 --renderer-log /mnt/a4500-backup/exploring-vlas/runtime/inproc-final-native-20261114-v1/kit.log -- \
   --scene /mnt/a4500-backup/exploring-vlas/inproc/scene-fixed-root-20261114/scene.usdc \
   --manifest /mnt/a4500-backup/exploring-vlas/inproc/scene-fixed-root-20261114/manifest.json \
   --fixture /mnt/a4500-backup/exploring-vlas/datasets/smoke-descent-clearance-fixed-v1/normal/attempt-0000/receipt.json \
@@ -169,9 +171,26 @@ needs its own fidelity/time/shutdown proof and cannot promote candidates yet.
 Browser rendering is evaluated in the design; it is not an interchangeable RTX
 backend and has no SO-ARM101 speed or image-gap measurements.
 
-Run `compare.py` in pixi (the Isaac venv's OpenCV cannot decode H.264 here):
-`--reference ROS_ATTEMPT --candidate INPROC_ATTEMPT --output REPORT` checks seed/
-target identity and writes side-by-sides and stage profiles. It is a trajectory
+Run the comparison in pixi (the Isaac venv's OpenCV cannot decode H.264 here):
+
+```bash
+pixi run --manifest-path linux-env/pixi.toml python linux-env/scripts/collect_inproc/compare.py \
+  --reference /mnt/a4500-backup/exploring-vlas/datasets/smoke-descent-clearance-fixed-v1/normal/attempt-0000 \
+  --candidate /mnt/a4500-backup/exploring-vlas/datasets/inproc-normal-fixed-next/attempt-0000 \
+  --output /mnt/a4500-backup/exploring-vlas/reports/inproc-normal-fixed-next-comparison
+```
+
+Both inputs are single attempt directories containing receipt.json, frames.jsonl
+and both MP4s. Choose the candidate attempt with the matching seed and target;
+it may have another attempt number after rejections. The output directory must
+not already exist. The command checks seed/target identity and writes
+side-by-sides and stage profiles. It is a trajectory
 comparison unless the physical poses match. `--replay` requires identical raw
 physical rows and reports PSNR/SSIM/RGB errors. Neither benchmark is claimed until
 exercised on the accepted sim experiment.
+
+
+Boot logs are written to `<runtime>/kit.log`. The completed owned boot used
+`/mnt/a4500-backup/exploring-vlas/runtime/inproc-final-native-20261114-v1/kit.log`.
+A future boot using the preflight example's new runtime will write its log beneath
+that new runtime instead. Runtime/output/report directories are always fresh.
