@@ -1,5 +1,7 @@
 {
   "hostnames": ["rtx6000", "EN4226747L"],
   "root": "/mnt/storage3/aaugus11/exploring-vlas",
-  "image_abi_manifest": "hosts/rtx6000-image-transport-abi.json"
+  "image_abi_manifest": "hosts/rtx6000-image-transport-abi.json",
+  "environment": "hosts/rtx6000.env",
+  "export_python": "/mnt/storage3/aaugus11/exploring-vlas/export-venv/bin/python"
 }

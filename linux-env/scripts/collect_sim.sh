@@ -3,6 +3,8 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+host_environment="$(python3 "$SCRIPT_DIR/collect/host_config.py" --environment)"
+[ -z "$host_environment" ] || source "$host_environment"
 command="${1:?up|run|export|deploy-clock|deploy|clock-sanity|down}"; shift
 index="${1:?instance index 0..9}"; shift
 [[ "$index" =~ ^[0-9]$ ]] || { echo 'Instance index must be 0..9' >&2; exit 2; }
@@ -94,6 +96,10 @@ PYCONFIG
         unset PYTHONPATH AMENT_PREFIX_PATH CMAKE_PREFIX_PATH COLCON_PREFIX_PATH ROS_DISTRO ROS_VERSION ROS_PYTHON_VERSION
         unset LD_LIBRARY_PATH
         export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+        export_python="$(python3 "$SCRIPT_DIR/collect/host_config.py" --export-python)"
+        if [ -n "$export_python" ]; then
+            exec "$export_python" "$SCRIPT_DIR/collect/export.py" "$@"
+        fi
         exec "$HOME/.pixi/bin/pixi" run --manifest-path "$REPO_ROOT/linux-env/pixi.toml" \
             python "$SCRIPT_DIR/collect/export.py" "$@"
         ;;

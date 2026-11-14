@@ -18,4 +18,16 @@ def profile(hostname=None):
 
 
 if __name__ == '__main__':
-    print(profile()['root'])
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--environment', action='store_true')
+    parser.add_argument('--export-python', action='store_true')
+    args = parser.parse_args()
+    config = profile()
+    if args.environment:
+        relative = config.get('environment')
+        print(str(Path(__file__).parent/relative) if relative else '')
+    elif args.export_python:
+        print(config.get('export_python', ''))
+    else:
+        print(config['root'])

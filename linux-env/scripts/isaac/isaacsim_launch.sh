@@ -55,6 +55,8 @@ done
 set -- "${launch_args[@]}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+host_environment="$(python3 "$SCRIPT_DIR/../collect/host_config.py" --environment)"
+[ -z "$host_environment" ] || source "$host_environment"
 if [ -n "$INSTANCE_INDEX" ]; then
     [[ "$INSTANCE_INDEX" =~ ^[0-9]+$ ]] && [ "$INSTANCE_INDEX" -le 9 ] || {
         echo '--instance must be an integer from 0 to 9' >&2; exit 2;
