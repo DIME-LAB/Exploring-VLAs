@@ -552,3 +552,17 @@ clock/index, native clock/epoch, physics callbacks or render counters during the
 publication. Its cost is reported separately as fabric_sync_ms. The original stamp
 join and moving-camera pose gate remain unchanged. This is an unverified render
 synchronization hypothesis, not a claim that the extra pose lag is solved.
+
+
+The explicit PhysX Fabric probe completed32 ticks with its settings and no-progress
+guards verified, but its drawable camera pose errors were identical to the USD
+path. The hypothesis did not resolve the gate. No successful finalization or
+episode acceptance was produced; sim released11:23:33Z. Distinguish observed
+metadata lag from actual pixel phase: drawable metadata is not yet independently
+matched to the SDG RGB result. A diagnostic now retains the legacy CameraParams
+post-render camera matrix and compute count alongside the unchanged drawable
+matrix, using the same two render products. It reports both against physical
+observation/arrival poses and does not change admission. The legacy source is
+PostProcessRenderProductCamera/SdRenderProductCamera connected to renderResults;
+wrong annotator type, invalid matrices or resolution fail. A fresh reviewed probe
+must disambiguate these producers before changing a pose gate or timestamps.

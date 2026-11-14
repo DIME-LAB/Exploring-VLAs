@@ -205,3 +205,10 @@ physics transforms before the single app update, requiring that the publication
 itself performs no physics, clock advance or render. Camera stamps are unchanged.
 The live motion/reset/pixel-phase gate must validate this synchronization path
 before any episode; CPU tests alone do not establish image correspondence.
+
+
+The PhysX Fabric publication probe did not resolve the drawable pose gate. The
+CameraParams diagnostic records the SDG post-render camera matrix and compute
+count beside the drawable matrix, with both pose errors in probe.json. Admission
+still uses the existing strict gate; the diagnostic does not establish correct
+pixels or permit episodes until its native provenance is measured.

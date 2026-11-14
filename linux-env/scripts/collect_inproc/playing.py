@@ -16,6 +16,20 @@ from comparisons import matches
 CAPTURE_KEYS=('/persistent/omni/replicator/captureOnPlay','/omni/replicator/captureOnPlay')
 
 
+def camera_parameters(annotation):
+    """Retain post-render SDG camera metadata separately from drawable metadata."""
+    node=annotation.get_node();raw=annotation.get_data()
+    if node.get_type_name()!='omni.replicator.core.CameraParams':
+        raise RuntimeError('Expected legacy post-render CameraParams annotator')
+    view=np.asarray(raw['cameraViewTransform'],float).reshape(4,4)
+    resolution=np.asarray(raw['renderProductResolution'],int).tolist()
+    if not np.isfinite(view).all() or resolution!=[640,480] or node.get_compute_count()<1:
+        raise RuntimeError('Invalid post-render camera parameters')
+    return dict(source='SDG PostProcessRenderProductCamera renderResults',
+        node_type=node.get_type_name(),compute_count=node.get_compute_count(),
+        render_view=view.reshape(-1).tolist(),resolution=resolution)
+
+
 def flush_physics_to_fabric(world):
     """Publish the measured pre-update pose without a render or physical step."""
     if world._physx_fabric_interface is None:
@@ -100,7 +114,7 @@ class PlayingRGB:
         import carb.eventdispatcher
         import omni.syntheticdata._syntheticdata as sd
         import omni.hydratexture
-        self.products={};self.annotators={};self.references={}
+        self.products={};self.annotators={};self.references={};self.camera_params={}
         self.frame_info={};self.drawable_observers=[]
         self.render_events=Counter();self.event_samples=[];self.calls=0
         interface=sd.acquire_syntheticdata_interface()
@@ -122,7 +136,10 @@ class PlayingRGB:
             annotation.attach(product)
             reference=rep.AnnotatorRegistry.get_annotator('ReferenceTime')
             reference.attach(product)
+            parameters=rep.AnnotatorRegistry.get_annotator('CameraParams')
+            parameters.attach(product)
             self.products[key]=product;self.annotators[key]=annotation;self.references[key]=reference
+            self.camera_params[key]=parameters
             def drawable(event,key=key,texture=product.hydra_texture):
                 info=texture.get_frame_info(event['result_handle'])
                 self.frame_info[key]={name:info.get(name) for name in ('swh_frame_number','frame_number')}
@@ -150,7 +167,8 @@ class PlayingRGB:
                 render_view=info.get('view'),
                 stamp_ns=round(int(n)/int(d)*1e9),reference_time=[int(n),int(d)],
                 copy_compute_count=self.annotators[key].get_node().get_compute_count(),
-                completions=self.render_events[product.path]-counts_before.get(product.path,0))
+                completions=self.render_events[product.path]-counts_before.get(product.path,0),
+                camera_params=camera_parameters(self.camera_params[key]))
             images[key]=np.ascontiguousarray(data[:,:,:3])
         self.calls=min(camera['completions'] for camera in cameras.values())
         return images,cameras,(time.perf_counter_ns()-start)/1e6
@@ -159,6 +177,7 @@ class PlayingRGB:
         for key,product in self.products.items():
             product.hydra_texture.set_updates_enabled(False)
             self.annotators[key].detach(product);self.references[key].detach(product)
+            self.camera_params[key].detach(product)
             product.destroy()
         self.observer=None
         self.drawable_observers.clear()

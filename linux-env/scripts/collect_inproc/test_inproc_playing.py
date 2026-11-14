@@ -4,11 +4,26 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch,Mock
-from playing import FrameLedger,Playing,capture_settings,CAPTURE_KEYS,flush_physics_to_fabric
+from playing import FrameLedger,Playing,capture_settings,CAPTURE_KEYS,flush_physics_to_fabric,camera_parameters
 from native import Native
 
 
 class PlayingTests(unittest.TestCase):
+    def test_post_render_camera_metadata_keeps_its_source_and_compute_count(self):
+        import numpy as np
+        node=Mock();node.get_type_name.return_value='omni.replicator.core.CameraParams'
+        node.get_compute_count.return_value=7
+        raw=dict(cameraViewTransform=np.eye(4),renderProductResolution=np.array([640,480]))
+        annotation=Mock();annotation.get_data.return_value=raw;annotation.get_node.return_value=node
+        result=camera_parameters(annotation)
+        self.assertEqual(result['compute_count'],7)
+        self.assertEqual(result['render_view'],np.eye(4).reshape(-1).tolist())
+        node.get_type_name.return_value='other.CameraParams'
+        with self.assertRaises(RuntimeError):camera_parameters(annotation)
+        node.get_type_name.return_value='omni.replicator.core.CameraParams'
+        raw['cameraViewTransform'][0,0]=float('nan')
+        with self.assertRaises(RuntimeError):camera_parameters(annotation)
+
     def test_fabric_publication_uses_physical_clock_without_stepping_or_rendering(self):
         interface=Mock()
         world=SimpleNamespace(_physx_fabric_interface=interface,current_time=1.25,

@@ -143,6 +143,9 @@ def main(a):
                     action=row['action'],executed_action=row['executed_action'],
                     camera_world_before=camera_before,camera_world_after=camera_after,
                     camera_pose_phase={key:view_pose_errors(timing['playing_frame']['cameras'][key]['render_view'],
+                        camera_before[key],camera_after[key]) for key in ('wrist','top')},
+                    camera_params_pose_phase={key:view_pose_errors(
+                        timing['playing_frame']['cameras'][key]['camera_params']['render_view'],
                         camera_before[key],camera_after[key]) for key in ('wrist','top')})
             report['frames'].append(dict(index=index,epoch=s['epoch'],sim_ns=s['sim_ns'],**{
                 'physics_render_ms' if a.step_mode=='playing' else 'physics_ms':physics_ms},
