@@ -1,14 +1,17 @@
 # In-process SO-ARM101 collection (ROADMAP 3.1f)
 
-Status: bounded camera priming passed live and sixteen strict joined boot ticks
-proved original-stamp correspondence before exposing a floating-base scene.
-The production asset now authors its root API on the world fixed joint; native
-production readback confirms fixed_base=true with six unchanged joint DOFs, and
-ROS pan/lift sweeps measured zero root drift. A fresh held scene is exported.
-Standalone motion/reset/success-exit acceptance,5+5 episodes, export, throughput
-and image-equivalence acceptance remain pending. Runtime/prototype files live in
-`linux-env/scripts/collect_inproc/`. Shared ROS collector and extension code are
-unchanged; the production robot asset's two root API opinions are corrected.
+Status: the production fixed-base correction is verified, with unchanged six-joint
+order and zero measured base drift in the real ROS pan/lift sweep. A fresh held
+scene is exported. A32-tick motion/reset diagnostic proves the SDG post-render
+camera matrix matches the retained native observation (maximum error1.71e-7) and
+its compute counter stays aligned with RGB. SDK drawable matrices are one update
+older and are retained only as diagnostics. The corrected admission path requires
+fresh post-render metadata and checks camera pose on every row before finalizing
+its tick proof. Its final native boot/success-exit check is queued after the ROS
+smoke. No5+5 episodes, export/readback or collector RTF are accepted yet.
+Runtime/prototype files live in `linux-env/scripts/collect_inproc/`. Shared ROS
+collector and extension code are unchanged; the production robot asset's two
+root API opinions are corrected.
 
 ## Decision and architecture
 
@@ -25,7 +28,7 @@ the caller pass the proof to gates or the writer. Native delivery may be zero or
 one update late, while camera stamps remain original. No wall pacing or render polling while
 the expert runs. Read native clock and unconditional physics callbacks; never
 assign time from a row number. Require one completion per product, fresh drawable
-frame numbers and consecutive RGB compute counts, with original camera timestamps
+frame numbers, consecutive RGB and post-render CameraParams compute counts, with original camera timestamps
 matching the retained observation within the shared 1 us tolerance. A missing,
 duplicated or skipped frame, epoch crossing or delay beyond one update is a fault.
 
@@ -35,7 +38,8 @@ without an app update and require their agreement within 10 ns. World.current_ti
 accumulates float32 PhysX callbacks independently: check its increments with the
 shared world_step_errors, as CLOCK_POLICY.absolute_world_native_equality=False
 requires. Neither Fabric time nor the camera stamps are rewritten. After reset,
-one unrecorded advance establishes the first observation; no pending row is
+bounded unrecorded priming first establishes steady camera cadence, then
+one boundary advance establishes the first observation; no pending row is
 accepted before its matching pair arrives. Restore writes happen synchronously
 between updates and resume a paused timeline without World.play's extra update.
 Held-time capture remains a diagnostic mode; its current RGB path failed live.
@@ -566,3 +570,35 @@ observation/arrival poses and does not change admission. The legacy source is
 PostProcessRenderProductCamera/SdRenderProductCamera connected to renderResults;
 wrong annotator type, invalid matrices or resolution fail. A fresh reviewed probe
 must disambiguate these producers before changing a pose gate or timestamps.
+
+
+## Authoritative post-render camera proof
+
+The diagnostic at9857b38 distinguished producers without changing its original
+gate: all32CameraParams matrices, including motion and both frames after paused
+restore, match the measured observation camera pose within1.71e-7. Their compute
+counts equal the RGB compute counts on every captured tick and both advance by
+exactly1 within each recording epoch. SDK drawable matrices remain one tick older;
+adding the post-render annotator did not change that SDK phase. Thus the rejected
+SDK pose gate did not describe the RGB camera's render results. No camera or
+image timestamp is changed to reach this conclusion.
+
+Admission now requires legacy `omni.replicator.core.CameraParams` metadata on the
+same render product as RGB/ReferenceTime, with positive compute count advancing
+exactly1 alongside RGB. `Playing.render` compares its camera matrix against the
+frozen physical snapshot's calibrated camera world pose for both cameras, using
+the unchanged2e-4 maximum-entry tolerance. A mismatch faults before
+`Capture.complete` can finalize a proof or return a row to gates/writers. The probe
+uses that same authoritative matrix and retains SDK matrices as
+`drawable_pose_phase` diagnostics. CameraParams comes from the installed
+PostProcessRenderProductCamera/SdRenderProductCamera dependency on renderResults.
+Native snapshots also require every articulation/body/link physics handle to be
+valid, preventing frozen USD fallback from masquerading as measured physics.
+
+The regression fixture `fixtures/camera_params_32_trace.json` contains the actual
+32native packets, camera transforms and source receipt SHA. It passes the new
+metadata/pose checks; substituting the old drawable matrix fails. The final native
+boot must still prove successful exit/finalization on this corrected entrance.
+GPU0is reserved for the ROS fixed-base smoke first. Its new read-only fixtures
+will live under `datasets/smoke-descent-clearance-fixed-v1/`; prior floating-base
+fixtures are comparison evidence and do not fulfill the new acceptance run.

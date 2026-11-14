@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch,Mock
-from playing import FrameLedger,Playing,capture_settings,CAPTURE_KEYS,flush_physics_to_fabric,camera_parameters
+from playing import FrameLedger,Playing,capture_settings,CAPTURE_KEYS,flush_physics_to_fabric,camera_parameters,render_pose_errors
 from native import Native
 
 
@@ -84,7 +84,10 @@ class PlayingTests(unittest.TestCase):
         stamp=round((1+index/30)*1e9)
         observation=round((1+(index-1)/30)*1e9)
         return dict(epoch=1,sim_ns=stamp,observation_epoch=1,observation_ns=observation,timeline_ns=stamp,fabric_time_s=1+index/30,physics_time_s=1+index/30,native_physics_steps=4,world_step_count=4,
-            cameras={key:dict(render_frame_number=index,copy_compute_count=index,stamp_ns=observation,completions=1)
+            cameras={key:dict(render_frame_number=index,copy_compute_count=index,stamp_ns=observation,completions=1,
+                camera_params=dict(node_type='omni.replicator.core.CameraParams',compute_count=index,
+                    source='SDG PostProcessRenderProductCamera renderResults',resolution=[640,480],
+                    render_view=[float(i%5==0) for i in range(16)]))
                 for key in ('wrist','top')})
     def test_exact_app_frame_and_pair(self):
         ledger=self.ledger();ledger.accept(self.packet());ledger.accept(self.packet(2))
@@ -173,7 +176,7 @@ class PlayingTests(unittest.TestCase):
         p=self.packet(2);p['cameras']['wrist']['copy_compute_count']+=1
         with self.assertRaises(RuntimeError):ledger.accept(p)
 
-    def test_measured_one_update_trace_preserves_original_stamps(self):
+    def test_historical_stamp_trace_is_not_a_render_pose_proof(self):
         trace=json.loads((Path(__file__).parent/'fixtures/playing_v11_trace.json').read_text())['trace']
         def packet(row):
             # The World clock here is a test model. The fixture retains the real
@@ -185,11 +188,42 @@ class PlayingTests(unittest.TestCase):
                 native_physics_steps=row['physical_steps'],world_step_count=row['world_steps'],cameras=row['cameras'])
         ledger=FrameLedger();ledger.reset(3,trace[0]['before_ns'],trace[0]['before_ns']/1e9)
         for row in trace:
-            ledger.accept(packet(row))
-            self.assertEqual(ledger.previous['cameras'],row['cameras'])
-        ledger=FrameLedger();ledger.reset(3,trace[0]['before_ns'],trace[0]['before_ns']/1e9)
-        ledger.accept(packet(trace[0]))
-        with self.assertRaises(RuntimeError):ledger.accept(packet(trace[2]))
+            previous=dict(epoch=3,sim_ns=row['before_ns'],physics_time_s=row['before_ns']/1e9)
+            ledger.check_advance(packet(row),previous)
+            ledger.reset(3,row['before_ns'],row['before_ns']/1e9)
+            with self.assertRaisesRegex(RuntimeError,'Post-render camera metadata'):
+                ledger.accept(packet(row))
+
+    def test_missing_repeated_or_skipped_post_render_metadata_is_a_fault(self):
+        packet=self.packet();del packet['cameras']['wrist']['camera_params']
+        with self.assertRaises(RuntimeError):self.ledger().accept(packet)
+        for count in (1,3):
+            ledger=self.ledger();ledger.accept(self.packet())
+            packet=self.packet(2);packet['cameras']['top']['camera_params']['compute_count']=count
+            with self.assertRaises(RuntimeError):ledger.accept(packet)
+
+    def test_measured_camera_params_trace_matches_pixels_while_drawable_metadata_lags(self):
+        fixture=json.loads((Path(__file__).parent/'fixtures/camera_params_32_trace.json').read_text())
+        ledger=FrameLedger();epoch=None
+        for frame in fixture['frames']:
+            packet=frame['packet']
+            if packet['epoch']!=epoch:
+                epoch=packet['epoch'];ledger.reset(epoch,packet['observation_ns'],packet['physics_time_s']-1/30)
+            ledger.accept(packet)
+            render_pose_errors(packet['cameras'],frame['camera_world_before'])
+        moving=fixture['frames'][16]
+        corrupted=copy.deepcopy(moving['packet']['cameras'])
+        corrupted['wrist']['camera_params']['render_view']=corrupted['wrist']['render_view']
+        with self.assertRaisesRegex(RuntimeError,'Rendered camera pose differs'):
+            render_pose_errors(corrupted,moving['camera_world_before'])
+
+    def test_snapshot_refuses_invalid_handles_before_any_usd_fallback(self):
+        for kind in ('articulation','body','link'):
+            owner=Native.__new__(Native)
+            views={name:SimpleNamespace(is_physics_handle_valid=lambda name=name:name!=kind)
+                for name in ('articulation','body','link')}
+            owner.art=views['articulation'];owner.bodies={'body':views['body']};owner.links={'link':views['link']}
+            with self.assertRaisesRegex(RuntimeError,'Invalid measured physics handle: '+kind):owner.snapshot()
 
 
 if __name__=='__main__':unittest.main()

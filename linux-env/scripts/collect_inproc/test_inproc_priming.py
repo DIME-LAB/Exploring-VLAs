@@ -20,6 +20,7 @@ class PrimingTests(unittest.TestCase):
         owner.snapshot=lambda:copy.deepcopy(owner.s)
         owner.clock=lambda:{k:owner.s[k] for k in ('epoch','sim_ns','physics_time_s')}
         owner.stamp=lambda:owner.s['sim_ns']
+        owner.transforms=lambda snapshot:({}, {key:np.eye(4).tolist() for key in ('wrist','top')})
         restored=dict(epoch=3,invalid_through_ns=owner.s['sim_ns'],arm_restored=True,
             snapshot=owner.snapshot(),command_baseline=dict(owner.clock(),drive_targets=[0.]*6))
         def advance():
@@ -40,6 +41,9 @@ class PrimingTests(unittest.TestCase):
             owner.rgb.calls=count
             return ({key:np.zeros((480,640,3),np.uint8) for key in ('wrist','top')},
                 {key:dict(render_frame_number=owner.counter,copy_compute_count=owner.copy_count,
+                    camera_params=dict(node_type='omni.replicator.core.CameraParams',compute_count=owner.copy_count,
+                        source='SDG PostProcessRenderProductCamera renderResults',resolution=[640,480],
+                        render_view=np.eye(4).reshape(-1).tolist()),
                     stamp_ns=owner.image_stamp,completions=count) for key in ('wrist','top')},0.)
         owner.rgb=SimpleNamespace(read=read,calls=0)
         def apply(values,stamp,epoch):
@@ -120,7 +124,7 @@ class PrimingTests(unittest.TestCase):
             capture.playing_tick([0.]*6,[0.]*6,[0.]*6,'hold','test',owner.snapshot())
         self.assertIsNone(capture.contract.previous)
 
-    def test_real_joined_v2_trace_stabilizes_after_the_unrecorded_burst(self):
+    def test_historical_startup_trace_without_camera_metadata_is_refused(self):
         fixture=json.loads((Path(__file__).parent/'fixtures/joined_v2_startup.json').read_text())
         trace=fixture['trace'];start=fixture['failed_playing_frame']
         owner,restored=self.fixture()
@@ -141,11 +145,9 @@ class PrimingTests(unittest.TestCase):
             return row,{},1.
         owner.advance=advance
         owner.rgb.read=lambda counts:({},owner.last_frame['cameras'],0.)
-        boundary=owner.prime(restored)
-        self.assertEqual(owner.counter,5)
-        self.assertEqual(boundary['priming']['consecutive'],3)
-        self.assertEqual(boundary['priming']['updates'][-1]['packet']['cameras'],trace[3]['cameras'])
-        Capture(owner,collision).boundary(boundary)
+        # That historical trace predates render-camera metadata. Its clocks are
+        # useful evidence, but it cannot satisfy the current admission contract.
+        with self.assertRaisesRegex(RuntimeError,'did not stabilize'):owner.prime(restored,max_updates=len(rows))
 
 
 if __name__=='__main__':unittest.main()

@@ -16,6 +16,33 @@ from comparisons import matches
 CAPTURE_KEYS=('/persistent/omni/replicator/captureOnPlay','/omni/replicator/captureOnPlay')
 
 
+def view_pose_errors(view,before,after):
+    matrix=np.asarray(view,float).reshape(4,4)
+    if not np.isfinite(matrix).all():raise ValueError('Non-finite render camera view')
+    expected=np.linalg.inv(np.asarray(before,float));choices=[matrix,matrix.T]
+    errors=[float(np.max(np.abs(choice-expected))) for choice in choices]
+    choice=int(np.argmin(errors))
+    return dict(before_error=errors[choice],
+        after_error=float(np.max(np.abs(choices[choice]-np.linalg.inv(np.asarray(after,float))))),
+        view_layout='matrix' if choice==0 else 'transpose')
+
+
+def render_pose_errors(cameras,worlds):
+    if set(cameras)!=set(worlds) or set(cameras)!={'wrist','top'}:
+        raise RuntimeError('Both measured camera poses are required')
+    result={}
+    for key,camera in cameras.items():
+        params=camera['camera_params']
+        if (params['node_type']!='omni.replicator.core.CameraParams' or
+            params['source']!='SDG PostProcessRenderProductCamera renderResults' or
+            params['resolution']!=[640,480] or params['compute_count']<1):
+            raise RuntimeError('Unverified render camera metadata: '+key)
+        result[key]=view_pose_errors(params['render_view'],worlds[key],worlds[key])
+        if result[key]['before_error']>=2e-4:
+            raise RuntimeError('Rendered camera pose differs from retained observation: '+key)
+    return result
+
+
 def camera_parameters(annotation):
     """Retain post-render SDG camera metadata separately from drawable metadata."""
     node=annotation.get_node();raw=annotation.get_data()
@@ -102,6 +129,13 @@ class FrameLedger:
             if old and (frame_id<=old['render_frame_number'] or camera['copy_compute_count']!=old['copy_compute_count']+1):
                 raise RuntimeError('Camera repeated or skipped a render/annotation buffer: '+key)
             if camera['copy_compute_count']<=0:raise RuntimeError('RGB producer has not computed: '+key)
+            params=camera.get('camera_params')
+            if not params or params.get('node_type')!='omni.replicator.core.CameraParams':
+                raise RuntimeError('Post-render camera metadata is unavailable: '+key)
+            if not isinstance(params.get('compute_count'),int) or params['compute_count']<=0:
+                raise RuntimeError('Post-render camera metadata has not computed: '+key)
+            if old and params['compute_count']!=old['camera_params']['compute_count']+1:
+                raise RuntimeError('Post-render camera metadata repeated or skipped a frame: '+key)
             frame_ids.append(frame_id)
         if len(set(frame_ids))!=1:raise RuntimeError('Camera pair belongs to different native render frames')
         self.previous=copy.deepcopy(packet)
@@ -433,6 +467,8 @@ class Playing(Native):
         if packet['epoch']!=self.epoch or packet['sim_ns']!=self.stamp():raise RuntimeError('Playing RGB cache is stale')
         if expected is None or expected['epoch']!=packet['observation_epoch'] or expected['sim_ns']!=packet['observation_ns']:
             raise RuntimeError('Image join requested another observation')
+        _,worlds=self.transforms(expected)
+        self.pending[1]['camera_pose_errors']=render_pose_errors(packet['cameras'],worlds)
         result=self.pending;self.pending=None
         return result
 

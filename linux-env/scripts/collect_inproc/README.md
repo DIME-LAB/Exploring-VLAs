@@ -7,9 +7,10 @@ scene. The production asset now places its root API on the world fixed joint.
 Native production readback verifies fixed_base=true and unchanged six-name joint
 order; ROS pan/lift sweeps measured zero root drift over272 physics samples.
 The shared collector runtime initializes, and a fresh fixed-base held scene is
-available. Standalone completed32 tick proofs including motion and paused reset but failed
-the moving-camera pose gate (one extra physical pose of lag). Its finalization
-and the5+5 dataset acceptance remain pending; no episodes have been accepted.
+available. The32-tick post-render diagnostic proves the RGB camera matrix matches native
+observation poses; SDK drawable metadata is older. The corrected per-row admission
+gate and native finalization still need their final boot. The5+5 dataset acceptance
+remains pending; no episodes have been accepted.
 
 Collision FK uses measured rigid root transforms and unchanged descendant checks;
 probe/collector refuse a floating native base flag. See
@@ -212,3 +213,15 @@ CameraParams diagnostic records the SDG post-render camera matrix and compute
 count beside the drawable matrix, with both pose errors in probe.json. Admission
 still uses the existing strict gate; the diagnostic does not establish correct
 pixels or permit episodes until its native provenance is measured.
+
+
+The diagnostic distinguishes the producers: CameraParams matches observationT
+within1.71e-7, while drawable metadata is older. Every capture now requires its
+CameraParams compute count to advance with RGB and its post-render matrix to
+match both measured camera poses before a tick can finalize. The probe gates on
+that same metadata and retains `drawable_pose_phase` only for diagnosis. Invalid
+native physics handles are terminal. The real32packet fixture exercises this
+proof and refuses the stale drawable matrix. The final native boot follows the
+ROS smoke; new read-only fixtures are expected under
+`datasets/smoke-descent-clearance-fixed-v1/`. No episode admission is claimed from
+the diagnostic or CPU tests alone.

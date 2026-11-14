@@ -154,6 +154,9 @@ class Native:
     def clock(self):return dict(epoch=self.epoch,sim_ns=self.stamp(),physics_time_s=float(self.world.current_time))
 
     def snapshot(self):
+        for name,view in [('articulation',self.art),*self.bodies.items(),*self.links.items()]:
+            if not view.is_physics_handle_valid():
+                raise RuntimeError('Invalid measured physics handle: '+name)
         bodies={}
         for name,view in self.bodies.items():
             p,q=view.get_world_poses()

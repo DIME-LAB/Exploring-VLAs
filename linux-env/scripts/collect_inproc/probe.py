@@ -10,19 +10,7 @@ import shared
 import numpy as np
 from storage import confined,atomic_json
 from collection_status import begin,finish,terminal
-
-
-def view_pose_errors(view,before,after):
-    """Compare native drawable view metadata to both measured camera poses."""
-    matrix=np.asarray(view,float).reshape(4,4)
-    if not np.isfinite(matrix).all():raise ValueError('Non-finite drawable camera view')
-    expected=np.linalg.inv(np.asarray(before,float))
-    choices=[matrix,matrix.T]
-    errors=[float(np.max(np.abs(choice-expected))) for choice in choices]
-    choice=int(np.argmin(errors))
-    return dict(before_error=errors[choice],
-        after_error=float(np.max(np.abs(choices[choice]-np.linalg.inv(np.asarray(after,float))))),
-        view_layout='matrix' if choice==0 else 'transpose')
+from playing import view_pose_errors
 
 
 def arguments(argv=None):
@@ -142,9 +130,9 @@ def main(a):
                 pose_phase=dict(observation_state=s['state'],arrival_state=after['state'],
                     action=row['action'],executed_action=row['executed_action'],
                     camera_world_before=camera_before,camera_world_after=camera_after,
-                    camera_pose_phase={key:view_pose_errors(timing['playing_frame']['cameras'][key]['render_view'],
+                    drawable_pose_phase={key:view_pose_errors(timing['playing_frame']['cameras'][key]['render_view'],
                         camera_before[key],camera_after[key]) for key in ('wrist','top')},
-                    camera_params_pose_phase={key:view_pose_errors(
+                    camera_pose_phase={key:view_pose_errors(
                         timing['playing_frame']['cameras'][key]['camera_params']['render_view'],
                         camera_before[key],camera_after[key]) for key in ('wrist','top')})
             report['frames'].append(dict(index=index,epoch=s['epoch'],sim_ns=s['sim_ns'],**{
