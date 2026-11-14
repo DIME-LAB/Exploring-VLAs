@@ -85,6 +85,35 @@ class NativeMissVelocityTests(unittest.TestCase):
         self.assertEqual(result['epoch'],2);self.assertFalse(r.miss_cap_state()['on'])
         np.testing.assert_array_equal(d['limits'][:,r.indices],original)
 
+    def test_bootstrap_deploy_cancel_with_no_installed_limits_is_a_native_noop(self):
+        for mode in ('collect','deploy'):
+            r,d,original,writes=self.runtime();r.mode=mode;r.world=NS(current_time=1.)
+            # Kit has received pause(), but is_playing() still exposes the
+            # preceding app update. This is the retained clock-startup failure.
+            pauses=[];r.timeline.pause=lambda:pauses.append(True);r.timeline.is_playing=lambda:True
+            published=[];r.publish_miss_fault.__func__.__globals__['atomic_json']=lambda p,v:published.append(copy.deepcopy(v))
+            before=d['limits'].copy();result=r.cancel()
+            with self.subTest(mode=mode):
+                self.assertEqual(pauses,[True]);self.assertEqual(result['epoch'],2)
+                self.assertIsNone(result['failure']);self.assertIsNone(result['miss_motion_fault'])
+                self.assertEqual(writes,[]);self.assertEqual(published,[])
+                self.assertIsNone(getattr(r,'_miss_motion_fault',None))
+                np.testing.assert_array_equal(d['limits'],before)
+                self.assertEqual(r.set_miss_velocity_cap(None),dict(on=False,values_rad_s=None))
+                self.assertEqual(writes,[]);self.assertEqual(published,[])
+
+    def test_real_cap_retirement_still_refuses_a_pending_playing_pause(self):
+        r,d,original,writes=self.runtime();r.world=NS(current_time=1.)
+        r.set_miss_velocity_cap(velocity_cap('regrasp_miss_close'))
+        r.timeline.is_playing=lambda:True
+        with self.assertRaisesRegex(RuntimeError,'requires a held simulation'):
+            r.set_miss_velocity_cap(None)
+        self.assertIsNotNone(r.failure)
+        self.assertIn('requires a held simulation',r._miss_motion_fault['error'])
+        # Fault retirement is still the checked, durable terminal path, not a
+        # successful caller handover or permission to advance another frame.
+        with self.assertRaises(RuntimeError):r.advance()
+
     def test_high_measured_velocity_cannot_be_braked_by_relabelling_cap(self):
         r,d,_,writes=self.runtime();d['v'][0,r.indices[0]]=2.28
         with self.assertRaisesRegex(RuntimeError,'before advance'):r.set_miss_velocity_cap(velocity_cap('regrasp_reopen'))

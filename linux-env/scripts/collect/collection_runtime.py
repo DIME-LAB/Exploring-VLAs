@@ -282,6 +282,12 @@ class Runtime:
         return result
 
     def set_miss_velocity_cap(self,cap):
+        if (cap is None and getattr(self,'_miss_cap',None) is None and
+                getattr(self,'_miss_saved_limits',None) is None and not getattr(self,'_miss_limits_dirty',False) and
+                getattr(self,'_miss_requested_cap',None) is None):
+            # A bootstrap/deploy pause commits on the next Kit update. With no
+            # native limit work to retire, there is no handover to guard.
+            return dict(on=False,values_rad_s=None)
         if self.busy or self.timeline.is_playing():raise self.fail_miss_motion(RuntimeError('Velocity-cap handover requires a held simulation'))
         if cap is None:return self.restore_miss_limits()
         if self.failure:raise RuntimeError('Native runtime is terminal: '+str(self.failure))
