@@ -67,3 +67,5 @@ Source SHA256 at read:
 - PERFORMANCE.md: `d3799ad61a60701c32a22c51a7d64ed520b4c8c8e7a95bfa35c0f4b27735c88e`
 - launch: `0bf835ec8cbe84bd0b29acf5995d512c27a81383bd7b13ec5386e1fa3d880d10`
 - kit_env.sh: `d4dcf461099ea752633a3d8095a65a2ffee447d04b5fd28a595b59257d6c8180`
+
+The later [offline render-budget estimate](inprocess-collector-render-cost.md) compares this native batch with four saturated ROS instances. Held-stamp publication counts suggest possible avoided rendering, but neither existing timer isolates GPU service; the conditional aggregate model is not a swap prediction. Keep the overnight 900 on ROS and await the lead’s later dual GPU 0 GO.
