@@ -27,7 +27,7 @@ from contract import JOINTS, corrective_action, parameters
 from protocol import CancelledGeneration, CommandLedger, StepGeneration, OwnershipStalled
 from dart import DEFAULT_NOISE, SmoothDart, TargetCandidate, PlannerSchedule
 from command_geometry import choose_noise_scale,final_command,QUERY_POLICY,frame_capacity_seconds
-from tick_contract import TickContract,TickContractError,require_snapshots,digest,verify_proof,CLOCK_POLICY
+from tick_contract import TickContract,TickContractError,require_snapshots,digest,verify_proof,CLOCK_POLICY,STEP_NS
 from episode_policy import ConvergenceFailure, QualityReject, POLICY, WorkerRegistry, FailureStreak, disposition
 from scene_sync import physical_pose_caches, collision_pose_errors
 from success import PHYSICAL_FLOOR_M, INTERIOR_FLOOR_M, initial_arm
@@ -43,7 +43,7 @@ def load_class(filename, name):
     path = HERE/filename
     tree = ast.parse(path.read_text())
     cls = next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name==name)
-    scope = dict(TOLERANCES=TOLERANCES,retire_executor=retire_executor,shutdown_context=shutdown_context,publisher_identity=publisher_identity,publisher_key=publisher_key,CAMERA_SELECTION_POLICY=CAMERA_SELECTION_POLICY,Path=Path,atomic_json=atomic_json,primitive_world_poses=primitive_world_poses,collection_status=collection_status,joined_profiles=joined_profiles,profile_tick=profile_tick,wall_profile_summary=wall_profile_summary,milliseconds=milliseconds,PROFILE_POLICY=PROFILE_POLICY,make_baseline=make_baseline,validate_baseline=validate_baseline,SensorAmbiguity=SensorAmbiguity,frame_identity=frame_identity,exact_duplicate=exact_duplicate,math=math,comparison=comparison,matches=matches,interval=interval,native_frame=native_frame,world_step_errors=world_step_errors,frame_capacity_seconds=frame_capacity_seconds,QUERY_POLICY=QUERY_POLICY,CLOCK_POLICY=CLOCK_POLICY,random=random,replace=replace,copy=copy,PlannerSchedule=PlannerSchedule,TargetCandidate=TargetCandidate,choose_noise_scale=choose_noise_scale,final_command=final_command,TickContract=TickContract,TickContractError=TickContractError,require_snapshots=require_snapshots,digest=digest,verify_proof=verify_proof, DEFAULT_NOISE=DEFAULT_NOISE, SmoothDart=SmoothDart, initial_arm=initial_arm, ConvergenceFailure=ConvergenceFailure, QualityReject=QualityReject, POLICY=POLICY, WorkerRegistry=WorkerRegistry, FailureStreak=FailureStreak, disposition=disposition, MotionWaitTimeout=MotionWaitTimeout, contextmanager=contextmanager, OwnershipStalled=OwnershipStalled, threading=threading,time=time,np=np,json=json,JOINTS=JOINTS,
+    scope = dict(STEP_NS=STEP_NS,TOLERANCES=TOLERANCES,retire_executor=retire_executor,shutdown_context=shutdown_context,publisher_identity=publisher_identity,publisher_key=publisher_key,CAMERA_SELECTION_POLICY=CAMERA_SELECTION_POLICY,Path=Path,atomic_json=atomic_json,primitive_world_poses=primitive_world_poses,collection_status=collection_status,joined_profiles=joined_profiles,profile_tick=profile_tick,wall_profile_summary=wall_profile_summary,milliseconds=milliseconds,PROFILE_POLICY=PROFILE_POLICY,make_baseline=make_baseline,validate_baseline=validate_baseline,SensorAmbiguity=SensorAmbiguity,frame_identity=frame_identity,exact_duplicate=exact_duplicate,math=math,comparison=comparison,matches=matches,interval=interval,native_frame=native_frame,world_step_errors=world_step_errors,frame_capacity_seconds=frame_capacity_seconds,QUERY_POLICY=QUERY_POLICY,CLOCK_POLICY=CLOCK_POLICY,random=random,replace=replace,copy=copy,PlannerSchedule=PlannerSchedule,TargetCandidate=TargetCandidate,choose_noise_scale=choose_noise_scale,final_command=final_command,TickContract=TickContract,TickContractError=TickContractError,require_snapshots=require_snapshots,digest=digest,verify_proof=verify_proof, DEFAULT_NOISE=DEFAULT_NOISE, SmoothDart=SmoothDart, initial_arm=initial_arm, ConvergenceFailure=ConvergenceFailure, QualityReject=QualityReject, POLICY=POLICY, WorkerRegistry=WorkerRegistry, FailureStreak=FailureStreak, disposition=disposition, MotionWaitTimeout=MotionWaitTimeout, contextmanager=contextmanager, OwnershipStalled=OwnershipStalled, threading=threading,time=time,np=np,json=json,JOINTS=JOINTS,
                  String=lambda data:NS(data=data),StepGeneration=StepGeneration,
                  CancelledGeneration=CancelledGeneration,CommandLedger=CommandLedger,
                  corrective_action=corrective_action,JOINT_LIMITS={k:(-3,3) for k in JOINTS},
@@ -252,7 +252,7 @@ class ReviewRegressions(unittest.TestCase):
         c.node._cmd_toggle_ground_plane=lambda:None
         from contextlib import nullcontext
         c.node._motion_guard=nullcontext
-        c.scene_reset=NS(clear=lambda:{},set_policy=lambda ids:None,
+        c.scene_reset=NS(rebuild_legos=lambda snapshot:None,clear=lambda:{},set_policy=lambda ids:None,
             verify=lambda snapshot,joints:dict(passed=False,poses=collision_pose_errors(objects,snapshot)))
         service=NS(Request=lambda:NS(components=NS(components=0)))
         with patch.dict(sys.modules,{'moveit_msgs':NS(),'moveit_msgs.srv':NS(GetPlanningScene=service)}):

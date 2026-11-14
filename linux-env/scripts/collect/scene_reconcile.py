@@ -13,8 +13,9 @@ FULL_SCENE = 1023
 def ros_messages():
     from moveit_msgs.msg import PlanningScene, CollisionObject, AttachedCollisionObject, AllowedCollisionEntry
     from moveit_msgs.srv import GetPlanningScene, ApplyPlanningScene
+    from geometry_msgs.msg import Pose
     return SimpleNamespace(Scene=PlanningScene, Object=CollisionObject, Attached=AttachedCollisionObject,
-                           Entry=AllowedCollisionEntry, Get=GetPlanningScene, Apply=ApplyPlanningScene)
+                           Entry=AllowedCollisionEntry, Get=GetPlanningScene, Apply=ApplyPlanningScene,Pose=Pose)
 
 
 def collision_policy(srdf, world_ids=()):
@@ -186,6 +187,31 @@ class SceneReconciler:
             return dict(removed_attached=[obj.object.id for obj in attached],
                         removed_world=[obj.id for obj in world], verified=True, query_components=FULL_SCENE,
                         native_scene=native_scene_summary(final))
+
+    def rebuild_legos(self,snapshot):
+        """Reset barriers include every physical block, including placed blocks.
+
+        GUI's ordinary scene refresh intentionally filters in-cup blocks for
+        post-drop home planning. A collector reset verifies the full world.
+        """
+        objects,_=physical_pose_caches(snapshot,primitive_cups=self.primitive_cups)
+        with self.node._motion_guard():
+            scene=self.diff()
+            for name,body in objects.items():
+                kind,shape=self.node._build_lego_geometry(name)
+                if kind not in ('mesh','box') or shape is None:raise ValueError('Missing reset geometry: '+name)
+                co=self.msg.Object();co.id='lego_'+name;co.header.frame_id='base';co.operation=co.ADD
+                pose=self.msg.Pose()
+                for key in ('x','y','z'):setattr(pose.position,key,body[key])
+                for key in ('x','y','z','w'):setattr(pose.orientation,key,body['q'+key])
+                if kind=='mesh':co.meshes.append(shape);co.mesh_poses.append(pose)
+                else:co.primitives.append(shape);co.primitive_poses.append(pose)
+                scene.world.collision_objects.append(co)
+            if scene.world.collision_objects:
+                response=self.apply(scene)
+                if response is None or not response.success:raise RuntimeError('Full lego reset rebuild refused')
+            self.node._lego_collision_names=[co.id for co in scene.world.collision_objects]
+            return list(self.node._lego_collision_names)
 
     def verify(self, snapshot, joint_names):
         observed=self.query()

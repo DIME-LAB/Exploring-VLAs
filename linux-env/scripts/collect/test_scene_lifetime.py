@@ -64,7 +64,7 @@ class Future:
 
 
 MESSAGES=NS(Scene=Scene,Object=Object,Attached=Attached,Entry=lambda:NS(enabled=[]),
-            Get=NS(Request=Request),Apply=NS(Request=Request))
+            Get=NS(Request=Request),Apply=NS(Request=Request),Pose=pose)
 
 
 def moveit_acm_roundtrip(msg):

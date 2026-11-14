@@ -99,3 +99,15 @@ camera-first and late re-render arrival, immutable consumed metadata, both produ
 boundaries, missing/multiple native ticks and differing publishers/layouts. The
 real native-take probe likewise sends a2ns initial camera offset and a1ns later
 header variation on both camera streams.
+
+## Durable camera boundary
+
+Provisional groups are not silently discarded at receipt publication. The boundary
+waits up to5wall seconds for pending native publication, then refuses if any group
+has no unique native binding. The retained three-header probe uses nativeN,
+headersN-1000,N,N+1001: the first pixels remain valid, but the extra orphan header
+makes the episode terminal. After a successful boundary, unmatched late headers
+before the earliest next30Hz physical tick are terminal too, so a late arrival
+cannot slip between checking and publishing. Future camera-first packets can
+still await their native delivery. The horizon derives from STEP_NS and the
+existing stamp_ns/native_ns bounds; no timestamp is rounded or synthesized.

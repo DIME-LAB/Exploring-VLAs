@@ -427,6 +427,13 @@ ticks, and rebuilds the synchronized scene before planning. A failed restore is 
 plans a home trajectory out of the previous failed contact pose. The baseline's
 calibration, samples and snapshot hash are retained in `run.json`.
 
+Collector reset rebuilds include **every** physical lego, including one still
+resting in a cup before the next randomization. `SceneReconciler.rebuild_legos`
+uses the shared geometry factory and the synchronized native snapshot; full
+world/pose/shape/ACM verification stays strict. GUI scene refresh retains its
+verified in-cup filter for post-drop home planning. The distinction matters at
+`reset_release`, which runs before the next seed's randomization.
+
 The sensor join retains raw stamps, layout/content hashes and each packet's RMW
 publisher identity. Camera pixels are provisional until they match exactly one
 native physical tick within the shared 1 us producer tolerance. It permanently
@@ -475,7 +482,11 @@ refuse abnormal producer exit. Capture retirement and executor retirement must b
 before native node/context destruction. Async profiles keep copied native IDs and
 selected camera headers in separate fields. Attempt finalization preserves the
 original terminal fault and publishes its seed/poses, raw profiles and camera
-counts even if supplementary profiling fails. See [ROS lifetime evidence](docs/notes/collection-ros-lifecycle.md).
+counts even if supplementary profiling or terminal-marker publication fails;
+the failure streak observes the final disposition once. Unresolved camera groups
+refuse an episode boundary after a bounded native-publication drain. A sealed
+boundary also rejects late unmatched headers in the gap before the next valid
+physical tick; camera-first packets for future ticks remain provisional. See [ROS lifetime evidence](docs/notes/collection-ros-lifecycle.md).
 
 A typed physical convergence deadline can reject one episode after native pause,
 worker retirement and contract auditing. Stationary/short data, calibrated-home

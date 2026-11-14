@@ -57,7 +57,7 @@ from query_service import StrictQueryClient
 from recovery import REGRASP_POLICY, regrasp_slot, recovery_geometry, detect_miss
 from dart import DEFAULT_NOISE, SmoothDart, TargetCandidate, PlannerSchedule
 from command_geometry import choose_noise_scale, final_command, QUERY_POLICY, frame_capacity_seconds
-from tick_contract import TickContract, TickContractError, require_snapshots, digest, verify_proof, CLOCK_POLICY
+from tick_contract import TickContract, TickContractError, require_snapshots, digest, verify_proof, CLOCK_POLICY, STEP_NS
 from episode_policy import (POLICY, QualityReject, ConvergenceFailure, WorkerRegistry,
                             PLANNER_REJECTIONS, FailureStreak, disposition)
 
@@ -99,6 +99,7 @@ class Sensors:
         self.camera_candidates={}
         self.camera_native_ticks={}
         self.native_ticks=collections.OrderedDict()
+        self.camera_boundary_floor=-1
         self.reference = None
         self.acks = {}
         self.subs = []
@@ -177,7 +178,33 @@ class Sensors:
                 candidates=list(frames.values()),native_ticks=[dict(epoch=e,sim_ns=n) for e,n in sorted(candidates)],
                 owner_epoch=first['receipt_epoch'],stamp_rule='stamp_ns',tolerance_ns=TOLERANCES['stamp_ns']))
             self.condition.notify_all();raise self.failure
+        earliest=self.camera_boundary_floor+STEP_NS-TOLERANCES['stamp_ns']-TOLERANCES['native_ns']
+        if self.camera_boundary_floor>=0 and any(stamp<earliest for stamp in frames):
+            self.failure=SensorAmbiguity(dict(stream=key,reason='late unresolved camera group behind durable boundary',
+                candidates=list(frames.values()),native_floor_ns=self.camera_boundary_floor,
+                earliest_next_header_ns=earliest,owner_epoch=first['receipt_epoch']))
+            self.condition.notify_all();raise self.failure
         return None  # Provisional first pixels cannot be consumed before native tick delivery.
+
+    def require_camera_boundary(self,floor,timeout=5.):
+        deadline=time.monotonic()+timeout
+        with self.condition:
+            while True:
+                if self.failure:raise self.failure
+                unresolved=[]
+                for camera,frames in self.seen_camera_frames.items():
+                    for first in frames.values():
+                        if self.camera_native_tick(camera,first) is None:
+                            unresolved.extend(self.camera_candidates[(camera,first['stamp_ns'])].values())
+                if not unresolved:
+                    self.camera_boundary_floor=max(self.camera_boundary_floor,floor)
+                    return dict(passed=True,native_floor_ns=floor,groups=sum(len(f) for f in self.seen_camera_frames.values()))
+                remaining=deadline-time.monotonic()
+                if remaining<=0:
+                    self.failure=SensorAmbiguity(dict(reason='unresolved camera groups at durable boundary',
+                        candidates=unresolved,native_floor_ns=floor,timeout_wall_s=timeout))
+                    self.condition.notify_all();raise self.failure
+                self.condition.wait(min(remaining,.1))
 
     def put(self,key,msg,info=None):
         if key in ('wrist','top'):
@@ -1364,7 +1391,7 @@ class Collector:
         cleared = self.scene_reset.clear()
         self.node._cmd_toggle_ground_plane()
         self.node._add_cup_collision_objects(cups_dict=dict(self.node._drop_data))
-        self.node._add_lego_collision_objects(legos_dict=dict(self.node.objects_data))
+        self.scene_reset.rebuild_legos(snapshot)
         world_ids = ['ground_plane'] + list(self.node._cup_collision_names) + list(self.node._lego_collision_names)
         with self.node._motion_guard():
             self.scene_reset.set_policy(world_ids)
@@ -1757,6 +1784,10 @@ class Collector:
                         receipt['recovery_report']=cycle_result['recovery_report']
                     if cycle_result.get('worker_error'):
                         receipt['cycle_worker_error'] = cycle_result['worker_error']
+                    if sensor_failure is not None:
+                        self.failure=self.failure or repr(sensor_failure)
+                        receipt['camera_boundary']=dict(passed=False,original_sensor_error=repr(sensor_failure))
+                    else:receipt['camera_boundary']=self.sensors.require_camera_boundary(self.generation.floor_ns)
                     receipt.update(self.sensors.camera_diagnostics(motion_epochs,duplicate_start,rerender_start,stale_camera_start))
                     receipt['root_file_growth'] = root_growth.finish()
                     profiles=getattr(self,'wall_profiles',[])[wall_profile_start:]
@@ -1772,12 +1803,11 @@ class Collector:
                     receipt['disposition'] = disposition(receipt,self.failure,writer.rows if writer else None)
                     receipt['accepted'] = receipt['disposition']['kind']=='accepted'
                     self.needs_home_restore=receipt['disposition']['kind']=='quality_reject'
-                    receipt['failure_streak'] = streak.observe(receipt['disposition'])
                     if receipt['disposition']['kind']=='terminal':self.persist_terminal_fault(receipt.get('error'),'attempt disposition')
                 except Exception as finalization_error:
                     self.failed_finalization(receipt,finalization_error,motion_epochs,duplicate_start,rerender_start,stale_camera_start,
                         getattr(self,'wall_profiles',[])[wall_profile_start:],writer.write_profiles if writer else [])
-                    receipt['failure_streak']=streak.observe(receipt['disposition'])
+                receipt['failure_streak']=streak.observe(receipt['disposition'])
                 path.mkdir(parents=True, exist_ok=True)
                 atomic_json(path / 'receipt.json',receipt)
                 with (root / 'episodes.jsonl').open('a') as log:
