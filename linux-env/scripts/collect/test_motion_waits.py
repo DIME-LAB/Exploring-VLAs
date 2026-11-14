@@ -160,7 +160,7 @@ class MotionWaitTests(unittest.TestCase):
         node=c.node;node._motion_context.epoch=1
         clock=Clock(0.);event=Event(clock,math.inf,epoch=1)
         def emit(record):
-            c.generation.install(dict(epoch=2,invalid_through_ns=0))
+            c.generation.install(dict(epoch=2,invalid_through_ns=c.generation.floor_ns))
             node._last_motion_status=dict(ok=True,epoch=2)
         node._motion_waiter=MotionWaiter(lambda:clock.sim,c.generation.require,emit,wall=lambda:clock.wall)
         with self.assertRaises(CancelledGeneration):node._wait_motion_event(event,10.)

@@ -21,6 +21,7 @@ class StepGeneration:
     def __init__(self):
         self.lock = threading.RLock()
         self.epoch = None
+        self.last_epoch = -1
         self.floor_ns = -1
         self.identity = (None, -1)
         self.retirement_timeout = 15.
@@ -57,6 +58,10 @@ class StepGeneration:
 
     def install(self, result):
         with self.own('install'):
+            newest=max(self.last_epoch,self.epoch if self.epoch is not None else -1)
+            if result['epoch']<=newest or result['invalid_through_ns']<self.floor_ns:
+                raise CancelledGeneration('Cancellation epoch or native clock did not advance monotonically')
+            self.last_epoch=result['epoch']
             self.epoch = result['epoch']
             self.floor_ns = result['invalid_through_ns']
             self.identity = (self.epoch, self.floor_ns)
@@ -69,6 +74,7 @@ class StepGeneration:
         with self.own('cancel/reset'):
             # Failure leaves the local generation unusable. The collector's
             # common terminal handler owns setter-free emergency cancellation.
+            if self.epoch is not None:self.last_epoch=max(self.last_epoch,self.epoch)
             self.epoch = None
             self.identity = (None, self.floor_ns)
             retire()

@@ -47,7 +47,7 @@ from diagnostics import final_stills
 from query_service import StrictQueryClient
 from recovery import REGRASP_POLICY, regrasp_slot, recovery_geometry, detect_miss
 from dart import DEFAULT_NOISE, SmoothDart, TargetCandidate, PlannerSchedule
-from command_geometry import choose_noise_scale, final_command, QUERY_POLICY
+from command_geometry import choose_noise_scale, final_command, QUERY_POLICY, frame_capacity_seconds
 from tick_contract import TickContract, TickContractError, require_snapshots, digest, verify_proof, CLOCK_POLICY
 from episode_policy import (POLICY, QualityReject, ConvergenceFailure, WorkerRegistry,
                             PLANNER_REJECTIONS, FailureStreak, disposition)
@@ -458,8 +458,15 @@ class Collector:
         self.scene_marker = SceneSafetyMarker(os.environ['SOARM_INSTANCE_ROOT'])
         self.scene_marker.require_fresh_stack()
         self.generation = StepGeneration()
-        self.node = PickPlaceNode(use_sim_time=True, joint_states_topic='/joint_states_measured',
-            execution=SceneExecution('collector', self.motion_effect, self.scene_incomplete, self.callback_failure))
+        self.generation.retirement_timeout = frame_capacity_seconds()+5.
+        # Node construction initializes guarded status before a native epoch exists.
+        # Only this synchronous constructor thread owns that bootstrap state.
+        self._constructing_thread = threading.get_ident()
+        try:
+            self.node = PickPlaceNode(use_sim_time=True, joint_states_topic='/joint_states_measured',
+                execution=SceneExecution('collector', self.motion_effect, self.scene_incomplete, self.callback_failure))
+        finally:
+            self._constructing_thread = None  # Revoke before either collector thread starts.
         self.node.validity_client=StrictQueryClient(self.node.validity_client,'MoveIt state validity',
             on_failure=lambda exc:self.abort_stalled_owner(exc,'MoveIt validity query'))
         self.node._motion_context = threading.local()
@@ -511,6 +518,10 @@ class Collector:
 
     @contextmanager
     def motion_effect(self, epoch):
+        if (getattr(self, '_constructing_thread', None) == threading.get_ident() and
+                epoch is None and self.generation.epoch is None and not self.generation.stalled):
+            yield
+            return
         try:
             self.generation.require(epoch)
             with self.generation.own('scene/bookkeeping/status'):
@@ -588,6 +599,8 @@ class Collector:
                 return
             self.stalled_abort_started = True
             self.failure = str(exc)
+        with self.tick_condition:
+            self.tick_condition.notify_all()
         # No generation lock: its owner may be stuck in publication forever.
         # Native cancellation only pauses and invalidates queued commands.
         try:
@@ -824,8 +837,8 @@ class Collector:
                 epoch = self.generation.epoch
             self.timeline(True)
             with self.tick_condition:
-                if not self.tick_condition.wait_for(lambda: (self.last_snapshot and self.last_snapshot['epoch'] == epoch and self.last_processed_ns > previous) or self.failure, timeout=20):
-                    raise TimeoutError('One-frame capture/command handshake exceeded 20 wall seconds')
+                if not self.tick_condition.wait_for(lambda: (self.last_snapshot and self.last_snapshot['epoch'] == epoch and self.last_processed_ns > previous) or self.failure, timeout=frame_capacity_seconds()):
+                    raise TimeoutError('Held-frame capacity exceeded '+str(frame_capacity_seconds())+' wall seconds; query/ACK/clock/recording did not retire')
                 if self.failure:
                     raise RuntimeError(self.failure)
                 snapshots.append(self.last_snapshot)

@@ -6,6 +6,10 @@ QUERY_POLICY=dict(per_query_timeout_s=1.,delivery_margin_s=.05,max_final_queries
                   max_preflight_queries=50000,max_segment_subdivisions=1000)
 
 
+def frame_capacity_seconds():
+    return QUERY_POLICY["max_final_queries"]*(QUERY_POLICY["per_query_timeout_s"]+QUERY_POLICY["delivery_margin_s"])+57.
+
+
 class QueryBudget:
     """Native validity RPCs have individual deadlines; successful calls add up."""
     def __init__(self,limit):self.limit=limit;self.count=0;self.total_s=0.;self.maximum_s=0.

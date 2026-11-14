@@ -625,15 +625,41 @@ The combined smoke runner uses the same launcher, collector and export entrypoin
 It first inspects one attempt in each mode, then resumes to five accepted normal
 and five dedicated re-grasp episodes, retaining failed videos with `--diagnostic`.
 It saves first-reset/restore receipts, stage/attempt wall times, dataset-load
-validation and exact-PID cleanup evidence. `--plan` starts no processes. `--go`
+validation and PID/start-time/pidfd cleanup evidence. `--plan` starts no processes. `--go`
 requires the lead's explicit window; independent review can run concurrently,
 and its verdict can supersede the smoke data. Visual review and pilot approval
 remain separate from collection completion:
 
 ```bash
 python3 -B linux-env/scripts/collect/run_smoke.py --cut <full-commit> \
-  --output /mnt/a4500-backup/exploring-vlas/datasets/smoke-clock-restore-v1 --plan
+  --output /mnt/a4500-backup/exploring-vlas/datasets/smoke-clock-restore-v2 --plan
 # In the granted window, use the identical command with --go instead of --plan.
+```
+
+The runner and indexed launchers share an exclusive `instance.lock`. The runner
+tracks kernel descendants (including orphaned grandchildren through a child
+subreaper), never adopts PID-file contents, and signals only its recorded pidfds
+after checking each identity again. The indexed Isaac log is pinned to
+`runtime/instance-N/isaac.log`. A startup failure without an attempt receipt keeps
+the original traceback as the primary smoke error and counts zero attempts.
+
+Constructor status initialization has a separate synchronous bootstrap owner;
+this owner is revoked before the ROS/capture threads start. No motion or callback
+may use `epoch=None`. Cancellation epochs must strictly increase, and both clocks
+are reconciled against the latest row or held boundary even across repeated
+pause/restore calls. The held-frame capacity is 325.8 wall seconds (256 queries
+at up to 1.05 s each, plus 57 s for ACK, clock delivery, recording and scheduling);
+retirement allows another 5 s. These are hang limits, not pacing targets.
+
+The integration checks below use fake Kit and MoveIt/ROS message sources and
+start no simulator. Run the real-node check on the isolated assigned domain with
+system Humble and the control workspace sourced:
+
+```bash
+ROS_DOMAIN_ID=90 python3 -B linux-env/scripts/collect/collector_boot_regression.py \
+  --output /mnt/a4500-backup/exploring-vlas/runtime/instance-0/bootstrap-check
+python3 -B linux-env/scripts/collect/process_ownership_regression.py \
+  --output /mnt/a4500-backup/exploring-vlas/runtime/instance-0/process-ownership-check
 ```
 
 ```bash

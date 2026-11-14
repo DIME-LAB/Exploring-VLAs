@@ -141,3 +141,31 @@ class IndependentClockTests(unittest.TestCase):
         rows=checked_window([dict(sim_ns=10**9,physics_time_s=1.),dict(sim_ns=1033333333,physics_time_s=1.+4*FLOAT32_DT)])
         row=copy.deepcopy(rows[-1]['tick_contract']['row']);row['sim_ns']+=STEP_NS
         self.assertIn('Repeated or skipped physical tick',observation_errors(row,rows[0]['tick_contract']['row']))
+
+
+class BoundaryChainTests(unittest.TestCase):
+    def test_pause_then_restore_rejects_world_and_native_rewinds(self):
+        for kind in ('world','native'):
+            c,r,_,initial,_=RestoreHistoryTests().setup_restore()
+            c.timeline(False)
+            if kind=='world':r.world.current_time=.9
+            else:r.stamp=lambda:900000000
+            with self.assertRaises(Exception):c.restore_physical('restore')
+            self.assertTrue(c.failure)
+
+    def test_restore_then_same_receipt_cannot_replay_epoch(self):
+        c,r,_,_,_=RestoreHistoryTests().setup_restore();receipt=c.restore_physical('restore')
+        with self.assertRaises(Exception):c.cancel_owner(lambda:copy.deepcopy(receipt))
+        self.assertTrue(c.failure)
+
+    def test_consecutive_held_boundaries_preserve_clock_anchor_and_allow_next_tick(self):
+        c,r,entry,_,_=RestoreHistoryTests().setup_restore()
+        c.timeline(False);c.restore_physical('restore');c.restore_physical('restore')
+        s=r.snapshot();s.update(sim_ns=1033333333,physics_time_s=1.+4*FLOAT32_DT)
+        capture_snapshot(c,r,entry,s);self.assertIsNone(c.failure)
+
+    def test_unobserved_multi_frame_gap_at_boundary_is_terminal(self):
+        c,r,_,_,_=RestoreHistoryTests().setup_restore();c.timeline(False)
+        r.stamp=lambda:1100000000;r.world.current_time=1.+12*FLOAT32_DT
+        with self.assertRaises(TickContractError):c.restore_physical('restore')
+        self.assertTrue(c.failure)

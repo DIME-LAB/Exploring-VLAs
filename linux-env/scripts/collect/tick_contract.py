@@ -114,11 +114,12 @@ def row_errors(row,previous=None):
 
 
 class TickContract:
-    def __init__(self):self.previous=None;self.boundary=None
+    def __init__(self):self.previous=None;self.boundary=None;self.anchor=None
     def install_boundary(self,result,restore=False,pause_targets=None):
         epoch=result['epoch'];stamp=result['invalid_through_ns'];previous=self.previous
-        if previous and (epoch<=previous['epoch'] or stamp<previous['sim_ns']-1000):
-            raise TickContractError(['Cancellation/restore rewound the native clock or epoch'])
+        anchor=previous or self.anchor or self.boundary
+        if anchor and (epoch<=anchor['epoch'] or stamp<anchor['sim_ns']-10):
+            raise TickContractError(['Cancellation/restore rewound the native clock or replayed an epoch'])
         if restore:
             baseline=copy.deepcopy(result['command_baseline']);snapshot=result['snapshot']
             if (baseline.get('epoch')!=epoch or snapshot.get('epoch')!=epoch or baseline.get('sim_ns')!=stamp or
@@ -130,6 +131,7 @@ class TickContract:
             if not isinstance(world,(int,float)) or not math.isfinite(world):raise TickContractError(['Restore World clock is invalid'])
             if previous and world<previous['physics_time_s']:raise TickContractError(['Restore rewound the World clock'])
             baseline['kind']='restore'
+            world=baseline['physics_time_s']
         else:
             targets=previous['applied_command'] if previous else pause_targets
             world=(previous['physics_time_s'] if previous and abs(stamp-previous['sim_ns'])<=1000 else None)
@@ -140,11 +142,27 @@ class TickContract:
                     raise TickContractError(['Pause did not supply a valid native clock boundary'])
                 if previous and world<previous['physics_time_s']:raise TickContractError(['Pause rewound the World clock'])
             baseline=(dict(epoch=epoch,sim_ns=stamp,physics_time_s=world,drive_targets=list(targets),kind='pause') if targets is not None else None)
-        self.previous=None;self.boundary=baseline
+        clock_anchor=dict(epoch=epoch,sim_ns=stamp,physics_time_s=world)
+        if anchor:
+            delta=stamp-anchor['sim_ns']
+            if abs(delta)>10 and abs(delta-STEP_NS)>10:
+                raise TickContractError(['Cancellation boundary skipped native frames'])
+            old_world=anchor.get('physics_time_s')
+            if old_world is not None:
+                if world is None:raise TickContractError(['Cancellation boundary omitted its World clock'])
+                errors=(world_step_errors(world,old_world) if delta>10 else
+                        ([] if abs(world-old_world)<=1e-6 else ['Held cancellation boundary changed the World clock']))
+                if errors:raise TickContractError(errors)
+        self.previous=None;self.boundary=baseline;self.anchor=clock_anchor
         return copy.deepcopy(baseline)
     def observe(self,row):
         if not self.previous and self.boundary is not None:row['drive_baseline']=copy.deepcopy(self.boundary)
         errors=observation_errors(row,self.previous)
+        if self.previous is None and self.anchor is not None:
+            if row['epoch']!=self.anchor['epoch']:errors.append('First tick belongs to another boundary epoch')
+            if abs(row['sim_ns']-self.anchor['sim_ns']-STEP_NS)>10:errors.append('First tick skipped the retained clock anchor')
+            if self.anchor.get('physics_time_s') is not None:
+                errors.extend(world_step_errors(row['physics_time_s'],self.anchor['physics_time_s']))
         if (not self.previous or self.previous['epoch']!=row['epoch']) and abs(row['sim_ns']-row['invalid_through_ns']-STEP_NS)>1000:
             errors.append('First physical tick skipped its reset boundary')
         if errors:raise TickContractError(errors,copy.deepcopy(row))

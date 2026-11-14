@@ -31,6 +31,8 @@ mkdir -p "$TMPDIR" "$ROS_LOG_DIR" "$HF_HOME" "$OPTIX_CACHE_PATH"
 launcher="$SCRIPT_DIR/isaac/isaacsim_launch.sh"
 case "$command" in
     up)
+        source "$SCRIPT_DIR/collect/instance_claim.sh"
+        claim_collection_instance "$SOARM_INSTANCE_ROOT"
         bash "$launcher" launch --headless --instance "$index" --rate-hz 0
         scene_live="$(PYTHONPATH="$REPO_ROOT/omni-kit-mcp" python3 -m kit_mcp.client run_python \
             '{"code":"import omni.usd\nresult=bool(omni.usd.get_context().get_stage().GetPrimAtPath(\"/World/SO_ARM101\").IsValid())"}' \

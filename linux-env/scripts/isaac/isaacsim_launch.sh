@@ -64,7 +64,7 @@ if [ -n "$INSTANCE_INDEX" ]; then
     export OMNI_KIT_MCP_PORT="$((8777 + 2 * INSTANCE_INDEX))"
     export SOARM_KIT_MCP_PORT="$OMNI_KIT_MCP_PORT"
     INSTANCE_ROOT="${SOARM_INSTANCE_ROOT:-/mnt/a4500-backup/exploring-vlas/runtime/instance-$INSTANCE_INDEX}"
-    export ISAACSIM_LOG="${ISAACSIM_LOG:-$INSTANCE_ROOT/isaac.log}"
+    export ISAACSIM_LOG="$INSTANCE_ROOT/isaac.log"
     python3 "$SCRIPT_DIR/../collect/storage.py" "$INSTANCE_ROOT" "$ISAACSIM_LOG"
     mkdir -p "$INSTANCE_ROOT"
     export CUDA_DEVICE_ORDER=PCI_BUS_ID
@@ -265,6 +265,10 @@ PY
 }
 
 do_launch() {
+    if [ -n "${INSTANCE_ROOT:-}" ]; then
+        source "$SCRIPT_DIR/../collect/instance_claim.sh"
+        claim_collection_instance "$INSTANCE_ROOT"
+    fi
     local ext="soarm101-dt" stream=0 headless=0 arg
     while [ $# -gt 0 ]; do
         arg="$1"
