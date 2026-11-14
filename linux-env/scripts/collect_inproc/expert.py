@@ -90,7 +90,16 @@ class Expert:
         if self.backend.epoch!=epoch:raise RuntimeError('Plan belongs to an earlier reset')
 
     def grip(self,target,phase,duration=3.):
-        initial=self.backend.snapshot()['state'][5];first=self.backend.stamp()
+        snapshot=self.backend.snapshot();initial=snapshot['state'][5]
+        # A restored, settled jaw already at the goal needs no motion interval.
+        # Keep its exact goal for the next command; every executed tick is recorded.
+        if (abs(initial-target)<1e-4 and abs(snapshot['velocity'][5])<1e-3
+                and abs(snapshot['drive_targets'][5]-target)<1e-4):
+            self.reference[5]=target
+            return dict(settled_at_goal=True,sim_ns=snapshot['sim_ns'],
+                measured_rad=initial,velocity_rad_s=snapshot['velocity'][5],
+                drive_target_rad=snapshot['drive_targets'][5],goal_rad=target)
+        first=self.backend.stamp()
         for _ in range(math.ceil((duration+5)*30)+2):
             s=self.backend.snapshot();elapsed=(s['sim_ns']-first)/1e9
             self.reference[5]=initial+min(1.,(elapsed+1/30)/duration)*(target-initial)
@@ -116,8 +125,10 @@ class Expert:
         solutions={name:self.select(v) for name,v in geometry['solutions'].items()}
         opening=geometry['grasp_spec']['opening_rad'];closing=geometry['grasp_spec']['closing_rad']
         def grip(phase,q):
-            self.grip(q,phase)
-            report['steps'].append(dict(stage=phase,sim_ns=self.snapshots[-1]['sim_ns']))
+            settled=self.grip(q,phase)
+            step=dict(stage=phase,sim_ns=self.snapshots[-1]['sim_ns'])
+            if settled:step.update(sim_ns=settled['sim_ns'],already_at_goal=settled)
+            report['steps'].append(step)
         def arm(phase,clean_key,executed_key):
             self.arm(solutions[clean_key],phase,2.5,executed_target=solutions[executed_key],hold=True)
             report['steps'].append(dict(stage=phase,end_sim_ns=self.snapshots[-1]['sim_ns']))
