@@ -1191,7 +1191,7 @@ class Collector:
                       else parameters(args.seed+trial,color,regrasp=args.regrasp_only or regrasp_slot(accepted)))
             params['trial'] = trial
             path = root / f'attempt-{trial:04d}'
-            receipt = dict(params=params, accepted=False)
+            receipt = dict(params=params,accepted=False,episode_id=hashlib.sha256((str(root)+':'+str(trial)+':'+str(params['seed'])).encode()).hexdigest())
             wait_log_start = len(self.wait_diagnostics)
             failure_log_start = len(self.capture_failures)
             cycle_result = {}
@@ -1201,6 +1201,8 @@ class Collector:
             receipt_cycle = None
             try:
                 with self.generation.own('attempt start'):
+                    self.current_episode_id=receipt['episode_id']
+                    self.episode_snapshots=[]
                     self.node._qs_abort_evt.clear()
                     motion_epochs.add(self.generation.epoch)
                 self.motion_call(self.reset_release,params['object'])
@@ -1247,9 +1249,6 @@ class Collector:
                 receipt['initial_restore_check'] = {k:v for k,v in self.scene_restore.items() if k != 'snapshot'}
                 receipt['initial_restore_error_m'] = self.scene_restore['max_position_error_m']
                 receipt['initial_expert_reference'] = list(self.servo.reference)
-                receipt['episode_id']=hashlib.sha256((str(root)+':'+str(trial)+':'+str(params['seed'])).encode()).hexdigest()
-                self.current_episode_id=receipt['episode_id']
-                self.episode_snapshots=[]
                 writer = EpisodeWriter(path, 30)
                 with self.writer_lock:
                     self.writer = writer

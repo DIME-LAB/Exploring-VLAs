@@ -164,3 +164,25 @@ class VerificationFinalizationTests(unittest.TestCase):
             else:
                 self.assertNotIn('quality_reject',receipt)
                 self.assertEqual(receipt['error'],'original verification contract failure')
+
+
+class EpisodeIdentityTests(unittest.TestCase):
+    def test_actual_attempt_preparation_assigns_new_id_before_reset_or_home(self):
+        import ast,hashlib,threading
+        from pathlib import Path
+        from types import SimpleNamespace as NS
+        from protocol import StepGeneration
+        tree=ast.parse(Path(__file__).with_name('collect.py').read_text())
+        run=next(n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name=='run')
+        loop=next(n for n in run.body if isinstance(n,ast.For) and isinstance(n.target,ast.Name) and n.target.id=='trial')
+        def assigned(node,name):return isinstance(node,ast.Assign) and any(isinstance(t,ast.Name) and t.id==name for t in node.targets)
+        path=next(n for n in loop.body if assigned(n,'path'));receipt=next(n for n in loop.body if assigned(n,'receipt'))
+        attempt=next(n for n in loop.body if isinstance(n,ast.Try))
+        observed=[];generation=StepGeneration();generation.install(dict(epoch=7,invalid_through_ns=0))
+        c=NS(current_episode_id='previous episode',generation=generation,node=NS(_qs_abort_evt=threading.Event()))
+        c.reset_release=lambda name:observed.append(c.current_episode_id)
+        c.motion_call=lambda fn,*a:fn(*a)
+        scope=dict(self=c,params=dict(object='red',seed=123),root=Path('/a/run'),trial=9,hashlib=hashlib,motion_epochs=set())
+        exec(compile(ast.Module(body=[path,receipt,attempt.body[0],attempt.body[1]],type_ignores=[]),'collect.py','exec'),scope)
+        self.assertEqual(observed,[scope['receipt']['episode_id']])
+        self.assertNotEqual(observed,['previous episode'])
