@@ -39,8 +39,27 @@ def vector(value,size):
     return isinstance(value,(list,tuple)) and len(value)==size and all(isinstance(v,(int,float)) and math.isfinite(v) for v in value)
 
 
-def observation_errors(row,previous=None):
+def camera_tick_errors(row,required=False):
+    identities=row.get('camera_identity',{})
+    if not isinstance(identities,dict):return ['Invalid native camera selection identities']
+    if not required and not any(isinstance(identity,dict) and 'native_tick' in identity for identity in identities.values()):return []
     errors=[]
+    for key in ('wrist','top'):
+        identity=identities.get(key,{})
+        native=identity.get('native_tick') if isinstance(identity,dict) else None
+        if not isinstance(native,dict):
+            errors.append('Missing native camera selection proof '+key)
+            continue
+        for proof in (comparison(key+' selection epoch',native.get('epoch'),row.get('epoch')),
+                comparison(key+' native selection tick',native.get('sim_ns'),row.get('pose_stamp_ns')),
+                comparison(key+' selected raw header',identity.get('stamp_ns'),row.get(key+'_stamp_ns')),
+                comparison(key+' camera/native producer agreement',identity.get('stamp_ns'),native.get('sim_ns'),'stamp_ns')):
+            if not proof['passed']:errors.append('Camera selection contract: '+json.dumps(proof,sort_keys=True))
+    return errors
+
+
+def observation_errors(row,previous=None):
+    errors=camera_tick_errors(row)
     if previous is not None:
         errors.extend('Previous tick: '+error for error in observation_errors(previous))
     stamp=row.get('sim_ns',0);epoch=row.get('epoch')

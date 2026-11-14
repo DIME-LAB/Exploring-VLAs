@@ -1,0 +1,134 @@
+{
+  "source_cut": "8a318eab1e397b5ae3c02a718e8d0e69618b953c",
+  "native_tick": {
+    "epoch": 8,
+    "sim_ns": 16083333333
+  },
+  "sensor_evidence": {
+    "stream": "wrist",
+    "reason": "distinct same-camera tick/layout candidates",
+    "candidates": [
+      {
+        "stream": "wrist",
+        "stamp_ns": 16083333331,
+        "content_sha256": "2a7d993a79eef0f881043fda07d696d91ed6df6f33d083fd16b9f30d6614578c",
+        "layout": {
+          "encoding": "rgb8",
+          "width": 640,
+          "height": 480,
+          "step": 1920,
+          "is_bigendian": 0,
+          "frame_id": "camera_link"
+        },
+        "receipt_epoch": 8,
+        "publisher": {
+          "scope": "receiving subscription/context-local RMW identity",
+          "gid": "48730f10f10b2c7900000000000000000000000000000000",
+          "implementation": "rmw_cyclonedds_cpp",
+          "publication_sequence_number": null,
+          "source_timestamp": 1794643460731305309,
+          "received_timestamp": null,
+          "transport_take_decode_ms": 0.977264
+        }
+      },
+      {
+        "stream": "wrist",
+        "stamp_ns": 16083333332,
+        "content_sha256": "c7b6c586082a9b6cd42628ec93b7aef81b0418cc77386276788a295340e349c5",
+        "layout": {
+          "encoding": "rgb8",
+          "width": 640,
+          "height": 480,
+          "step": 1920,
+          "is_bigendian": 0,
+          "frame_id": "camera_link"
+        },
+        "receipt_epoch": 8,
+        "publisher": {
+          "scope": "receiving subscription/context-local RMW identity",
+          "gid": "48730f10f10b2c7900000000000000000000000000000000",
+          "implementation": "rmw_cyclonedds_cpp",
+          "publication_sequence_number": null,
+          "source_timestamp": 1794643460831808541,
+          "received_timestamp": null,
+          "transport_take_decode_ms": 1.989342
+        }
+      }
+    ],
+    "owner_epoch": 8
+  },
+  "async_clock_pairs": [
+    {
+      "epoch": 8,
+      "camera_stamp_ns": 15650000000,
+      "native_sim_ns": 15650000000
+    },
+    {
+      "epoch": 8,
+      "camera_stamp_ns": 15683333333,
+      "native_sim_ns": 15683333333
+    },
+    {
+      "epoch": 8,
+      "camera_stamp_ns": 15716666666,
+      "native_sim_ns": 15716666667
+    },
+    {
+      "epoch": 8,
+      "camera_stamp_ns": 15750000000,
+      "native_sim_ns": 15750000000
+    },
+    {
+      "epoch": 8,
+      "camera_stamp_ns": 15783333333,
+      "native_sim_ns": 15783333333
+    },
+    {
+      "epoch": 8,
+      "camera_stamp_ns": 15816666666,
+      "native_sim_ns": 15816666667
+    },
+    {
+      "epoch": 8,
+      "camera_stamp_ns": 15850000000,
+      "native_sim_ns": 15850000000
+    },
+    {
+      "epoch": 8,
+      "camera_stamp_ns": 15883333333,
+      "native_sim_ns": 15883333333
+    },
+    {
+      "epoch": 8,
+      "camera_stamp_ns": 15916666666,
+      "native_sim_ns": 15916666667
+    },
+    {
+      "epoch": 8,
+      "camera_stamp_ns": 15950000000,
+      "native_sim_ns": 15950000000
+    },
+    {
+      "epoch": 8,
+      "camera_stamp_ns": 15983333333,
+      "native_sim_ns": 15983333333
+    },
+    {
+      "epoch": 8,
+      "camera_stamp_ns": 16016666665,
+      "native_sim_ns": 16016666667
+    },
+    {
+      "epoch": 8,
+      "camera_stamp_ns": 16050000000,
+      "native_sim_ns": 16050000000
+    },
+    {
+      "epoch": 8,
+      "camera_stamp_ns": 16083333331,
+      "native_sim_ns": 16083333333
+    }
+  ],
+  "raw_rgb_payloads_available": false,
+  "note": "Raw packet digests and times retained; tests reconstruct distinct RGB pixels. Encoded diagnostic video is not raw packet bytes."
+}

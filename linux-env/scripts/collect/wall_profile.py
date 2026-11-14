@@ -1,7 +1,8 @@
 """Same-host monotonic wall timing; diagnostic only, never a simulation clock."""
-import math,copy
+import math,copy,json
+from comparisons import comparison
 
-PROFILE_POLICY=dict(version=2,clock='CLOCK_MONOTONIC on the same host',
+PROFILE_POLICY=dict(version=3,clock='CLOCK_MONOTONIC on the same host',
     kit_boundary='advance requested to Kit post-update; proxy for render completion, not a GPU fence',
     camera_boundary='both RGB callbacks received; includes DDS transport and native publication ordering',
     native_state='in-process PhysX/body read; no per-tick bridge/run_python RPC',
@@ -17,6 +18,7 @@ def profile_tick(snapshot,entry,read_start,read_end):
     cameras=max(entry[k][1] for k in ('wrist','top'))
     step_start=native.get('step_start_ns');step_end=native.get('step_end_ns')
     result=dict(profile_id=str(snapshot['epoch'])+':'+str(snapshot['sim_ns'])+':'+str(read_start),epoch=snapshot['epoch'],sim_ns=snapshot['sim_ns'],capture_start_ns=read_end,
+        native_sim_ns=snapshot['sim_ns'],camera_stamp_ns=(entry['wrist'][2]['stamp_ns'] if len(entry['wrist'])>2 else None),
         read_wait_ms=milliseconds(read_start,read_end),camera_receive_ns=cameras,
         kit_step_render_ms=milliseconds(step_start,step_end) if step_start is not None and step_end is not None else None,
         step_to_both_cameras_ms=milliseconds(step_start,cameras) if step_start is not None else None,
@@ -45,13 +47,27 @@ def summary(rows):
 
 def joined_profiles(captures,writes):
     linked={row['profile_id']:row for row in writes}
-    if len(linked)!=len(writes):raise RuntimeError('Duplicate async write profile identity')
+    if len(linked)!=len(writes):raise ProfileContractError([dict(field='profile_id',rule='copy',error='Duplicate async write profile identity')])
     result=[]
     for original in captures:
         row=copy.deepcopy(original);write=linked.pop(row['profile_id'],None)
         if write is not None:
-            if any(write[key]!=row[key] for key in ('epoch','sim_ns')):raise RuntimeError('Async write profile differs from capture tick')
+            native=row.get('native_sim_ns',row['sim_ns'])
+            camera=row.get('camera_stamp_ns',row['sim_ns'])
+            proofs=[comparison('async profile epoch',write['epoch'],row['epoch']),
+                comparison('async native tick',write.get('native_sim_ns'),native),
+                comparison('async native alias',write['sim_ns'],native),
+                comparison('async selected camera stamp',write.get('camera_stamp_ns'),camera),
+                comparison('native/camera producer agreement',native,camera,'stamp_ns')]
+            failed=[proof for proof in proofs if not proof['passed']]
+            if failed:raise ProfileContractError(failed)
             row.update({key:write[key] for key in ('row_queue_ms','row_video_write_ms')})
         result.append(row)
     if linked:raise RuntimeError('Async write has no matching capture profile')
     return result
+
+
+class ProfileContractError(RuntimeError):
+    def __init__(self,proofs):
+        self.proofs=proofs
+        super().__init__('Async write profile contract failed: '+json.dumps(proofs,sort_keys=True))

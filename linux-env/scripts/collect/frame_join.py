@@ -39,7 +39,7 @@ def publisher_identity(info):
 def publisher_key(publisher):return publisher['implementation']+':'+publisher['gid']
 
 
-CAMERA_SELECTION_POLICY=dict(version=2,selection='first taken packet per exact stamp and publisher GID',
-    rerender='same GID + stamp + layout: retain first pixels; count later renders',
-    ambiguity='different GID, changed layout or different nearby stamp is terminal',
+CAMERA_SELECTION_POLICY=dict(version=3,selection='first taken pixels per unique native tick and publisher GID',
+    rerender='same GID/layout + one native tick within 1 us: retain first pixels; count later renders',
+    ambiguity='different GID/layout, absent or multiple matching native ticks are terminal',
     boundary='discard stamps at/below cancellation floor plus 1 us producer tolerance')

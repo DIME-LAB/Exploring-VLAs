@@ -8,7 +8,7 @@ physical requirements, separate from numeric agreement tolerances.
 
 | Comparison / entrance | Rule and reason |
 | --- | --- |
-| Sensors join: camera, measured JointState and native pose stamp | `stamp_ns`: absolute 1,000 ns; the capture contract's existing bound for independent ROS camera/native producers. Raw-stamp candidates are matched within this bound; exactly one compatible candidate is required. Adjacent rounded microseconds have no admission role. Ambiguity fails. |
+| Sensors join: camera, measured JointState and native pose stamp | `stamp_ns`: absolute 1,000 ns; the capture contract's existing bound for independent ROS camera/native producers. First taken same-source pixels are provisional until all header candidates match one unique native tick within this bound. Later renders retain the selected raw stamp/pixels; multiple native IDs or changed source/layout fail. Adjacent rounded microseconds have no admission role. Ambiguity fails. |
 | Sensors controller-reference diagnostic / ROS held-clock join | `stamp_ns`; the diagnostic retains original stamp/epoch and age. Future clocks beyond this bound fail. |
 | Capture state / velocity versus native articulation snapshot | `state_rad`: absolute 1e-7 in the quantity's units, preserving the original capture bound. State is radians; velocity is radians/s. |
 | Consecutive native pose ticks | `native_ns`: 10 ns about 1/30 s, allowing integer-nanosecond quantization. Cadence is checked against copied native pose stamps, independently of camera offset variations. Strictly positive ordering; missing/duplicate frames fail. |
@@ -81,3 +81,29 @@ only after its producer retires. A live receipt watcher defers partial/missing
 legacy documents. A final malformed receipt after producer exit is terminal and
 preserves the collector log. The controlled concurrent encoder regression proves
 200 reads see only the old complete document or no document until publication.
+
+## Camera/native entrance sweep
+
+The primitive-scene retained pairs in `fixtures/native-tick-rerender.json` exercise
+all14observed async writes (camera-native differences0,-1,-2ns) and the1ns held
+re-render variation. The sweep uses these ownership rules, with no new tolerance:
+
+| Entrance | Rule |
+| --- | --- |
+| Sensors camera grouping / native selection | Candidate headers must share one unique native epoch/tick under `stamp_ns` (1us); native IDs themselves are exact copies. Raw pixels remain provisional until the native tick arrives. Missing/multiple matches never enter recorded rows. |
+| Per-packet duplicate classification | Exact raw header + content hash classifies identical packets; this is not a native/camera comparison. Same-source re-renders are counted only after/subject to the unique-native contract. |
+| Sensors pending/read and floor handling | Independent stamps use `stamp_ns`; epoch/floor selection is atomic. Native selection ID versus joined snapshot is a copied identity and stays exact. Strict native cadence/order remains unchanged. |
+| Capture observation, home/settle/containment and trailing verdicts | Camera/joint versus native pose uses `stamp_ns` through TickContract; snapshots/proof IDs copied from the same native packet remain exact. |
+| Convergence-failure proof association | Failing recorded camera stamp versus the independently sampled motion-wait clock now explicitly uses `stamp_ns`; epochs remain exact. |
+| TickContract/export camera selection proof | Selected header equals its copied camera-identity header exactly; copied native epoch/tick equals the native pose exactly. Camera/native producer agreement alone uses `stamp_ns`. New-policy export requires both proofs; legacy proof-less rows remain diagnosable under their earlier contract and cannot be resumed/adopted under changed source/config hashes. |
+| Async row/video profiles | `native_sim_ns` is copied from the capture profile, `camera_stamp_ns` retains the selected header; profile_id, epoch and both producer-owned copies are exact. Their cross-producer agreement uses `stamp_ns`. Failures retain structured field/left/right/delta/rule/tolerance proofs. |
+| ACK, expert, geometry and scheduling labels | Observation/declared/geometry stamps copied from the selected row remain exact; native application/command-clock latency uses the existing one-tick interval plus `stamp_ns` allowance. |
+| Recovery endpoints, restore floors, native snapshots and receipt hashes | Native-to-native copies remain exact; World/native independent clocks retain their existing progression/precision rules, never camera-header equality. |
+| Dataset timestamps | Measured selected camera deltas are written unchanged; timing audit applies the shared independent-producer/native-cadence rules. No synthetic stamps. |
+
+Attempt finalization has one receipt/ledger publication entrance after either
+normal assembly or a structured terminal fallback. A supplemental profile/write
+failure preserves the original sensor/clock error as primary, records the
+supplementary proofs and raw timing records, and saves seed/initial poses/camera
+counts. Such an attempt is terminal, never a quality rejection or accepted row.
+Capture and executor retirement must both pass before native node destruction.

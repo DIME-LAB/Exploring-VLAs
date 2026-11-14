@@ -7,6 +7,7 @@ import shutil
 import subprocess
 
 from contract import JOINTS, timing_audit
+from tick_contract import camera_tick_errors
 from collection_status import require_finalized
 from recovery import receipt_error, recovery_summary
 from storage import atomic_json,confined, prepare_environment
@@ -54,6 +55,9 @@ def main():
         if not receipt['accepted']:
             continue
         rows = [json.loads(line) for line in (path / 'frames.jsonl').read_text().splitlines()]
+        if config.get('camera_selection_policy',{}).get('version',0)>=3:
+            selection_errors=[error for row in rows for error in camera_tick_errors(row,required=True)]
+            if selection_errors:raise ValueError(f'{path}: {selection_errors}')
         recovery_error=receipt_error(receipt,rows)
         if recovery_error:raise ValueError(f'{path}: {recovery_error}')
         audit = timing_audit(rows, fps)

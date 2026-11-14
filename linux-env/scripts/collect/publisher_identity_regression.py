@@ -49,14 +49,15 @@ def main():
         until(lambda:sensors.stale_camera_messages.get('wrist',0)==2)
         assert not sensors.failure and not sensors.camera_publishers
         stamp=floor+33333333
-        pa.publish(image(stamp,11));pt.publish(image(stamp,33))
+        first_stamp=stamp-2
+        pa.publish(image(first_stamp,11));pt.publish(image(stamp,33))
         j=JointState();j.header.stamp.sec,j.header.stamp.nanosec=divmod(stamp,10**9);j.name=list(JOINTS);j.position=[0.]*6;j.velocity=[0.]*6
         pj.publish(j);pk.publish(String(data=json.dumps(dict(epoch=1,sim_ns=stamp))))
         until(lambda:any(len(entry)==4 for entry in sensors.pending.values()))
-        selected,entry=sensors.read(timeout=0);assert selected==stamp and entry['wrist'][0].data[0]==11
+        selected,entry=sensors.read(timeout=0);assert selected==first_stamp and entry['wrist'][0].data[0]==11
         gid=entry['wrist'][2]['publisher']['gid'];known=[bytes(row.endpoint_gid).hex() for row in node.get_publishers_info_by_topic('/wrist_camera_rgb_sim')]
         result['packet_identity']=entry['wrist'][2]['publisher'];result['graph_endpoint_gids']=known
-        pa.publish(image(stamp,22));pt.publish(image(stamp,44));until(lambda:sum(sensors.rerender_messages.values())==2)
+        pa.publish(image(stamp-1,22));pt.publish(image(stamp+1,44));until(lambda:sum(sensors.rerender_messages.values())==2)
         assert not sensors.failure and entry['wrist'][0].data[0]==11 and entry['top'][0].data[0]==33
         decode=[]
         for index in range(1,51):
@@ -65,11 +66,11 @@ def main():
             decode.append(sensors.seen_camera_frames['wrist'][next_stamp//1000]['publisher']['transport_take_decode_ms'])
         result['warm_native_take_decode_ms']=dict(frames=len(decode),mean=sum(decode)/len(decode),p95=sorted(decode)[47],maximum=max(decode))
         pb=b.create_publisher(Image,'/wrist_camera_rgb_sim',64);until(lambda:pb.get_subscription_count()==1)
-        pb.publish(image(stamp,11));until(lambda:sensors.failure is not None)
+        pb.publish(image(first_stamp,11));until(lambda:sensors.failure is not None)
         assert isinstance(sensors.failure,SensorAmbiguity)
         candidates=sensors.failure.evidence['candidates'];assert len({row['publisher']['gid'] for row in candidates})==2
         assert candidates[0]['content_sha256']==candidates[1]['content_sha256']
-        result.update(passed=True,selected=dict(stamp_ns=stamp,wrist_value=int(entry['wrist'][0].data[0]),top_value=int(entry['top'][0].data[0]),
+        result.update(passed=True,selected=dict(stamp_ns=first_stamp,native_tick=entry['wrist'][2]['native_tick'],wrist_value=int(entry['wrist'][0].data[0]),top_value=int(entry['top'][0].data[0]),
             identities={k:entry[k][2] for k in ('wrist','top')}),
             stale_boundary_frames=dict(sensors.stale_camera_messages),rerenders=dict(sensors.rerender_messages),
             rerender_log=list(sensors.rerender_log.values()),duplicate_publisher=sensors.failure.evidence,

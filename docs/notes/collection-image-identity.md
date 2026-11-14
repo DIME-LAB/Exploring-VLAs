@@ -9,15 +9,27 @@ provided, so tests reconstruct different pixels rather than claiming those bytes
 Its image stamp 178316666666 ns is 1 ns below the cancellation floor.
 
 Before identity checks, discard pre-epoch camera packets and raw stamps at/below
-floor + 1 us (the independent-producer tolerance). Valid next physics ticks are
-33,333,333 ns later. For active frames, require nonzero per-packet RMW identity:
-implementation plus the 24-byte GID. Bind each camera stream for this subscription
-lifetime. Different source, unknown identity, changed layout or distinct nearby
-stamp is terminal. For an exact stamp from the same source and same layout, keep
-the first taken pixels permanently. Count identical repeats separately from
-changed-pixel re-renders; retain first/last digests and count in receipts. No late
-re-render can replace a pending or consumed image. The DDS subscription order,
-under its existing mutually exclusive callback group, defines first taken.
+floor + the shared 1 us independent-producer tolerance. Valid next physics ticks
+are 33,333,333 ns later. A single atomic epoch/floor identity and a short identity
+lock serialize this decision and publisher binding with reset installation.
+
+Require nonzero packet RMW identity (implementation + 24-byte GID), bound for the
+subscription lifetime. Keep first taken pixels/layout provisionally, then consume
+only after the camera headers match one unique native physical epoch/tick within
+that tolerance. Same-source held re-renders can differ by a few header nanoseconds;
+all candidate headers must fit the same native tick. No matching native tick
+prevents consumption; more than one native tick, a different source or changed
+layout is terminal. Native IDs are copied exactly into the selection proof;
+header/identity copies remain exact and independent native/camera agreement is
+tolerant. Export requires both camera selection proofs. Later re-renders never
+replace pending or consumed pixels, hashes or selected packet metadata.
+
+Count exact duplicate packets separately from changed-pixel/header re-renders;
+retain selected/last header stamps and hashes. Receipt publication snapshots these
+counters under the sensor lock; fenced candidate/native/re-render history can be
+pruned only after the receipt is durable. DDS subscription order under the
+mutually exclusive callback group defines first taken. Raw timestamps are never
+rounded, rewritten or synthesized by selection/validation.
 
 Startup and every episode boundary also query each camera topic: require exactly
 one graph endpoint with a nonzero GID, and retain its type, node and QoS. These
@@ -78,3 +90,12 @@ The viewport/render-product SDK exposes update-disable controls. Correct render
 completion ordering has not yet been validated on this collector's products;
 render pausing remains a separate measured optimization on an authorized own
 instance. First-packet correctness does not depend on it.
+
+The retained primitive-scene failure is in `fixtures/native-tick-rerender.json`:
+one wrist GID/layout at16,083,333,331 and16,083,333,332ns, both belonging to native
+tick16,083,333,333ns. Original digests/times are retained; tests reconstruct RGB
+payloads explicitly because raw packets were not saved. Tests exercise native-first,
+camera-first and late re-render arrival, immutable consumed metadata, both producer
+boundaries, missing/multiple native ticks and differing publishers/layouts. The
+real native-take probe likewise sends a2ns initial camera offset and a1ns later
+header variation on both camera streams.

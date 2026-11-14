@@ -43,7 +43,7 @@ from gpu_device import owned_gpu_audit,gpu_uuid,GpuIsolationError
 from safe_home import make_baseline,validate_baseline
 from frame_join import SensorAmbiguity,identity as frame_identity,exact_duplicate,publisher_identity,publisher_key,CAMERA_SELECTION_POLICY
 from image_transport import publisher_executor_type
-from comparisons import comparison,matches,interval,native_frame
+from comparisons import comparison,matches,interval,native_frame,TOLERANCES
 from contract import COLORS, JOINTS, EVAL_SEEDS, corrective_action, parameters, timing_audit
 from checkpoint import progress
 from storage import atomic_json,CANONICAL_ROOT, RootFileGrowth, SceneSafetyMarker, confined, prepare_environment, wait_for_storage
@@ -81,7 +81,7 @@ def timeline(play):
 
 
 class Sensors:
-    """Exact sim-stamp join: each image pair and state are consumed once, without resampling."""
+    """Join first camera pixels and measured state to unique native ticks; retain raw stamps."""
     def __init__(self, node, generation):
         self.generation = generation
         self.condition = threading.Condition()
@@ -96,6 +96,9 @@ class Sensors:
         self.rerender_messages=collections.Counter()
         self.stale_camera_messages=collections.Counter()
         self.rerender_log={}
+        self.camera_candidates={}
+        self.camera_native_ticks={}
+        self.native_ticks=collections.OrderedDict()
         self.reference = None
         self.acks = {}
         self.subs = []
@@ -158,6 +161,24 @@ class Sensors:
             reference['age_sim_ns'] = stamp-reference['stamp_ns']
         return reference
 
+    def camera_native_tick(self,key,first,required=False):
+        token=(key,first['stamp_ns'])
+        frames=self.camera_candidates[token]
+        candidates={value for value in self.native_ticks if value[0]==first['receipt_epoch'] and
+                    any(matches(stamp,value[1],'stamp_ns') for stamp in frames)}
+        if token in self.camera_native_ticks:candidates.add(self.camera_native_ticks[token])
+        if len(candidates)==1:
+            native=next(iter(candidates))
+            if all(matches(stamp,native[1],'stamp_ns') for stamp in frames):
+                self.camera_native_ticks[token]=native
+                return native
+        if candidates or required:
+            self.failure=SensorAmbiguity(dict(stream=key,reason='camera selection requires one unique native tick',
+                candidates=list(frames.values()),native_ticks=[dict(epoch=e,sim_ns=n) for e,n in sorted(candidates)],
+                owner_epoch=first['receipt_epoch'],stamp_rule='stamp_ns',tolerance_ns=TOLERANCES['stamp_ns']))
+            self.condition.notify_all();raise self.failure
+        return None  # Provisional first pixels cannot be consumed before native tick delivery.
+
     def put(self,key,msg,info=None):
         if key in ('wrist','top'):
             with self.generation.observe_identity() as identity:
@@ -176,7 +197,7 @@ class Sensors:
         else:
             raw_stamp = ns(msg.header.stamp)
         if raw_stamp<=0:return
-        if key in ('wrist','top') and (identity[0] is None or raw_stamp<=identity[1]+1000):
+        if key in ('wrist','top') and (identity[0] is None or raw_stamp<=identity[1]+int(TOLERANCES['stamp_ns'])):
             with self.condition:self.stale_camera_messages[key]+=1
             return
         incoming=frame_identity(key,msg,raw_stamp)
@@ -184,14 +205,21 @@ class Sensors:
         with self.condition:
             if self.failure:return
             if key in ('wrist','top'):
-                if identity[0] is None or raw_stamp<=identity[1]+1000:
+                if identity[0] is None or raw_stamp<=identity[1]+int(TOLERANCES['stamp_ns']):
                     self.stale_camera_messages[key]+=1;return
                 incoming['receipt_epoch']=identity[0]
                 try:incoming['publisher']=publisher_identity(info)
                 except SensorAmbiguity as exc:
                     self.failure=exc;self.condition.notify_all();raise
+            if key=='tick':
+                self.native_ticks[(msg['epoch'],raw_stamp)]=True
+                while len(self.native_ticks)>240:self.native_ticks.popitem(last=False)
             if not hasattr(self,'consumed'):self.consumed=collections.OrderedDict()
             if not hasattr(self,'seen_camera_frames'):self.seen_camera_frames={'wrist':{},'top':{}}
+            if key=='tick':
+                for camera,frames in self.seen_camera_frames.items():
+                    for bucket in range(raw_stamp//int(TOLERANCES['stamp_ns'])-2,raw_stamp//int(TOLERANCES['stamp_ns'])+3):
+                        if bucket in frames:self.camera_native_tick(camera,frames[bucket])
             if key in self.seen_camera_frames:
                 publisher=incoming['publisher'];bound=self.camera_publishers.get(key)
                 if bound is not None and publisher_key(bound)!=publisher_key(publisher):
@@ -200,29 +228,33 @@ class Sensors:
                     self.condition.notify_all();raise self.failure
                 self.camera_publishers[key]=bound or publisher
                 if bound is None:self.camera_first_frame[key]=incoming
-                seen=self.seen_camera_frames[key];bucket=raw_stamp//1000
-                candidates=[seen[b] for b in (bucket-1,bucket,bucket+1)
-                            if b in seen and matches(seen[b]['stamp_ns'],raw_stamp,'stamp_ns')]
+                seen=self.seen_camera_frames[key];bucket=raw_stamp//int(TOLERANCES['stamp_ns'])
+                candidates=[seen[b] for b in range(bucket-2,bucket+3) if b in seen and
+                    max(raw_stamp,*self.camera_candidates[(key,seen[b]['stamp_ns'])])-min(raw_stamp,*self.camera_candidates[(key,seen[b]['stamp_ns'])])<=2*TOLERANCES['stamp_ns']]
                 if candidates:
                     previous=candidates[0]
-                    same=(len(candidates)==1 and previous['stamp_ns']==raw_stamp and
+                    same=(len(candidates)==1 and
                         previous['layout']==incoming['layout'] and
                         publisher_key(previous['publisher'])==publisher_key(publisher))
                     if same:
+                        self.camera_candidates[(key,previous['stamp_ns'])].setdefault(raw_stamp,incoming)
+                        self.camera_native_tick(key,previous)
                         if exact_duplicate(previous,incoming):self.duplicate_messages[key]+=1
                         else:
                             self.rerender_messages[key]+=1
                             token=key+':'+str(raw_stamp)
                             event=self.rerender_log.setdefault(token,dict(stream=key,stamp_ns=raw_stamp,epoch=previous['receipt_epoch'],
                                 publisher=previous['publisher'],selected_content_sha256=previous['content_sha256'],count=0))
-                            event.update(count=event['count']+1,last_content_sha256=incoming['content_sha256'],
+                            event.update(count=event['count']+1,last_stamp_ns=raw_stamp,last_content_sha256=incoming['content_sha256'],
                                 last_publication_sequence_number=publisher.get('publication_sequence_number'))
                         return  # Never replace the first pending OR consumed image.
                     self.failure=SensorAmbiguity(dict(stream=key,reason='distinct same-camera tick/layout candidates',
                         candidates=[*candidates,incoming],owner_epoch=self.generation.epoch))
                     self.condition.notify_all();raise self.failure
                 seen[bucket]=incoming
-            if self.last>=0 and raw_stamp<=self.last+1000:
+                self.camera_candidates[(key,raw_stamp)]={raw_stamp:incoming}
+                self.camera_native_tick(key,incoming)
+            if self.last>=0 and raw_stamp<=self.last+int(TOLERANCES['stamp_ns']):
                 # This sample was never eligible for a current joined frame.
                 # Previously observed camera identities above still detect a
                 # conflicting late alternative to any recorded/pending frame.
@@ -252,13 +284,26 @@ class Sensors:
             while len(self.pending)>240:self.pending.popitem(last=False)
             self.condition.notify_all()
 
+    def camera_diagnostics(self,motion_epochs,duplicate_start,rerender_start,stale_camera_start):
+        with self.condition:
+            result={}
+            result['camera_duplicate_messages'] = {key: value - duplicate_start.get(key, 0) for key, value in self.duplicate_messages.items()}
+            result['camera_publishers']=dict(self.camera_publishers)
+            result['camera_rerenders']={key:value-rerender_start.get(key,0) for key,value in self.rerender_messages.items()}
+            result['camera_stale_boundary_frames']={key:value-stale_camera_start.get(key,0) for key,value in self.stale_camera_messages.items()}
+            result['camera_rerender_log']=[dict(value) for value in self.rerender_log.values() if value['epoch'] in motion_epochs]
+            return result
+
     def prune_durable_camera_history(self):
         # The caller has atomically published this attempt's receipt. A native
         # cancellation floor already excludes these frames from future joins.
         with self.generation.observe_identity() as (_,floor),self.condition:
             for frames in self.seen_camera_frames.values():
-                for key in [k for k,v in frames.items() if v['stamp_ns']<=floor+1000]:del frames[key]
-            for key in [k for k,v in self.rerender_log.items() if v['stamp_ns']<=floor+1000]:del self.rerender_log[key]
+                for key in [k for k,v in frames.items() if v['stamp_ns']<=floor+int(TOLERANCES['stamp_ns'])]:del frames[key]
+            for key in [k for k,v in self.rerender_log.items() if v['stamp_ns']<=floor+int(TOLERANCES['stamp_ns'])]:del self.rerender_log[key]
+            for token in [t for t in self.camera_candidates if t[1]<=floor+int(TOLERANCES['stamp_ns'])]:
+                del self.camera_candidates[token];self.camera_native_ticks.pop(token,None)
+            for tick in [t for t in self.native_ticks if t[1]<=floor+int(TOLERANCES['stamp_ns'])]:del self.native_ticks[tick]
 
     def read(self, timeout=15):
         deadline = time.monotonic() + timeout
@@ -272,11 +317,19 @@ class Sensors:
                 if ready:
                     stamp = ready[0]
                     entry = self.pending.pop(stamp)
+                    for key in ('wrist','top'):
+                        message,received,first=entry[key]
+                        native=self.camera_native_tick(key,first,required=True)
+                        snapshot=entry['tick'][0]
+                        if native!=(snapshot['epoch'],snapshot['sim_ns']):
+                            self.failure=SensorAmbiguity(dict(stream=key,reason='camera native tick differs from joined snapshot',native_tick=native,snapshot_epoch=snapshot['epoch'],snapshot_sim_ns=snapshot['sim_ns']))
+                            self.condition.notify_all();raise self.failure
+                        entry[key]=(message,received,dict(first,native_tick=dict(epoch=native[0],sim_ns=native[1]),selection='first taken pixels for unique native tick'))
                     self.last = ns(entry['wrist'][0].header.stamp)
                     self.consumed[self.last]={key:(value[2] if key in ('wrist','top') else frame_identity(key,value[0],value[0]['sim_ns'] if key=='tick' else ns(value[0].header.stamp))) for key,value in entry.items()}
                     while len(self.consumed)>240:self.consumed.popitem(last=False)
                     for old in list(self.pending):
-                        if old <= self.last+1000:
+                        if old <= self.last+int(TOLERANCES['stamp_ns']):
                             del self.pending[old]
                     return ns(entry['wrist'][0].header.stamp), entry
                 remaining = deadline - time.monotonic()
@@ -324,7 +377,8 @@ class EpisodeWriter:
                         self.encoders[key].stdin.write(img.tobytes())
                     out.write(json.dumps(row) + '\n')
                     profile=row['wall_profile']
-                    completed=dict(profile_id=profile['profile_id'],epoch=row['epoch'],sim_ns=row['sim_ns'],
+                    completed=dict(profile_id=profile['profile_id'],epoch=profile['epoch'],sim_ns=profile['sim_ns'],
+                        native_sim_ns=profile.get('native_sim_ns',profile['sim_ns']),camera_stamp_ns=row['sim_ns'],
                         row_queue_ms=milliseconds(enqueue_ns,write_start),row_video_write_ms=milliseconds(write_start,time.monotonic_ns()))
                     timings.write(json.dumps(completed)+'\n');self.write_profiles.append(completed)
                     self.rows.append(row)
@@ -817,7 +871,7 @@ class Collector:
             record['physical_convergence'] = dict(exc.evidence)
             record['failing_tick_contract']=failure_tick
             record['validated_sim_tick']=bool(failure_tick and not verify_proof(failure_tick) and
-                failure_tick['row']['epoch']==exc.evidence['epoch']==epoch and matches(failure_tick['row']['sim_ns'],exc.evidence['stamp_ns']))
+                failure_tick['row']['epoch']==exc.evidence['epoch']==epoch and matches(failure_tick['row']['sim_ns'],exc.evidence['stamp_ns'],'stamp_ns'))
         if isinstance(exc,SensorAmbiguity):record['sensor_join_failure']=exc.evidence
         if isinstance(exc,TickContractError):record['pipeline_contract_failure']=dict(errors=exc.errors,evidence=exc.evidence)
         if not hasattr(self, 'capture_failures'):
@@ -1324,6 +1378,19 @@ class Collector:
                 raise TimeoutError(f'Full planning scene reset verification failed: {check}')
             self.stop.wait(.05)
 
+    def failed_finalization(self,receipt,error,motion_epochs,duplicate_start,rerender_start,stale_camera_start,profiles,writes):
+        original=getattr(self.sensors,'failure',None) or receipt.get('error') or self.failure or error
+        self.failure=self.failure or repr(original)
+        receipt.update(accepted=False,error=repr(original) if isinstance(original,BaseException) else str(original),
+            disposition=dict(kind='terminal',reason='attempt_finalization'),motion_epochs=sorted(motion_epochs))
+        receipt.setdefault('finalization_errors',[]).append(dict(error=repr(error),exception_type=type(error).__name__,proofs=getattr(error,'proofs',None)))
+        receipt['wall_tick_profile']=dict(failed=True,ticks=profiles,async_writes=writes)
+        if isinstance(original,SensorAmbiguity):
+            receipt.update(exception_type='SensorAmbiguity',original_sensor_error_preserved=True,sensor_join_failure=original.evidence)
+        receipt.update(self.sensors.camera_diagnostics(motion_epochs,duplicate_start,rerender_start,stale_camera_start))
+        try:self.persist_terminal_fault(original,'attempt finalization')
+        except Exception as publication_error:receipt['terminal_publication_error']=repr(publication_error)
+
     def run(self):
         args = self.args
         root = confined(args.output)
@@ -1421,7 +1488,7 @@ class Collector:
                     raise ValueError(f'Missing dimensions for baseline object {name}')
                 position[2] = self.node._ground_z_var.get() + float(bbox['sz']) / 2
             self.baseline_cup_layout = initial['cup_layout']
-        tracked_sources = ['linux-env/scripts/collect/image_abi.py','linux-env/scripts/collect/image_transport_abi.json','linux-env/scripts/collect/ros_lifecycle.py','linux-env/scripts/collect/protocol.py','linux-env/scripts/collect/image_take.c','linux-env/scripts/collect/image_transport.py','isaac/exts/soarm101-dt/so_arm101_dt/extension.py','isaac/exts/soarm101-dt/so_arm101_dt/primitive_colliders.py','linux-env/scripts/collect/cup_geometry.py','linux-env/scripts/collect/pose_math.py','linux-env/scripts/collect/collection_status.py','linux-env/scripts/collect/nvml_processes.py','linux-env/scripts/collect/renderer_device.py','linux-env/scripts/collect/wall_profile.py','linux-env/scripts/collect/gpu_device.py','linux-env/scripts/collect/safe_home.py','linux-env/scripts/collect/frame_join.py','linux-env/scripts/collect/comparisons.py','linux-env/scripts/collect/collect.py', 'linux-env/scripts/collect/contract.py',
+        tracked_sources = ['linux-env/scripts/collect/image_abi.py','linux-env/scripts/collect/image_transport_abi.json','linux-env/scripts/collect/ros_lifecycle.py','linux-env/scripts/collect/protocol.py','linux-env/scripts/collect/wall_profile.py','linux-env/scripts/collect/image_take.c','linux-env/scripts/collect/image_transport.py','isaac/exts/soarm101-dt/so_arm101_dt/extension.py','isaac/exts/soarm101-dt/so_arm101_dt/primitive_colliders.py','linux-env/scripts/collect/cup_geometry.py','linux-env/scripts/collect/pose_math.py','linux-env/scripts/collect/collection_status.py','linux-env/scripts/collect/nvml_processes.py','linux-env/scripts/collect/renderer_device.py','linux-env/scripts/collect/wall_profile.py','linux-env/scripts/collect/gpu_device.py','linux-env/scripts/collect/safe_home.py','linux-env/scripts/collect/frame_join.py','linux-env/scripts/collect/comparisons.py','linux-env/scripts/collect/collect.py', 'linux-env/scripts/collect/contract.py',
                            'linux-env/scripts/collect/checkpoint.py',
                            'linux-env/scripts/collect/episode_policy.py',
                            'linux-env/scripts/collect/dart.py',
@@ -1480,7 +1547,7 @@ class Collector:
             atomic_json(root / 'run.json',previous)
         else:
             atomic_json(root / 'run.json',dict(instance=args.instance, host=socket.gethostname(), gpu_index=int(os.getenv('ISAACSIM_GPU', '0')),
-            wall_profile_policy=PROFILE_POLICY,recording_version=5,camera_selection_policy=CAMERA_SELECTION_POLICY,image_transport=self.executor.image_take.metadata, gpu_isolation_initial=initial_gpu_footprint,transport_config=transport_config, observation_state_topic='/joint_states_measured',
+            wall_profile_policy=PROFILE_POLICY,recording_version=6,camera_selection_policy=CAMERA_SELECTION_POLICY,image_transport=self.executor.image_take.metadata, gpu_isolation_initial=initial_gpu_footprint,transport_config=transport_config, observation_state_topic='/joint_states_measured',
             diagnostic=args.diagnostic, success_profile=PROFILE,
             motion_wait_policy=wait_policy, tick_clock_policy=CLOCK_POLICY,geometry_query_policy=QUERY_POLICY,quality_policy=POLICY,regrasp_policy=REGRASP_POLICY,regrasp_only=args.regrasp_only,
             application_contract='Held at observation tick; read-back verified PhysX targets before one-frame advance; maximum one sim tick latency',
@@ -1644,73 +1711,73 @@ class Collector:
                     receipt['error'] = repr(provenance_error)
                     self.abort_stalled_owner(provenance_error, 'failure provenance')
             finally:
-                with self.writer_lock:
-                    self.writer = None
                 try:
-                    if self.generation.stalled:
-                        raise OwnershipStalled(self.generation.stalled)
-                    receipt['end_cancel'] = self.timeline(False)
-                    if receipt_cycle is not None:
-                        receipt_cycle.join(timeout=5.)
-                        if receipt_cycle.is_alive():
-                            raise RuntimeError('Episode worker did not retire')
-                    receipt['retirement'] = self.workers.retire()
-                except Exception as retire_error:
-                    receipt['retirement'] = dict(passed=False,error=repr(retire_error))
-                    self.abort_stalled_owner(retire_error,'episode retirement')
-                if writer:
-                    writer.close()
-                    receipt['timing'] = timing_audit(writer.rows, 30)
-                    receipt['accepted'] = receipt['accepted'] and receipt['timing']['passed']
-                    if args.diagnostic:
-                        try:
-                            receipt['diagnostics'] = final_stills(path, writer.rows)
-                        except Exception as exc:
-                            receipt['diagnostics'] = dict(saved=False, error=repr(exc))
-                            receipt['accepted'] = False
-                            receipt['error'] = 'Diagnostic still capture failed: '+repr(exc)
-                            self.failure = receipt['error']
-                    if receipt.get('score') and receipt['score'].get('contract_passed'):
-                        initial_z = receipt['initial_physical']['bodies'][params['object']]['position'][2]
-                        maximum_z = max((row.get('target_object_pose', {}).get('z', initial_z) for row in writer.rows), default=initial_z)
-                        receipt['score']['lift_m'] = maximum_z - initial_z
-                        if maximum_z - initial_z < .025:
-                            receipt['accepted'] = False
-                            receipt['error'] = 'Object did not lift at least 25 mm before placement'
-                            receipt['quality_reject'] = dict(kind='insufficient_lift',evidence=dict(lift_m=maximum_z-initial_z),contract=require_snapshots(snapshots))
-                receipt['capture_failures'] = list(self.capture_failures[failure_log_start:])
-                sensor_failure=getattr(self.sensors,'failure',None)
-                if isinstance(sensor_failure,SensorAmbiguity):
-                    if receipt.get('error'):receipt['secondary_error']=receipt['error']
-                    receipt.update(error=repr(sensor_failure),exception_type='SensorAmbiguity',
-                        original_sensor_error_preserved=True,sensor_join_failure=sensor_failure.evidence)
-                receipt['noise_operations'] = list(self.servo.noise_specs)
-                if cycle_result.get('recovery_report'):
-                    receipt['recovery_report']=cycle_result['recovery_report']
-                if cycle_result.get('worker_error'):
-                    receipt['cycle_worker_error'] = cycle_result['worker_error']
-                with self.sensors.condition:
-                    receipt['camera_duplicate_messages'] = {key: value - duplicate_start.get(key, 0) for key, value in self.sensors.duplicate_messages.items()}
-                    receipt['camera_publishers']=dict(self.sensors.camera_publishers)
-                    receipt['camera_rerenders']={key:value-rerender_start.get(key,0) for key,value in self.sensors.rerender_messages.items()}
-                    receipt['camera_stale_boundary_frames']={key:value-stale_camera_start.get(key,0) for key,value in self.sensors.stale_camera_messages.items()}
-                    receipt['camera_rerender_log']=[dict(value) for value in self.sensors.rerender_log.values() if value['epoch'] in motion_epochs]
-                receipt['root_file_growth'] = root_growth.finish()
-                profiles=getattr(self,'wall_profiles',[])[wall_profile_start:]
-                writes=writer.write_profiles if writer else []
-                joined=joined_profiles(profiles,writes)
-                receipt['wall_tick_profile']=dict(summary=wall_profile_summary(joined),recorded_summary=wall_profile_summary([p for p in joined if p['recorded']]),ticks=profiles,async_writes=writes)
-                receipt['motion_wait_diagnostics'] = [r for r in self.wait_diagnostics[wait_log_start:]
-                                                       if r['epoch'] in motion_epochs]
-                try:receipt['gpu_isolation_after']=self.gpu_footprint()
-                except Exception as gpu_error:
-                    receipt['gpu_isolation_after']=getattr(gpu_error,'evidence',dict(passed=False,error=repr(gpu_error)))
-                    self.failure=self.failure or repr(gpu_error)
-                receipt['disposition'] = disposition(receipt,self.failure,writer.rows if writer else None)
-                receipt['accepted'] = receipt['disposition']['kind']=='accepted'
-                self.needs_home_restore=receipt['disposition']['kind']=='quality_reject'
-                receipt['failure_streak'] = streak.observe(receipt['disposition'])
-                if receipt['disposition']['kind']=='terminal':self.persist_terminal_fault(receipt.get('error'),'attempt disposition')
+                    with self.writer_lock:
+                        self.writer = None
+                    try:
+                        if self.generation.stalled:
+                            raise OwnershipStalled(self.generation.stalled)
+                        receipt['end_cancel'] = self.timeline(False)
+                        if receipt_cycle is not None:
+                            receipt_cycle.join(timeout=5.)
+                            if receipt_cycle.is_alive():
+                                raise RuntimeError('Episode worker did not retire')
+                        receipt['retirement'] = self.workers.retire()
+                    except Exception as retire_error:
+                        receipt['retirement'] = dict(passed=False,error=repr(retire_error))
+                        self.abort_stalled_owner(retire_error,'episode retirement')
+                    if writer:
+                        writer.close()
+                        receipt['timing'] = timing_audit(writer.rows, 30)
+                        receipt['accepted'] = receipt['accepted'] and receipt['timing']['passed']
+                        if args.diagnostic:
+                            try:
+                                receipt['diagnostics'] = final_stills(path, writer.rows)
+                            except Exception as exc:
+                                receipt['diagnostics'] = dict(saved=False, error=repr(exc))
+                                receipt['accepted'] = False
+                                receipt['error'] = 'Diagnostic still capture failed: '+repr(exc)
+                                self.failure = receipt['error']
+                        if receipt.get('score') and receipt['score'].get('contract_passed'):
+                            initial_z = receipt['initial_physical']['bodies'][params['object']]['position'][2]
+                            maximum_z = max((row.get('target_object_pose', {}).get('z', initial_z) for row in writer.rows), default=initial_z)
+                            receipt['score']['lift_m'] = maximum_z - initial_z
+                            if maximum_z - initial_z < .025:
+                                receipt['accepted'] = False
+                                receipt['error'] = 'Object did not lift at least 25 mm before placement'
+                                receipt['quality_reject'] = dict(kind='insufficient_lift',evidence=dict(lift_m=maximum_z-initial_z),contract=require_snapshots(snapshots))
+                    receipt['capture_failures'] = list(self.capture_failures[failure_log_start:])
+                    sensor_failure=getattr(self.sensors,'failure',None)
+                    if isinstance(sensor_failure,SensorAmbiguity):
+                        if receipt.get('error'):receipt['secondary_error']=receipt['error']
+                        receipt.update(error=repr(sensor_failure),exception_type='SensorAmbiguity',
+                            original_sensor_error_preserved=True,sensor_join_failure=sensor_failure.evidence)
+                    receipt['noise_operations'] = list(self.servo.noise_specs)
+                    if cycle_result.get('recovery_report'):
+                        receipt['recovery_report']=cycle_result['recovery_report']
+                    if cycle_result.get('worker_error'):
+                        receipt['cycle_worker_error'] = cycle_result['worker_error']
+                    receipt.update(self.sensors.camera_diagnostics(motion_epochs,duplicate_start,rerender_start,stale_camera_start))
+                    receipt['root_file_growth'] = root_growth.finish()
+                    profiles=getattr(self,'wall_profiles',[])[wall_profile_start:]
+                    writes=writer.write_profiles if writer else []
+                    joined=joined_profiles(profiles,writes)
+                    receipt['wall_tick_profile']=dict(summary=wall_profile_summary(joined),recorded_summary=wall_profile_summary([p for p in joined if p['recorded']]),ticks=profiles,async_writes=writes)
+                    receipt['motion_wait_diagnostics'] = [r for r in self.wait_diagnostics[wait_log_start:]
+                                                           if r['epoch'] in motion_epochs]
+                    try:receipt['gpu_isolation_after']=self.gpu_footprint()
+                    except Exception as gpu_error:
+                        receipt['gpu_isolation_after']=getattr(gpu_error,'evidence',dict(passed=False,error=repr(gpu_error)))
+                        self.failure=self.failure or repr(gpu_error)
+                    receipt['disposition'] = disposition(receipt,self.failure,writer.rows if writer else None)
+                    receipt['accepted'] = receipt['disposition']['kind']=='accepted'
+                    self.needs_home_restore=receipt['disposition']['kind']=='quality_reject'
+                    receipt['failure_streak'] = streak.observe(receipt['disposition'])
+                    if receipt['disposition']['kind']=='terminal':self.persist_terminal_fault(receipt.get('error'),'attempt disposition')
+                except Exception as finalization_error:
+                    self.failed_finalization(receipt,finalization_error,motion_epochs,duplicate_start,rerender_start,stale_camera_start,
+                        getattr(self,'wall_profiles',[])[wall_profile_start:],writer.write_profiles if writer else [])
+                    receipt['failure_streak']=streak.observe(receipt['disposition'])
                 path.mkdir(parents=True, exist_ok=True)
                 atomic_json(path / 'receipt.json',receipt)
                 with (root / 'episodes.jsonl').open('a') as log:
@@ -1770,9 +1837,9 @@ class Collector:
         def retire_capture():
             self.capture_thread.join(timeout=frame_capacity_seconds()+5)
             if self.capture_thread.is_alive():raise RuntimeError('Capture worker did not retire')
-        cleanup('capture retirement',retire_capture)
+        capture_retired=cleanup('capture retirement',retire_capture)
         retired=cleanup('executor shutdown',lambda:retire_executor(self.executor,self.ros_thread))
-        if retired:
+        if capture_retired and retired:
             destroyed=cleanup('node destruction',self.node.destroy_node)
             if destroyed:cleanup('ROS shutdown',lambda:shutdown_context(rclpy,self.ros_context))
         cleanup('post-cleanup terminal status',lambda:note_terminal('after cleanup'))

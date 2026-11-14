@@ -72,6 +72,15 @@ class ResumeRetirementTests(unittest.TestCase):
                     self.assertFalse(record['passed']);self.assertEqual(record['cleanup_errors'][0]['stage'],'executor shutdown')
                     with self.assertRaises(RuntimeError):collection_status.require_finalized(root)
 
+    def test_unretired_capture_refuses_native_node_and_context_destruction(self):
+        with tempfile.TemporaryDirectory() as directory,patch('storage.confined',side_effect=Path),patch('collection_status.confined',side_effect=Path):
+            root=Path(directory);certificate=collection_status.begin(root);c=collector(root,certificate,lambda **kw:True)
+            c.capture_thread.is_alive=lambda:True;c.node.destroy_node=Mock();c.ros_context.destroy=Mock()
+            with self.assertRaisesRegex(RuntimeError,'finalization failed'):c.close()
+            c.node.destroy_node.assert_not_called();c.ros_context.destroy.assert_not_called()
+            final=json.loads((root/'collector-finalization.json').read_text());self.assertFalse(final['passed'])
+            self.assertTrue(any(e['stage']=='capture retirement' for e in final['cleanup_errors']))
+
     def test_incomplete_schema_and_mixed_invocation_fail_consistency_checks(self):
         with tempfile.TemporaryDirectory() as directory,patch('storage.confined',side_effect=Path),patch('collection_status.confined',side_effect=Path):
             root=Path(directory);cert=collection_status.begin(root);good=collection_status.finish(root,cert,[])

@@ -13,8 +13,8 @@ from tick_contract import FLOAT32_DT
 def sensors():
     Sensors,scope=probes.load_class('collect.py','Sensors');scope['collections']=collections
     s=object.__new__(Sensors);s.condition=threading.Condition();s.pending=collections.OrderedDict()
-    s.last=-1;s.failure=None;s.duplicate_messages=collections.Counter();s.generation=StepGeneration();s.generation.install(dict(epoch=1,invalid_through_ns=-1))
-    s.camera_publishers={};s.camera_first_frame={};s.rerender_messages=collections.Counter();s.stale_camera_messages=collections.Counter();s.rerender_log={}
+    s.last=-1;s.failure=None;s.consumed=collections.OrderedDict();s.seen_camera_frames={'wrist':{},'top':{}};s.duplicate_messages=collections.Counter();s.generation=StepGeneration();s.generation.install(dict(epoch=1,invalid_through_ns=-1))
+    s.camera_publishers={};s.camera_first_frame={};s.rerender_messages=collections.Counter();s.stale_camera_messages=collections.Counter();s.rerender_log={};s.camera_candidates={};s.camera_native_ticks={};s.native_ticks=collections.OrderedDict()
     return s
 
 

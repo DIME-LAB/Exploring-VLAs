@@ -38,10 +38,10 @@ class RerenderIdentityTests(unittest.TestCase):
             self.assertEqual(candidates[0]['content_sha256'],candidates[1]['content_sha256'])
             self.assertNotEqual(candidates[0]['publisher']['gid'],candidates[1]['publisher']['gid'])
 
-    def test_nearby_stamps_or_layout_changes_are_not_rerenders(self):
+    def test_headers_outside_the_native_tick_or_layout_changes_are_terminal(self):
         for kind in ('nearby_stamp','layout'):
-            s=sensors();s.put('wrist',image(10**9,11),publisher_info());other=image(10**9,22)
-            if kind=='nearby_stamp':other.header.stamp.nanosec=500
+            s=sensors();s.put('tick',NS(data=json.dumps(dict(epoch=1,sim_ns=10**9))));s.put('wrist',image(10**9,11),publisher_info());other=image(10**9,22)
+            if kind=='nearby_stamp':other.header.stamp.nanosec=1500
             else:other.encoding='rgba8'
             with self.subTest(kind=kind),self.assertRaises(SensorAmbiguity):s.put('wrist',other,publisher_info())
 

@@ -428,15 +428,17 @@ plans a home trajectory out of the previous failed contact pose. The baseline's
 calibration, samples and snapshot hash are retained in `run.json`.
 
 The sensor join retains raw stamps, layout/content hashes and each packet's RMW
-publisher identity. For an exact stamp from the same publisher and unchanged
-layout, it deterministically keeps the **first taken image**, including after
-consumption. Later identical packets count as duplicates; changed pixels count
-as held re-renders and retain selected/last hashes and counts. A different
-publisher (even identical pixels), changed layout, missing identity or distinct
-nearby stamp is terminal. Pending joint states cannot overwrite a different
-same-tick state. Camera packets at/below the cancellation floor plus the 1 us
-producer allowance, and pre-epoch bootstrap packets, are discarded before source
-binding/ambiguity checks.
+publisher identity. Camera pixels are provisional until they match exactly one
+native physical tick within the shared 1 us producer tolerance. It permanently
+keeps the **first taken image** for that tick/publisher/layout, including after
+consumption; a held re-render may have a slightly different raw header stamp.
+Identical packets count separately from changed-pixel or changed-header re-renders.
+Different GIDs/layouts, no matching native tick or multiple matching native ticks
+are terminal. Selection proof records the copied native epoch/tick and unchanged
+selected camera stamp; export requires this proof. Pending measured joint states
+cannot overwrite a different same-tick state. Camera packets at/below the
+cancellation floor plus the producer allowance, and pre-epoch bootstrap packets,
+are discarded before source binding/ambiguity checks.
 
 Kit can re-render while physics is held, so RGB variation alone does not imply a
 second publisher. Startup and each episode boundary require one graph endpoint
@@ -469,7 +471,11 @@ allow fenced image/re-render history to be pruned. The shared node explicitly
 destroys its ActionClient waitables before base-node destruction. Collector and
 clock checks retire the spin thread and callback pool before destroying nodes and
 contexts. Clock checks require an invocation-bound post-cleanup certificate and
-refuse abnormal producer exit. See [ROS lifetime evidence](docs/notes/collection-ros-lifecycle.md).
+refuse abnormal producer exit. Capture retirement and executor retirement must both pass
+before native node/context destruction. Async profiles keep copied native IDs and
+selected camera headers in separate fields. Attempt finalization preserves the
+original terminal fault and publishes its seed/poses, raw profiles and camera
+counts even if supplementary profiling fails. See [ROS lifetime evidence](docs/notes/collection-ros-lifecycle.md).
 
 A typed physical convergence deadline can reject one episode after native pause,
 worker retirement and contract auditing. Stationary/short data, calibrated-home
