@@ -85,6 +85,8 @@ def run(a):
             from playing import Playing
             backend=Playing(a.scene,a.manifest)
         else:backend=Native(a.scene,a.manifest,cameras=not a.physics_only)
+        runtime_qualification=shared.require_preloaded_modules(os.environ.get('SOARM_RUNTIME_QUALIFICATION'))
+        atomic_json(root/'runtime-qualification.json',runtime_qualification)
         atomic_json(root/'articulation-audit.json',backend.articulation_audit)
         if not backend.articulation_audit['fixed_base']:
             raise RuntimeError('PhysX reports a floating-base articulation; scene correction required')

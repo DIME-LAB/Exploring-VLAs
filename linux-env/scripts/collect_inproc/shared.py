@@ -33,6 +33,26 @@ def app_config():
             '--/exts/omni.services.transport.server.http/allow_port_range=false'])
 
 
+def require_preloaded_modules(qualification):
+    """Verify the already loaded package against the host's live qualification."""
+    if qualification is None:return None
+    import hashlib
+    import json
+    path=Path(qualification);expected=json.loads(path.read_text())['result']
+    loaded={}
+    for name,record in expected['modules'].items():
+        module=sys.modules.get(name)
+        if module is None:raise RuntimeError('Qualified module was not preloaded: '+name)
+        actual=Path(module.__file__)
+        measured=dict(path=str(actual),sha256=hashlib.sha256(actual.read_bytes()).hexdigest())
+        if measured!=record:raise RuntimeError('Loaded module differs from host qualification: '+name)
+        loaded[name]=measured
+    version=sys.modules['charset_normalizer'].__version__
+    if version!=expected['version']:raise RuntimeError('Preloaded charset version differs')
+    return dict(passed=True,version=version,modules=loaded,qualification=str(path),
+        qualification_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+
+
 def publish_exit_ready(root,certificate,passed):
     """The child is drained; its owner must still prove process cleanup."""
     import hashlib
