@@ -22,6 +22,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--environment', action='store_true')
     parser.add_argument('--export-python', action='store_true')
+    parser.add_argument('--export-wrapper', action='store_true')
     args = parser.parse_args()
     config = profile()
     if args.environment:
@@ -29,5 +30,8 @@ if __name__ == '__main__':
         print(str(Path(__file__).parent/relative) if relative else '')
     elif args.export_python:
         print(config.get('export_python', ''))
+    elif args.export_wrapper:
+        relative = config.get('export_wrapper')
+        print(str(Path(__file__).parent/relative) if relative else '')
     else:
         print(config['root'])

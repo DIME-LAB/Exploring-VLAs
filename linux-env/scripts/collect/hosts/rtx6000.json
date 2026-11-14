@@ -3,5 +3,6 @@
   "root": "/mnt/storage3/aaugus11/exploring-vlas",
   "image_abi_manifest": "hosts/rtx6000-image-transport-abi.json",
   "environment": "hosts/rtx6000.env",
-  "export_python": "/mnt/storage3/aaugus11/exploring-vlas/export-venv/bin/python"
+  "export_python": "/mnt/storage3/aaugus11/exploring-vlas/export-venv/bin/python",
+  "export_wrapper": "hosts/rtx6000_export.py"
 }

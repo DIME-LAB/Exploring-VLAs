@@ -98,7 +98,8 @@ PYCONFIG
         export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
         export_python="$(python3 "$SCRIPT_DIR/collect/host_config.py" --export-python)"
         if [ -n "$export_python" ]; then
-            exec "$export_python" "$SCRIPT_DIR/collect/export.py" "$@"
+            export_wrapper="$(python3 "$SCRIPT_DIR/collect/host_config.py" --export-wrapper)"
+            exec "$export_python" "$export_wrapper" "$SCRIPT_DIR/collect/export.py" "$@"
         fi
         exec "$HOME/.pixi/bin/pixi" run --manifest-path "$REPO_ROOT/linux-env/pixi.toml" \
             python "$SCRIPT_DIR/collect/export.py" "$@"
