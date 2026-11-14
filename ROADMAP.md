@@ -235,7 +235,15 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       20 um rest contact, and verifies CPU dynamics. Fixed-base normal smoke 5/5 and pilot-3.1-v4 50/50
       pass: fresh native offsets 0.1 mm/0, 13 boxes/cup and 1/lego; fixed_base=true and base drift zero.
 - [ ] 3.2 Fine-tune (more steps/episodes than 10k/100), sim/real mix per the coursework findings.
+    - Published guidance (2026-11-14 review, coursework 3.2-train-prep/reference-guidance-2026-11-14.md):
+      set scheduler_decay_steps = steps (smolvla_base bakes 30k); 60k steps (~6.4 epochs) not 187.5k;
+      closed-loop eval at 10k/20k/40k/60k; verify camera1/camera2 key mapping end to end; second job:
+      full fine-tune at LR 5e-5 (official LIBERO/MetaWorld fine-tunes unfreeze all); mask miss_prefix frames.
 - [ ] 3.3 Re-run the Phase 1 evaluation matrix.
+    - Deploy at the training action rate: new data is labelled at a true 30 Hz sim clock, so dispatch actions
+      at 30 Hz sim time (client fps = server action_fps = 30), not 17.4/19.4 Hz. Re-observe every 10-25
+      actions (paper: open-loop 50 dropped LIBERO 80%->52%). RTC: execution_horizon=10,
+      max_guidance_weight=10, inference_delay from measured latency. Warm compiled checkpoints first.
 
 ## Ops / optional (decide individually)
 
