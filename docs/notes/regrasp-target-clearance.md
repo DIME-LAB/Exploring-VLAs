@@ -32,10 +32,17 @@ history and installs the restored target as its idle hold. It then advances six
 unrecorded normal-dynamics ticks. Every tick must pass the same clock/state/image/
 command contract and fresh geometry/scene checks. A native protected-scene guard
 anchors every cup and block (target and neighbours) to the pre-restore world:
-linear speed <=0.1 mm/s, angular speed <=0.005 rad/s and maximum corner motion
+linear speed <=0.7 mm/s, angular speed <=0.012 rad/s and maximum corner motion
 <=0.2 mm. Block corners use measured body-local geometry; cup corners use all
 thirteen authored primitive boxes. Both fixed base frames must remain within
 the shared 1 um float32-readback rule (quaternions compared up to sign).
+The velocity screens are empirical contact/impulse diagnostics, not solver
+displacement bounds. The checked-in
+[rest-velocity-floor.json](../../linux-env/scripts/collect/fixtures/rest-velocity-floor.json) records
+59 real episodes and pose-only rest classification; clean pre-contact maxima
+were0.34691 mm/s and0.0056004 rad/s. Limits give about2x margin. Displacement
+remains0.2 mm. Receipts retain per-body120Hz substep peaks; resting peaks above
+half a velocity limit require reporting before production.
 
 The guard reads native poses and velocities in every 120 Hz pre-physics callback
 and again after the final solve of every 30 Hz frame. Four callback samples plus
@@ -53,6 +60,13 @@ journal. Independent receipt reconstruction verifies all 24 callback samples,
 six final samples, original anchor hash and final certificate **before** the
 writer opens. These are sampled no-disturbance bounds; no claim is made about
 unobservable sub-substep contact that produces no above-tolerance motion.
+The graph clock need not tick at120Hz: each raw native substep stamp must stay
+nondecreasing inside its held frame's [start,start+1/30s] interval under the
+10ns native rule. The independently measured World clock supplies substep
+cadence. The first corrective row's fixed robot base is bound to the certified
+last settle boundary. Replay binds the current robot model to the saved model
+(geometry and kinematics, using the shared arithmetic readback tolerance) before
+any synthetic write.
 
 The writer opens only after successful settle and scene synchronization.
 Reset or settle verification failures publish the original native error durably

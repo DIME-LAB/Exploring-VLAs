@@ -174,5 +174,41 @@ class ProtectedSettleTests(unittest.TestCase):
         report['protected_finish']['frame_sha256'][0]=digest(frame)
         self.assertIsNotNone(receipt_error(source,rows))
 
+    def test_rehashed_native_substep_clock_outside_frame_refuses(self):
+        source,rows=SetupHarness().run();report=source['recovery_report']
+        frame=report['settle_snapshots'][0]['protected_settle'];frame['substeps'][1]['snapshot']['sim_ns']+=100000000
+        report['protected_finish']['frame_sha256'][0]=digest(frame)
+        self.assertIsNotNone(receipt_error(source,rows))
+
+    def test_first_corrective_fixed_base_edit_refuses(self):
+        source,rows=SetupHarness().run();rows[0]['robot_base_world_pose']['position'][0]+=.1
+        self.assertIn('fixed base',receipt_error(source,rows))
+
+    def test_replay_current_robot_geometry_change_refuses_before_write(self):
+        source,_=SetupHarness().run();h=SetupHarness(replay=source)
+        model=copy.deepcopy(h.collector.native_finger_model)
+        model['all_robot_boxes'][0]['half_extents_m'][0]-=.001
+        model.pop('sha256');model['sha256']=digest(model);h.collector.native_finger_model=model
+        with self.assertRaisesRegex(ValueError,'robot model differs'):h.run()
+        self.assertEqual(h.q_writes,0)
+
+    def test_replay_model_independent_arithmetic_readback_is_tolerant(self):
+        from recovery_start import replay_model_binding
+        h=SetupHarness();model=copy.deepcopy(h.collector.native_finger_model);current=copy.deepcopy(model)
+        current['all_robot_boxes'][0]['half_extents_m'][0]+=1e-12
+        current.pop('sha256');current['sha256']=digest(current)
+        self.assertTrue(replay_model_binding(current,model)['passed'])
+
+    def test_each_body_peak_and_half_bound_flag_survive_certificate_reconstruction(self):
+        def disturb(h,frame,step):
+            if frame==0 and step==1:h.bodies[h.neighbour]['velocity']=[.0004,0,0,0,0,.007]
+        h=SetupHarness(disturb=disturb);source,rows=h.run();cert=source['recovery_report']['protected_finish']
+        self.assertIsNone(receipt_error(source,rows));self.assertIn(h.neighbour,cert['half_bound_exceeded'])
+        peak=cert['velocity_peaks'][h.neighbour]
+        self.assertEqual(peak['samples'],30);self.assertAlmostEqual(peak['max_linear_m_s'],.0004)
+        self.assertAlmostEqual(peak['max_angular_rad_s'],.007)
+        altered=copy.deepcopy(source);altered['recovery_report']['protected_finish']['velocity_peaks'][h.neighbour]['max_linear_m_s']=0.
+        self.assertIsNotNone(receipt_error(altered,rows))
+
 
 if __name__=='__main__':unittest.main()

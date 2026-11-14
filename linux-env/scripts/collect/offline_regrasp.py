@@ -56,6 +56,7 @@ def run_full(args):
     (output/'TEST_ONLY_NOT_TRAINING_DATA').write_text('CPU fake transports; no native physics qualification.\n')
     fixture_path=HERE/'fixtures/regrasp-boot.json';fixture=json.loads(fixture_path.read_text())
     from recovery import recovery_parameters
+    from recovery_start import POLICY as START_POLICY
     fixture['params']['regrasp']=recovery_parameters(fixture['params']['seed'],True)
     reference=output/'reference';reference.mkdir()
     atomic_json(reference/'run.json',dict(baseline=fixture['baseline'],baseline_cup_layout=fixture['baseline_cup_layout']))
@@ -234,7 +235,7 @@ def run_full(args):
                     if not r.busy:continue
                     for substep in range(4):
                         if args.inject_moving_target and collector is not None and getattr(collector.node,'_last_motion_tag',None)=='synthetic_start_settle':
-                            body_data[fixture['params']['object']]['velocity']=[.0002,0.,0.,0.,0.,0.]
+                            body_data[fixture['params']['object']]['velocity']=[2*START_POLICY['stationary_linear_m_s'],0.,0.,0.,0.,0.]
                         if collector is not None and getattr(collector.node,'_last_motion_tag',None)=='synthetic_start_settle':
                             neighbour=next(n for n in body_data if n!=fixture['params']['object'] and not n.startswith('cup_'))
                             if args.inject_moving_cup and substep==1:body_data['cup_red']['position'][0]+=.002

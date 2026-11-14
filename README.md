@@ -613,17 +613,23 @@ drive targets and zero velocity, with immediate readback and epoch/command-histo
 rebasing. Six unrecorded normal-dynamics hold ticks then verify the complete
 pipeline contract and static geometry. A native guard measures **every cup and
 block**, including neighbours and the target, against the pre-restore world
-anchor: corner motion <=0.2 mm, linear speed <=0.1 mm/s, angular speed <=0.005
+anchor: corner motion <=0.2 mm, linear speed <=0.7 mm/s, angular speed <=0.012
 rad/s. It samples all four 120 Hz pre-physics callbacks plus the final post-solve
 boundary in each tick; a transient excursion or missing sample is terminal.
 Both physical base frames must retain their held float32-readback poses. The
 writer starts only after all 24 callback samples, six final boundaries, scene
-synchronization and independent certificate reconstruction pass. The shared Quickstart then
+synchronization and independent certificate reconstruction pass. These velocity
+limits are empirical contact/impulse screens, not solver displacement bounds:
+[rest-velocity calibration](linux-env/scripts/collect/fixtures/rest-velocity-floor.json)
+measured pre-contact maxima0.34691 mm/s and0.0056004 rad/s. The screens provide
+about2x margin; the0.2 mm per-substep displacement gate is unchanged. Every
+receipt reports native per-body substep peak velocities. Any resting-body peak
+above half a velocity limit must be reported before production. The shared Quickstart then
 performs the correction at normal speed and dynamics. Setup failures are terminal
 with durable native evidence; exhausted collision-clear candidates are planner
 quality refusals. Receipt replay restores the saved synthetic world anchor
 (all body poses) and selected joints, with zero velocities and matching drives;
-it refuses changed fixed bases or body geometry before writing. Its certificate
+it refuses changed fixed bases, body geometry or the saved robot geometry/kinematics before writing. Its certificate
 binds world/base readback, clocks, drive baselines, all substeps and the first
 corrective tick. The lateral offset excludes the separately sampled hover, so
 the 3-D displacement can exceed 38 mm.
@@ -994,7 +1000,7 @@ three colour sample videos and parameter/timing reports. A completed export can
 be checked again with the export command's `--validate-existing` flag: it refuses
 missing or different episode/phase metadata, re-audits the raw rows and videos,
 and compares every stored state, action and phase with that source without
-rewriting the dataset. Standalone export resolves the shared pure IK package
+rewriting the dataset. Every stored timestamp, frame/episode/global/task index and task assignment is checked against raw. Both camera videos are decoded and checked at EVERY frame for count, PTS order and raw content: lossless RGB must match exactly; H264 requires per-frame PSNR>=32 dB and max absolute RGB error<=224. Those lossy bounds accommodate measured chroma-edge re-encoding error; they do not claim pixel identity. A failed audit invalidates the previous validation certificate. Standalone export resolves the shared pure IK package
 without requiring a sourced ROS workspace. Report accepted yield,
 RTF, idle/stationary fractions, storage growth and episodes per wall-hour. The
 collector refuses requests above 50; the lead schedules the larger run.
@@ -1003,6 +1009,28 @@ Offline validation: `python3 -m unittest discover -s linux-env/scripts/collect -
  'test_*.py'`. This includes 1,000 randomized comparisons of legacy pure geometry,
 actual shared grasp/jaw execution for both dimension orders/cross settings, the successful fallback-warning probe, late-application and above-rim
 rejections, storage thresholds, output confinement and deployment feedback flags.
+The CPU-only retroactive checker validates finalized normal batches without
+ROS/Isaac/CUDA. It checks ALL episode table rows and tasks; a separate worker
+checks two full, deterministic, colour-diverse video episodes per batch and
+every video container count. New exports use the same checker on all images.
+For example (dataset/pixi Python environment, source batches are read-only):
+
+```bash
+CUDA_VISIBLE_DEVICES= OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 nice -n 10 \
+  linux-env/.pixi/envs/default/bin/python -B linux-env/scripts/collect/validate_exports.py \
+  --root /mnt/a4500-backup/exploring-vlas/datasets \
+  --output /mnt/a4500-backup/exploring-vlas/reports/content-validation/content-validation.json --watch
+CUDA_VISIBLE_DEVICES= OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 nice -n 10 \
+  linux-env/.pixi/envs/default/bin/python -B linux-env/scripts/collect/validate_video_exports.py \
+  --metadata /mnt/a4500-backup/exploring-vlas/reports/content-validation/content-validation.json \
+  --output /mnt/a4500-backup/exploring-vlas/reports/content-validation/video-validation.json --watch
+```
+
+The table gate must pass every finalized production batch before training;
+sampled video checks may run alongside training and any failure stops training.
+The dataset-environment regression is
+`python -B linux-env/scripts/collect/export_content_regression.py -v`.
+
 Always validate the completed five-episode smoke before starting the pilot;
 check physical feedback, application acknowledgements, containment and dataset
 read-back, rather than relying on a scripted completion message.

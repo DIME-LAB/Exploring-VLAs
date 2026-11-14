@@ -1,22 +1,30 @@
 """Seeded synthetic post-miss starts, static geometry and measured reset evidence."""
 import copy,math,random
 import numpy as np
-from comparisons import matches,native_frame,comparison
+from comparisons import matches,native_frame,comparison,bound_comparison
 from contract import JOINTS
 from finger_geometry import FingerModel,body_box,separation,rotation
 from tick_contract import digest,require_snapshots,row_errors,TickContractError,PHYSICS_DT,PHYSICS_STEPS,STEP_NS,world_step_errors
 from miss_clearance import proof_differences
 
 STRATEGY='synthetic_post_miss_reset'
-POLICY=dict(version=2,strategy=STRATEGY,phenotypes=dict(closed=.5,partly_closed=.3,open_hover=.2),
+POLICY=dict(version=3,strategy=STRATEGY,phenotypes=dict(closed=.5,partly_closed=.3,open_hover=.2),
     offset_min_m=.026,offset_max_m=.038,yaw_jitter_max_rad=math.radians(12),
     near_hover_m=[.003,.015],open_hover_m=[.018,.035],max_candidates=24,settle_ticks=6,
     finger_margin_m=.001,arithmetic_margin_m=.00002,target_corner_motion_max_m=.0002,
-    stationary_linear_m_s=.0001,stationary_angular_rad_s=.005,
+    # Empirical contact/impulse screens, NOT solver displacement bounds. See
+    # fixtures/rest-velocity-floor.json: clean maxima .34691 mm/s/.0056004 rad/s.
+    stationary_linear_m_s=.0007,stationary_angular_rad_s=.012,
+    velocity_calibration=dict(source='linux-env/scripts/collect/fixtures/rest-velocity-floor.json',
+        sha256='c1404aae15733be6f9c08d02987983aed6c9e5b672674ada96bc94a1b8efbe46',
+        interpretation='empirical contact/impulse screens; report any resting peak above half a bound before production'),
     protected_bodies='every cup and block in the pre-restore world anchor',
     protected_corner_motion_max_m=.0002,protected_base_rule='float32_readback',
     settle_sampling='four pre-physics samples plus final post-solve sample per 30 Hz frame',
     physics_dt_s=PHYSICS_DT,physics_steps_per_tick=PHYSICS_STEPS,
+    native_substep_clock='nondecreasing within the held frame; native_ns comparison rule; World clock supplies substep cadence',
+    replay_robot_model_rule='all geometry/kinematics equal under arithmetic readback rule; derived digest recorded separately',
+    first_corrective_base_rule='float32_readback',
     origin='synthetic reset; no physical failed grasp is claimed',recorded_phase='corrective',
     training='all recorded frames train on normal-speed corrective expert; no miss prefix is recorded')
 
@@ -148,6 +156,14 @@ def replay_baseline(observed,saved_world):
     return result
 
 
+def replay_model_binding(current,saved):
+    a=copy.deepcopy(current);b=copy.deepcopy(saved)
+    a.pop('sha256',None);b.pop('sha256',None)
+    differences=proof_differences(a,b,'synthetic.replay_robot_model')
+    return dict(passed=not differences,current_sha256=digest(current),saved_sha256=digest(saved),
+        numeric_rule='arithmetic',differences=differences)
+
+
 def protected_state(anchor,snapshot):
     """Measure every protected body's corner excursion and velocity, never re-anchor."""
     from cup_geometry import PRIMITIVES
@@ -186,7 +202,9 @@ class ProtectedSettle:
         sample=self._sample(snapshot);index=len(self.pending)
         sample.update(index=index,source='pre_physics_callback',step_s=float(step))
         sample['checks'].extend([comparison('physics dt',step,PHYSICS_DT,'world_s'),
-            comparison('pre-step World progression',snapshot['physics_time_s']-self.boundary['physics_time_s'],index*PHYSICS_DT,'world_s')])
+            comparison('pre-step World progression',snapshot['physics_time_s']-self.boundary['physics_time_s'],index*PHYSICS_DT,'world_s'),
+            bound_comparison('native substep clock in held frame',snapshot['sim_ns'],self.boundary['sim_ns'],self.boundary['sim_ns']+STEP_NS,'native_ns'),
+            bound_comparison('native substep clock monotonic',snapshot['sim_ns'],self.pending[-1]['snapshot']['sim_ns'] if self.pending else self.boundary['sim_ns'],self.boundary['sim_ns']+STEP_NS,'native_ns')])
         sample['passed']=sample['passed'] and index<PHYSICS_STEPS and all(c['passed'] for c in sample['checks'])
         self.pending.append(sample)
         if not sample['passed']:
@@ -207,9 +225,17 @@ class ProtectedSettle:
         return copy.deepcopy(frame)
     def certificate(self):
         passed=(not self.failure and not self.pending and len(self.frames)==POLICY['settle_ticks'] and all(f['passed'] for f in self.frames))
+        samples=[p for f in self.frames for p in [*f['substeps'],f['final']]]+self.pending
+        peaks={}
+        for name in self.anchor['bodies']:
+            body=[p['motion']['bodies'][name] for p in samples]
+            peaks[name]=dict(samples=len(body),max_linear_m_s=max((p['linear_m_s'] for p in body),default=0.),
+                max_angular_rad_s=max((p['angular_rad_s'] for p in body),default=0.))
+        half=[name for name,p in peaks.items() if p['max_linear_m_s']>POLICY['stationary_linear_m_s']/2 or p['max_angular_rad_s']>POLICY['stationary_angular_rad_s']/2]
         return dict(version=1,epoch=self.epoch,anchor_sha256=self.anchor_sha256,passed=passed,
             frames=len(self.frames),pre_physics_samples=sum(len(f['substeps']) for f in self.frames),
-            final_post_solve_samples=len(self.frames),frame_sha256=[digest(f) for f in self.frames])
+            final_post_solve_samples=len(self.frames),frame_sha256=[digest(f) for f in self.frames],
+            velocity_peaks=peaks,half_bound_exceeded=half)
     def evidence(self):
         return dict(certificate=self.certificate(),pending=copy.deepcopy(self.pending),frames=copy.deepcopy(self.frames),failure=copy.deepcopy(self.failure))
 
@@ -242,6 +268,9 @@ def setup_error(receipt):
         baseline=report['baseline']
         expected=(replay_baseline(observed,report['replay_world_anchor']) if 'replay_world_anchor' in report else observed)
         if baseline!=expected or report['world_anchor_sha256']!=digest(world_anchor(baseline)):return 'synthetic world anchor differs'
+        if 'replay_world_anchor' in report:
+            binding=replay_model_binding(report['model'],report['replay_robot_model'])
+            if not binding['passed'] or report['replay_model_binding']!=binding:return 'synthetic replay robot model differs'
         selection=report['selection'];attempts=selection['attempts'];specs=list(candidates(receipt['params']['regrasp']))
         index=selection['spec']['index']
         if len(attempts)!=index+1 or selection['spec']!=specs[index] or any(a['spec']!=specs[i] for i,a in enumerate(attempts)):return 'synthetic candidate order differs'
@@ -296,6 +325,8 @@ def receipt_error(receipt,rows):
         report=receipt['recovery_report'];episode_id=receipt['episode_id'];ticks=report['settle_snapshots']
         if not rows or any(r['episode_id']!=episode_id or r['epoch']!=report['epoch'] or r['collection_phase']!='corrective' for r in rows):return 'synthetic corrective row identity differs'
         if row_errors(rows[0],ticks[-1]['tick_contract']['row']):return 'synthetic handover tick contract failed'
+        if any(not c['passed'] for c in pose_checks(ticks[-1]['robot_base_world_pose'],rows[0]['robot_base_world_pose'],'first corrective fixed robot base')) or rows[0].get('robot_base_pose_source')!=ticks[-1]['robot_base_pose_source']:
+            return 'synthetic first corrective fixed base differs'
         if any(row_errors(r,rows[i-1] if i else None) for i,r in enumerate(rows)):return 'synthetic corrective tick contract failed'
         if any(native_frame(r)['sim_ns']<=report['record_after_sim_ns'] for r in rows):return 'synthetic setup frames entered dataset'
     except (KeyError,TypeError,ValueError,IndexError,TickContractError):return 'synthetic corrective evidence incomplete'

@@ -51,7 +51,7 @@ class SyntheticStartTests(unittest.TestCase):
     def test_stationary_target_and_corner_motion_are_independent_requirements(self):
         _,_,_,o,_,_=self.fixture()
         self.assertTrue(o.target_state(o.baseline)['passed'])
-        for field,value in [('velocity',[.0002,0,0,0,0,0]),('velocity',[0,0,0,0,.01,0])]:
+        for field,value in [('velocity',[2*POLICY['stationary_linear_m_s'],0,0,0,0,0]),('velocity',[0,0,0,0,2*POLICY['stationary_angular_rad_s'],0])]:
             s=copy.deepcopy(o.baseline);s['bodies'][o.target][field]=value;self.assertFalse(o.target_state(s)['passed'])
         s=copy.deepcopy(o.baseline);s['bodies'][o.target]['position'][0]+=.0003
         self.assertFalse(o.target_state(s)['passed'])

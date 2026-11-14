@@ -989,6 +989,7 @@ class Collector:
         # These inputs also include native entrypoints executed over the bridge.
         tracked_sources = [
             'linux-env/scripts/collect/image_transport_abi.json',
+            'linux-env/scripts/collect/fixtures/rest-velocity-floor.json',
             'linux-env/scripts/collect/image_take.c',
             'isaac/exts/soarm101-dt/so_arm101_dt/extension.py',
             'isaac/exts/soarm101-dt/so_arm101_dt/primitive_colliders.py',
@@ -1294,7 +1295,7 @@ class Collector:
 
     def _prepare_regrasp_start(self,params,result):
         """Create an unrecorded synthetic miss state, then hand over normal dynamics."""
-        from recovery_start import POLICY as START_POLICY,STRATEGY,StaticClearance,choose,protected_state,world_anchor,replay_baseline,setup_error
+        from recovery_start import POLICY as START_POLICY,STRATEGY,StaticClearance,choose,protected_state,world_anchor,replay_baseline,setup_error,replay_model_binding
         if self.writer is not None:raise RuntimeError('Synthetic reset cannot run while recording')
         epoch=self.generation.epoch;self.generation.require(epoch)
         observed=self.held_snapshot(epoch);before=observed;previous=None
@@ -1322,6 +1323,10 @@ class Collector:
         model=bind_target_offsets(self.native_finger_model,fresh['block_offsets'])
         if fresh['finger_offsets']!=model['effective_finger_offsets'] or fresh['block_offsets']!=self.native_shape_offsets[name]:raise RuntimeError('Synthetic start effective offsets differ')
         report.update(model=model,fresh_offsets=fresh)
+        if previous is not None:
+            report['replay_robot_model']=copy.deepcopy(previous['model'])
+            report['replay_model_binding']=replay_model_binding(model,previous['model'])
+            if not report['replay_model_binding']['passed']:raise ValueError('Replay robot model differs from its saved geometry/kinematics')
         oracle=StaticClearance(model,before,name)
         if not protected_state(before,before)['passed']:raise RuntimeError('Synthetic start requires every protected body stationary')
         def check(q):

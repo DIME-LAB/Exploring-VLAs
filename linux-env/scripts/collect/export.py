@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Export audited successful attempts through the installed LeRobotDataset writer and validate."""
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
 
 # Audit shares the calibrated pure IK package without importing the ROS node.
 REPO=Path(__file__).resolve().parents[3]
@@ -18,6 +20,8 @@ from checkpoint import require_recovery_mode,require_episode_mode
 from recovery import receipt_error, recovery_summary
 from dataset_phase import FEATURE,PHASES,POLICY as PHASE_POLICY,phase_code,feature,stored_phase_codes
 from storage import atomic_json,confined, prepare_environment
+from export_content import validate_metadata
+from export_video import validate_videos
 
 
 def main():
@@ -29,13 +33,15 @@ def main():
     args = p.parse_args()
     run, report = args.run, args.report_dir
     run, report = confined(run), confined(report)
+    report.mkdir(parents=True, exist_ok=True)
+    validation_started=time.time_ns()
+    atomic_json(report/'validation.json',dict(passed=False,loaded=False,status='VALIDATION_IN_PROGRESS',started_wall_ns=validation_started))
     if (run / 'superseded.json').exists():
         raise ValueError('Superseded diagnostic run cannot be exported as a dataset')
     require_finalized(run)
     summary = json.loads((run / 'summary.json').read_text())
     if not summary.get('complete') or summary.get('end_marker') != 'COLLECTION_FINISHED':
         raise ValueError('Collection is incomplete; refusing to export a partial run')
-    report.mkdir(parents=True, exist_ok=True)
     config = json.loads((run / 'run.json').read_text())
     require_recovery_mode(config,config.get('regrasp_only',False),config.get('normal_only',False))
     for path in sorted(run.glob('attempt-*/receipt.json')):
@@ -44,6 +50,8 @@ def main():
         if config.get('regrasp_policy',{}).get('strategy')=='synthetic_post_miss_reset' and receipt['params'].get('recovery')=='regrasp' and receipt.get('accepted'):
             if receipt.get('recovery_report',{}).get('strategy')!='synthetic_post_miss_reset':raise ValueError('Current recovery policy requires a certified synthetic post-miss reset')
     prepare_environment(config['instance'])
+    validator_names=('export.py','export_content.py','export_video.py','dataset_phase.py')
+    validator_sources={n:hashlib.sha256(Path(__file__).with_name(n).read_bytes()).hexdigest() for n in validator_names}
     import cv2
     import torch
     import numpy as np
@@ -140,6 +148,16 @@ def main():
     assert tuple(first['observation.state'].shape) == (6,)
     assert tuple(first['observation.images.wrist'].shape) == (3, 480, 640)
     assert tuple(last['observation.images.top'].shape) == (3, 480, 640)
+    try:
+        content=validate_metadata(run)
+        video_content=validate_videos(run,content,sample_count=None)
+        if validator_sources!={n:hashlib.sha256(Path(__file__).with_name(n).read_bytes()).hexdigest() for n in validator_names}:
+            raise RuntimeError('Validator source changed during content audit')
+    except Exception as error:
+        atomic_json(report/'validation.json',dict(passed=False,loaded=False,status='VALIDATION_FAILED',
+            started_wall_ns=validation_started,completed_wall_ns=time.time_ns(),error=str(error),
+            field=getattr(error,'field',None),details=getattr(error,'details',None),validator_source_sha256=validator_sources))
+        raise
     sheet = Image.new('RGB', (256 * 5, 192 * ((len(thumbs) + 4) // 5)))
     for index, thumb in enumerate(thumbs):
         sheet.paste(thumb, ((index % 5) * 256, (index // 5) * 192))
@@ -153,7 +171,10 @@ def main():
         subprocess.run(['ffmpeg', '-v', 'error', '-y', '-i', str(path / 'top.mp4'), '-i', str(path / 'wrist.mp4'),
             '-filter_complex', '[0:v][1:v]hstack=inputs=2', '-c:v', 'libx264', '-threads', '2', '-crf', '20',
             str(report / f'sample-{color}.mp4')], check=True)
-    validation = dict(frame_phases=dict(policy=PHASE_POLICY,counts=phase_counts,all_values_read_back=True),recovery=recovery,loaded=True, fps=loaded.fps, episodes=loaded.num_episodes,
+    validation = dict(passed=True,status='VALIDATION_FINISHED',started_wall_ns=validation_started,completed_wall_ns=time.time_ns(),
+                     validator_source_sha256=validator_sources,
+                     export_content=dict(metadata=content,video=video_content),
+                     frame_phases=dict(policy=PHASE_POLICY,counts=phase_counts,all_values_read_back=True),recovery=recovery,loaded=True, fps=loaded.fps, episodes=loaded.num_episodes,
                      frames=len(loaded), features=loaded.features,all_state_actions_read_back=True,timing_passed=all(a['passed'] for a in audits),
                      color_counts={color: sum(e['params']['color'] == color for e in manifest) for color in ('red', 'green', 'blue')})
     atomic_json(report / 'validation.json',validation)

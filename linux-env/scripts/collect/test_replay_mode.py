@@ -1,5 +1,5 @@
 """Replay and export agree with the immutable mode declared in run.json."""
-import argparse,ast,io,json,math,os,tempfile,unittest
+import argparse,ast,io,json,math,os,tempfile,time,unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
@@ -26,10 +26,11 @@ class ReplayModeTests(unittest.TestCase):
             root=Path(directory);(root/'run.json').write_text(json.dumps(dict(normal_only=True,regrasp_only=False,recovery_mode='normal_only',instance=0)))
             (root/'summary.json').write_text(json.dumps(dict(complete=True,end_marker='COLLECTION_FINISHED')))
             attempt=root/'attempt-0000';attempt.mkdir();(attempt/'receipt.json').write_text(json.dumps(dict(accepted=True,params=parameters(1,'red',regrasp=True))))
-            scope=dict(argparse=argparse,__doc__='export',Path=Path,json=json,confined=lambda p:p,require_finalized=lambda p:None,require_recovery_mode=require_recovery_mode,require_episode_mode=require_episode_mode)
+            scope=dict(argparse=argparse,__doc__='export',Path=Path,json=json,time=time,atomic_json=lambda p,v:p.write_text(json.dumps(v)),confined=lambda p:p,require_finalized=lambda p:None,require_recovery_mode=require_recovery_mode,require_episode_mode=require_episode_mode)
             with patch('sys.argv',['export.py',str(root),'--report-dir',str(root/'report')]),self.assertRaisesRegex(ValueError,'declared collection mode'):
                 exec(compile(ast.Module(body=main.body[:cut],type_ignores=[]),'actual export mode entrance','exec'),scope)
             self.assertFalse((root/'dataset').exists())
+            self.assertFalse(json.loads((root/'report/validation.json').read_text())['loaded'])
 
     def test_each_declared_mode_accepts_only_its_episode_kinds(self):
         for only_normal,only_regrasp in ((False,False),(True,False),(False,True)):
