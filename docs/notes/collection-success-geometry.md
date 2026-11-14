@@ -1,82 +1,46 @@
-# Cup-local success geometry
+# Primitive cup success geometry
 
-The success gate measures the complete oriented block box in the cup's physical
-body frame. Each corner must lie above 0.6 mm, below 94 mm, and within the
-height-dependent interior radius in `cup_profile.json`. The block and cup must
-stay settled for 15 consecutive 30 Hz simulated ticks, with the cup upright.
-The episode also needs at least 25 mm of measured lift.
+The authoritative asset is `isaac/exts/soarm101-dt/assets/sorting_collision_geometry.json`.
+Both the collector success gate and its MoveIt cup objects read this file. Each
+cup consists of twelve tapered wall boxes plus one floor box; sizes/centres are
+metres in CUP-BASE coordinates, and rotations are wxyz. `/drop_poses` describes
+the body centre, 48.26 mm above the base along cup Z, rather than the primitive
+origin. The collector transforms the complete compound into the planning base
+frame. The GUI scene implementation is unchanged.
 
-The radius is a concave piecewise affine lower envelope of the full CAD shell's
-interior, expressed in metres. Four nodes describe the floor fillet and tapered
-wall. The first sampling plane is 10 nm above the 1.2 mm authored floor to avoid
-a coplanar STL slice. The calibration takes the smaller of the actual slice
-inradius and active triangle supporting-plane distance, then subtracts 0.1 mm
-at the nodes. Across all analytical critical heights the envelope's minimum
-radial plane separation is about 0.0598 mm; it is not a uniform 0.1 mm clearance.
-A further 0.7 mm inward geometric allowance leaves at least about 0.7598 mm
-radial separation from the authored supporting planes. The floor keeps its
-separate, explicit 0.6 mm geometric allowance.
+Every corner of the oriented physical block must satisfy every inner wall plane
+`n.p <= offset`. Normals in the asset are NOT normalized. Physical signed distance
+is `(offset - n.p) / ||n||`; normalizing n without scaling the offset changes the
+geometry. Unit tests derive the inner faces from the rotated primitive boxes and
+check that they coincide with all twelve authored planes. A box and the allowed
+interior are convex; checking all eight corners also bounds edges and faces.
 
-Native RigidBody tensor getters resolve every block to contact offset
-1.3625002466 mm and rest offset 0. All 16 shapes of each cup resolve to contact
-0.0999999975 mm and rest 0. These effective values supersede USD `-Infinity`
-sentinels and UI/default parameters. The 0.7 mm allowance is a geometric design
-margin; it is not a sum of contact/rest offsets. [PhysX](https://nvidia-omniverse.github.io/PhysX/physx/5.4.0/_api_build/class_px_shape.html)
-uses contact offsets to generate predictive contacts and rest offsets to set
-resting separation. Positive contact offsets do not authorize overlap; zero
-rest offsets imply no nominal resting overlap.
+The floor top is 1.2 mm and the rim is 96.52 mm. Admission allows at most 20 um of
+wall/floor penetration: 9 um measured rest-contact residual, 10 um allowance for
+solver variability and 1 um for float/transforms. This is a bounded rest tolerance,
+not the 0.1 mm predictive-contact distance; rest offsets are zero. The 20 um bound
+is smaller than contact distance and is explicit in metadata. A 0.1 mm side or
+floor violation fails; rim admission requires all corners below rim minus 0.1 mm.
+No radial-cylinder/CAD envelope or 0.7 mm inward margin is used. The old radial
+calibrator/profile files are removed; earlier Mac diagnostic reports retain the
+historical measurements for superseded runs.
 
-For each nonhorizontal STL triangle, calibration verifies the envelope against
-its infinite supporting plane over that triangle's complete active height
-interval. Both sides are affine between envelope nodes and a plane's sign
-change, so checking interval endpoints, nodes and sign changes proves the
-inequality between them. All 24,010 triangles pass. The source mesh hash is
-checked at collection startup. Concavity means the admissible volume is an
-intersection of convex frusta; testing all eight box corners bounds the whole
-box, including edges and faces.
+Success also requires an upright cup, block/cup speed below 0.015 m/s, angular
+speed below 0.15 rad/s for fifteen consecutive contract-valid 30 Hz ticks, and
+25 mm of lift during the episode. A contract-invalid physical verdict is terminal.
 
-The returned cooked inner-wall intersections lie inward of the authored shell at the measured
-corner directions, restricting the physically reachable settled interior.
-The envelope certifies containment in the authored cup; measured physical
-settlement checks behavior under those cooked collisions. The geometric radial
-allowance does not promise uniform normal distance from every cooked face.
+MoveIt uses the exact thirteen boxes, without mesh padding. Native reset readback
+checks each box's dimensions and transformed pose together, including parent and
+world/base transforms. A tolerance-aware one-to-one match accepts message-order
+changes while refusing missing/duplicate shapes, altered sizes, bad orientations
+or the 48.26 mm origin mistake. Dimensional tolerance is 0.1 um; pose tolerance is
+10 um for ROS/service readback (separate from physical containment tolerances).
+The native ACM/attachment/octomap and measured-state checks remain strict.
 
-Reproduce calibration without ROS or Isaac:
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 OPENBLAS_NUM_THREADS=1 python3 -B \
-  linux-env/scripts/collect/calibrate_cup_profile.py \
-  --output /mnt/a4500-backup/exploring-vlas/runtime/instance-0/cup-calibration.json
-```
-
-The script prints the measured slice radii, conservative envelope, margins,
-source hash and triangle verification. It refuses a nonconcave or unverified
-result. Changing the cup asset also requires remeasuring the floor/rim and
-checking the live collider; regenerating a profile alone is insufficient.
-
-The checked-in physical fixture records seed 310000, including all 15 settled
-snapshots. Its maximum-radius corner is index 1 at height 15.706255 mm and
-radius 25.245268 mm. Its corresponding bottom corner is at 2.924815 mm with
-nearly identical radius. At these directions/heights, the authored mesh wall
-radii are 30.787616 mm and 29.051482 mm. The PhysX cooking interface returned
-16 convex pieces; its side-wall ray intersections are 26.486565 mm and
-26.486631 mm. The block centre is 6.783824 mm off axis.
-
-The returned cooked bottom slab reaches 2.924848 mm, matching the measured
-block bottom to less than 0.05 micrometres. This supports contact with an inflated
-cooked floor, rather than a wall-taper perch. The authored floor is 1.2 mm;
-convex decomposition is a coarse approximation, not the smooth CAD shell. The
-radial success profile bounds the authored interior. Returned cooked convexes
-provide contact diagnostics and must not be represented as one circular wall.
-The exact fixture passes with 0.594024 mm minimum radial admission clearance.
-Rim-resting, outside, protruding, below-floor, moving and tilted-cup fixtures
-still reject. This CPU regression does not turn the historical failed attempt
-into an accepted episode or replace the fresh five-success smoke.
-
-`--diagnostic` retains failed videos and writes final recorded-frame stills with
-frame index and native stamp in the receipt. Each PNG must exist, be nonempty,
-and decode before `saved=True`; a missing/corrupt output rejects diagnostic
-acceptance through the existing failure path. Older stills are removed before
-extraction so a zero-output FFmpeg success cannot reuse them. It adds no simulation steps. The
-settled verification tail is explicitly outside the training video. Production
-keeps its success-only video retention and export always excludes failures.
+CPU dynamics are explicit at World construction and verified from the current
+PhysxSceneAPI enableGPUDynamics=false attribute. Unknown settings refuse collection.
+Runtime metadata and each receipt retain the scene setting; effective tensor
+contact/rest offsets and shape counts must match the primitive contract (13 per
+cup, 1 per lego, 0.1 mm contact and zero rest). The next smoke must confirm these
+settings, floor/wall contacts, reset receipts, videos and timing against the new
+scene; no live yield or throughput is inferred from offline checks.

@@ -46,7 +46,7 @@ case "$command" in
             PYTHONPATH="$REPO_ROOT/omni-kit-mcp" python3 - "$SOARM_KIT_MCP_PORT" <<'PYWORLD'
 import json, sys
 from kit_mcp.client import call
-code = "from isaacsim.core.api import World\nfrom so_arm101_dt.extension import get_instance\nget_instance()._min_frame_rate=30\nassert World.instance() is None, 'A fresh World is required'\nw=World(physics_dt=1/120, rendering_dt=1/30)\nresult={'physics_dt': 1/120, 'rendering_dt': 1/30}"
+code = "from isaacsim.core.api import World\nfrom so_arm101_dt.extension import get_instance\nget_instance()._min_frame_rate=30\nassert World.instance() is None, 'A fresh World is required'\nw=World(physics_dt=1/120, rendering_dt=1/30, device='cpu')\nresult={'physics_dt': 1/120, 'rendering_dt': 1/30}"
 print(json.dumps(call('run_python', {'code': code}, port=int(sys.argv[1]), timeout=30)))
 PYWORLD
             PYTHONPATH="$REPO_ROOT/omni-kit-mcp" python3 -m kit_mcp.client soarm101.quick_start \

@@ -567,19 +567,29 @@ The audit rejects skipped/duplicate ticks, mismatched physical state/images/pose
 noisy labels, changed applied targets, and application latency above one tick.
 A five-sim-second-late application probe must fail.
 
-Success uses a measured height-dependent interior profile from the full cup
-STL. `cup_profile.json` contains a concave envelope verified against every active
-triangle supporting plane, with 0.1 mm subtracted at the calibration nodes and
-an additional 0.7 mm inward geometric allowance. Resolved tensor values are
-block contact 1.3625 mm/rest 0 and cup-shape contact 0.1 mm/rest 0. Positive contact
-offsets trigger predictive contacts; they do not define permitted wall overlap.
-The geometric allowance is independent of their sum. All eight oriented block corners must fit their
-height's radius. Concavity makes the admitted volume convex, so fitting the
-corners also bounds the box between them. The 0.6 mm lower gate, 94 mm ceiling,
-15 settled ticks and 25 mm lift requirement remain. Receipts log each corner's
-height, radial bound and clearance; run metadata includes the profile and source
-hashes. A changed cup STL refuses collection until recalibrated.
-See [cup geometry and calibration](docs/notes/collection-success-geometry.md).
+Success and collector MoveIt cups share
+`isaac/exts/soarm101-dt/assets/sorting_collision_geometry.json`: twelve tapered
+wall boxes and one floor box per cup, in the cup-base frame. The `/drop_poses`
+centre is 48.26 mm above that base along the cup's local Z. MoveIt receives all
+thirteen boxes with their exact dimensions and wxyz orientations, and reset
+verification matches each shape together with its world pose using a one-to-one
+geometric match. The GUI scene path retains its established behavior.
+
+All eight block corners must satisfy all twelve interior planes. Asset normals
+are not unit vectors: signed clearance is `(offset - n·corner)/||n||`. Floor top
+is 1.2 mm; the rim is 96.52 mm. Wall/floor contact permits at most **20 um** of
+penetration (9 um measured rest contact + 10 um solver variability + 1 um float
+allowance), below the 0.1 mm contact distance; rest offsets are zero. The upper
+gate is 0.1 mm below the rim. There is no STL radial envelope or 0.7 mm inward
+margin. The 15 settled ticks and 25 mm lift requirement remain. Metadata records
+the primitive asset hash, per-corner plane distances and verified effective
+shape offsets/counts. See [cup geometry](docs/notes/collection-success-geometry.md).
+
+The collection World is created with `device='cpu'`; the loaded scene explicitly
+disables GPU dynamics. Runtime refuses an absent/unknown/true GPU-dynamics value
+and records the verified CPU scene setting in run transport metadata and each
+episode receipt. CUDA remains pinned for rendering/other CUDA consumers. World
+timing and physics mode are launch-time properties, never changed on a live scene.
 
 For smoke/diagnostic runs, `--diagnostic` retains failed-attempt videos and saves
 `final-top.png` / `final-wrist.png` from the final recorded frame without advancing
@@ -794,22 +804,20 @@ Only successful audited episodes enter the dataset. Success requires all eight
 corners of the selected block's oriented bounding box inside a conservative cup
 interior in the cup's local frame, below the rim, with low block/cup velocities
 for 15 consecutive sim ticks. The block must also have lifted at least 25 mm.
-The concave height-dependent radial profile and 94 mm ceiling bound the block
-inside the authored shell (rim 96.52 mm). The lower gate remains 0.6 mm, an
-explicit geometric allowance below the authored 1.2 mm floor. Resolved rest
-offsets are zero; a negative authored/default UI parameter is not used to infer
-physical overlap. Floor-supported placements pass; below-floor, side-protruding
-and above-rim placements fail. [PhysX contact/rest semantics](https://nvidia-omniverse.github.io/PhysX/physx/5.4.0/_api_build/class_px_shape.html)
-separate predictive contact distance from resting geometry. Confirm the cooked
-USD collision floor and actual rest height during the smoke;
-the offline asset fixture alone does not establish that live measurement.
+The same primitive half-planes used by MoveIt bound the oriented block in the
+cup-base frame. Both floor and wall checks admit the documented 20 um rest
+residual; the rim has a 0.1 mm clearance. Floor-supported wall-contact placements
+pass, while meaningful side protrusion, below-floor and rim placements fail.
+Smoke must confirm these gates against physical boxes and recorded video;
+offline geometry proves the contract, not live placement yield.
 
 State/action use absolute degrees in deployment's six-joint order, including
 `gripper.pos`; raw audit rows retain radians. The action is the clean corrective
 expert command. Seeded disturbances affect only `executed_action`; actual PhysX
-read-back targets are logged separately. Noise uses std 0.002–0.006 rad,
-probability 0.30, clip ±0.012 rad, during the first 80% of arm trajectories;
-the final 20% is clean recovery. Diversity also covers object poses, cup line/arc
+read-back targets are logged separately. Minimum-jerk drift segments use nominal
+0.26–1 degree offsets, 0.3–0.8 s holds and at least 0.35 s ramps, with 65% per-arm-
+operation probability. Home/gripper operations and the final 20% stay noise-free.
+The recorded noise operation includes its seed, full program and geometry scale. Diversity also covers object poses, cup line/arc
 layouts and colour order, approach offsets/heights and speed.
 
 `summary.json` must have complete=true and COLLECTION_FINISHED; exit code alone

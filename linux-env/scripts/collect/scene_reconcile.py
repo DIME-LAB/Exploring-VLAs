@@ -119,8 +119,9 @@ def ground_matches(obj, snapshot, height):
 
 
 class SceneReconciler:
-    def __init__(self, node, messages, srdf):
+    def __init__(self, node, messages, srdf,primitive_cups=False):
         self.node,self.msg,self.srdf=node,messages,srdf
+        self.primitive_cups=primitive_cups
 
     def query(self):
         req=self.msg.Get.Request();req.components.components=FULL_SCENE
@@ -188,22 +189,25 @@ class SceneReconciler:
 
     def verify(self, snapshot, joint_names):
         observed=self.query()
-        objects,cups=physical_pose_caches(snapshot)
+        objects,cups=physical_pose_caches(snapshot,primitive_cups=self.primitive_cups)
         expected={'ground_plane'}|{'lego_'+name for name in objects}|{'cup_'+name for name in cups}
         world={obj.id:obj for obj in observed.world.collision_objects}
         state=dict(zip(observed.robot_state.joint_state.name,observed.robot_state.joint_state.position))
         feedback=all(name in state and abs(state[name]-q)<1e-5 for name,q in zip(joint_names,snapshot['state']))
         policy=collision_policy(self.srdf,expected)
-        poses=collision_pose_errors(observed.world.collision_objects,snapshot)
+        poses=collision_pose_errors(observed.world.collision_objects,snapshot,primitive_cups=self.primitive_cups)
         attachments=[obj.object.id for obj in observed.robot_state.attached_collision_objects]
         ground=ground_matches(world.get('ground_plane'),snapshot,self.node._ground_z_var.get())
         geometry={}
         for name in objects:
             kind,shape=self.node._build_lego_geometry(name)
             geometry['lego_'+name]=geometry_check(world.get('lego_'+name),kind,shape)
-        cup_kind,cup_shape=self.node._build_cup_geometry()
-        for name in cups:
-            geometry['cup_'+name]=geometry_check(world.get('cup_'+name),cup_kind,cup_shape)
+        if self.primitive_cups:
+            for name in cups:geometry['cup_'+name]=poses['objects']['cup_'+name]
+        else:
+            cup_kind,cup_shape=self.node._build_cup_geometry()
+            for name in cups:
+                geometry['cup_'+name]=geometry_check(world.get('cup_'+name),cup_kind,cup_shape)
         geometry_ok=all(check['passed'] for check in geometry.values())
         native=native_scene_summary(observed)
         occupancy_empty=native['octomap_bytes']==0

@@ -48,7 +48,7 @@ from protocol import StepGeneration, CancelledGeneration, OwnershipStalled
 from scene_sync import physical_pose_caches, collision_pose_errors
 from scene_reconcile import SceneReconciler, ros_messages
 from success import SETTLED_TICKS, initial_arm, settled_containment
-from cup_profile import PROFILE
+from cup_geometry import PROFILE,CUP,PRIMITIVES,primitive_world_poses
 from diagnostics import final_stills
 from query_service import StrictQueryClient
 from recovery import REGRASP_POLICY, regrasp_slot, recovery_geometry, detect_miss
@@ -557,7 +557,8 @@ class Collector:
         self.node._simulation_held = lambda: mcp('run_python', {'code':
             'import collection_runtime as c\nr=c.runtime()\nresult=not r.busy and not r.timeline.is_playing()'})
         self.scene_reset = SceneReconciler(self.node, ros_messages(),
-            (REPO/'vla_SO-ARM101/src/so_arm101_moveit_config/config/so_arm101.srdf').read_text())
+            (REPO/'vla_SO-ARM101/src/so_arm101_moveit_config/config/so_arm101.srdf').read_text(),primitive_cups=True)
+        self.node._add_cup_collision_objects=self.add_cup_collisions
         self.workers = WorkerRegistry(self.generation, self.node._motion_thread, self.node._motion_token)
         self.node._motion_thread = self.workers.thread
         # Install terminal hooks and their locks before any executor callback.
@@ -1197,11 +1198,33 @@ class Collector:
         return cups
 
     def update_pose_cache(self, snapshot):
-        objects, cups = physical_pose_caches(snapshot)
+        objects, cups = physical_pose_caches(snapshot,primitive_cups=self.scene_reset.primitive_cups)
         with self.node.objects_lock, self.node._drop_lock:
             self.node._physical_pose_cache = True
             self.node.objects_data = objects
             self.node._drop_data = cups
+
+    def add_cup_collisions(self,cups_dict=None):
+        from geometry_msgs.msg import Pose
+        from shape_msgs.msg import SolidPrimitive
+        with self.node._motion_guard():
+            if cups_dict is None:
+                with self.node._drop_lock:items=dict(self.node._drop_data)
+            else:items=dict(cups_dict)
+            scene=self.scene_reset.diff()
+            for name,drop in items.items():
+                co=self.scene_reset.msg.Object();co.header.frame_id='base';co.id='cup_'+name;co.operation=co.ADD
+                for shape in primitive_world_poses(drop):
+                    box=SolidPrimitive();box.type=SolidPrimitive.BOX;box.dimensions=shape['dimensions']
+                    pose=Pose()
+                    for key,value in zip(('x','y','z'),shape['position']):setattr(pose.position,key,value)
+                    for key,value in zip(('w','x','y','z'),shape['orientation']):setattr(pose.orientation,key,value)
+                    co.primitives.append(box);co.primitive_poses.append(pose)
+                scene.world.collision_objects.append(co)
+            response=self.scene_reset.apply(scene)
+            if response is None or not response.success:raise RuntimeError('Primitive cup scene update refused')
+            self.node._cup_collision_names=[co.id for co in scene.world.collision_objects]
+            self.node._acm_allow_ground_rest(self.node._cup_collision_names)
 
     def sync_scene(self,snapshot=None):
         snapshot=self.episode_start_physical if snapshot is None else snapshot
@@ -1279,6 +1302,9 @@ class Collector:
             raise RuntimeError('Effective shape offsets missing bodies')
         for name, values in offsets.items():
             kind = 'cup' if name.startswith('cup_') else 'block'
+            expected_shapes=len(PRIMITIVES) if kind=='cup' else 1
+            if any(len(values[key+'_m'])!=expected_shapes for key in ('contact','rest')):
+                raise RuntimeError('Physical primitive shape count differs from the shared geometry: '+name)
             for key in ('contact','rest'):
                 expected = PROFILE['effective_offsets_m'][kind+'_'+key]
                 if not values[key+'_m'] or any(abs(value-expected)>1e-7 for value in values[key+'_m']):
@@ -1316,7 +1342,7 @@ class Collector:
                     raise ValueError(f'Missing dimensions for baseline object {name}')
                 position[2] = self.node._ground_z_var.get() + float(bbox['sz']) / 2
             self.baseline_cup_layout = initial['cup_layout']
-        tracked_sources = ['linux-env/scripts/collect/collection_status.py','linux-env/scripts/collect/nvml_processes.py','linux-env/scripts/collect/renderer_device.py','linux-env/scripts/collect/wall_profile.py','linux-env/scripts/collect/gpu_device.py','linux-env/scripts/collect/safe_home.py','linux-env/scripts/collect/frame_join.py','linux-env/scripts/collect/comparisons.py','linux-env/scripts/collect/collect.py', 'linux-env/scripts/collect/contract.py',
+        tracked_sources = ['isaac/exts/soarm101-dt/so_arm101_dt/extension.py','isaac/exts/soarm101-dt/so_arm101_dt/primitive_colliders.py','linux-env/scripts/collect/cup_geometry.py','linux-env/scripts/collect/pose_math.py','linux-env/scripts/collect/collection_status.py','linux-env/scripts/collect/nvml_processes.py','linux-env/scripts/collect/renderer_device.py','linux-env/scripts/collect/wall_profile.py','linux-env/scripts/collect/gpu_device.py','linux-env/scripts/collect/safe_home.py','linux-env/scripts/collect/frame_join.py','linux-env/scripts/collect/comparisons.py','linux-env/scripts/collect/collect.py', 'linux-env/scripts/collect/contract.py',
                            'linux-env/scripts/collect/checkpoint.py',
                            'linux-env/scripts/collect/episode_policy.py',
                            'linux-env/scripts/collect/dart.py',
@@ -1328,8 +1354,6 @@ class Collector:
                            'linux-env/scripts/collect/storage.py',
                            'linux-env/scripts/collect/collection_runtime.py',
                            'linux-env/scripts/collect/success.py',
-                           'linux-env/scripts/collect/cup_profile.py',
-                           'linux-env/scripts/collect/cup_profile.json',
                            'linux-env/scripts/collect/diagnostics.py',
                            'linux-env/scripts/collect/scene_sync.py',
                            'linux-env/scripts/collect/scene_reconcile.py',
@@ -1348,7 +1372,7 @@ class Collector:
         tracked_sources.append(PROFILE['source'])
         source_hashes = {name: hashlib.sha256((REPO / name).read_bytes()).hexdigest() for name in tracked_sources}
         if source_hashes[PROFILE['source']] != PROFILE['source_sha256']:
-            raise RuntimeError('Cup shell differs from the calibrated success profile; recalibrate before collecting')
+            raise RuntimeError('Primitive cup asset differs from the loaded geometry contract')
         if transport_config['loaded_sha256'] != source_hashes['linux-env/scripts/collect/collection_runtime.py']:
             raise RuntimeError('Kit loaded a different collection runtime')
         if any(source_hashes['linux-env/scripts/collect/'+name] != digest
@@ -1358,6 +1382,7 @@ class Collector:
                 transport_config['renderer_multi_gpu'] is not False or transport_config['physics_gpu']!=0 or transport_config['cuda_device']!=0 or
                 transport_config['cuda_device_count']!=1 or transport_config['cuda_visible_devices']!=gpu_uuid(int(os.getenv('ISAACSIM_GPU','0')))):
             raise RuntimeError('Renderer/physics/CUDA instance GPU isolation differs')
+        if transport_config['physics_dynamics']!='cpu':raise RuntimeError('Collection requires CPU PhysX dynamics')
         try:initial_gpu_footprint=self.gpu_footprint()
         finally:atomic_json(root/'gpu-isolation-startup.json',getattr(self,'last_gpu_footprint',dict(passed=False,error='GPU audit did not complete')))
         provenance = dict(start_trial=attempted, started=time.time(), source_sha256=source_hashes,
@@ -1394,7 +1419,7 @@ class Collector:
                       else parameters(args.seed+trial,color,regrasp=args.regrasp_only or regrasp_slot(accepted)))
             params['trial'] = trial
             path = root / f'attempt-{trial:04d}'
-            receipt = dict(params=params,accepted=False,episode_id=hashlib.sha256((str(root)+':'+str(trial)+':'+str(params['seed'])).encode()).hexdigest())
+            receipt = dict(physics=transport_config['physics_config'],params=params,accepted=False,episode_id=hashlib.sha256((str(root)+':'+str(trial)+':'+str(params['seed'])).encode()).hexdigest())
             wait_log_start = len(self.wait_diagnostics)
             failure_log_start = len(self.capture_failures)
             cycle_result = {}

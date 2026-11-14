@@ -1,15 +1,14 @@
 """Whole-block containment in the cup frame, using synchronized physical poses."""
 import math
-from cup_profile import radial_limit
+from pose_math import rotate
+from cup_geometry import CUP,PROFILE,WALL_REST_TOLERANCE_M,wall_checks
 from tick_contract import snapshot_contracts
 
-# Cup body coordinates have their origin at the base; rim height is 96.52 mm.
-# Authored floor is 1.2 mm. The 0.6 mm floor allowance is geometric;
-# effective block/cup rest offsets are zero and do not authorize overlap.
-PHYSICAL_FLOOR_M = .0012
-FLOOR_REST_TOLERANCE_M = .0006
+# Body origin and primitives are cup-base coordinates, from the shared asset.
+PHYSICAL_FLOOR_M = CUP['floor_top_m']
+FLOOR_REST_TOLERANCE_M = PROFILE['floor_rest_tolerance_m']
 INTERIOR_FLOOR_M = PHYSICAL_FLOOR_M - FLOOR_REST_TOLERANCE_M
-INTERIOR_RIM_M = .094
+INTERIOR_RIM_M = CUP['rim_m'] - PROFILE['rim_clearance_m']
 SETTLED_TICKS = 15
 
 
@@ -32,16 +31,6 @@ def initial_arm(snapshots, target):
                 position_spread_rad=spread, sampled_velocity=snapshots[-1]['velocity'])
 
 
-def rotate(q, v):
-    w, x, y, z = q
-    norm = math.sqrt(w*w+x*x+y*y+z*z)
-    if norm < 1e-10:
-        raise ValueError('Invalid pose quaternion')
-    w, x, y, z = (t/norm for t in q)
-    uv = (y*v[2]-z*v[1], z*v[0]-x*v[2], x*v[1]-y*v[0])
-    uuv = (y*uv[2]-z*uv[1], z*uv[0]-x*uv[2], x*uv[1]-y*uv[0])
-    return [v[i]+2*(w*uv[i]+uuv[i]) for i in range(3)]
-
 
 def contained(snapshot, object_name, color):
     block = snapshot['bodies'][object_name]
@@ -56,20 +45,18 @@ def contained(snapshot, object_name, color):
         relative = [block['position'][i]+offset[i]-cup['position'][i] for i in range(3)]
         corners.append(rotate(inverse, relative))
     radius = max(math.hypot(c[0], c[1]) for c in corners)
-    radial_checks = [dict(corner=index, height_m=c[2], radius_m=math.hypot(c[0],c[1]),
-                          allowed_radius_m=radial_limit(c[2]),
-                          clearance_m=radial_limit(c[2])-math.hypot(c[0],c[1]))
-                     for index,c in enumerate(corners)]
+    walls=wall_checks(corners)
     low, high = min(c[2] for c in corners), max(c[2] for c in corners)
     velocity = max(math.sqrt(sum(v*v for v in body['velocity'][:3])) for body in (block, cup))
     angular = max(math.sqrt(sum(v*v for v in body['velocity'][3:])) for body in (block, cup))
     upright = rotate(cup['orientation'], [0, 0, 1])[2] > math.cos(math.radians(5))
-    ok = (all(c['clearance_m'] >= 0 for c in radial_checks) and low >= INTERIOR_FLOOR_M and high <= INTERIOR_RIM_M
+    ok = (all(c['passed'] for c in walls) and low >= INTERIOR_FLOOR_M and high <= INTERIOR_RIM_M
           and velocity <= .015 and angular <= .15 and upright)
     return dict(passed=ok, max_corner_radius_m=radius, lowest_corner_m=low,
                 highest_corner_m=high, linear_speed_m_s=velocity, angular_speed_rad_s=angular,
-                upright=upright, min_radial_clearance_m=min(c['clearance_m'] for c in radial_checks),
-                radial_checks=radial_checks)
+                upright=upright, min_wall_clearance_m=min(c['clearance_m'] for c in walls),
+                wall_checks=walls,geometry_source_sha256=PROFILE['source_sha256'],
+                floor_tolerance_m=FLOOR_REST_TOLERANCE_M,wall_tolerance_m=WALL_REST_TOLERANCE_M)
 
 
 def settled_containment(snapshots,object_name,color):

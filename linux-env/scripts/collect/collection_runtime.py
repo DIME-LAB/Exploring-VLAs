@@ -22,7 +22,7 @@ from rclpy.executors import SingleThreadedExecutor
 from rclpy.parameter import Parameter
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
-from pxr import Gf, Usd, UsdGeom, UsdPhysics
+from pxr import Gf, Usd, UsdGeom, UsdPhysics, PhysxSchema
 from isaacsim.core.api import World
 from isaacsim.core.prims import Articulation, RigidPrim
 from comparisons import matches
@@ -314,6 +314,14 @@ class Runtime:
                     max_arm_position_error_rad=arm_error, max_arm_velocity_rad_s=velocity_error, snapshot=actual)
 
 
+def physics_mode(stage):
+    path='/physicsScene';prim=stage.GetPrimAtPath(path)
+    if not prim.IsValid() or not prim.HasAPI(PhysxSchema.PhysxSceneAPI):raise RuntimeError('Physics dynamics are unverified')
+    enabled=PhysxSchema.PhysxSceneAPI(prim).GetEnableGPUDynamicsAttr().Get()
+    if enabled is not False:raise RuntimeError('CPU dynamics require an explicit false enableGPUDynamics value: '+repr(enabled))
+    return dict(dynamics='cpu',enable_gpu_dynamics=False,scene_path=path)
+
+
 def install(mode='collect'):
     global _RUNTIME
     if hashlib.sha256(Path(__file__).read_bytes()).hexdigest() != _LOADED_SHA256:
@@ -329,7 +337,8 @@ def install(mode='collect'):
     _RUNTIME.set_mode(mode)
     import torch
     import carb
-    return dict(mode=mode, joint_names=_RUNTIME.art.dof_names,
+    physics=physics_mode(_RUNTIME.stage)
+    return dict(mode=mode, physics_config=physics,joint_names=_RUNTIME.art.dof_names,
                 epoch=_RUNTIME.epoch, invalid_through_ns=_RUNTIME.invalid_through_ns,
                 loaded_sha256=_LOADED_SHA256,
                 loaded_dependencies=_LOADED_DEPENDENCIES,
@@ -340,6 +349,7 @@ def install(mode='collect'):
                 renderer_gpu=carb.settings.get_settings().get('/renderer/activeGpu'),
                 renderer_multi_gpu=carb.settings.get_settings().get('/renderer/multiGpu/enabled'),
                 physics_gpu=carb.settings.get_settings().get('/physics/cudaDevice'),
+                physics_dynamics=physics['dynamics'],
                 measured_topic='/joint_states_measured', local_corners=_RUNTIME.local_corners,
                 effective_shape_offsets=_RUNTIME.resolved_shape_offsets())
 

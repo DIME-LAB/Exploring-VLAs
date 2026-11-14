@@ -1,18 +1,14 @@
 """Physical-body to MoveIt pose contract, independent of ROS transport."""
 import math
-from success import rotate
+from pose_math import rotate,multiply
+from cup_geometry import CUP,primitive_world_poses,compound_pose_check
 
 CUP_HEIGHT_M = .0965
 DROP_COLORS = {'drop_1':'blue', 'drop_2':'green', 'drop_3':'red'}
 
 
-def multiply(a, b):
-    w,x,y,z = a; v,i,j,k = b
-    return [w*v-x*i-y*j-z*k, w*i+x*v+y*k-z*j,
-            w*j-x*k+y*v+z*i, w*k+x*j-y*i+z*v]
 
-
-def physical_pose_caches(snapshot):
+def physical_pose_caches(snapshot,primitive_cups=False):
     base = snapshot['base_world_pose']
     inv = [base['orientation'][0]] + [-v for v in base['orientation'][1:]]
     objects, cups = {}, {}
@@ -20,7 +16,7 @@ def physical_pose_caches(snapshot):
         q = multiply(inv, body['orientation'])
         pos = rotate(inv, [v-o for v,o in zip(body['position'], base['position'])])
         if name.startswith('cup_'):
-            offset = rotate(q, [0,0,CUP_HEIGHT_M/2])
+            offset = rotate(q, [0,0,(CUP['rim_m'] if primitive_cups else CUP_HEIGHT_M)/2])
             pos = [a+b for a,b in zip(pos,offset)]
             target = next(k for k,v in DROP_COLORS.items() if name == 'cup_'+v)
             dest = cups
@@ -30,9 +26,9 @@ def physical_pose_caches(snapshot):
     return objects, cups
 
 
-def collision_pose_errors(collision_objects, snapshot):
+def collision_pose_errors(collision_objects, snapshot,primitive_cups=False):
     """Compare every reset body, including geometry and parent-frame offsets."""
-    objects, cups = physical_pose_caches(snapshot)
+    objects, cups = physical_pose_caches(snapshot,primitive_cups=primitive_cups)
     expected = {'lego_'+k:(v, False) for k,v in objects.items()}
     expected.update({'cup_'+k:(v, True) for k,v in cups.items()})
     actual = {co.id:co for co in collision_objects}
@@ -41,6 +37,8 @@ def collision_pose_errors(collision_objects, snapshot):
         if name not in actual:
             errors[name] = dict(error='missing collision object');continue
         co = actual[name]
+        if cup and primitive_cups:
+            errors[name]=compound_pose_check(co,target,snapshot);continue
         if co.header.frame_id not in ('base', 'world', '/World/base'):
             errors[name] = dict(error='unsupported planning frame '+co.header.frame_id);continue
         mesh = bool(co.mesh_poses)

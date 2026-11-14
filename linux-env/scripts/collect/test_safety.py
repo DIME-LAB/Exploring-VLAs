@@ -90,23 +90,18 @@ class SafetyTests(unittest.TestCase):
     def test_above_rim_is_rejected(self):
         self.assertFalse(contained(self.snapshot(.104), 'red_2x3_0', 'red')['passed'])
 
-    def test_interior_bounds_are_conservative_against_cup_asset(self):
-        import struct
-        raw=(ROOT/'vla_SO-ARM101/src/so_arm101_description/meshes/cup/cup.stl').read_bytes()
-        count=struct.unpack('<I',raw[80:84])[0]
-        data=np.frombuffer(raw,offset=84,count=count,dtype=np.dtype([('normal','<f4',3),('v','<f4',(3,3)),('attr','<u2')]))
-        centers=data['v'].mean(1);normals=data['normal']
-        floor=(normals[:,2]>.9)&(np.linalg.norm(centers[:,:2],axis=1)<20)
-        asset_floor=float(data['v'][floor,:,:,][...,2].max())/1000
-        self.assertLessEqual(INTERIOR_FLOOR_M,asset_floor)
-        self.assertTrue(contained(self.snapshot(asset_floor+.0064),'red_2x3_0','red')['passed'])
-        self.assertLess(INTERIOR_RIM_M,float(data['v'][...,2].max())/1000)
-        from cup_profile import verify_shell
-        self.assertTrue(verify_shell(raw)['passed'])
+    def test_interior_bounds_follow_the_primitive_cup_asset(self):
+        from cup_geometry import CUP,PRIMITIVES
+        floor=next(p for p in PRIMITIVES if p['name']=='floor')
+        floor_top=floor['center_m'][2]+floor['size_m'][2]/2
+        self.assertAlmostEqual(floor_top,.0012)
+        self.assertLessEqual(INTERIOR_FLOOR_M,floor_top)
+        self.assertTrue(contained(self.snapshot(floor_top+.0064),'red_2x3_0','red')['passed'])
+        self.assertLess(INTERIOR_RIM_M,CUP['rim_m'])
 
     def test_floor_supported_block_is_valid_with_geometric_floor_allowance(self):
         from success import PHYSICAL_FLOOR_M
-        for bottom in (PHYSICAL_FLOOR_M, PHYSICAL_FLOOR_M-.0005):
+        for bottom in (PHYSICAL_FLOOR_M, PHYSICAL_FLOOR_M-9e-6):
             rows=[self.snapshot(bottom+.0064) for _ in range(SETTLED_TICKS)]
             for index,row in enumerate(rows):row['sim_ns']+=round(index*1e9/30)
             rows=checked_window(rows)

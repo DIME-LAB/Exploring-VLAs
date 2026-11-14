@@ -184,7 +184,7 @@ class EpisodeIdentityTests(unittest.TestCase):
         c.gpu_footprint=lambda:dict(passed=True)
         c.reset_release=lambda name:observed.append(c.current_episode_id)
         c.motion_call=lambda fn,*a:fn(*a)
-        scope=dict(self=c,params=dict(object='red',seed=123),root=Path('/a/run'),trial=9,hashlib=hashlib,motion_epochs=set())
+        scope=dict(transport_config=dict(physics_config=dict(dynamics='cpu')),self=c,params=dict(object='red',seed=123),root=Path('/a/run'),trial=9,hashlib=hashlib,motion_epochs=set())
         reset_index=next(i for i,n in enumerate(attempt.body) if isinstance(n,ast.Expr) and isinstance(n.value,ast.Call) and any(isinstance(a,ast.Attribute) and a.attr=='reset_release' for a in n.value.args))
         exec(compile(ast.Module(body=[path,receipt,*attempt.body[:reset_index+1]],type_ignores=[]),'collect.py','exec'),scope)
         self.assertEqual(observed,[scope['receipt']['episode_id']])

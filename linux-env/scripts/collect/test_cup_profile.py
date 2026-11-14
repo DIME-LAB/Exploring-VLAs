@@ -1,4 +1,4 @@
-"""Measured shell containment and retained diagnostic media regressions."""
+"""Primitive-gate live-pose fixtures and retained diagnostic media."""
 import copy
 import io
 import json
@@ -6,7 +6,7 @@ import math
 from pathlib import Path
 import unittest
 from unittest.mock import patch
-from cup_profile import PROFILE,radial_limit,radius_at_height,verify_shell
+from cup_geometry import PROFILE,WALLS,wall_checks
 from success import contained,settled_containment
 from test_tick_contract import checked_window
 from diagnostics import final_stills, png_dimensions
@@ -17,14 +17,14 @@ class CupProfileTests(unittest.TestCase):
     def fixture(self):
         return json.loads(Path(__file__).with_name('fixtures').joinpath('live-cup-rest-310000.json').read_text())
 
-    def test_exact_rejected_live_pose_passes_height_dependent_profile(self):
+    def test_retained_live_pose_is_inside_the_primitive_planes(self):
         data=self.fixture()
         result=settled_containment(checked_window(data['snapshots']),data['object'],data['color'])
         self.assertTrue(result['passed'])
         check=result['checks'][-1]
         self.assertAlmostEqual(check['max_corner_radius_m'],.02524526772523616,delta=1e-12)
-        self.assertGreater(check['min_radial_clearance_m'],.0005)
-        self.assertEqual(max(check['radial_checks'],key=lambda c:c['radius_m'])['corner'],1)
+        self.assertGreater(check['min_wall_clearance_m'],.0005)
+        self.assertEqual(len(check['wall_checks']),96)
 
     def test_same_live_pose_cannot_pass_on_rim_outside_or_with_protruding_corner(self):
         data=self.fixture();sample=data['snapshots'][-1];name=data['object'];cup=sample['bodies']['cup_red']
@@ -43,31 +43,19 @@ class CupProfileTests(unittest.TestCase):
         high=copy.deepcopy(low);high['bodies']['red_2x3_0']['position'][2]=.07
         self.assertFalse(contained(low,'red_2x3_0','red')['passed'])
         self.assertTrue(contained(high,'red_2x3_0','red')['passed'])
-        self.assertLess(radial_limit(.003),radial_limit(.08))
+        n=WALLS[0]['interior_plane']['normal'];offset=WALLS[0]['interior_plane']['offset_m']
+        self.assertLess(offset-n[2]*.003,offset-n[2]*.08)
 
-    def test_envelope_is_concave_and_inside_every_source_triangle_support(self):
-        root=Path(__file__).resolve().parents[3]
-        raw=(root/PROFILE['source']).read_bytes()
-        checked=verify_shell(raw)
-        self.assertTrue(checked['passed']);self.assertEqual(checked['triangles'],24010)
-        self.assertEqual(checked['supporting_plane_violations'],0)
-        self.assertGreater(checked['min_radial_plane_clearance_m'],.0000597)
-        altered=copy.deepcopy(PROFILE)
-        for node in altered['samples']:node['envelope_m']+=.002
-        self.assertFalse(verify_shell(raw,altered)['passed'])
-        self.assertEqual(PROFILE['effective_offsets_m']['block_rest'],0.)
-        self.assertAlmostEqual(PROFILE['effective_offsets_m']['block_contact'],.0013625002466142178)
-
-    def test_every_intermediate_box_point_is_inside_when_all_corners_pass(self):
-        # The hypograph of a nonnegative concave radius is convex.
-        data=self.fixture();check=contained(data['snapshots'][-1],data['object'],data['color'])
-        self.assertTrue(check['passed'])
-        heights=[n['height_m'] for n in PROFILE['samples']]
-        for a in heights:
-            for b in heights:
-                for t in (0,.1,.5,.9,1):
-                    self.assertGreaterEqual(radius_at_height((1-t)*a+t*b)+1e-12,
-                        (1-t)*radius_at_height(a)+t*radius_at_height(b))
+    def test_every_intermediate_box_point_is_inside_the_linear_halfplanes(self):
+        from pose_math import rotate
+        data=self.fixture();sample=data['snapshots'][-1];name=data['object'];body=sample['bodies'][name];cup=sample['bodies']['cup_'+data['color']]
+        inv=[cup['orientation'][0]]+[-v for v in cup['orientation'][1:]]
+        corners=[rotate(inv,[a+b-c for a,b,c in zip(body['position'],rotate(body['orientation'],local),cup['position'])]) for local in sample['local_corners'][name]]
+        for a in corners:
+            for b in corners:
+                for t in (0.,.1,.5,.9,1.):
+                    point=[(1-t)*x+t*y for x,y in zip(a,b)]
+                    self.assertTrue(all(c['passed'] for c in wall_checks([point])))
 
 
 class DiagnosticMediaTests(unittest.TestCase):

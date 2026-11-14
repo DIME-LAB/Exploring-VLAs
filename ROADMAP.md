@@ -212,6 +212,8 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       Bar: before/after collider inventory, RTF (GPU vs CPU dynamics), grasp slip/tilt over >=10 grasps, GUI
       quickstart still works, no camera change except the grasp pose. Then the collector's success-gate cup
       profile and MoveIt cup objects follow the primitives. Must land before the pilot/full collection.
+      Collector integration uses the shared 13-box cup asset for success planes and MoveIt, admits documented
+      20 um rest contact, and verifies CPU dynamics; offline tests pass, live smoke/pilot remain pending.
 - [ ] 3.2 Fine-tune (more steps/episodes than 10k/100), sim/real mix per the coursework findings.
 - [ ] 3.3 Re-run the Phase 1 evaluation matrix.
 
