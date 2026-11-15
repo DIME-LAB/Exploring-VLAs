@@ -3,6 +3,7 @@ from pathlib import Path
 import argparse,hashlib,importlib.util,json,math,os,sys,threading,time
 import numpy as np
 REPO=Path(__file__).resolve().parents[3]
+from native_environment import qualified_host
 sys.path.insert(0,str(REPO/'linux-env/scripts/collect'))
 sys.path.insert(0,str(REPO/'omni-kit-mcp'))
 from collect import mcp
@@ -32,7 +33,7 @@ def validate_collector_cut():
 
 def main():
  p=argparse.ArgumentParser();p.add_argument('--fixture',type=Path,required=True);p.add_argument('--fixture-sha256',required=True);p.add_argument('--out',type=Path,required=True);p.add_argument('--commands',choices=('clean','executed'),required=True);a=p.parse_args()
- hostroot=Path('/mnt/storage3/aaugus11/exploring-vlas');assert a.out.resolve().is_relative_to(hostroot) and not a.out.exists();a.out.mkdir(parents=True)
+ hostroot=Path(qualified_host(REPO)['root']);assert a.out.resolve().is_relative_to(hostroot) and not a.out.exists();a.out.mkdir(parents=True)
  require_environment()
  core=validate_collector_cut()
  raw=a.fixture.read_bytes();assert hashlib.sha256(raw).hexdigest()==a.fixture_sha256;fixture=json.loads(raw);assert fixture['kind']=='native-held-replay-v1' and len(fixture['episodes'])==3

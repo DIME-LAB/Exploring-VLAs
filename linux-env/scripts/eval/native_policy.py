@@ -3,18 +3,19 @@ from pathlib import Path
 import argparse,hashlib,importlib.util,json,math,os,secrets,signal,socket,subprocess,sys,time
 from multiprocessing.connection import Listener
 import numpy as np
-REPO=Path(__file__).resolve().parents[3];HOST=Path('/mnt/storage3/aaugus11/exploring-vlas')
+REPO=Path(__file__).resolve().parents[3]
 sys.path.insert(0,str(REPO/'linux-env/scripts/collect'))
 from collect import mcp
 from held_tick import CollectorTransport,validate_policy_features,validate_policy_requests
 from native_replay import require_environment,validate_collector_cut
 from checkpoint_contract import checkpoint_files
+from native_environment import qualified_host,policy_python
 from run_episodes import Client
 from phase3_metrics import PhysicalScore
 FEATURES=('shoulder_pan.pos','shoulder_lift.pos','elbow_flex.pos','wrist_flex.pos','wrist_roll.pos','gripper.pos')
 
 def main():
- p=argparse.ArgumentParser();p.add_argument('--out',type=Path,required=True);p.add_argument('--checkpoint',type=Path,required=True);p.add_argument('--weights-sha256',required=True);p.add_argument('--bank',type=Path,required=True);p.add_argument('--bank-sha256',required=True);p.add_argument('--server-port',type=int,default=18092);p.add_argument('--max-actions',type=int,default=1350);p.add_argument('--rtc-off',action='store_true');p.add_argument('--check-only',action='store_true');p.add_argument('--observe-every-actions',type=int,choices=(1,5,10,25,50),default=10);p.add_argument('--evaluation-kind');p.add_argument('--queue-aggregation',choices=('weighted_average','latest_only'),default='weighted_average');p.add_argument('--eval-codec-roundtrip',action='store_true');a=p.parse_args();require_environment();core=validate_collector_cut()
+ p=argparse.ArgumentParser();p.add_argument('--out',type=Path,required=True);p.add_argument('--checkpoint',type=Path,required=True);p.add_argument('--weights-sha256',required=True);p.add_argument('--bank',type=Path,required=True);p.add_argument('--bank-sha256',required=True);p.add_argument('--server-port',type=int,default=18092);p.add_argument('--max-actions',type=int,default=1350);p.add_argument('--rtc-off',action='store_true');p.add_argument('--check-only',action='store_true');p.add_argument('--observe-every-actions',type=int,choices=(1,5,10,25,50),default=10);p.add_argument('--evaluation-kind');p.add_argument('--queue-aggregation',choices=('weighted_average','latest_only'),default='weighted_average');p.add_argument('--eval-codec-roundtrip',action='store_true');a=p.parse_args();host=qualified_host(REPO);HOST=Path(host['root']);require_environment();core=validate_collector_cut()
  assert a.out.resolve().is_relative_to(HOST/'eval/runs') and not a.out.exists();a.out.mkdir();assert a.max_actions==1350
  checkpoint_inventory=checkpoint_files(a.checkpoint)
  assert checkpoint_inventory['model.safetensors']['sha256']==a.weights_sha256
@@ -37,7 +38,7 @@ def main():
  env.update(PYTHONPATH=str(REPO/'lerobot/src'),PYTHONDONTWRITEBYTECODE='1',SOARM_EVAL_NATIVE_HELD='1',OMP_NUM_THREADS='4',OPENBLAS_NUM_THREADS='1',MKL_NUM_THREADS='1',LEROBOT_RTC_ENABLED='0' if a.rtc_off else '1',LEROBOT_RTC_EXECUTION_HORIZON='10',LEROBOT_RTC_MAX_GUIDANCE_WEIGHT='10',LEROBOT_RTC_PREFIX_ATTENTION_SCHEDULE='EXP')
  for key,part in [('TMPDIR','tmp'),('XDG_CACHE_HOME','cache'),('HF_HOME','cache/huggingface'),('TORCH_HOME','cache/torch'),('TORCHINDUCTOR_CACHE_DIR','cache/inductor'),('TRITON_CACHE_DIR','cache/triton')]:
   directory=HOST/'eval'/part;directory.mkdir(parents=True,exist_ok=True);env[key]=str(directory)
- python='/mnt/storage3/aaugus11/smolvla-train/venv/bin/python';key=a.out/'rpc.key';fd=os.open(key,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+ python=policy_python(host);key=a.out/'rpc.key';fd=os.open(key,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
  with os.fdopen(fd,'wb') as file:file.write(secrets.token_bytes(32))
  address=str(a.out/'rpc.sock');assert len(address.encode())<104
  processor_path=a.checkpoint/'policy_preprocessor.json';processor=json.loads(processor_path.read_text())
