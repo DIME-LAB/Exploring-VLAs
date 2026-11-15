@@ -300,3 +300,20 @@ byte-identical; only model weights differ. `phase3-20k-main-proof.json` records
 the counts, all paired differences, source/model/bank hashes and cleanup. The Mac
 20k delivery contains paired seed/probe CSVs, plots, raw traces and selected videos.
 The40k/60k and best-checkpoint deployment/language evaluations remain pending.
+
+
+## Additional RTC-off and 30k windows
+
+The lead explicitly added a20k MAIN RTC-off arm and a30k MAIN RTC-on checkpoint
+window. They reuse the frozen30 held-out layouts,30sim-Hz, eager backend and
+10-action re-observation cadence. The30k preset points at the backup checkpoint
+030000/pretrained_model with unchanged top/wrist keys and an empty rename map.
+The scored execution source and fork stay frozen; only checkpoint path and RTC
+arm differ. `report_scored_window.py --suite main-rtc-off --step 20000` reports
+the native RTC-off manifest, retaining the same30-scene denominator and refusing
+an arm mismatch. The default RTC-on reports remain byte-identical.
+
+A separate lock/state directory runs the same CPU checkpoint watcher for030000,
+leaving the original40k/60k watcher untouched. No GPU evaluation starts from a
+watcher. Additional language direction probes use fixed home frames and paired
+flow-noise seeds42–46; they are unscored CPU diagnostics, not MAIN episodes.

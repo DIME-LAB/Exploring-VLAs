@@ -40,4 +40,10 @@ class ReportTests(unittest.TestCase):
  def test_missing_manifest_refused(self):
   (self.attempt/'episode-manifest.json').unlink()
   with self.assertRaises(FileNotFoundError):collect(self.root)
+ def test_rtc_off_arm_keeps_false_flag_and_planned_cohort(self):
+  entries=[r for r in manifest()['best_checkpoint_only'] if r['suite']=='main-rtc-off'];(self.attempt/'episode-manifest.json').write_text(json.dumps(entries));self.row.update(suite='main-rtc-off',rtc_enabled=False);self.write()
+  rows,_=collect(self.root,suite='main-rtc-off');self.assertFalse(rows[0]['rtc_enabled']);self.assertTrue(rows[0]['valid']);self.assertEqual(summarize(rows)['n'],30)
+ def test_rtc_off_cannot_be_mislabeled_as_rtc_on(self):
+  entries=[r for r in manifest()['best_checkpoint_only'] if r['suite']=='main-rtc-off'];(self.attempt/'episode-manifest.json').write_text(json.dumps(entries));self.row.update(suite='main-rtc-off',rtc_enabled=False);self.write()
+  with self.assertRaisesRegex(ValueError,'planned MAIN'):collect(self.root)
 if __name__=='__main__':unittest.main()

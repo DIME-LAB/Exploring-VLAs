@@ -10,6 +10,7 @@ MODEL_PRESETS = {
     "sim": ("anirudhrani/smolvla_sim_100ep_fft__10ksteps_h200", "", "{}"),
     "phase3-10k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/smolvla-phase3-normal-60k-s42-20261114/checkpoints/010000/pretrained_model", "", "{}"),
     "phase3-20k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/smolvla-phase3-normal-60k-s42-20261114/checkpoints/020000/pretrained_model", "", "{}"),
+    "phase3-30k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/smolvla-phase3-normal-60k-s42-20261114/checkpoints/030000/pretrained_model", "", "{}"),
     "phase3-40k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/smolvla-phase3-normal-60k-s42-20261114/checkpoints/040000/pretrained_model", "", "{}"),
     "phase3-60k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/smolvla-phase3-normal-60k-s42-20261114/checkpoints/060000/pretrained_model", "", "{}"),
     "base-ft": ("/home/aaugus11/w_ckpt/smolvla-base-ft-rec222812-20k-s42-20261113", "", "{}"),

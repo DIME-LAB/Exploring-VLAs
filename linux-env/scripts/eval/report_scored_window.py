@@ -29,8 +29,10 @@ def select_examples(rows):
     if invalid is not None:selected.append((invalid,'invalid: '+invalid['validity_reasons']))
     return selected
 
-def collect(root,expected_step=10000):
-    expected={r['seed']:r for r in manifest()['per_checkpoint']}; found={}; configs=[];attempted={};result_paths=[]
+def collect(root,expected_step=10000,suite='main'):
+    if suite not in ('main','main-rtc-off'):raise ValueError('Expected a MAIN deployment arm')
+    plan=manifest();planned=plan['per_checkpoint'] if suite=='main' else [r for r in plan['best_checkpoint_only'] if r['suite']==suite]
+    expected={r['seed']:r for r in planned};expected_rtc=suite=='main';found={};configs=[];attempted={};result_paths=[]
     attempts=[p for p in sorted(root.glob('attempt-*')) if p.is_dir()]
     if not attempts:raise ValueError('Expected window root containing attempt-* directories')
     for attempt in attempts:
@@ -60,7 +62,7 @@ def collect(root,expected_step=10000):
     for path,e in result_paths:
         raw=json.loads(path.read_text()); seed=raw['seed']
         if seed!=e['seed']:raise ValueError('Result seed does not match its episode manifest entry')
-        if any(raw.get(k)!=e[k] for k in ('suite','color','phrase','task')) or raw.get('rtc_enabled') is not True:
+        if any(raw.get(k)!=e[k] for k in ('suite','color','phrase','task')) or raw.get('rtc_enabled') is not expected_rtc:
             raise ValueError(f'Wrong MAIN contract for seed {seed}')
         reasons=validity(raw)
         health=path.parent.parent/'window-health.json'
@@ -69,7 +71,7 @@ def collect(root,expected_step=10000):
         jitter=[abs(v['jitter_ms']) for v in trace];loads=[(raw.get('host_load_start') or [None])[0],(raw.get('host_load_end') or [None])[0]]
         major_start=raw.get('isaac_major_faults_start');major_end=raw.get('isaac_major_faults_end')
         row={k:raw.get(k) for k in ('seed','color','task','outcome','closing_distance_m','closest_target_distance_m','closing_motion_ge2deg','time_to_grasp_s','time_to_place_s','sim_time_s','wall_time_s','total_episode_wall_s','actions_sent','chunks','effective_action_fps','empty_ticks_after_startup','empty_ticks_pct','first_chunk_s','request_chunk_mean_ms','request_chunk_p95_ms','request_queue_depth_mean','chunk_size_threshold','actions_per_chunk','sim_cap_hz','failure_note')}
-        row.update(valid=not reasons,validity_reasons=';'.join(reasons),reported_outcome=raw['outcome'] if not reasons else 'invalid',result_file=str(path.relative_to(root)),video_file=str((path.parent/'viewport.mp4').relative_to(root)),rtc_enabled=True,
+        row.update(valid=not reasons,validity_reasons=';'.join(reasons),reported_outcome=raw['outcome'] if not reasons else 'invalid',result_file=str(path.relative_to(root)),video_file=str((path.parent/'viewport.mp4').relative_to(root)),rtc_enabled=expected_rtc,
             effective_wall_action_fps=c.get('effective_wall_action_fps'),missed_sim_slots=c.get('missed_action_ticks_after_startup'),
             send_median_ms=percentile(costs,.5),send_p95_ms=percentile(costs,.95),jitter_p95_ms=percentile(jitter,.95),jitter_max_ms=max(jitter) if jitter else None,
             load1_start=loads[0],load1_end=loads[1],isaac_major_faults_delta=major_end-major_start if major_end is not None and major_start is not None else None,
@@ -98,8 +100,8 @@ def summarize(rows):
     result['valid_only_success']=dict(k=vk,n=len(valid),wilson95=wilson(vk,len(valid)) if valid else None)
     return result
 
-def report(root,out,expected_step=10000):
-    rows,config=collect(root,expected_step);out.mkdir(parents=True,exist_ok=True)
+def report(root,out,expected_step=10000,suite='main'):
+    rows,config=collect(root,expected_step,suite);out.mkdir(parents=True,exist_ok=True)
     summary=dict(overall=summarize(rows),per_color={c:summarize([r for r in rows if r['color']==c]) for c in COLORS},contract=config,
         denominator='All 30 planned seeds. Invalid/non-run rows are distinct outcomes and cannot contribute confirmed successes. Starvation is overlapping, not an exclusion. Timing/distance averages are diagnostic over all observed rows, including invalid rows; valid-only averages are separate.',
         limitations='Marginal Wilson intervals; ten scenes per colour. Layout pairing only; policy flow RNG not paired. One checkpoint/arm cannot establish an RTC or training-step effect.')
@@ -111,6 +113,6 @@ def report(root,out,expected_step=10000):
     return rows,summary
 
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('root',type=Path);p.add_argument('--out',type=Path,required=True);p.add_argument('--step',type=int,default=10000);a=p.parse_args()
-    rows,summary=report(a.root,a.out,a.step);print(json.dumps(summary['overall'],indent=2))
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('root',type=Path);p.add_argument('--out',type=Path,required=True);p.add_argument('--step',type=int,default=10000);p.add_argument('--suite',choices=('main','main-rtc-off'),default='main');a=p.parse_args()
+    rows,summary=report(a.root,a.out,a.step,a.suite);print(json.dumps(summary['overall'],indent=2))
 if __name__=='__main__':main()
