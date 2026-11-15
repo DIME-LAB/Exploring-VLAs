@@ -1,5 +1,7 @@
 """Seeded physical scene bank for paired policy evaluations (executed in Kit)."""
 from pathlib import Path
+import hashlib
+_SOURCE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 import json
 import time
 import os
@@ -29,7 +31,10 @@ def probe():
     return dict(samples=samples, max_wall_gap_s=max(gaps, default=None))
 
 
-def prepare(seed, bank):
+def prepare(seed, bank, colors=('blue',), generate=True):
+    if not generate:
+        from phase3 import validate_bank
+        validate_bank(bank)
     import numpy as np
     import omni.timeline
     import omni.usd
@@ -40,6 +45,10 @@ def prepare(seed, bank):
     stage = omni.usd.get_context().get_stage()
     timeline = omni.timeline.get_timeline_interface()
     playing = timeline.is_playing()
+    reset = {}
+    if len(colors) == 3:
+        import collection_runtime
+        reset = collection_runtime.runtime().cancel()
     timeline.pause()
     try:
         if not _VIEWS:
@@ -84,29 +93,55 @@ def prepare(seed, bank):
 
         baseline = bank / 'baseline.json'
         if not baseline.exists():
+            if not generate:raise FileNotFoundError('Frozen baseline file missing')
             baseline.write_text(json.dumps(snapshot(), indent=2) + '\n')
         target = bank / f'seed-{seed}.json'
         ext = get_instance()
         if not target.exists():
+            if not generate:
+                raise FileNotFoundError('Frozen seed file missing: '+str(target))
             restore(json.loads(baseline.read_text()))
             rng = np.random.get_state()
             try:
                 np.random.seed(seed)
-                result = ext._cmd_randomize_object_poses(required_visible_color='blue', required_visible_count=1)
-                if result.get('status') != 'success':
-                    raise RuntimeError(str(result))
-                bodies = snapshot()
+                for attempt in range(64):
+                    restore(json.loads(baseline.read_text()))
+                    result = ext._cmd_randomize_object_poses(required_visible_color=colors[0], required_visible_count=1)
+                    if result.get('status') != 'success':
+                        raise RuntimeError(str(result))
+                    bodies = snapshot()
+                    if all(any(name.startswith(color) and ext._is_in_camera_view(body['position'], margin_px=30)
+                               for name,body in bodies.items()) for color in colors):
+                        break
+                else:
+                    raise RuntimeError(f'Seed {seed} cannot produce all-colour visibility')
             finally:
                 np.random.set_state(rng)
             target.write_text(json.dumps(bodies, indent=2) + '\n')
         bodies = json.loads(target.read_text())
         error, qerror = restore(bodies)
-        visible = [name for name, body in bodies.items() if name.startswith('blue')
-                   and ext._is_in_camera_view(body['position'], margin_px=30)]
-        if not visible:
-            raise RuntimeError(f'Seed {seed} has no visible blue lego')
-        return dict(seed=seed, scene_file=str(target), bodies=bodies, visible_blue=visible,
+        visible = {color: [name for name, body in bodies.items() if name.startswith(color)
+                   and ext._is_in_camera_view(body['position'], margin_px=30)] for color in colors}
+        if any(not names for names in visible.values()):
+            raise RuntimeError(f'Seed {seed} lacks requested colour visibility: {visible}')
+        return dict(seed=seed, scene_file=str(target), bodies=bodies, visible_blue=visible.get('blue', []), visible_colors=visible,
+                    reset_epoch=reset.get('epoch'), reset_stamp_ns=reset.get('invalid_through_ns'),
                     max_position_error_m=error, max_orientation_error=qerror)
     finally:
         if playing:
             timeline.play()
+
+
+def freeze(bank):
+    """Generate every held-out scene before scoring and seal its physical bytes."""
+    import hashlib
+    bank = Path(bank)
+    if (bank/'bank-manifest.json').exists():
+        raise FileExistsError('Bank already frozen')
+    receipts = [prepare(seed, bank, ('red','green','blue')) for seed in range(900000,900030)]
+    files = [bank/'baseline.json']+[bank/f'seed-{seed}.json' for seed in range(900000,900030)]
+    manifest = dict(seeds=list(range(900000,900030)),colors=['red','green','blue'],
+                    files_sha256={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in files},
+                    visible={r['seed']:r['visible_colors'] for r in receipts})
+    (bank/'bank-manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
+    return manifest

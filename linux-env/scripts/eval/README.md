@@ -185,3 +185,49 @@ versus 47.142 s recording wall time. Own policy processes exited; Isaac
 attempts, CSV, plots, review and video are in
 `~/w_policy_phase1/1.15/`, copied to the Mac
 `coursework-eee598/roadmap-2026-11/phase1/1.3-1.8-policy/1.15/`.
+
+## Phase3 sim-time evaluation (opt-in)
+
+`phase3.py plan --out DIR` writes the frozen 3.3 main/probe manifest. Run
+`phase3.py check --checkpoint DIR --out PROOF` before any load. The four
+`phase3-*k` shared presets name staged checkpoints; absent checkpoints fail
+validation. Main evaluations use30 held-out layouts,10 percolour, RTC-on at
+10k/20k/40k/60k. The best complete checkpoint (ties to later) alone receives
+RTC-off30, colour-swap18 and paraphrase54 trials.
+
+`phase3.py run --suite main --index 0 --count 5 --checkpoint DIR --out DIR`
+starts one persistent model/client for a five-row announced window, using the
+existing episode runner with `--sim-time`, measured physical feedback,
+client/server30fps and observations after each10 executed actions. Isolated
+capture decorates the native observation with an auxiliary simulation stamp;
+the server adapter converts measured latency in that clock to RTC delay. Its
+native camera, normalization, model and RPC implementations are retained. Eager inference is fixed for all checkpoints/arms via an in-memory loader
+override (saved weights/configs stay immutable). The checkpoint-native
+max-autotune/CUDA-graph path failed RTC capture in the unscored pilot. A
+100-action non-actuating warmup precedes all scored episodes. Every episode
+records simulated dispatch jitter, wall duration, starvation and physical
+colour-aware lift/cup/closing-distance scores. `report_phase3.py ROOT --out DIR`
+separates suites, invalid attempts and per-colour/phrase denominators, with
+Wilson intervals and paired RTC/checkpoint differences.
+
+Live entry requires explicit `ROS_DOMAIN_ID=92`, the eval loopback XML with
+`ROS_LOCALHOST_ONLY` and `ROS_AUTOMATIC_DISCOVERY_RANGE` unset on all participants, a fresh
+30Hz simulation scene (physics120Hz), the collector's deploy-clock transport,
+and controllers launched with `use_sim_time=true`. Use only announced GPU0
+windows; policy and sim share GPU0, never GPU1. Set
+`SOARM_EVAL_LOCALHOST_ONLY=1` for `collect_sim.sh up/deploy-clock/down 2` so its
+DDS participants remain on loopback. Preserve its own-process cleanup rules.
+All weights, caches and results belong under
+`/mnt/a4500-backup/exploring-vlas/eval/`. `sim_time.py` is eval-only; ordinary
+Phase1 launch defaults and the installed lerobot fork are unchanged. The
+adapter's `--eval-clock=wall` episode-client mode keeps wall pacing for real
+hardware. Run CPU regressions with `CUDA_VISIBLE_DEVICES='' pixi run python -m
+unittest discover -s linux-env/scripts/eval -p 'test_*.py' -v`.
+
+The bank manifest SHA is pinned in `phase3.py` and validated before each
+restore; comparisons require the same source/fork/backend/bank contracts.
+Clock delivery uses RELIABLE/depth128. Preparation is **NOT-READY for scored
+checkpoints** until a complete45sim-second reliable-clock check has zero
+missed slots: the first best-effort45s test missed two slots, and the
+replacement was interrupted after13.43sim-s by the announced GPU handoff.
+Neither that interrupted test nor the short pilot episodes are task scores.

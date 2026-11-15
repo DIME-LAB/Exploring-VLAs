@@ -82,7 +82,7 @@ def mcp(tool, params=None):
     return result
 
 
-def scrubbed_env():
+def scrubbed_env(sim_time=False):
     env = {
         k: v
         for k, v in os.environ.items()
@@ -97,18 +97,26 @@ def scrubbed_env():
         RMW_IMPLEMENTATION="rmw_cyclonedds_cpp",
         CYCLONEDDS_URI=f"file://{REPO}/linux-env/cyclonedds.xml",
     )
+    if sim_time:
+        if os.environ.get("ROS_DOMAIN_ID") != "92":
+            raise RuntimeError("Phase3 live eval requires explicit ROS_DOMAIN_ID=92")
+        env.update(ROS_DOMAIN_ID="92",
+                   CYCLONEDDS_URI=f"file://{REPO}/linux-env/cyclonedds-eval.xml")
     uuid = subprocess.check_output(
-        ["nvidia-smi", "-i", "1", "--query-gpu=uuid", "--format=csv,noheader"],
+        ["nvidia-smi", "-i", "0" if sim_time else "1", "--query-gpu=uuid", "--format=csv,noheader"],
         text=True,
     ).strip()
     if not uuid.startswith("GPU-"):
-        raise RuntimeError("GPU 1 UUID unavailable")
+        raise RuntimeError("Requested policy GPU UUID unavailable")
     env["CUDA_VISIBLE_DEVICES"] = uuid
     return env
 
 
 class Ros:
-    def __init__(self):
+    def __init__(self, sim_time=False, joint_topic="/joint_states"):
+        self.physical = None
+        self.clock_s = None
+        self.physical_samples = []
         rclpy.init()
         self.node = rclpy.create_node("policy_episode_harness")
         self.lock = threading.Lock()
@@ -132,7 +140,10 @@ class Ros:
         self.node.create_subscription(
             TFMessage, "/drop_poses", lambda m: self.tf("drops", m), 10
         )
-        self.node.create_subscription(JointState, "/joint_states", self.joints, 10)
+        self.node.create_subscription(JointState, joint_topic, self.joints, 10)
+        if sim_time:
+            from std_msgs.msg import String
+            self.node.create_subscription(String, "/collection_tick", self.physical_received, 100)
         self.arm = ActionClient(
             self.node, FollowJointTrajectory, "/arm_controller/follow_joint_trajectory"
         )
@@ -145,6 +156,17 @@ class Ros:
         self.ex.add_node(self.node)
         self.thread = threading.Thread(target=self.ex.spin, daemon=True)
         self.thread.start()
+
+    def physical_received(self, message):
+        snapshot = json.loads(message.data)
+        with self.lock:
+            self.physical = snapshot
+            self.physical_samples.append(snapshot)
+
+    def physical_drain(self):
+        with self.lock:
+            samples, self.physical_samples = self.physical_samples, []
+        return samples
 
     def update(self, key, value):
         with self.lock:
@@ -177,6 +199,8 @@ class Ros:
         stamp = msg.clock if label == "clock" else msg.header.stamp
         with self.lock:
             self.arrivals[label].append((time.time(), stamp.sec+stamp.nanosec/1e9))
+            if label == "clock":
+                self.clock_s = stamp.sec+stamp.nanosec/1e9
 
     def reset_arrivals(self):
         with self.lock:
@@ -275,6 +299,18 @@ def blue_in_cup(objects, drops):
     return best["inside"], best
 
 
+def inference_health(server, streams, tails):
+    """Promote native RPC/model errors before they can resemble starvation."""
+    if server.poll() is not None:
+        raise RuntimeError(f'Owned policy server exited: {server.returncode}')
+    needles = ('Error in StreamActions:', 'Error receiving actions:')
+    for i, (stream, needle) in enumerate(zip(streams, needles)):
+        new_log = tails[i]+stream.read()
+        tails[i] = new_log[-128:]
+        if needle in new_log:
+            raise RuntimeError('Native policy inference/RPC failed; see logs; episode is invalid')
+
+
 class Client:
     def __init__(self, cmd, env, out):
         out.mkdir(parents=True, exist_ok=True)
@@ -307,7 +343,15 @@ class Client:
     def tagged(self, tag, timeout):
         deadline = time.monotonic() + timeout
         while True:
-            line = self.lines.get(timeout=max(0, deadline - time.monotonic()))
+            health = getattr(self, 'health_check', None)
+            if health:
+                health()
+            try:
+                line = self.lines.get(timeout=min(.2, max(0, deadline-time.monotonic())))
+            except queue.Empty:
+                if time.monotonic() >= deadline:
+                    raise
+                continue
             if line.startswith("FATAL"):
                 self.fatal = json.loads(line[len("FATAL"):])
                 self.log.write(line)
@@ -320,6 +364,7 @@ class Client:
 
     def close(self):
         if self.proc.poll() is None:
+            self.send("ABORT")
             self.send("QUIT")
             try:
                 self.proc.wait(timeout=20)
@@ -356,7 +401,9 @@ def save_result(out, result):
         "effective_action_fps",
         "max_blue_lift_m",
         "failure_note",
-        "video",
+        "video", "clock_basis", "color", "task", "suite", "phrase", "wall_time_s", "sim_time_s",
+        "grasp_success", "correct_cup", "any_placement", "closing_distance_m", "closest_target_distance_m",
+        "sim_dispatch_jitter_p95_ms", "total_episode_wall_s",
     ]
     path = out / "results.csv"
     new = not path.exists()
@@ -383,6 +430,8 @@ def add_telemetry(result, epdir, cfg):
             capture_rpc_s=request.get("capture_rpc_s")))
     latencies = sorted(1000*c["request_to_arrival_s"] for c in chunks if c["request_to_arrival_s"] is not None)
     depths = [c["queue_depth_at_capture_request"] for c in chunks if c["queue_depth_at_capture_request"] is not None]
+    if "sim_dispatch_jitter_p95_ms" in metrics:
+        result["sim_dispatch_jitter_p95_ms"] = metrics["sim_dispatch_jitter_p95_ms"]
     result.update(empty_ticks_after_startup=empty, empty_ticks_pct=100*empty/opportunities if opportunities else None,
         first_chunk_s=metrics.get("first_chunk_s"),
         request_chunk_mean_ms=statistics.mean(latencies) if latencies else None,
@@ -403,6 +452,11 @@ def episode_client_command(command, corrected=False):
 def main():
     p = build_parser()
     p.description = __doc__
+    p.add_argument("--episode-manifest", type=Path, help="Ordered Phase3 rows; changes task/colour only while idle")
+    p.add_argument("--sim-time", action="store_true", help="Opt-in /clock dispatch and physical Phase3 scoring")
+    p.add_argument("--color", choices=("red", "green", "blue"), default="blue")
+    p.add_argument("--warmup-actions", type=int, default=100)
+    p.add_argument("--wall-watchdog-s", type=float, default=900)
     p.add_argument("--episodes", type=int, default=2)
     p.add_argument("--max-s", type=float, default=45)
     p.add_argument("--out", type=Path, required=True)
@@ -414,13 +468,33 @@ def main():
     p.add_argument("--fresh-client-per-episode", action="store_true", help="Diagnose persistent-client resource accumulation")
     p.add_argument("--dataset-brightness", action="store_true", help="Diagnostic only: divide both policy RGB feeds by calibrated live gain")
     args = parse_args(parser=p)
+    if args.sim_time and args.fresh_client_per_episode:
+        p.error("Phase3 uses one persistent client per window")
+    if args.dataset_brightness and args.sim_time:
+        p.error("Inverse-brightness diagnostic and sim-time capture cannot be combined")
     if args.dataset_brightness and not args.observation_process:
         p.error("--dataset-brightness requires isolated observation capture")
     args.seeds = [int(s) for s in args.seeds.split(",")] if args.seeds else list(range(900000, 900000 + args.episodes))
-    if len(args.seeds) != args.episodes or len(set(args.seeds)) != args.episodes:
+    if len(args.seeds) != args.episodes or (not args.episode_manifest and len(set(args.seeds)) != args.episodes):
         p.error("Provide exactly one unique seed per episode")
-    args.scene_bank = (args.scene_bank or Path.home() / "w_policy_phase1/1.9/scene-bank").expanduser().resolve()
+    args.scene_bank = (args.scene_bank or (Path("/mnt/a4500-backup/exploring-vlas/eval/scene-bank-v1") if args.sim_time else Path.home() / "w_policy_phase1/1.9/scene-bank")).expanduser().resolve()
+    episode_rows = json.loads(args.episode_manifest.read_text()) if args.episode_manifest else None
+    if episode_rows is not None:
+        if len(episode_rows) != args.episodes or [r["seed"] for r in episode_rows] != args.seeds:
+            p.error("Episode manifest does not match requested seed order")
+        if any(r["rtc"] != args.rtc_enabled for r in episode_rows):
+            p.error("One persistent server must use one RTC arm")
     cfg = args
+    if args.sim_time:
+        from phase3 import validate_bank
+        args.scene_bank_sha256 = validate_bank(args.scene_bank)
+        for name in ("ROS_LOCALHOST_ONLY", "ROS_AUTOMATIC_DISCOVERY_RANGE", "ROS_STATIC_PEERS"):
+            os.environ.pop(name, None)
+        os.environ["CYCLONEDDS_URI"] = f"file://{REPO}/linux-env/cyclonedds-eval.xml"
+        os.environ["RMW_IMPLEMENTATION"] = "rmw_cyclonedds_cpp"
+        if args.fps != 30 or args.joint_states_topic != "/joint_states_measured":
+            p.error("--sim-time requires --fps 30 --joint-states-topic /joint_states_measured")
+        args.cameras_json = json.dumps({k: json.loads(args.cameras_json)[k] for k in ("top", "wrist")})
     args.out = args.out.expanduser().resolve()
     if args.episodes < 1 or args.max_s <= 0 or args.sim_rate_hz <= 0:
         raise ValueError("Positive episodes/max-s required")
@@ -429,6 +503,9 @@ def main():
     if cfg.dry_run:
         server_cmd, client_cmd = build_commands(cfg, python="python3")
         client_cmd = episode_client_command(client_cmd, args.dataset_brightness)
+        if args.sim_time:
+            server_cmd = server_cmd[:2]+[str(Path(__file__).with_name("sim_time.py")), "sim"]+server_cmd[4:]
+            client_cmd += ["--eval-clock=sim"]
         print(
             json.dumps(
                 {
@@ -443,13 +520,14 @@ def main():
         )
         return
     args.out.mkdir(parents=True, exist_ok=True)
-    env = scrubbed_env()
+    env = scrubbed_env(args.sim_time)
     env.update(
         {k: v for k, v in rtc_environment(cfg).items() if k.startswith("LEROBOT_RTC_")}
     )
     metadata = dict(vars(cfg))
     metadata.update(
         gpu_uuid=env["CUDA_VISIBLE_DEVICES"],
+        inference_mode=env.get("SOARM_EVAL_INFERENCE_MODE", "eager" if args.sim_time else "checkpoint-default"),
         host_cpu_count=os.cpu_count(),
         host_load_start=list(os.getloadavg()),
         started_utc=time.strftime("%FT%TZ", time.gmtime()),
@@ -463,12 +541,17 @@ def main():
                        for path in [Path(__file__), Path(__file__).with_name("scene_reset.py"),
                                     Path(__file__).with_name("episode_client.py"),
                                     SCRIPTS / "run_async_inference_sim.py",
-                                    Path(__file__).with_name("observation_transform.py")]},
+                                    Path(__file__).with_name("observation_transform.py")]+(
+                                    [Path(__file__).with_name(name) for name in ("sim_time.py", "phase3.py", "phase3_metrics.py")]+[
+                                    REPO/"vla_SO-ARM101/src/so_arm101_control/so_arm101_control/compute_workspace.py",
+                                    SCRIPTS/"collect/success.py", SCRIPTS/"collect/cup_geometry.py", SCRIPTS/"collect/pose_math.py"] if args.sim_time else [])},
     )
     (args.out / "run_config.json").write_text(
         json.dumps(metadata, indent=2, default=str) + "\n"
     )
     commands = build_commands(cfg, python="python3")
+    if args.sim_time:
+        commands = (commands[0][:2]+[str(Path(__file__).with_name("sim_time.py")), "sim"]+commands[0][4:], commands[1])
     pixi = [
         str(Path.home() / ".pixi/bin/pixi"),
         "run",
@@ -494,15 +577,25 @@ def main():
     )
     client = ros = None
     try:
-        if not wait_for_port(
-            cfg.server_host, cfg.server_port, cfg.server_startup_timeout
-        ):
-            raise RuntimeError("Policy server startup failed")
+        startup_deadline = time.monotonic()+cfg.server_startup_timeout
+        while not wait_for_port(cfg.server_host, cfg.server_port, .5):
+            if server.poll() is not None:
+                raise RuntimeError(f"Policy server exited at startup: {server.returncode}; see server.log")
+            if time.monotonic() >= startup_deadline:
+                raise TimeoutError("Policy server startup deadline")
         # Same client configuration entrance as the deployment launcher.
         client_cmd = pixi+episode_client_command(commands[1], args.dataset_brightness)
+        if args.sim_time:
+            client_cmd += ["--eval-clock=sim"]
         client = Client(client_cmd, env, args.out)
-        print("READY", client.tagged("READY", 240), flush=True)
-        ros = Ros()
+        health_log = (args.out/'server.log').open(errors='replace')
+        client_health_log = (args.out/'client.log').open(errors='replace')
+        health_tail = ['', '']
+        def server_health():
+            inference_health(server, (health_log, client_health_log), health_tail)
+        client.health_check = server_health
+        print("READY", client.tagged("READY", 900 if args.sim_time else 240), flush=True)
+        ros = Ros(args.sim_time, args.joint_states_topic)
         deadline = time.monotonic() + 15
         while True:
             try:
@@ -512,11 +605,28 @@ def main():
                 if time.monotonic() > deadline:
                     raise
                 time.sleep(0.1)
+        if args.sim_time:
+            from phase3 import require_deployment
+            deployment = require_deployment(ros, mcp)
+            (args.out / "deployment.json").write_text(json.dumps(deployment, indent=2)+"\n")
+            client.send(f"WARM warmup 600 {args.warmup_actions}")
+            client.tagged("EPSTART", 15)
+            warmup = client.tagged("EPDONE", 900)
+            if warmup["actions_sent"] < args.warmup_actions or warmup["chunks"] < 2:
+                raise RuntimeError("Incomplete compiled/guided warmup")
+            if not any(e.get("eval_rtc", {}).get("prefix_steps", 0)>0 for e in warmup.get("chunk_events", []) if e.get("eval_rtc")) and args.rtc_enabled:
+                raise RuntimeError("Warmup did not exercise guided RTC prediction")
+            (args.out / "warmup.json").write_text(json.dumps(warmup, indent=2)+"\n")
         for index in range(args.episodes):
             if index and args.fresh_client_per_episode:
                 client.close()
                 client = Client(client_cmd, env, args.out / f"client-{index:02d}")
-                print("READY", client.tagged("READY", 240), flush=True)
+                print("READY", client.tagged("READY", 900 if args.sim_time else 240), flush=True)
+            if episode_rows is not None:
+                row = episode_rows[index]
+                cfg.color, cfg.task = row["color"], row["task"]
+                cfg.condition = f'{row["suite"]}-{row["phrase"]}-{row["color"]}-rtc-{row["rtc"]}'
+                client.send("TASK " + json.dumps(cfg.task))
             ep = f"ep{index:02d}"
             epdir = args.out / ep
             epdir.mkdir()
@@ -526,6 +636,10 @@ def main():
                 "condition": args.condition,
                 "seed": args.seeds[index],
                 "rtc_enabled": cfg.rtc_enabled,
+                "clock_basis": "simulation" if args.sim_time else "wall",
+                "task": cfg.task, "color": args.color,
+                "phrase": episode_rows[index]["phrase"] if episode_rows else "exact",
+                "suite": episode_rows[index]["suite"] if episode_rows else args.condition,
                 "requested_fps": cfg.fps,
                 "observation_transform": {
                     "name": "inverse_dataset_gain" if args.dataset_brightness else "identity",
@@ -542,6 +656,7 @@ def main():
                 "failure_note": "",
                 "video": "",
             }
+            episode_wall_started = time.monotonic()
             recording = False
             running = False
             try:
@@ -550,8 +665,11 @@ def main():
                 result["randomize"] = mcp("run_python", {"code":
                     f"import sys; sys.path.insert(0, {str(Path(__file__).parent)!r}); "
                     f"import scene_reset, importlib; "
-                    "scene_reset = importlib.reload(scene_reset) if not hasattr(scene_reset, 'start_probe') else scene_reset; "
-                    f"result = scene_reset.prepare({args.seeds[index]}, {str(args.scene_bank)!r})"})
+                    "import hashlib; from pathlib import Path; "
+                    "scene_current=hashlib.sha256(Path(scene_reset.__file__).read_bytes()).hexdigest(); "
+                    "scene_reset._FRAME_SUB = None if getattr(scene_reset, '_SOURCE_SHA256', None) != scene_current else scene_reset._FRAME_SUB; "
+                    "scene_reset = importlib.reload(scene_reset) if getattr(scene_reset, '_SOURCE_SHA256', None) != scene_current else scene_reset; "
+                    f"result = scene_reset.prepare({args.seeds[index]}, {str(args.scene_bank)!r}, {('red', 'green', 'blue') if args.sim_time else ('blue',)!r}, generate={not args.sim_time!r})"})
                 result["host_load_start"] = list(os.getloadavg())
                 result["gpu_start"] = subprocess.check_output([
                     "nvidia-smi", "--query-gpu=index,uuid,utilization.gpu,memory.used", "--format=csv"], text=True)
@@ -581,6 +699,18 @@ def main():
                     "import importlib, scene_reset; "
                     "result = scene_reset.start_probe()"})
                 starts = {k: v[2] for k, v in objects.items() if k.startswith("blue")}
+                score = None
+                if args.sim_time:
+                    from phase3 import new_score
+                    fence = time.monotonic()+15
+                    while (ros.physical is None or ros.physical["epoch"] != result["randomize"]["reset_epoch"] or ros.physical["sim_ns"] <= result["randomize"]["reset_stamp_ns"]):
+                        if time.monotonic()>fence:
+                            raise TimeoutError("No post-reset physical scoring baseline")
+                        time.sleep(.02)
+                    baseline = dict(ros.physical, bodies=result["randomize"]["bodies"])
+                    result["physical_baseline"] = dict(epoch=ros.physical["epoch"], stamp_ns=ros.physical["sim_ns"], starts_from="verified saved reset bodies")
+                    score = new_score(args.color, baseline)
+                    ros.physical_drain()
                 blue_in_cup(objects, drops)
                 mcp(
                     "soarm101.start_recording",
@@ -593,23 +723,41 @@ def main():
                 client.send(f"RUN {ep} {args.max_s}")
                 client.tagged("EPSTART", 15)
                 running = True
+                if args.sim_time:
+                    ros.physical_drain()
                 started = time.monotonic()
+                started_sim = ros.clock_s
+                if score is not None:
+                    score.begin = started_sim
                 inside_since = None
                 lift_since = {k: None for k in starts}
                 lifted = False
                 max_lift = 0.0
                 success = False
                 done = {}
-                with (epdir / "poses.jsonl").open("w") as poses:
-                    while time.monotonic() - started < args.max_s + 15:
+                with (epdir / "poses.jsonl").open("w") as poses, (epdir / "physical.jsonl").open("w") as physical_out:
+                    while time.monotonic() - started < (args.wall_watchdog_s if args.sim_time else args.max_s + 15):
                         try:
                             done = client.tagged("EPDONE", 0.1)
+                            server_health()
                             running = False
                             break
                         except queue.Empty:
                             pass
                         objects, drops, joints = ros.snapshot()
                         now = time.monotonic()
+                        if score is not None:
+                            for snapshot in ros.physical_drain():
+                                if snapshot["epoch"] != result["randomize"]["reset_epoch"]:
+                                    raise RuntimeError("Physical snapshot crossed reset epoch")
+                                if not started_sim <= snapshot["sim_ns"]/1e9 <= started_sim+args.max_s:
+                                    continue
+                                score.update(snapshot)
+                                physical_out.write(json.dumps(snapshot)+"\n")
+                            scored = score.result()
+                            if scored["success"] and not success:
+                                success = True
+                                client.send("ABORT")
                         inside, detail = blue_in_cup(objects, drops)
                         lift = max(
                             (
@@ -627,13 +775,16 @@ def main():
                                 lifted = True
                                 if result["time_to_grasp_s"] is None:
                                     result["time_to_grasp_s"] = lift_since[name] - started
+                        if args.sim_time:
+                            inside = False  # physical whole-block scorer above owns Phase3 outcomes
                         if inside and not lifted:
                             inside = False
                         inside_since = (inside_since or now) if inside else None
                         poses.write(
                             json.dumps(
                                 {
-                                    "t": now - started,
+                                    "t": (ros.clock_s-started_sim) if args.sim_time else now-started,
+                                    "wall_t": now-started,
                                     "objects": objects,
                                     "drop_1": drops["drop_1"],
                                     "inside": inside,
@@ -655,9 +806,15 @@ def main():
                         raise TimeoutError("Client did not acknowledge episode stop")
                 if done["actions_sent"] == 0 or done["chunks"] == 0:
                     raise RuntimeError("Policy produced no executable actions")
+                if score is not None:
+                    for snapshot in ros.physical_drain():
+                        if snapshot["epoch"] != result["randomize"]["reset_epoch"]:
+                            raise RuntimeError("Final physical snapshot crossed reset epoch")
+                        if started_sim <= snapshot["sim_ns"]/1e9 <= started_sim+min(args.max_s, done["duration_s"]):
+                            score.update(snapshot)
                 objects, drops, _ = ros.snapshot()
                 inside, detail = blue_in_cup(objects, drops)
-                success = success and inside
+                success = success and inside if not args.sim_time else score.result()["success"]
                 result.update(
                     outcome="success"
                     if success
@@ -679,6 +836,12 @@ def main():
                     if lifted
                     else "timeout; no sustained blue lift",
                 )
+                if score is not None:
+                    result.update(score.result())
+                    result["outcome"] = "success" if result["success"] else "grasped-not-placed" if result["grasp_success"] else "no-grasp"
+                    result["failure_note"] = "" if result["success"] else "sim-time budget; see physical characterization"
+                    result["wall_time_s"] = done["wall_duration_s"]
+                    result["sim_time_s"] = done["duration_s"]
             except Exception as error:
                 result["outcome"] = "error"
                 result["failure_note"] = f"{type(error).__name__}: {error}"
@@ -757,6 +920,14 @@ def main():
                         f"; cleanup {type(error).__name__}: {error}"
                     )
                 finally:
+                    if args.sim_time:
+                        try:
+                            server_health()
+                        except Exception as health_error:
+                            result["outcome"]="error"
+                            result["failure_note"] += f"; final health: {health_error}"
+                            cleanup_error=health_error
+                    result["total_episode_wall_s"] = time.monotonic()-episode_wall_started
                     add_telemetry(result, epdir, cfg)
                     (epdir / "result.json").write_text(
                         json.dumps(result, indent=2) + "\n"
@@ -772,7 +943,16 @@ def main():
     finally:
         try:
             if client:
-                client.close()
+                try:
+                    if args.sim_time:
+                        try:
+                            server_health()
+                        except Exception as health_error:
+                            (args.out/"window-health.json").write_text(json.dumps(dict(passed=False,error=str(health_error)))+"\n")
+                            raise
+                        (args.out/"window-health.json").write_text(json.dumps(dict(passed=True))+"\n")
+                finally:
+                    client.close()
         finally:
             try:
                 if ros:

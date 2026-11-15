@@ -38,6 +38,7 @@ def emit(tag: str, payload: dict | None = None) -> None:
 def main() -> int:
     diagnostic_parser = argparse.ArgumentParser(add_help=False)
     diagnostic_parser.add_argument("--dataset-brightness", action="store_true")
+    diagnostic_parser.add_argument("--eval-clock", choices=("sim", "wall"))
     diagnostic, remaining = diagnostic_parser.parse_known_args(sys.argv[1:])
     cfg = draccus.parse(RobotClientConfig, args=remaining)
     from observation_transform import enable_isolated_correction, transform_metadata
@@ -46,7 +47,15 @@ def main() -> int:
         if not cfg.observation_process:
             raise ValueError("--dataset-brightness requires isolated observation capture")
         enable_isolated_correction()
+    if diagnostic.eval_clock == "sim":
+        from sim_time import enable_clocked_capture
+        if not cfg.observation_process:
+            raise ValueError('Simulation-clock evaluation requires isolated capture')
+        enable_clocked_capture()
     client = RobotClient(cfg)
+    if diagnostic.eval_clock:
+        from sim_time import install_client
+        install_client(client, diagnostic.eval_clock == "sim")
     status_arrays = {}
     for label in ("arm", "gripper"):
         action_client = getattr(client.robot, f"_{label}_action_client", None)
@@ -65,8 +74,8 @@ def main() -> int:
         action_client.take_data = counted_take
 
     def resources():
-        node = client.robot._node
-        executor = node.executor
+        node = getattr(client.robot, "_node", None)
+        executor = getattr(node, "executor", None)
         action_clients = {}
         for label in ("arm", "gripper"):
             action_client = getattr(client.robot, f"_{label}_action_client", None)
@@ -144,6 +153,7 @@ def main() -> int:
             state["chunk_events"].append(dict(
                 arrival_wall_time=arrival, observation_timestamp=incoming[0].get_timestamp(),
                 first_step=incoming[0].get_timestep(), actions=len(incoming),
+                eval_rtc=getattr(incoming[0], 'eval_rtc', None),
                 observation_to_arrival_s=arrival-incoming[0].get_timestamp(),
                 queue_depth_before_merge=client.action_queue.qsize()))
             if state["first_chunk_t"] is None:
@@ -185,8 +195,12 @@ def main() -> int:
             if line == "QUIT":
                 break
             parts = line.split()
-            if parts[0] != "RUN":
+            if parts[0] == "TASK":
+                cfg.task = json.loads(line[5:])
                 continue
+            if parts[0] not in ("RUN", "WARM"):
+                continue
+            warming = parts[0] == "WARM"
             ep, max_s = parts[1], float(parts[2])
             max_actions = int(parts[3]) if len(parts) > 3 else 10**9
             resources_before = resources()
@@ -208,6 +222,9 @@ def main() -> int:
                 )
                 state["observation_transform_proof"] = None
             emit("EPSTART", {"ep": ep, "t0": state["ep_t0"]})
+            original_actuator = client.robot.send_action
+            if warming:
+                client.robot.send_action = lambda action: action
             try:
                 client.control_loop(
                     task=cfg.task,
@@ -223,6 +240,8 @@ def main() -> int:
                                "request_events": state["request_events"],
                                "chunk_events": state["chunk_events"]})
                 raise
+            finally:
+                client.robot.send_action = original_actuator
             metrics = client.control_loop_stats
             with state_lock:
                 state["paused"] = True
@@ -236,6 +255,7 @@ def main() -> int:
                 "EPDONE",
                 {
                     "ep": ep,
+                    "warmup_only": warming,
                     "observation_transform": correction,
                     "observation_transform_proof": state.get("observation_transform_proof"),
                     "duration_s": round(dur, 2),

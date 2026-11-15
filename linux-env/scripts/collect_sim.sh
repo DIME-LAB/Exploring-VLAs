@@ -13,8 +13,16 @@ export ISAACSIM_GPU="${ISAACSIM_GPU:-0}"
 export ROS_DOMAIN_ID="$((90 + index))"
 export SOARM_KIT_MCP_PORT="$((8777 + 2 * index))"
 export OMNI_KIT_MCP_PORT="$SOARM_KIT_MCP_PORT"
-unset ROS_LOCALHOST_ONLY
-export CYCLONEDDS_URI="file://$REPO_ROOT/linux-env/cyclonedds.xml"
+if [ "${SOARM_EVAL_LOCALHOST_ONLY:-0}" = 1 ]; then
+    unset ROS_LOCALHOST_ONLY ROS_AUTOMATIC_DISCOVERY_RANGE ROS_STATIC_PEERS
+else
+    unset ROS_LOCALHOST_ONLY
+fi
+if [ "${SOARM_EVAL_LOCALHOST_ONLY:-0}" = 1 ]; then
+    export CYCLONEDDS_URI="file://$REPO_ROOT/linux-env/cyclonedds-eval.xml"
+else
+    export CYCLONEDDS_URI="file://$REPO_ROOT/linux-env/cyclonedds.xml"
+fi
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export SOARM_COLLECTION_ROOT="${SOARM_COLLECTION_ROOT:-$(python3 "$SCRIPT_DIR/collect/host_config.py")}"
 export HF_LEROBOT_HOME="${HF_LEROBOT_HOME:-$SOARM_COLLECTION_ROOT/datasets}"

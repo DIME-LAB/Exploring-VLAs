@@ -89,6 +89,9 @@ KIT_MCP_ROOT="$REPO_ROOT/omni-kit-mcp"
 TOOLS_PATH="$REPO_ROOT/isaac"
 TOOLS_MODULE="soarm101_tools"
 CYCLONEDDS_XML="$REPO_ROOT/linux-env/cyclonedds.xml"
+if [ "${SOARM_EVAL_LOCALHOST_ONLY:-0}" = 1 ]; then
+    CYCLONEDDS_XML="$REPO_ROOT/linux-env/cyclonedds-eval.xml"
+fi
 GPU="${ISAACSIM_GPU:-0}"
 # Default recording cadence; update this one value when dataset timing changes.
 DEFAULT_SIM_RATE_HZ=17.4
@@ -401,7 +404,12 @@ do_launch() {
     (
         # Isaac-only environment, scoped to this launch.
         unset ROS_VERSION ROS_PYTHON_VERSION AMENT_PREFIX_PATH CMAKE_PREFIX_PATH \
-              COLCON_PREFIX_PATH ROS_PACKAGE_PATH ROS_LOCALHOST_ONLY
+              COLCON_PREFIX_PATH ROS_PACKAGE_PATH
+        if [ "${SOARM_EVAL_LOCALHOST_ONLY:-0}" = 1 ]; then
+            unset ROS_LOCALHOST_ONLY ROS_AUTOMATIC_DISCOVERY_RANGE ROS_STATIC_PEERS
+        else
+            unset ROS_LOCALHOST_ONLY
+        fi
         venv="$(dirname "$(dirname "$ISAACSIM_BIN")")"
         # Isaac's bundled ROS 2 Humble (same distro as the host's /opt/ros/humble) over
         # CycloneDDS. rcutils dlopens the RMW through LD_LIBRARY_PATH, so the bundled lib dir
