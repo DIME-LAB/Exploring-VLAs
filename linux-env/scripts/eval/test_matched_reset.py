@@ -1,10 +1,17 @@
 import hashlib,json,tempfile,unittest
-import collections,threading,types,sys
+import collections,threading,types,sys,math,copy
 from pathlib import Path
 from matched_reset_client import require_qualification,install_fenced_boundary
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'collect'))
 from protocol import StepGeneration
+from matched_reset import orientation_errors
 class Tests(unittest.TestCase):
+    def test_cup_geodesic_limit_does_not_relax_lego_limit(self):
+        expected=dict(bodies={n:dict(orientation=[1.,0.,0.,0.]) for n in ('cup_red','red_2x3_0')});actual=copy.deepcopy(expected)
+        def rotate(name,degrees):actual['bodies'][name]['orientation']=[math.cos(math.radians(degrees)/2),0.,0.,math.sin(math.radians(degrees)/2)]
+        rotate('cup_red',.08);self.assertTrue(orientation_errors(actual,expected)['passed'])
+        rotate('cup_red',.11);self.assertFalse(orientation_errors(actual,expected)['passed'])
+        rotate('cup_red',.08);rotate('red_2x3_0',.02);self.assertFalse(orientation_errors(actual,expected)['passed'])
     def test_pending_joins_are_retired_before_metadata_is_pruned(self):
         generation=StepGeneration();generation.install(dict(epoch=1,invalid_through_ns=100))
         sensors=types.SimpleNamespace(condition=threading.Condition(),pending=collections.OrderedDict([(110,dict(wrist='old',top='old',tick='old',joint='old'))]),acks={(1,110):'old'})

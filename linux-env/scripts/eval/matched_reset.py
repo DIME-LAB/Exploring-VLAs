@@ -1,9 +1,20 @@
 """Opt-in scene-only worker using the collector's exact normal preparation path."""
 from pathlib import Path
-import argparse,copy,hashlib,json,os,signal,subprocess,sys,time
+import argparse,copy,hashlib,json,math,os,signal,subprocess,sys,time
 
 COLLECTOR_SHA='09f86817b46e2b1ad4695fce29e059ea387a0bbc97d9568786a70c818308ae90'
 HELPER_SHA='eb41cef2e7bee6a972e646a26963c8a0d01142895223969c880144401e4ee868'
+
+def orientation_errors(actual,expected):
+    cup={};lego={}
+    for name,body in expected['bodies'].items():
+        q=actual['bodies'][name]['orientation'];p=body['orientation']
+        component=min(max(abs(x-y) for x,y in zip(q,p)),max(abs(x+y) for x,y in zip(q,p)))
+        if name.startswith('cup_'):
+            cosine=abs(sum(x*y for x,y in zip(q,p)))/math.sqrt(sum(x*x for x in q)*sum(x*x for x in p))
+            cup[name]=math.degrees(2*math.acos(min(1.,max(0.,cosine))))
+        else:lego[name]=component
+    return dict(cup_geodesic_degrees=cup,lego_quaternion_component=lego,passed=max(cup.values())<=.1 and max(lego.values())<=1e-4)
 
 def validate_collector_root(root):
     root=Path(root).resolve();folder=root/'linux-env/scripts/collect'
@@ -52,7 +63,8 @@ def main():
         position_error=max(abs(x-y) for name in expected['bodies'] for x,y in zip(actual['bodies'][name]['position'],expected['bodies'][name]['position']))
         quaternion_error=max(min(max(abs(x-y) for x,y in zip(actual['bodies'][name]['orientation'],expected['bodies'][name]['orientation'])),max(abs(x+y) for x,y in zip(actual['bodies'][name]['orientation'],expected['bodies'][name]['orientation']))) for name in expected['bodies'])
         sampler_equal=receipt['cup_randomization']==source['cup_randomization']
-        validation=dict(passed=q_error<=.01 and position_error<=1e-4 and quaternion_error<=1e-4 and sampler_equal,joint_max_error_deg=q_error,body_max_position_error_m=position_error,body_max_quaternion_error=quaternion_error,exact_cup_sampler=sampler_equal,joint_error_deg=np.degrees(np.array(actual['state'])-expected['state']).tolist(),body_position_errors_m={n:(np.array(actual['bodies'][n]['position'])-expected['bodies'][n]['position']).tolist() for n in expected['bodies']},actual=actual,expected=expected,actual_cup_sampler=receipt['cup_randomization'],expected_cup_sampler=source['cup_randomization'])
+        orientation=orientation_errors(actual,expected)
+        validation=dict(passed=q_error<=.01 and position_error<=1e-4 and orientation['passed'] and sampler_equal,orientation_rule='Lead-approved cups geodesic<=0.1deg; LEGO quaternion component<=1e-4',orientation_errors=orientation,joint_max_error_deg=q_error,body_max_position_error_m=position_error,body_max_quaternion_error=quaternion_error,exact_cup_sampler=sampler_equal,joint_error_deg=np.degrees(np.array(actual['state'])-expected['state']).tolist(),body_position_errors_m={n:(np.array(actual['bodies'][n]['position'])-expected['bodies'][n]['position']).tolist() for n in expected['bodies']},actual=actual,expected=expected,actual_cup_sampler=receipt['cup_randomization'],expected_cup_sampler=source['cup_randomization'])
         atomic_json(a.out/'pose-validation.json',validation)
         receipt.update(prepared_snapshot=actual,pose_validation=validation)
         atomic_json(path/'receipt.json',receipt)
