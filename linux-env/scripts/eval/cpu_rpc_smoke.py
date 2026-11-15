@@ -5,7 +5,7 @@ from multiprocessing.connection import Listener
 import numpy as np
 
 def main():
- p=argparse.ArgumentParser();p.add_argument('--out',type=Path,required=True);p.add_argument('--checkpoint',required=True);p.add_argument('--actions',type=int,default=20);p.add_argument('--observe-every-actions',type=int,choices=(1,5,10),default=10);p.add_argument('--rtc-off',action='store_true');p.add_argument('--eval-codec-roundtrip',action='store_true');a=p.parse_args();assert not a.out.exists();a.out.mkdir(parents=True)
+ p=argparse.ArgumentParser();p.add_argument('--out',type=Path,required=True);p.add_argument('--checkpoint',required=True);p.add_argument('--actions',type=int,default=20);p.add_argument('--observe-every-actions',type=int,choices=(1,5,10,25,50),default=10);p.add_argument('--rtc-off',action='store_true');p.add_argument('--queue-aggregation',choices=('weighted_average','latest_only'),default='weighted_average');p.add_argument('--eval-codec-roundtrip',action='store_true');a=p.parse_args();assert not a.out.exists();a.out.mkdir(parents=True)
  assert os.environ.get('CUDA_VISIBLE_DEVICES')==''
  root=Path(__file__).resolve().parents[3];env=dict(os.environ,PYTHONPATH=str(root/'lerobot/src'),SOARM_EVAL_NATIVE_HELD='1',LEROBOT_RTC_ENABLED='0' if a.rtc_off else '1',LEROBOT_RTC_EXECUTION_HORIZON='10',LEROBOT_RTC_MAX_GUIDANCE_WEIGHT='10',OMP_NUM_THREADS='4',OPENBLAS_NUM_THREADS='1',MKL_NUM_THREADS='1',PYTHONDONTWRITEBYTECODE='1')
  for name in ('TMPDIR','HF_HOME','XDG_CACHE_HOME','TORCH_HOME'):
@@ -46,7 +46,7 @@ def main():
     time.sleep(.05)
   worker=threading.Thread(target=bridge,daemon=True);worker.start()
   with (a.out/'actor.log').open('w') as log:
-   actor=subprocess.Popen([sys.executable,'-u',str(Path(__file__).with_name('native_policy_client.py')),'--socket',address,'--auth-file',str(key),'--calibration-dir',str(a.out/'calibration'),'--checkpoint',a.checkpoint,'--server-port',str(port),'--policy-device','cpu','--observe-every-actions',str(a.observe_every_actions)]+(['--eval-codec-roundtrip'] if a.eval_codec_roundtrip else []),env=env,cwd=a.out,stdin=subprocess.PIPE,stdout=log,stderr=subprocess.STDOUT,text=True)
+   actor=subprocess.Popen([sys.executable,'-u',str(Path(__file__).with_name('native_policy_client.py')),'--socket',address,'--auth-file',str(key),'--calibration-dir',str(a.out/'calibration'),'--checkpoint',a.checkpoint,'--server-port',str(port),'--policy-device','cpu','--observe-every-actions',str(a.observe_every_actions),'--queue-aggregation',a.queue_aggregation]+(['--eval-codec-roundtrip'] if a.eval_codec_roundtrip else []),env=env,cwd=a.out,stdin=subprocess.PIPE,stdout=log,stderr=subprocess.STDOUT,text=True)
   # Input is buffered while the production checkpoint handshake completes.
   actor.stdin.write('RUN smoke '+str(a.actions)+' '+json.dumps('Pick a red lego and place it in red cup')+'\nQUIT\n');actor.stdin.flush();rc=actor.wait(timeout=600);done.set();worker.join(timeout=5);assert rc==0 and not failure,(rc,failure)
   text=(a.out/'actor.log').read_text()
@@ -56,12 +56,18 @@ def main():
   assert [c['native_rtc']['prefix_steps'] for c in event['chunks']]==([0]+[50-a.observe_every_actions]*(len(event['chunks'])-1) if not a.rtc_off else [0]*len(event['chunks']))
   assert all(len(c['actions_degrees'])==50 and all(len(x)==6 for x in c['actions_degrees']) for c in event['chunks'])
   validate_policy_requests(event['requests'],not a.rtc_off,a.observe_every_actions)
+  assert event['queue_aggregation']==a.queue_aggregation
+  if a.queue_aggregation=='latest_only':
+   from native_policy_robot import FEATURES
+   for action in event['sent']:
+    step=action['action_index'];chunk=event['chunks'][step//a.observe_every_actions]
+    assert [action['requested'][n] for n in FEATURES]==chunk['actions_degrees'][step-chunk['step']]
   assert event['eval_codec_roundtrip']==a.eval_codec_roundtrip
   for request in event['requests']:
    if a.eval_codec_roundtrip:
     assert all(v['requested_codec_index']==v['returned_codec_index'] for v in request['capture']['eval_codec_roundtrip'].values())
    else:assert request['capture']['eval_codec_roundtrip'] is False
-  proof=dict(eval_codec_roundtrip=a.eval_codec_roundtrip,status='PASS',scope='CPU synthetic transport only; no simulation or model quality claim',actions=a.actions,captures=state['captures'],observe_every_actions=a.observe_every_actions,rtc_enabled=not a.rtc_off,prefix_steps=[c['native_rtc']['prefix_steps'] for c in event['chunks']],checkpoint=a.checkpoint,inference_wait_wall_s=[r['wall_s'] for r in event['requests']],cuda_visible_devices=env['CUDA_VISIBLE_DEVICES']);(a.out/'result.json').write_text(json.dumps(proof,indent=2)+'\n');print(json.dumps(proof),flush=True)
+  proof=dict(queue_aggregation=a.queue_aggregation,eval_codec_roundtrip=a.eval_codec_roundtrip,status='PASS',scope='CPU synthetic transport only; no simulation or model quality claim',actions=a.actions,captures=state['captures'],observe_every_actions=a.observe_every_actions,rtc_enabled=not a.rtc_off,prefix_steps=[c['native_rtc']['prefix_steps'] for c in event['chunks']],checkpoint=a.checkpoint,inference_wait_wall_s=[r['wall_s'] for r in event['requests']],cuda_visible_devices=env['CUDA_VISIBLE_DEVICES']);(a.out/'result.json').write_text(json.dumps(proof,indent=2)+'\n');print(json.dumps(proof),flush=True)
  finally:
   done.set();terminate(actor);terminate(server)
   if connection is not None:connection.close()

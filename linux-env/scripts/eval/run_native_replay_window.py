@@ -3,7 +3,7 @@ from pathlib import Path
 import argparse,datetime,hashlib,json,os,signal,subprocess,time
 REPO=Path(__file__).resolve().parents[3];HOST=Path('/mnt/storage3/aaugus11/exploring-vlas')
 def main():
- p=argparse.ArgumentParser();p.add_argument('--out',type=Path,required=True);p.add_argument('--fixture',type=Path);p.add_argument('--fixture-sha256');p.add_argument('--checkpoint',type=Path);p.add_argument('--weights-sha256');p.add_argument('--bank',type=Path);p.add_argument('--bank-sha256');p.add_argument('--cadence-diagnostic',action='store_true');p.add_argument('--stop-by-utc',required=True);p.add_argument('--codec-diagnostic',action='store_true');a=p.parse_args();assert not (a.cadence_diagnostic and a.codec_diagnostic);guarded=a.cadence_diagnostic or a.codec_diagnostic;root=a.out.resolve();assert root.is_relative_to(HOST/'eval/runs') and not root.exists();root.mkdir(parents=True)
+ p=argparse.ArgumentParser();p.add_argument('--out',type=Path,required=True);p.add_argument('--fixture',type=Path);p.add_argument('--fixture-sha256');p.add_argument('--checkpoint',type=Path);p.add_argument('--weights-sha256');p.add_argument('--bank',type=Path);p.add_argument('--bank-sha256');p.add_argument('--cadence-diagnostic',action='store_true');p.add_argument('--stop-by-utc',required=True);p.add_argument('--codec-diagnostic',action='store_true');p.add_argument('--replacement-diagnostic',action='store_true');a=p.parse_args();assert sum((a.cadence_diagnostic,a.codec_diagnostic,a.replacement_diagnostic))<=1;guarded=a.cadence_diagnostic or a.codec_diagnostic or a.replacement_diagnostic;root=a.out.resolve();assert root.is_relative_to(HOST/'eval/runs') and not root.exists();root.mkdir(parents=True)
  deadline=datetime.datetime.strptime(a.stop_by_utc,'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc).timestamp()-180;assert deadline>time.time()+600
  if a.checkpoint:
   assert a.weights_sha256 and a.bank and a.bank_sha256
@@ -18,7 +18,7 @@ def main():
  for key in ('ROS_LOCALHOST_ONLY','ROS_AUTOMATIC_DISCOVERY_RANGE','ROS_STATIC_PEERS'):env.pop(key,None)
  for key,part in [('TMPDIR','tmp'),('ROS_LOG_DIR','ros-logs'),('XDG_CACHE_HOME','cache'),('HF_HOME','cache/huggingface'),('OPTIX_CACHE_PATH','cache/optix')]:
   directory=instance/part;directory.mkdir(parents=True,exist_ok=True);env[key]=str(directory)
- ledger=dict(gpu_budget_gib=7 if guarded else None,global_memory_ceiling=.79 if guarded else None,started_utc=time.strftime('%FT%TZ',time.gmtime()),kind='DIAGNOSTIC native codec held-filler' if a.codec_diagnostic else 'DIAGNOSTIC native cadence RTC off' if a.cadence_diagnostic else 'PRIMARY native held-tick training-home policy test' if a.checkpoint else 'native held-tick actuation qualification',root=str(root),status='starting',arms=[],source_sha256={name:hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in ('run_native_replay_window.py','native_replay.py','held_tick.py','phase3_metrics.py','native_policy.py','native_policy_client.py','native_policy_robot.py','native_policy_server.py','codec_stream.py')})
+ ledger=dict(gpu_budget_gib=7 if guarded else None,global_memory_ceiling=.79 if guarded else None,started_utc=time.strftime('%FT%TZ',time.gmtime()),kind='DIAGNOSTIC native replacement-only RTC off' if a.replacement_diagnostic else 'DIAGNOSTIC native codec held-filler' if a.codec_diagnostic else 'DIAGNOSTIC native cadence RTC off' if a.cadence_diagnostic else 'PRIMARY native held-tick training-home policy test' if a.checkpoint else 'native held-tick actuation qualification',root=str(root),status='starting',arms=[],source_sha256={name:hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in ('run_native_replay_window.py','native_replay.py','held_tick.py','phase3_metrics.py','native_policy.py','native_policy_client.py','native_policy_robot.py','native_policy_server.py','codec_stream.py')})
  def save():
   tmp=root/'window-ledger.tmp';tmp.write_text(json.dumps(ledger,indent=2)+'\n');os.replace(tmp,root/'window-ledger.json')
  last_gpu_sample=[0.];bad_samples=[0]
@@ -62,10 +62,11 @@ def main():
  try:
   assert run(['bash','linux-env/scripts/collect_sim.sh','up','2'],'launch.log')==0,'Private runtime launch failed'
   if a.checkpoint:
-   settings=[(1,False),(5,False)] if a.cadence_diagnostic else [(10,True)]
+   settings=[(10,False),(25,False),(50,False)] if a.replacement_diagnostic else [(1,False),(5,False)] if a.cadence_diagnostic else [(10,True)]
    for cadence,rtc in settings:
-    folder=root/(f'rtc-off-exec{cadence}' if a.cadence_diagnostic else 'attempt-01');argv=['python3','-u',str(REPO/'linux-env/scripts/eval/native_policy.py'),'--out',str(folder),'--checkpoint',str(a.checkpoint),'--weights-sha256',a.weights_sha256,'--bank',str(a.bank),'--bank-sha256',a.bank_sha256,'--observe-every-actions',str(cadence)]+([] if rtc else ['--rtc-off'])
+    folder=root/(f'replacement-rtc-off-exec{cadence}' if a.replacement_diagnostic else f'rtc-off-exec{cadence}' if a.cadence_diagnostic else 'attempt-01');argv=['python3','-u',str(REPO/'linux-env/scripts/eval/native_policy.py'),'--out',str(folder),'--checkpoint',str(a.checkpoint),'--weights-sha256',a.weights_sha256,'--bank',str(a.bank),'--bank-sha256',a.bank_sha256,'--observe-every-actions',str(cadence)]+([] if rtc else ['--rtc-off'])
     if a.codec_diagnostic:argv.append('--eval-codec-roundtrip')
+    if a.replacement_diagnostic:argv.extend(['--queue-aggregation','latest_only'])
     import shlex
     shell='source /opt/ros/humble/setup.bash && source '+shlex.quote(str(REPO/'vla_SO-ARM101/install/setup.bash'))+' && source '+shlex.quote(str(REPO/'linux-env/scripts/collect/hosts/rtx6000.env'))+' && unset ROS_LOCALHOST_ONLY ROS_AUTOMATIC_DISCOVERY_RANGE ROS_STATIC_PEERS && exec '+shlex.join(argv)
     ledger['status']='scoring-'+folder.name;ledger['arms'].append(dict(cadence=cadence,rtc=rtc));save();rc=run(['bash','-c',shell],folder.name+'.log');assert rc==0,'Native policy window failed; preserve evidence, no retry'

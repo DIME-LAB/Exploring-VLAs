@@ -1,6 +1,6 @@
 import copy,math,sys,unittest
 from contextlib import nullcontext
-from held_tick import HeldTick,float32,verify_ack,verify_step
+from held_tick import HeldTick,float32,verify_ack,verify_step,validate_policy_requests
 class Generation:
  def own(self,_):return nullcontext()
  def require(self,epoch,stamp):
@@ -36,4 +36,9 @@ class Tests(unittest.TestCase):
   with self.assertRaisesRegex(RuntimeError,'exactly one'):self.session.step([0]*6)
  def test_frame_epoch_is_refused(self):
   with self.assertRaisesRegex(RuntimeError,'reset epoch'):verify_step(dict(sim_ns=1),dict(epoch=9,sim_ns=33_333_334),2)
+ def test_rtc_off_cannot_retain_a_guidance_prefix(self):
+  request=dict(measured_prediction_sim_s=0,native_rtc=dict(inference_delay=0,enabled=False,prefix_steps=0))
+  validate_policy_requests([request],False,25)
+  request['native_rtc']['prefix_steps']=25
+  with self.assertRaisesRegex(ValueError,'guidance prefix'):validate_policy_requests([request],False,25)
 if __name__=='__main__':unittest.main()

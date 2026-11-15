@@ -94,10 +94,11 @@ def validate_policy_features(features):
     if list(features)!=['observation.state','observation.images.top','observation.images.wrist']:raise ValueError('Policy image feature order differs')
     if features['observation.state']['names']!=list(POLICY_FEATURES) or list(features['observation.state']['shape'])!=[6]:raise ValueError('Policy six-joint state order differs')
     if any(list(features[k]['shape'])!=[480,640,3] for k in ('observation.images.top','observation.images.wrist')):raise ValueError('Policy camera geometry differs')
-def validate_policy_requests(requests,rtc):
+def validate_policy_requests(requests,rtc,observe_every_actions=10):
     if not requests:raise ValueError('No policy inference requests')
     for index,request in enumerate(requests):
         trace=request['native_rtc']
         if request['measured_prediction_sim_s']!=0 or trace['inference_delay']!=0:raise ValueError('Physics advanced during held inference')
         if trace['enabled']!=rtc:raise ValueError('RTC mode differs')
-        if rtc and (trace['execution_horizon']!=10 or trace['max_guidance_weight']!=10 or trace['prefix_steps']!=(0 if index==0 else 40)):raise ValueError('RTC guidance contract differs')
+        if not rtc and trace['prefix_steps']!=0:raise ValueError('RTC-off inference retained a guidance prefix')
+        if rtc and (trace['execution_horizon']!=10 or trace['max_guidance_weight']!=10 or trace['prefix_steps']!=(0 if index==0 else 50-observe_every_actions)):raise ValueError('RTC guidance contract differs')

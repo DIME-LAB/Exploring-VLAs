@@ -62,6 +62,7 @@ class HeldTickRobot(Robot):
             self.codec=EvalCodec();self.codec_first=True
     def send_action(self,action):
         if set(action)!=set(FEATURES):raise ValueError('Six-joint action contract differs')
+        self.last_requested_action=dict(action)
         return self.exchange(dict(op='action',action=action))['performed']
     def disconnect(self):
         if self.connection is not None:self.connection.close();self.connection=None
