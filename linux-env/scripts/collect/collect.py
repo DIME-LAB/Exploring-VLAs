@@ -61,6 +61,7 @@ from command_geometry import choose_noise_scale, final_command, QUERY_POLICY, fr
 import support_contact
 from base_drift import summary as base_drift_summary
 from tick_contract import TickContract, TickContractError, require_snapshots, digest, verify_proof, CLOCK_POLICY, STEP_NS
+from scene_bank import SceneBankSession, configure_args as configure_scene_bank_args
 from episode_policy import (POLICY, QualityReject, ConvergenceFailure, WorkerRegistry,
                             PLANNER_REJECTIONS, FailureStreak, disposition)
 
@@ -1466,53 +1467,8 @@ class Collector:
         try:self.persist_terminal_fault(original,'attempt finalization')
         except Exception as publication_error:receipt['terminal_publication_error']=repr(publication_error)
 
-    def run(self):
+    def _initialize_scene_session(self, root, previous, attempted):
         args = self.args
-        root = confined(args.output)
-        if (root / 'superseded.json').exists():
-            raise ValueError('Superseded diagnostic run requires a fresh output directory')
-        if args.resume:collection_status.require_finalized(root)
-        previous = json.loads((root / 'run.json').read_text()) if args.resume else None
-        mode = require_recovery_mode(previous,args.regrasp_only,args.normal_only)
-        root.mkdir(parents=True, exist_ok=args.resume)
-        with self.status_lock:self.finalization_certificate=collection_status.begin(root)
-        if previous and previous.get('diagnostic', False) != args.diagnostic:
-            raise ValueError('Resume diagnostic retention mode differs from the existing run')
-        wait_policy = dict(rtf_floor=args.wait_rtf_floor, sim_margin_s=5., wall_margin_s=frame_capacity_seconds()+30.,
-                           episode_wall_min_s=args.episode_deadline)
-        if previous and previous.get('motion_wait_policy') != wait_policy:
-            raise ValueError('Resume motion wait policy differs from the existing run')
-        if previous and previous.get('quality_policy') != POLICY:
-            raise ValueError('Quality policy differs; use a fresh output directory')
-        receipts = []
-        ledger_rows = {}
-        if previous:
-            for trial, path in enumerate(sorted(root.glob('attempt-*'))):
-                if path.name != f'attempt-{trial:04d}':
-                    raise ValueError('Cannot resume a ledger with missing attempt directories')
-                receipt = json.loads((path / 'receipt.json').read_text())
-                if receipt['accepted']:
-                    rows = [json.loads(line) for line in (path / 'frames.jsonl').read_text().splitlines()]
-                    ledger_rows[trial]=rows
-                    if not timing_audit(rows, 30)['passed'] or not all((path / f'{k}.mp4').exists() for k in ('wrist', 'top')):
-                        raise ValueError(f'Cannot resume invalid accepted attempt {path}')
-                receipts.append(receipt)
-            logged = [json.loads(line) for line in (root / 'episodes.jsonl').read_text().splitlines()]
-            if logged != receipts:
-                raise ValueError('Resume attempt log differs from the receipt ledger')
-        self.safe_home_baseline=copy.deepcopy(previous.get('safe_home_baseline')) if previous else None
-        self.needs_home_restore=bool(receipts and receipts[-1].get('disposition',{}).get('kind')=='quality_reject')
-        streak = FailureStreak(receipts)
-        if streak.stopped:
-            raise RuntimeError('Previous receipt ledger requires a stop; review before a new run')
-        attempted, accepted = progress(receipts,args.seed,args.regrasp_only,lambda r:ledger_rows[r['params']['trial']],normal_only=args.normal_only)
-        if accepted > args.episodes:
-            raise ValueError('Requested target is smaller than the accepted checkpoint')
-        old_summary = json.loads((root / 'summary.json').read_text()) if (root / 'summary.json').exists() else {}
-        # Older runs did not checkpoint elapsed time. Their last receipt mtime records
-        # the end of active work; exclude the intervening shutdown/disk wait.
-        previous_wall = old_summary.get('wall_seconds', max(0., (root / 'episodes.jsonl').stat().st_mtime - previous['started']) if previous and receipts else 0.)
-        disk_wait = old_summary.get('disk_wait_seconds', 0.)
         clock_config = self.mutate_kit('run_python', {'code': (REPO / 'linux-env/scripts/collect/configure_clock.py').read_text() + '\nresult=configure(30)'})
         transport_config = self.mutate_kit('run_python', {'code': 'import sys\nsys.path.insert(0,' + repr(str(REPO / 'linux-env/scripts/collect')) + ')\nimport collection_runtime as c\nresult=c.install()'})
         self.generation.install(transport_config)
@@ -1613,6 +1569,167 @@ class Collector:
         finally:atomic_json(root/'gpu-isolation-startup.json',getattr(self,'last_gpu_footprint',dict(passed=False,error='GPU audit did not complete')))
         provenance = dict(start_trial=attempted, started=time.time(), source_sha256=source_hashes,
             git_commit=subprocess.check_output(['git', '-C', str(REPO), 'rev-parse', 'HEAD'], text=True).strip())
+        return clock_config, transport_config, baseline, source_hashes, initial_gpu_footprint, provenance
+
+    def _prepare_scene_attempt(self, params, baseline, receipt, motion_epochs, root, path):
+        args = self.args
+        with self.generation.own('attempt start'):
+            self.current_episode_id=receipt['episode_id']
+            self.current_attempt_path=path
+            self.episode_snapshots=[]
+            self.node._qs_abort_evt.clear()
+            motion_epochs.add(self.generation.epoch)
+        if self.needs_home_restore:
+            receipt['failed_episode_home_reset']=self.restore_failed_episode_home()
+            self.needs_home_restore=False
+        receipt['gpu_isolation_before']=self.gpu_footprint()
+        receipt['camera_graph']=self.camera_graph()
+        self.motion_call(self.reset_release,params['object'])
+        # Home with the same shared primitive used by Quickstart, with sim ticks active.
+        home = self.motion_call(self.request_home)
+        motion_epochs.add(home.motion_epoch)
+        finished = self.motion_call(self.node._wait_motion_event, home, 90., epoch=home.motion_epoch)
+        with self.generation.own('home wait continuation'):
+            self.generation.require(home.motion_epoch)
+            if not finished or not home.verdict or not home.verdict.get('ok'):
+                raise RuntimeError('Pre-episode home failed')
+        self.servo.configure(params)
+        receipt['home_before_reset'] = self.settle_home('before_reset')
+        if self.safe_home_baseline is None:
+            self.safe_home_baseline=make_baseline(receipt['home_before_reset'],receipt['episode_id'])
+            run_config=json.loads((root/'run.json').read_text());run_config['safe_home_baseline']=self.safe_home_baseline
+            atomic_json(root/'run.json',run_config)
+        receipt['cup_randomization'] = self.scene(params, baseline)
+        # Replay uses the recorded initial arm/hold exactly; normal
+        # collection verifies the calibrated home after every barrier.
+        if args.replay_receipt:
+            receipt['home_after_reset'] = dict(passed=True,replayed=True,
+                restore_check=self.scene_restore['max_arm_position_error_rad'])
+        else:
+            receipt['home_after_reset'] = self.settle_home('after_reset')
+            self.scene_restore = self.restore_physical(
+                'import collection_runtime as c\nr=c.runtime()\nresult=r.restore(r.snapshot(),arm=True)')
+            verification = self.advance_ticks(6)
+            self.episode_start_physical = verification[-1]
+            check=initial_arm(verification,
+                [receipt['home_after_reset']['target'][name] for name in JOINTS[:5]])
+            receipt['home_after_reset']['post_velocity_reset_check'] = check
+            if not check['contract_passed']:raise TickContractError(check['contract']['errors'],dict(contract=check['contract'],snapshots=verification))
+            if not check['passed']:
+                self.reject_quality('home_unstable',dict(label='post_velocity_reset',check=check),verification)
+            self.sync_scene()
+        receipt['initial_arm_check'] = receipt['home_after_reset']
+        self.node.approach_offset = params['approach_offset_m']
+        self.node._grasp_approach_height_var.set(params['approach_height_m'])
+        self.node.speed_scale = params['speed_scale']
+        receipt['camera_duplicate_messages_before_episode'] = dict(self.sensors.duplicate_messages)
+        receipt['initial_objects'] = dict(self.node.objects_data)
+        receipt['initial_cups'] = dict(self.node._drop_data)
+        receipt['initial_physical'] = self.scene_restore['snapshot']
+        receipt['episode_start_physical'] = self.episode_start_physical
+        receipt['planning_scene_pose_check'] = self.scene_pose_check
+        receipt['planning_scene_clear_check'] = self.scene_clear_check
+        receipt['initial_restore_check'] = {k:v for k,v in self.scene_restore.items() if k != 'snapshot'}
+        receipt['initial_restore_error_m'] = self.scene_restore['max_position_error_m']
+        receipt['initial_expert_reference'] = list(self.servo.reference)
+
+    def run_scene_bank(self):
+        """Use the real startup/preparation path, stopping before expert execution."""
+        args=self.args;root=confined(args.output);root.mkdir(parents=True,exist_ok=False)
+        with self.status_lock:self.finalization_certificate=collection_status.begin(root)
+        self.safe_home_baseline=None;self.needs_home_restore=False
+        session=self.bank_session=SceneBankSession(args)
+        clock,transport,baseline,sources,gpu,provenance=self._initialize_scene_session(root,None,0)
+        live_baseline=copy.deepcopy(baseline)
+        assert set(live_baseline)==set(session.reference['baseline']), 'Live training object set differs'
+        baseline=copy.deepcopy(session.reference['baseline'])
+        sources['linux-env/scripts/collect/scene_bank.py']=hashlib.sha256((REPO/'linux-env/scripts/collect/scene_bank.py').read_bytes()).hexdigest()
+        context=dict(clock_config=clock,transport_config=transport,source_sha256=sources,
+                     gpu_isolation_initial=gpu,git_commit=provenance['git_commit'],mode=args.scene_bank,
+                     live_startup_baseline=live_baseline,selected_sampler_baseline='recorded training run baseline')
+        atomic_json(root/'run.json',dict(scene_bank_only=True,baseline=baseline,
+            baseline_cup_layout=self.baseline_cup_layout,**context))
+        session.bind(baseline,self.baseline_cup_layout,self.episode_start_physical,context)
+        for trial,planned in enumerate(session.plan):
+            if self.stop.is_set() or self.failure:raise RuntimeError('Scene-bank generation interrupted')
+            params=copy.deepcopy(planned);params.setdefault('trial',trial);path=root/f'attempt-{trial:04d}';path.mkdir(parents=True,exist_ok=False)
+            receipt=dict(params=params,accepted=False,scene_bank_only=True,
+                episode_id=hashlib.sha256((str(root)+':'+str(trial)+':'+str(params['seed'])).encode()).hexdigest())
+            epochs=set()
+            try:
+                self._prepare_scene_attempt(params,baseline,receipt,epochs,root,path)
+                receipt['bank_visibility']=self.mutate_kit('run_python',{'code':
+                    'from so_arm101_dt.extension import get_instance\n'
+                    'import collection_runtime as c\ni=get_instance()\ns=c.runtime().snapshot()\n'
+                    'result={color:[name for name,body in s["bodies"].items() if name.startswith(color+"_") and i._is_in_camera_view(body["position"],margin_px=30)] for color in ("red","green","blue")}'})
+                receipt['end_cancel']=self.timeline(False)
+                receipt['retirement']=self.workers.retire()
+                receipt['camera_boundary']=self.sensors.require_camera_boundary(self.generation.floor_ns)
+                receipt['gpu_isolation_after']=self.gpu_footprint()
+                if self.failure or self.generation.stalled or getattr(self.sensors,'failure',None):raise RuntimeError('Scene capture/lifecycle failed before acceptance')
+                receipt['accepted']=True
+                session.record(receipt)
+                atomic_json(path/'receipt.json',receipt)
+                self.sensors.prune_durable_camera_history()
+                atomic_json(root/'summary.json',dict(producer_invocation=self.finalization_certificate['invocation'],
+                    complete=False,scene_bank_only=True,layouts=trial+1,planned=len(session.plan),end_marker='COLLECTION_IN_PROGRESS'))
+                print(json.dumps(dict(scene_seed=params['seed'],layouts=trial+1,planned=len(session.plan))),flush=True)
+            except BaseException as error:
+                receipt.update(accepted=False,error=repr(error));atomic_json(path/'receipt.json',receipt)
+                atomic_json(root/'summary.json',dict(producer_invocation=self.finalization_certificate['invocation'],
+                    complete=False,scene_bank_only=True,layouts=len(session.receipts),error=repr(error),end_marker='COLLECTION_STOPPED'))
+                raise
+        atomic_json(root/'summary.json',dict(producer_invocation=self.finalization_certificate['invocation'],
+            complete=True,scene_bank_only=True,layouts=len(session.receipts),end_marker='COLLECTION_FINISHED'))
+
+    def run(self):
+        args = self.args
+        root = confined(args.output)
+        if (root / 'superseded.json').exists():
+            raise ValueError('Superseded diagnostic run requires a fresh output directory')
+        if args.resume:collection_status.require_finalized(root)
+        previous = json.loads((root / 'run.json').read_text()) if args.resume else None
+        mode = require_recovery_mode(previous,args.regrasp_only,args.normal_only)
+        root.mkdir(parents=True, exist_ok=args.resume)
+        with self.status_lock:self.finalization_certificate=collection_status.begin(root)
+        if previous and previous.get('diagnostic', False) != args.diagnostic:
+            raise ValueError('Resume diagnostic retention mode differs from the existing run')
+        wait_policy = dict(rtf_floor=args.wait_rtf_floor, sim_margin_s=5., wall_margin_s=frame_capacity_seconds()+30.,
+                           episode_wall_min_s=args.episode_deadline)
+        if previous and previous.get('motion_wait_policy') != wait_policy:
+            raise ValueError('Resume motion wait policy differs from the existing run')
+        if previous and previous.get('quality_policy') != POLICY:
+            raise ValueError('Quality policy differs; use a fresh output directory')
+        receipts = []
+        ledger_rows = {}
+        if previous:
+            for trial, path in enumerate(sorted(root.glob('attempt-*'))):
+                if path.name != f'attempt-{trial:04d}':
+                    raise ValueError('Cannot resume a ledger with missing attempt directories')
+                receipt = json.loads((path / 'receipt.json').read_text())
+                if receipt['accepted']:
+                    rows = [json.loads(line) for line in (path / 'frames.jsonl').read_text().splitlines()]
+                    ledger_rows[trial]=rows
+                    if not timing_audit(rows, 30)['passed'] or not all((path / f'{k}.mp4').exists() for k in ('wrist', 'top')):
+                        raise ValueError(f'Cannot resume invalid accepted attempt {path}')
+                receipts.append(receipt)
+            logged = [json.loads(line) for line in (root / 'episodes.jsonl').read_text().splitlines()]
+            if logged != receipts:
+                raise ValueError('Resume attempt log differs from the receipt ledger')
+        self.safe_home_baseline=copy.deepcopy(previous.get('safe_home_baseline')) if previous else None
+        self.needs_home_restore=bool(receipts and receipts[-1].get('disposition',{}).get('kind')=='quality_reject')
+        streak = FailureStreak(receipts)
+        if streak.stopped:
+            raise RuntimeError('Previous receipt ledger requires a stop; review before a new run')
+        attempted, accepted = progress(receipts,args.seed,args.regrasp_only,lambda r:ledger_rows[r['params']['trial']],normal_only=args.normal_only)
+        if accepted > args.episodes:
+            raise ValueError('Requested target is smaller than the accepted checkpoint')
+        old_summary = json.loads((root / 'summary.json').read_text()) if (root / 'summary.json').exists() else {}
+        # Older runs did not checkpoint elapsed time. Their last receipt mtime records
+        # the end of active work; exclude the intervening shutdown/disk wait.
+        previous_wall = old_summary.get('wall_seconds', max(0., (root / 'episodes.jsonl').stat().st_mtime - previous['started']) if previous and receipts else 0.)
+        disk_wait = old_summary.get('disk_wait_seconds', 0.)
+        clock_config, transport_config, baseline, source_hashes, initial_gpu_footprint, provenance = self._initialize_scene_session(root, previous, attempted)
         if previous:
             for name, digest in previous['source_sha256'].items():
                 if name != 'linux-env/scripts/collect/collect.py' and source_hashes[name] != digest:
@@ -1657,65 +1774,7 @@ class Collector:
             writer = None
             receipt_cycle = None
             try:
-                with self.generation.own('attempt start'):
-                    self.current_episode_id=receipt['episode_id']
-                    self.current_attempt_path=path
-                    self.episode_snapshots=[]
-                    self.node._qs_abort_evt.clear()
-                    motion_epochs.add(self.generation.epoch)
-                if self.needs_home_restore:
-                    receipt['failed_episode_home_reset']=self.restore_failed_episode_home()
-                    self.needs_home_restore=False
-                receipt['gpu_isolation_before']=self.gpu_footprint()
-                receipt['camera_graph']=self.camera_graph()
-                self.motion_call(self.reset_release,params['object'])
-                # Home with the same shared primitive used by Quickstart, with sim ticks active.
-                home = self.motion_call(self.request_home)
-                motion_epochs.add(home.motion_epoch)
-                finished = self.motion_call(self.node._wait_motion_event, home, 90., epoch=home.motion_epoch)
-                with self.generation.own('home wait continuation'):
-                    self.generation.require(home.motion_epoch)
-                    if not finished or not home.verdict or not home.verdict.get('ok'):
-                        raise RuntimeError('Pre-episode home failed')
-                self.servo.configure(params)
-                receipt['home_before_reset'] = self.settle_home('before_reset')
-                if self.safe_home_baseline is None:
-                    self.safe_home_baseline=make_baseline(receipt['home_before_reset'],receipt['episode_id'])
-                    run_config=json.loads((root/'run.json').read_text());run_config['safe_home_baseline']=self.safe_home_baseline
-                    atomic_json(root/'run.json',run_config)
-                receipt['cup_randomization'] = self.scene(params, baseline)
-                # Replay uses the recorded initial arm/hold exactly; normal
-                # collection verifies the calibrated home after every barrier.
-                if args.replay_receipt:
-                    receipt['home_after_reset'] = dict(passed=True,replayed=True,
-                        restore_check=self.scene_restore['max_arm_position_error_rad'])
-                else:
-                    receipt['home_after_reset'] = self.settle_home('after_reset')
-                    self.scene_restore = self.restore_physical(
-                        'import collection_runtime as c\nr=c.runtime()\nresult=r.restore(r.snapshot(),arm=True)')
-                    verification = self.advance_ticks(6)
-                    self.episode_start_physical = verification[-1]
-                    check=initial_arm(verification,
-                        [receipt['home_after_reset']['target'][name] for name in JOINTS[:5]])
-                    receipt['home_after_reset']['post_velocity_reset_check'] = check
-                    if not check['contract_passed']:raise TickContractError(check['contract']['errors'],dict(contract=check['contract'],snapshots=verification))
-                    if not check['passed']:
-                        self.reject_quality('home_unstable',dict(label='post_velocity_reset',check=check),verification)
-                    self.sync_scene()
-                receipt['initial_arm_check'] = receipt['home_after_reset']
-                self.node.approach_offset = params['approach_offset_m']
-                self.node._grasp_approach_height_var.set(params['approach_height_m'])
-                self.node.speed_scale = params['speed_scale']
-                receipt['camera_duplicate_messages_before_episode'] = dict(self.sensors.duplicate_messages)
-                receipt['initial_objects'] = dict(self.node.objects_data)
-                receipt['initial_cups'] = dict(self.node._drop_data)
-                receipt['initial_physical'] = self.scene_restore['snapshot']
-                receipt['episode_start_physical'] = self.episode_start_physical
-                receipt['planning_scene_pose_check'] = self.scene_pose_check
-                receipt['planning_scene_clear_check'] = self.scene_clear_check
-                receipt['initial_restore_check'] = {k:v for k,v in self.scene_restore.items() if k != 'snapshot'}
-                receipt['initial_restore_error_m'] = self.scene_restore['max_position_error_m']
-                receipt['initial_expert_reference'] = list(self.servo.reference)
+                self._prepare_scene_attempt(params, baseline, receipt, motion_epochs, root, path)
                 writer = EpisodeWriter(path, 30)
                 with self.writer_lock:
                     self.writer = writer
@@ -1951,6 +2010,10 @@ def main():
     parser.add_argument('--episodes', type=int, default=5)
     parser.add_argument('--seed', type=int, default=310000)
     parser.add_argument('--replay-receipt', type=Path)
+    parser.add_argument('--scene-bank',choices=('eval','receipts'))
+    parser.add_argument('--scene-bank-reference-run',type=Path)
+    parser.add_argument('--scene-bank-output',type=Path)
+    parser.add_argument('--scene-bank-receipts',type=Path,nargs='+')
     parser.add_argument('--max-attempts', type=int, default=250)
     parser.add_argument('--episode-deadline', type=float, default=180,
                         help='Minimum wall watchdog; grows with planned simulated execution time')
@@ -1963,6 +2026,7 @@ def main():
     recovery_group.add_argument('--normal-only',action='store_true',help='Disable recovery sampling for a normal-only run')
     parser.add_argument('--diagnostic', action='store_true', help='Keep failed videos and save final recorded-frame stills')
     args = parser.parse_args()
+    configure_scene_bank_args(args,parser)
     if not math.isfinite(args.wait_rtf_floor) or args.wait_rtf_floor <= 0:
         parser.error('--wait-rtf-floor must be finite and positive')
     if not math.isfinite(args.episode_deadline) or args.episode_deadline <= 0:
@@ -1985,12 +2049,15 @@ def main():
     signal.signal(signal.SIGINT, lambda *_: collector.request_stop())
     signal.signal(signal.SIGTERM, lambda *_: collector.request_stop())
     try:
-        collector.run()
+        if args.scene_bank:collector.run_scene_bank()
+        else:collector.run()
     except BaseException:
         try:collector.close()
         except BaseException as cleanup_error:print('Secondary collector cleanup failure: '+repr(cleanup_error),file=sys.stderr,flush=True)
         raise
-    else:collector.close()
+    else:
+        collector.close()
+        if args.scene_bank:print(json.dumps(collector.bank_session.seal()),flush=True)
 
 
 if __name__ == '__main__':

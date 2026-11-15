@@ -1,0 +1,8 @@
+{
+  "reference_file_sha256": "b74cced3bca9425b55bc033d6803489685b71832d22cec5ab2828e6dda307e31",
+  "methods": {
+    "run": "104ee5c7099663f472104ebdbea50ce2261b1fcfb0c747c472df69af105cc0aa",
+    "randomize_scene": "f697fce172c519929eee57c01b00ed2db0044d07bc740d2a3b7a93f0528eae95"
+  },
+  "normalization": "ast.dump(include_attributes=False), empty Python3.12 type_params omitted for Python3.10 parity"
+}
