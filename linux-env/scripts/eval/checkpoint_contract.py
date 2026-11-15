@@ -17,12 +17,17 @@ def checkpoint_files(directory):
         result[str(path.relative_to(directory))]=dict(size=before.st_size,sha256=digest.hexdigest())
     return result
 
-def require_handoff(directory,receipt_path,weights_sha256):
+def require_handoff(directory,receipt_path,weights_sha256,*,published=False):
     receipt_path=Path(receipt_path);receipt=json.loads(receipt_path.read_text())
     if receipt['source_before']['files']!=receipt['source_after']['files'] or receipt['verified']['verified'] is not True:raise ValueError('Handoff lacks stable verified source files')
-    if Path(directory).resolve()!=Path(receipt['source_before']['model']).resolve():raise ValueError('Evaluation source path differs from handoff')
+    if published:
+        if not (receipt['source_before']['ready'] and receipt['source_after']['ready'] and receipt['stable_seconds']>=60):raise ValueError('Published handoff lacks source completion/stability')
+        expected_path=receipt['published_model']
+    else:expected_path=receipt['source_before']['model']
+    if Path(directory).resolve()!=Path(expected_path).resolve():raise ValueError('Evaluation source path differs from handoff')
     actual=checkpoint_files(directory)
     expected={name:{key:row[key] for key in ('size','sha256')} for name,row in receipt['source_before']['files'].items()}
+    if published and {name:{key:row[key] for key in ('size','sha256')} for name,row in receipt['verified']['files'].items()}!=expected:raise ValueError('Published verification differs from stable source')
     if actual!=expected:raise ValueError('Checkpoint files differ from verified handoff')
     if actual['model.safetensors']['sha256']!=weights_sha256:raise ValueError('Checkpoint weights differ')
     return dict(receipt=str(receipt_path),receipt_sha256=hashlib.sha256(receipt_path.read_bytes()).hexdigest(),files=actual)

@@ -2,6 +2,14 @@ import hashlib,json,tempfile,unittest
 from pathlib import Path
 from checkpoint_contract import checkpoint_files,require_handoff,require_processor_proof
 class Tests(unittest.TestCase):
+    def test_published_copy_requires_exact_target_and_verified_inventory(self):
+        with tempfile.TemporaryDirectory() as root:
+            root=Path(root);model=root/'published';model.mkdir();(model/'model.safetensors').write_bytes(b'weights');inventory=checkpoint_files(model);sha=inventory['model.safetensors']['sha256']
+            receipt=dict(published_model=str(model),source_before=dict(ready=True,model='/source/model',files=inventory),source_after=dict(ready=True,files=inventory),stable_seconds=60,verified=dict(verified=True,files=inventory))
+            path=root/'receipt.json';path.write_text(json.dumps(receipt));require_handoff(model,path,sha,published=True)
+            with self.assertRaisesRegex(ValueError,'path differs'):require_handoff(model,path,sha)
+            receipt['verified']['files']={};path.write_text(json.dumps(receipt))
+            with self.assertRaisesRegex(ValueError,'verification differs'):require_handoff(model,path,sha,published=True)
     def test_processor_tamper_is_refused_even_when_weights_are_unchanged(self):
         with tempfile.TemporaryDirectory() as root:
             root=Path(root);model=root/'model';model.mkdir()

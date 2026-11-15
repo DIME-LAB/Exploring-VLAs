@@ -3,7 +3,7 @@ import argparse,unittest
 from pathlib import Path
 from run_native_replay_window import policy_plan
 def args(**values):
-    return argparse.Namespace(**dict(dict(cadence_diagnostic=False,codec_diagnostic=False,replacement_diagnostic=False,memorisation_diagnostic=False,best_replacement_cadence=None),**values))
+    return argparse.Namespace(**dict(dict(cadence_diagnostic=False,codec_diagnostic=False,replacement_diagnostic=False,memorisation_diagnostic=False,matched_reset_diagnostic=False,best_replacement_cadence=None),**values))
 class Tests(unittest.TestCase):
     def test_memorisation_matches_default_and_one_selected_replacement(self):
         for cadence in (10,25,50):
@@ -14,6 +14,10 @@ class Tests(unittest.TestCase):
     def test_unselected_or_mixed_diagnostics_are_refused(self):
         with self.assertRaises(ValueError):policy_plan(args(memorisation_diagnostic=True))
         with self.assertRaises(ValueError):policy_plan(args(memorisation_diagnostic=True,best_replacement_cadence=10,replacement_diagnostic=True))
+    def test_matched_reset_uses_both_frozen_execution_arms(self):
+        p=policy_plan(args(matched_reset_diagnostic=True))
+        self.assertEqual([r['cadence'] for r in p],[10,50]);self.assertEqual([r['rtc'] for r in p],[True,False])
+        with self.assertRaises(ValueError):policy_plan(args(matched_reset_diagnostic=True,codec_diagnostic=True))
     def test_default_and_existing_diagnostics_keep_their_protocol(self):
         self.assertEqual(policy_plan(args()),[dict(name='attempt-01',cadence=10,rtc=True,aggregation='weighted_average',codec=False)])
         self.assertTrue(policy_plan(args(codec_diagnostic=True))[0]['codec'])
