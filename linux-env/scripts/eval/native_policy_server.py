@@ -3,6 +3,12 @@ def install():
     from lerobot.async_inference import policy_server as production
     import os
     if os.environ.get('SOARM_EVAL_NATIVE_HELD')!='1':raise RuntimeError('Native held-tick server requires explicit opt-in')
+    cap=os.environ.get('SOARM_EVAL_TORCH_MEMORY_GIB')
+    if cap:
+        import torch
+        limit=float(cap)*1024**3
+        if not torch.cuda.is_available() or torch.cuda.device_count()!=1:raise RuntimeError('GPU memory cap requires one visible CUDA device')
+        torch.cuda.set_per_process_memory_fraction(limit/torch.cuda.get_device_properties(0).total_memory,device=0)
     native_factory=production.get_policy_class
     def factory(name):
         cls=native_factory(name)
@@ -29,7 +35,7 @@ def install():
             # The client measures the native stamp again at arrival and refuses
             # the response if physics advanced: measured inference delay is0.
             kwargs=dict(prev_chunk_left_over=tail,inference_delay=0) if enabled else {}
-            self.native_rtc=dict(enabled=enabled,step=step,prefix_steps=0 if tail is None else tail.shape[1],inference_delay=0,capture_sim_ns=context['sim_ns'],epoch=context['epoch'],execution_horizon=rtc.execution_horizon if enabled else None,max_guidance_weight=rtc.max_guidance_weight if enabled else None)
+            self.native_rtc=dict(enabled=enabled,step=step,prefix_steps=tail.shape[1] if enabled and tail is not None else 0,inference_delay=0,capture_sim_ns=context['sim_ns'],epoch=context['epoch'],execution_horizon=rtc.execution_horizon if enabled else None,max_guidance_weight=rtc.max_guidance_weight if enabled else None)
             chunk=self.policy.predict_action_chunk(observation,**kwargs)
             if chunk.ndim!=3:chunk=chunk.unsqueeze(0)
             chunk=chunk[:,:self.actions_per_chunk,:];self._rtc_previous_chunk=chunk.detach().clone();self._rtc_chunk_start=step
