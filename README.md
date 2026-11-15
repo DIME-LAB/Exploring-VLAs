@@ -1034,3 +1034,66 @@ The dataset-environment regression is
 Always validate the completed five-episode smoke before starting the pilot;
 check physical feedback, application acknowledgements, containment and dataset
 read-back, rather than relying on a scripted completion message.
+
+### Production recovery cohorts
+
+`linux-env/scripts/collect/regrasp_runner.py` owns one assigned instance and
+selects complete three-episode RGB cohorts. It invokes the unchanged collector
+once per new attempt (`--max-attempts` increases by one), and uses certified
+`--resume` only after a healthy accepted predecessor. The instance stays up
+within a healthy cohort; its verified initial arm baseline is restored between
+collector processes. Each new cohort gets fresh startup and clock certification.
+
+A protected-body velocity screen may reject a start only before any writer
+artifact exists. The outer runner replays the native proof's non-velocity
+clock/drive/base/displacement checks, binds the durable fault to that invocation,
+and requires clean process retirement plus verified owned-down. The terminal
+cohort remains untouched as diagnostic data. Its next unused seed starts a fresh
+cohort and instance; terminal collector markers are never cleared or relabelled.
+Unknown causes, clock/reset/transport/scene failures, any fault after recording
+opens, or failed cleanup stop the entire runner.
+
+Every start retains per-body peak velocities and its rejection reason. More than
+10% resting-screen rejects stops the runner once at least 20 attempts have run
+(exactly 10% is allowed). Only complete RGB cohorts count toward the requested
+dataset: 50 cohorts per slot yield 150 selected episodes, 50 of each colour.
+`runner.json` also reports physical accepts, unselected valid prefixes, their
+collector wall time, and the whole quarantined-cohort extra wall time. Selected
+cohorts require native timing/recovery audits, full fresh LeRobot export/load and
+all-row/all-decoded-frame equivalence. Their file seals are checked before an
+outer resume; incomplete/pending or mandatory-stop checkpoints refuse.
+
+These commands only prepare plans on a qualified RTX host. Actual `--go` needs
+the lead's released slots and launch window, the sealed training pull, and host
+ABI/clock/recovery qualification of the exact cut:
+
+```bash
+python3 -B linux-env/scripts/collect/regrasp_runner.py --plan \
+  --instance 3 --gpu 0 --cohorts 50 --seed-start 600000 --seed-end 604239 \
+  --cut "$(git rev-parse HEAD)" \
+  --output /mnt/storage3/aaugus11/exploring-vlas/datasets/regrasp-i3
+
+python3 -B linux-env/scripts/collect/regrasp_runner.py --plan \
+  --instance 4 --gpu 0 --cohorts 50 --seed-start 650000 --seed-end 654239 \
+  --cut "$(git rev-parse HEAD)" \
+  --output /mnt/storage3/aaugus11/exploring-vlas/datasets/regrasp-i4
+```
+
+Slots 3/4 use domains 93/94, bridges 8783/8785 and HTTP 8784/8786.
+The renderer and CUDA are UUID-pinned, nice=10, CPU physics threads=4.
+All outputs/caches/runtime stay under the qualified host root. No automatic
+backup deletion is implemented. With all cohorts retained, the two slots reserve
+20 GiB for recovery raw data/proofs/exports, based on the measured three-episode
+smoke with margin. RTX admission before each attempt keeps the **50 GiB floor**,
+plus that 20 GiB retention reserve and at least 13 GiB for training (or its larger
+declared checkpoint reserve): normally **83 GiB free**, and 20 GiB on root.
+The already transferred merged training job is not charged a second time.
+The reserve is empirical; a capacity failure stops without starting an attempt.
+No source batch, training file, other workspace or archive is cleaned.
+
+The outer runner uses launcher ownership claims and PID/birth/pidfd descendant
+tracking. It never adopts a live PID/port, never signals a foreign/reused marker,
+keeps cleanup failures latched, and bounds every subprocess stage. Collector
+success depends on affirmative receipts, not a shutdown exit code. A recorded
+native screen fault remains terminal inside its original collector; only this
+outer selection policy permits a new process after the old instance is gone.
