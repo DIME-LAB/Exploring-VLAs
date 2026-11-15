@@ -39,7 +39,7 @@ for i,(r,why) in enumerate(selected):
  meta=json.loads(subprocess.check_output(['ffprobe','-v','error','-select_streams','v:0','-count_frames','-show_entries','stream=nb_read_frames:format=duration','-of','json',str(movie)],text=True));duration=float(meta['format']['duration'])
  subprocess.run(['ffmpeg','-v','error','-i',str(movie),'-f','null','-'],check=True,capture_output=True)
  media.append(dict(seed=r['seed'],color=r['color'],selection=why,file=str(movie.relative_to(root)),duration_s=duration,frames=int(meta['streams'][0]['nb_read_frames']),sha256=hashlib.sha256(movie.read_bytes()).hexdigest(),fully_decoded=True))
- for j,t in enumerate((1,min(15,duration*.5),max(1,duration-2))):
+ for j,t in enumerate((1,duration*.5,max(1,duration-2))):
   frame=root/'frames'/f"seed-{r['seed']}-{j}.png";subprocess.run(['ffmpeg','-v','error','-y','-ss',str(t),'-i',str(movie),'-frames:v','1',str(frame)],check=True)
   axs[i,j].imshow(Image.open(frame));axs[i,j].axis('off');axs[i,j].set_title(f"{r['color']} · seed {r['seed']} · video {t:.1f}s",fontsize=9)
  axs[i,0].text(0,-.07,why,transform=axs[i,0].transAxes,fontsize=9)

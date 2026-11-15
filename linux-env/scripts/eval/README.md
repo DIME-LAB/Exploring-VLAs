@@ -344,6 +344,11 @@ alternatives. Seed summaries expose chosen block sets, resultant heading,
 endpoint spread, wrong-colour choices and small angular margins; low resultant
 length alone does not establish wrong-colour averaging. `report_directions.py`
 audits the paired20k/30k files and recomputes FK/angles from saved actions.
+Explicit `--models` and `--expected-models` also support one or more unfreeze
+checkpoints; manifest entries bind each key to its full path, additional step
+and native-handoff SHA. Primary20k/30k identities remain pinned. The report
+requires the complete six-anchor/five-noise grid, exact controls and all90
+predictions per model; entirely negligible XY motion remains unclassified.
 These predictions are not independent scenes or closed-loop success scores.
 
 `behaviour.py` computes measured-FK approach, closure, descent and dwell metrics
