@@ -129,6 +129,11 @@ from pathlib import Path
 module=Path(sys.argv[1]);r=types.SimpleNamespace(epoch=1,stamp=lambda:1000000000,native_miss_fault_path='test-only',failure=None,busy=False,timeline=types.SimpleNamespace(is_playing=lambda:False),snapshot=lambda:{'epoch':1,'sim_ns':1000000000})
 c=types.ModuleType('collection_runtime');c.__file__=str(module);c._LOADED_SHA256=hashlib.sha256(module.read_bytes()).hexdigest();c.runtime=lambda:r
 sys.modules['collection_runtime']=c
+sys.path.insert(0,str(module.parent))
+from test_stage_readiness import StageFixture
+fixture=StageFixture();r.body_paths=fixture.paths
+for name,value in fixture.modules.items():
+ if name!='collection_runtime':sys.modules[name]=value
 print(json.dumps({'ready':True}),flush=True)
 for line in sys.stdin:
  request=json.loads(line)
@@ -151,6 +156,10 @@ for line in sys.stdin:
                 p.native_call=call;value=p.observe('c'*32);require_process_binding(value)
                 self.assertEqual(value['pid'],process.pid);self.assertEqual(value['process_binding']['spawn_identity']['pgid'],old['pgid'])
                 self.assertEqual(value['owned_identity']['pgid'],process.pid)
+                ready=p.observe('e'*32,readiness=True);require_process_binding(ready)
+                from stage_readiness import errors
+                self.assertEqual(errors(ready['stage_readiness']),[])
+                self.assertEqual(ready['process_binding']['request_nonce'],'e'*32)
             finally:
                 process.stdin.close();process.wait(timeout=5);process.stdout.close();process.stderr.close()
                 for fd in p.ledger.handles.values():__import__('os').close(fd)

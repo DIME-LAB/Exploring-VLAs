@@ -1077,6 +1077,15 @@ files refuse. Any symlink (including dangling links), special entry or linked
 ancestor in a cohort tree refuses. Incomplete/pending or mandatory-stop
 checkpoints also refuse; version-1 runner checkpoints cannot be resumed.
 
+Before admitting a collector process, the outer runner requires three stable
+stage-readiness observations, 0.25 seconds apart, under a 120-second deadline
+(plus an already running bounded transport call). Each observation retains the
+owned native pidfd/nonce proof, loading status, named prim validity, native-body
+path agreement, readable transforms and the exact unchanged collector baseline
+query. A failure records path diagnostics and prevents collector launch; it
+does not catch or relax errors inside the collector. Start the two assigned
+slots at least 60 seconds apart, then retain both owned cleanup proofs.
+
 Production execution is supported only by the qualified `rtx6000` host profile;
 other hosts refuse `--go` and capacity admission. These commands prepare plans.
 Actual `--go` needs the lead's released slots and launch window, the sealed training pull, and host

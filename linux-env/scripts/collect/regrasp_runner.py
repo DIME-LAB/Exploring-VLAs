@@ -414,7 +414,7 @@ class Processes:
         from kit_mcp.client import call
         value=call('run_python',dict(code=code),host='127.0.0.1',port=8777+2*self.config['instance'],timeout=30)
         return value['result'] if isinstance(value,dict) and 'result' in value else value
-    def observe(self,nonce):
+    def observe(self,nonce,*,readiness=False):
         """Bind the live responder to an already owned birth and held pidfd."""
         keys=('pid','start_ticks','pgid');context=dict(request_nonce=nonce);fd=None
         prefix="import os,time\nfrom pathlib import Path\nf=Path('/proc/self/stat').read_text().rsplit(')',1)[1].split()\n"
@@ -433,6 +433,9 @@ class Processes:
                     any(before[k]!=own[k] for k in ('pid','start_ticks')) or select.select([fd],[],[],0)[0]):
                 raise RuntimeError('Native responder pidfd is not live before observation')
             code=prefix+"import collection_runtime as c\nr=c.runtime()\nresult={'pid':os.getpid(),'start_ticks':f[19],'pgid':os.getpgid(0),'nonce':"+repr(nonce)+",'wall_ns':time.time_ns(),'epoch':r.epoch,'sim_ns':r.stamp(),'fault_path':r.native_miss_fault_path,'fault':getattr(r,'_miss_motion_fault',None),'fault_durable':getattr(r,'_miss_fault_durable',False),'failure':r.failure,'playing':r.timeline.is_playing(),'busy':r.busy,'loaded_sha256':c._LOADED_SHA256,'runtime_module':str(Path(c.__file__).resolve()),'snapshot':r.snapshot()}"
+            if readiness:
+                from stage_readiness import probe_code
+                code+='\n_native_value=result\n_ready_scope={}\nexec('+repr(probe_code())+',_ready_scope)\n_native_value["stage_readiness"]=_ready_scope["result"]\nresult=_native_value'
             value=self.native_call(code);after=identity(discovery['pid']);context['kernel_after']=after
             context['response_identity']={k:value.get(k) for k in (*keys,'nonce','runtime_module','loaded_sha256')}
             if (value.get('nonce')!=nonce or after is None or after['state']=='Z' or
@@ -462,6 +465,15 @@ class Processes:
             raise
         finally:
             if fd is not None:os.close(fd)
+    def wait_readiness(self,label):
+        from stage_readiness import wait
+        from regrasp_evidence import require_process_binding
+        def read():
+            value=self.observe(uuid.uuid4().hex,readiness=True);require_process_binding(value)
+            if any(value[k]!=self.boot_record['native'][k] for k in ('pid','start_ticks','pgid','loaded_sha256','runtime_module')):
+                raise RuntimeError('Stage readiness answered from another bound native runtime')
+            return value
+        return wait(read,lambda proof:atomic_json(self.root(self.current_cohort)/('stage-readiness-'+label+'.json'),proof))
     def capacity(self):
         from host_config import profile
         if profile()['name']!='rtx6000':raise RuntimeError('Production recovery is qualified only on rtx6000')
@@ -489,6 +501,7 @@ class Processes:
         native=self.observe(uuid.uuid4().hex)
         self.boot_record=dict(transport=transport,native=native)
         atomic_json(root/'native-boot.json',self.boot_record)
+        self.wait_readiness('startup')
     def attempt(self,cohort,trial,seed):
         self.capacity()
         run=self.root(cohort)/'run'
@@ -496,6 +509,7 @@ class Processes:
         argv=['bash',self.wrapper,'run',str(self.config['instance']),'--episodes','3','--seed',str(cohort['base_seed']),
               '--regrasp-only','--output',str(run),'--max-attempts',str(trial+1)]
         if trial:argv.append('--resume')
+        self.wait_readiness('attempt-%04d'%trial)
         invocation=uuid.uuid4().hex;before=self.observe(invocation)
         if os.path.lexists(before['fault_path']):raise RuntimeError('Native journal already exists before invocation')
         stage=self.stage('attempt',argv,invocation=invocation)
