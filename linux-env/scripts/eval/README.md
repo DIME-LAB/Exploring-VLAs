@@ -317,3 +317,54 @@ A separate lock/state directory runs the same CPU checkpoint watcher for030000,
 leaving the original40k/60k watcher untouched. No GPU evaluation starts from a
 watcher. Additional language direction probes use fixed home frames and paired
 flow-noise seeds42–46; they are unscored CPU diagnostics, not MAIN episodes.
+
+## Paired HOME direction diagnostics
+
+`open_loop.py` reuses the saved native dataset, policy and pre/postprocessors
+on CPU. Pass an explicit checkpoint and a fresh output directory; existing
+diagnostics are refused. `--home --colour-swap --flow-seeds 42 43 44 45 46`
+holds each of six frame-zero observations fixed while changing the colour word
+and paired flow noise. The source case manifest is `RUN/behaviour/open-loop-cases.json`.
+Different checkpoints require an explicit `--out`. No inference starts from a
+checkpoint watcher, and CPU model diagnostics run outside scored GPU windows.
+
+Use the existing pixi Python with `CUDA_VISIBLE_DEVICES=''`,
+`HF_HUB_OFFLINE=1`, `PYTHONDONTWRITEBYTECODE=1` and caches/TMPDIR beneath
+`/mnt/a4500-backup/exploring-vlas/eval/cache/`. The checkpoint's camera order
+and processors remain native; RTC and compilation are disabled only for these
+unscored open-loop probes. Raw image/state tensor hashes are checked before and
+after every prompt, native source-prompt controls are repeated, and tokens,
+normalised states, model/case hashes, predicted actions, TCP paths and base poses
+are saved. Seen and pilot source membership is checked against all900 training seeds.
+
+`direction_metrics.py` reports net50-action TCP displacement angles to every
+block in3D and XY. Motions below1mm are unclassified in the affected space;
+tied colour bearings are ambiguous. Both blocks of a requested colour are valid
+alternatives. Seed summaries expose chosen block sets, resultant heading,
+endpoint spread, wrong-colour choices and small angular margins; low resultant
+length alone does not establish wrong-colour averaging. `report_directions.py`
+audits the paired20k/30k files and recomputes FK/angles from saved actions.
+These predictions are not independent scenes or closed-loop success scores.
+
+`behaviour.py` computes measured-FK approach, closure, descent and dwell metrics
+for policy and recorded expert trajectories. `compare_scored_conditions.py`
+requires the same30 layouts and deployment contract, and exactly one changed
+factor (checkpoint or RTC). Invalid rows remain visible; paired means require
+both episodes valid, with separate denominators when closures are missing.
+The scored reporter binds the full checkpoint path to preflight, checks the RTC
+configuration and refuses guided chunk prefixes in an RTC-off arm. Finalized
+deliveries are protected against report overwrites.
+
+## Unfreeze-from30k checkpoint handoff
+
+The separate unfreeze trial uses the same validated `stage_checkpoints.py`
+with `--steps 2500,5000,7500,10000`, a separate local state/lock directory and
+destination `/mnt/a4500-backup/exploring-vlas/eval/checkpoints/unfreeze30k`.
+Its source is the job's `unfreeze-10k/training/checkpoints`. CPU-only stable
+save/marker/hash gates are unchanged. Distinct presets `unfreeze30k+2500`,
+`unfreeze30k+5000`, `unfreeze30k+7500` and `unfreeze30k+10000` refer to additional
+steps after the primary30k checkpoint, not primary training step numbers.
+Each scored MAIN window still requires its own lead GO and START/STOP, uses
+the frozen30 scenes and protocol, and receives the same unscored HOME probe.
+Results identify the full checkpoint family/path and recipe; training-step
+labels alone must never pool primary and unfreeze models.

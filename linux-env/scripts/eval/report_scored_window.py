@@ -21,10 +21,15 @@ def select_examples(rows):
         rs=[r for r in rows if r['color']==color and r.get('result_file') and r.get('valid')]
         successes=[r for r in rs if r['success']];failures=[r for r in rs if not r['success']]
         if successes:selected.append((min(successes,key=lambda r:r['time_to_place_s'] if r.get('time_to_place_s') is not None else math.inf),'success'))
-        if failures:selected.append((min(failures,key=lambda r:r['closing_distance_m'] if r.get('closing_distance_m') is not None else math.inf),'failure: closest first closing'))
+        if failures:
+            closest=min(failures,key=lambda r:r['closing_distance_m'] if r.get('closing_distance_m') is not None else math.inf)
+            selected.append((closest,'failure: closest first closing' if closest.get('closing_distance_m') is not None else 'failure: no ≥2° closure'))
         if not successes and len(failures)>1:
             remaining=[r for r in failures if r['seed']!=selected[-1][0]['seed']]
-            selected.append((max(remaining,key=lambda r:r['closing_distance_m'] if r.get('closing_distance_m') is not None else -1),'failure: farthest first closing'))
+            farthest=max(remaining,key=lambda r:r['closing_distance_m'] if r.get('closing_distance_m') is not None else -1)
+            selected.append((farthest,'failure: farthest first closing' if farthest.get('closing_distance_m') is not None else 'failure: no ≥2° closure'))
+        no_close=next((r for r in failures if r.get('closing_distance_m') is None and all(x['seed']!=r['seed'] for x,_ in selected)),None)
+        if no_close is not None:selected.append((no_close,'failure: no ≥2° closure'))
     invalid=next((r for r in rows if not r.get('valid') and r.get('result_file')),None)
     if invalid is not None:selected.append((invalid,'invalid: '+invalid['validity_reasons']))
     return selected
@@ -38,13 +43,15 @@ def collect(root,expected_step=10000,suite='main'):
     for attempt in attempts:
         config=json.loads((attempt/'run_config.json').read_text())
         if config.get('scene_bank_sha256')!=BANK_SHA256 or config.get('inference_mode')!='eager':raise ValueError('Changed bank/backend')
+        if config.get('rtc_enabled') is not expected_rtc:raise ValueError('Wrong RTC configuration for requested suite')
         if Path(config['pretrained']).name!='pretrained_model' or int(Path(config['pretrained']).parent.name)!=expected_step:
             raise ValueError('Unexpected checkpoint step')
-        if configs and any(config[k]!=configs[0][k] for k in ('pretrained','scene_bank_sha256','source_sha256','inference_mode','fork_commit')):
+        if configs and any(config[k]!=configs[0][k] for k in ('pretrained','scene_bank_sha256','source_sha256','inference_mode','fork_commit','rtc_enabled')):
             raise ValueError('Mixed model or source contracts')
         if (root/'preflight.json').exists():
             proof=json.loads((root/'preflight.json').read_text())
             if config['source_sha256']!=proof['source_sha256']:raise ValueError('Source differs from qualification preflight')
+            if config['pretrained']!=proof['checkpoint']['path']:raise ValueError('Checkpoint path differs from preflight')
         configs.append(config)
         entries=json.loads((attempt/'episode-manifest.json').read_text())
         if not isinstance(entries,list):raise ValueError('Expected episode manifest array')
@@ -65,6 +72,8 @@ def collect(root,expected_step=10000,suite='main'):
         if any(raw.get(k)!=e[k] for k in ('suite','color','phrase','task')) or raw.get('rtc_enabled') is not expected_rtc:
             raise ValueError(f'Wrong MAIN contract for seed {seed}')
         reasons=validity(raw)
+        if not expected_rtc and any((e.get('eval_rtc') or {}).get('prefix_steps',0)>0 for e in raw.get('client',{}).get('chunk_events',[])):
+            reasons.append('guided-prefix-in-rtc-off')
         health=path.parent.parent/'window-health.json'
         if not health.exists() or not json.loads(health.read_text()).get('passed'):reasons.append('missing-or-failed-window-health')
         c=raw.get('client',{}); costs=c.get('send_action_costs_ms',[]);trace=c.get('clock_dispatch_trace',[])
@@ -101,6 +110,7 @@ def summarize(rows):
     return result
 
 def report(root,out,expected_step=10000,suite='main'):
+    if (out/'provenance/delivery-manifest.json').exists():raise ValueError('Refusing to overwrite a finalized delivery')
     rows,config=collect(root,expected_step,suite);out.mkdir(parents=True,exist_ok=True)
     summary=dict(overall=summarize(rows),per_color={c:summarize([r for r in rows if r['color']==c]) for c in COLORS},contract=config,
         denominator='All 30 planned seeds. Invalid/non-run rows are distinct outcomes and cannot contribute confirmed successes. Starvation is overlapping, not an exclusion. Timing/distance averages are diagnostic over all observed rows, including invalid rows; valid-only averages are separate.',
