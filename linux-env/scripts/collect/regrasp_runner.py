@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Own one instance; select only certified RGB recovery cohorts for production."""
-import argparse,ast,copy,ctypes,hashlib,json,math,os,re,signal,socket,subprocess,time,uuid
+import argparse,copy,ctypes,hashlib,json,math,os,re,signal,socket,subprocess,time,uuid,stat
 from pathlib import Path
 from contract import COLORS,parameters,timing_audit
 from recovery import receipt_error
@@ -8,31 +8,40 @@ from recovery_start import POLICY,ProtectedSettle,protected_state,world_anchor,s
 from tick_contract import digest,require_snapshots
 from storage import CANONICAL_ROOT,atomic_json,confined
 import collection_status,clock_status
+from regrasp_evidence import verify_transport,setup_prefix,semantic_error
+from miss_clearance import proof_differences
 from run_smoke import REPO,InstanceClaim,OwnedProcesses,frozen,identity
 
 WRITER_FILES=('frames.jsonl','write-profiles.jsonl','wrist.mp4','top.mp4',
               'wrist-encode.log','top-encode.log','final-wrist.png','final-top.png')
-POLICY_VERSION=1
+POLICY_VERSION=2
+
+
+def checked_tree(path):
+    """Inspect names without following links, including every ancestor."""
+    path=Path(path)
+    for parent in [path,*path.parents]:
+        mode=parent.lstat().st_mode
+        if not stat.S_ISDIR(mode):raise RuntimeError('Artifact ancestor is not a regular directory: '+str(parent))
+    pending=[path]
+    while pending:
+        directory=pending.pop()
+        for entry in directory.iterdir():
+            mode=entry.lstat().st_mode
+            if stat.S_ISDIR(mode):pending.append(entry)
+            elif not stat.S_ISREG(mode):raise RuntimeError('Non-regular artifact entry: '+str(entry))
 
 
 def leaf(path):
-    """Evidence leaves must be regular files, never links to another invocation."""
-    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
-    with os.fdopen(fd) as stream:return json.load(stream)
-
-
-def semantic_error(value):
-    """Unwrap exception/string renderings without executing receipt text."""
-    for _ in range(8):
-        try:node=ast.parse(value,mode='eval').body
-        except (SyntaxError,TypeError):return value
-        if isinstance(node,ast.Constant) and isinstance(node.value,str):value=node.value;continue
-        if (isinstance(node,ast.Call) and isinstance(node.func,ast.Name) and
-                node.func.id in ('RuntimeError','OwnershipStalled') and len(node.args)==1 and not node.keywords and
-                isinstance(node.args[0],ast.Constant) and isinstance(node.args[0].value,str)):
-            value=node.args[0].value;continue
-        return value
-    return value
+    """No symlink, FIFO or device may stand in for a durable JSON file."""
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):raise RuntimeError('Evidence leaf is not a regular file: '+str(path))
+        with os.fdopen(fd) as stream:
+            fd=None
+            return json.load(stream)
+    finally:
+        if fd is not None:os.close(fd)
 
 
 def retired_terminal(run,stage):
@@ -61,7 +70,7 @@ def velocity_only(anchor,snapshot):
     return motion
 
 
-def screen_evidence(receipt,fault):
+def screen_evidence(receipt,fault,transport):
     """Replay native non-velocity contracts; a screen is the only allowed failure."""
     report=receipt['recovery_report'];baseline=report['baseline']
     if report.get('policy')!=POLICY or report.get('passed') is not False:
@@ -71,7 +80,7 @@ def screen_evidence(receipt,fault):
     require_snapshots([baseline])
     if not report.get('fresh_offsets') or not report.get('model'):
         raise RuntimeError('Fresh guarded shape offsets/model are missing')
-    if report.get('fault_epoch')!=fault.get('epoch'):raise RuntimeError('Native fault epoch differs')
+    if report.get('fault_epoch')!=fault.get('epoch') or report.get('epoch')!=fault.get('epoch'):raise RuntimeError('Native fault epoch differs')
     if any(fault.get(k) is not None for k in ('cap','requested_cap','saved_original_limits_rad_s')) or fault.get('dirty') is not False:
         raise RuntimeError('Native limit state is unresolved')
     if (fault.get('terminal') is not True or fault.get('durability_unresolved') is not False or
@@ -81,8 +90,10 @@ def screen_evidence(receipt,fault):
     if error=='Synthetic start requires every protected body stationary':
         if any(k in report for k in ('selection','restore','protected_start','record_after_sim_ns')):
             raise RuntimeError('Precondition error belongs to a later setup stage')
+        oracle=setup_prefix(receipt,transport,'baseline')
         samples=[dict(snapshot=baseline,motion=velocity_only(baseline,baseline))]
     elif error.startswith(('Protected scene disturbed during settle: ','Protected settle coverage or motion failed: ')):
+        oracle=setup_prefix(receipt,transport,'guard')
         evidence=fault['protected_settle'];restore=report['restore']['snapshot']
         if report['restore'].get('arm_restored') is not True or restore['epoch']!=fault['epoch']:
             raise RuntimeError('Synthetic restore is unverified')
@@ -90,13 +101,13 @@ def screen_evidence(receipt,fault):
         monitor=ProtectedSettle(baseline,clean(restore))
         def add(sample,step=None):
             snap=sample['snapshot'];motion=velocity_only(baseline,snap)
-            if digest(motion)!=digest(sample['motion']):raise RuntimeError('Native motion proof differs from its snapshot')
+            if proof_differences(sample['motion'],motion,'native.motion'):raise RuntimeError('Native motion proof differs from its snapshot')
             samples.append(dict(snapshot=snap,motion=motion))
             if step is not None:
                 monitor.before_substep(step,clean(snap));checked=monitor.pending[-1]
             else:
                 checked=monitor._sample(clean(snap))
-            if digest(checked['checks'])!=digest(sample['checks']):
+            if proof_differences(sample['checks'],checked['checks'],'native.checks'):
                 raise RuntimeError('Native substep clock/drive proof differs')
         frames=evidence['frames'];boundary=sample_snapshot(restore)
         if len(frames)>6 or len(evidence['pending'])>4:raise RuntimeError('Excess native protected samples')
@@ -108,7 +119,12 @@ def screen_evidence(receipt,fault):
                 if sample.get('index')!=j:raise RuntimeError('Protected callback order differs')
                 add(sample,sample['step_s'])
             add(frame['final']);monitor.finish_frame(clean(frame['final']['snapshot']));boundary=sample_snapshot(frame['final']['snapshot'])
-        for j,sample in enumerate(evidence['pending']):
+        pending=evidence['pending']
+        if evidence['failure']['stage']=='final_post_solve':
+            if not frames or digest(pending)!=digest(frames[-1]['substeps']):
+                raise RuntimeError('Failed final frame does not bind its retained callbacks')
+            pending=[]  # finish_frame retains the failed frame AND its callback list.
+        for j,sample in enumerate(pending):
             if sample['index']!=j:raise RuntimeError('Pending callback order differs')
             add(sample,sample['step_s'])
         failure=evidence['failure']
@@ -125,6 +141,9 @@ def screen_evidence(receipt,fault):
             if any(digest(s['protected_settle'])!=digest(frames[i]) for i,s in enumerate(previous)):
                 raise RuntimeError('Returned settle frames differ from the durable fault')
     else:raise RuntimeError('Native fault is not a protected velocity screen')
+    for sample in samples:
+        if not oracle.state(sample['snapshot']['state'],dict(sample['snapshot'],local_corners=baseline['local_corners']))['passed']:
+            raise RuntimeError('A non-velocity static setup failure is terminal')
     failed=[i for i,s in enumerate(samples) if not s['motion']['passed']]
     if not failed:raise RuntimeError('No measured protected velocity-screen rejection')
     if failed!=[len(samples)-1]:
@@ -143,6 +162,7 @@ def screen_evidence(receipt,fault):
 
 def classify(run,trial,seed,stage,runtime):
     """Only the current pre-writer screen can be quarantined; all doubt stops."""
+    checked_tree(run.parent)
     path=run/('attempt-%04d'%trial);receipt=leaf(path/'receipt.json')
     expected=dict(parameters(seed,COLORS[trial],regrasp=True),trial=trial)
     if receipt.get('params')!=expected:raise RuntimeError('Attempt seed/colour/parameters differ')
@@ -151,7 +171,10 @@ def classify(run,trial,seed,stage,runtime):
         raise RuntimeError('Attempt/recovery identity differs')
     if (path/'receipt.json').stat().st_mtime_ns<stage['started_wall_ns']:
         raise RuntimeError('Attempt receipt predates its producer')
+    observation=leaf(run.parent/'observations'/('attempt-%04d.json'%trial))
+    boot=leaf(run.parent/'native-boot.json')
     if receipt.get('accepted') is True:
+        verify_transport(observation,boot,stage,runtime,receipt)
         certificate=collection_status.require_finalized(run,stage['pid'],stage['started_wall_ns'])
         rows=[json.loads(line) for line in (path/'frames.jsonl').read_text().splitlines()]
         if not timing_audit(rows,30)['passed'] or receipt_error(receipt,rows):
@@ -175,6 +198,7 @@ def classify(run,trial,seed,stage,runtime):
     native_path=Path(receipt['native_miss_fault_file'])
     if not native_path.resolve().is_relative_to((runtime/'native-motion-faults').resolve()):
         raise RuntimeError('Native fault belongs to another instance')
+    checked_tree(native_path.parent)
     native=leaf(native_path)
     if native_path.stat().st_mtime_ns<stage['started_wall_ns']:raise RuntimeError('Native fault predates its producer')
     if not any(digest(f)==digest(native) for f in receipt.get('native_miss_faults',[])):
@@ -182,7 +206,8 @@ def classify(run,trial,seed,stage,runtime):
     if any(semantic_error(f.get('error'))!=semantic_error(native['error']) or f.get('epoch')!=native['epoch']
            for f in receipt.get('native_miss_faults',[])):
         raise RuntimeError('Another native fault is also present')
-    proof=screen_evidence(receipt,native);message=proof['native_error']
+    transport=verify_transport(observation,boot,stage,runtime,receipt,native)
+    proof=screen_evidence(receipt,native,transport);message=proof['native_error']
     allowed_sources={'synthetic start verification','attempt disposition','before cleanup','after cleanup'}
     if markers[0]!=markers[1] or receipt.get('terminal_failure')!=markers[0]:
         raise RuntimeError('Terminal markers differ')
@@ -214,41 +239,74 @@ def require_export(value,episodes=3):
         raise RuntimeError('Cohort all-frame content proof is missing')
 
 
+def reconstruct_ledger(state,facts):
+    """A bijection between sealed attempts, events, cohorts and selected RGB data."""
+    cohorts=state['cohorts'];events=state['events'];config=state['config']
+    if [c['index'] for c in cohorts]!=list(range(len(cohorts))):
+        raise RuntimeError('Duplicate, orphan or unordered checkpoint cohort')
+    if [f['index'] for f in facts]!=list(range(len(cohorts))):
+        raise RuntimeError('Cohort artifacts do not cover the checkpoint bijectively')
+    canonical=[];manifest=[];selected=0;screens=0;next_seed=config['seed_start']
+    for cohort,fact in zip(cohorts,facts):
+        source=fact['events']
+        if not source or len(source)>3 or len(fact['attempts'])!=len(source) or source!=cohort.get('events'):
+            raise RuntimeError('Cohort event membership differs from its seal')
+        if bool(cohort.get('selected'))==bool(cohort.get('quarantined')):
+            raise RuntimeError('Cohort selection/quarantine flags conflict')
+        if fact['kind']!=('selected' if cohort.get('selected') else 'quarantined'):
+            raise RuntimeError('Cohort status differs from its artifact seal')
+        if cohort.get('base_seed')!=next_seed:raise RuntimeError('Cohort seed base differs from verified attempts')
+        accepted=0
+        for trial,event in enumerate(source):
+            if event.get('cohort')!=cohort['index'] or event.get('trial')!=trial or event.get('seed')!=next_seed:
+                raise RuntimeError('Cohort/seed/trial ledger is not bijective')
+            if not math.isfinite(event['wall_s']) or event['wall_s']<0:raise RuntimeError('Invalid recorded attempt cost')
+            if next_seed>config['seed_end']:raise RuntimeError('Sealed attempt exceeds reserved seed range')
+            attempt=fact['attempts'][trial]
+            expected=dict(parameters(next_seed,COLORS[trial],regrasp=True),trial=trial)
+            if attempt['params']!=expected or attempt['receipt_sha256']!=event['outcome']['receipt_sha256']:
+                raise RuntimeError('Event seed/colour is not its sealed collector receipt')
+            kind=event['outcome']['kind']
+            if kind=='accepted' and attempt['accepted'] is True:accepted+=1
+            elif kind=='screen_reject' and attempt['accepted'] is False and trial==len(source)-1:screens+=1
+            else:raise RuntimeError('Cohort contains an unverified attempt outcome')
+            canonical.append(event);next_seed+=1
+        if accepted!=cohort['accepted']:raise RuntimeError('Cohort acceptance count differs')
+        if cohort.get('selected'):
+            require_export(cohort['validation'])
+            if accepted!=3 or len(source)!=3:raise RuntimeError('Selected cohort is not verified RGB')
+            manifest.append(dict(index=cohort['index'],dataset='cohort-%04d/run/dataset'%cohort['index'],
+                seed_start=source[0]['seed'],seed_end=source[-1]['seed'],colors={c:1 for c in COLORS}))
+            selected+=3
+        elif accepted!=len(source)-1:raise RuntimeError('Quarantine has an unverified prefix')
+        require_down(cohort['owned_down'])
+    if selected>3*config['cohorts']:raise RuntimeError('Selected quota exceeds its configured cohort count')
+    if canonical!=events:raise RuntimeError('Global event ledger contains duplicate or orphan membership')
+    if (state['attempts']!=len(canonical) or state['next_seed']!=next_seed or
+            state['screen_rejects']!=screens or state['selected_episodes']!=selected):
+        raise RuntimeError('Checkpoint quota/counters differ from sealed attempts')
+    return manifest
+
+
 class Runner:
     """The same orchestration is exercised by fake and actual process transports."""
     def __init__(self,config,adapter,publish):
         self.config=config;self.adapter=adapter;self.publish=publish
     def run(self,state=None):
+        resuming=state is not None
         state=copy.deepcopy(state) if state is not None else dict(version=POLICY_VERSION,config=self.config,events=[],cohorts=[],
             next_seed=self.config['seed_start'],attempts=0,screen_rejects=0,selected_episodes=0,
             unselected_prefix_episodes=0,unselected_prefix_wall_s=0.,pending=None,stopped=False)
-        if state['config']!=self.config or state['pending'] or state['stopped']:raise RuntimeError('Runner resume is inconsistent, incomplete or stopped')
-        if state.get('events') and state is not None:
-            if state.get('final_owned_down') is None:raise RuntimeError('Runner checkpoint has no owned retirement')
+        if state.get('version')!=POLICY_VERSION or state['config']!=self.config or state['pending'] or state['stopped']:raise RuntimeError('Runner resume is inconsistent, incomplete or stopped')
+        if resuming:
             require_down(state['final_owned_down'])
-            if (len(state['events'])!=state['attempts'] or
-                    [e['seed'] for e in state['events']]!=list(range(self.config['seed_start'],state['next_seed'])) or
-                    sum(e['outcome']['kind']=='screen_reject' for e in state['events'])!=state['screen_rejects']):
-                raise RuntimeError('Runner checkpoint counters/seeds differ')
-            selected=0
-            for cohort in state['cohorts']:
-                events=[e for e in state['events'] if e['cohort']==cohort['index']]
-                if [e['trial'] for e in events]!=list(range(len(events))) or len(events)>3:
-                    raise RuntimeError('Runner checkpoint cohort order differs')
-                if cohort.get('selected'):
-                    if len(events)!=3 or any(e['outcome']['kind']!='accepted' for e in events):
-                        raise RuntimeError('Selected checkpoint is not an RGB cohort')
-                    require_export(cohort['validation']);selected+=3
-                elif not cohort.get('quarantined') or not events or events[-1]['outcome']['kind']!='screen_reject':
-                    raise RuntimeError('Incomplete runner cohort cannot resume')
-            if selected!=state['selected_episodes']:raise RuntimeError('Runner checkpoint selection differs')
-            self.adapter.verify_prior(state)
+            reconstruct_ledger(state,self.adapter.verify_prior(state))
         state.pop('final_owned_down',None)
         def save():self.publish(copy.deepcopy(state))
         save()
         try:
             while state['selected_episodes']<3*self.config['cohorts']:
-                number=len(state['cohorts']);cohort=dict(index=number,base_seed=state['next_seed'],accepted=0,attempt_wall_s=0.,selected=False)
+                number=len(state['cohorts']);cohort=dict(index=number,base_seed=state['next_seed'],accepted=0,attempt_wall_s=0.,selected=False,events=[])
                 state['cohorts'].append(cohort);save();cohort_started=time.monotonic()
                 if state['next_seed']>self.config['seed_end']:raise RuntimeError('Reserved seed range exhausted')
                 self.adapter.start(cohort)
@@ -274,8 +332,9 @@ class Runner:
                         state['unselected_prefix_wall_s']+=cohort.get('prefix_wall_s',0.)
                     else:raise RuntimeError('Unknown attempt outcome')
                     event=dict(state['pending'],outcome=outcome,wall_s=wall)
-                    state['events'].append(event);state['pending']=None
+                    state['events'].append(event);cohort['events'].append(copy.deepcopy(event));state['pending']=None
                     if outcome['kind']=='accepted':cohort['prefix_wall_s']=cohort.get('prefix_wall_s',0.)+wall
+                    if restart:cohort['artifact_seal_sha256']=self.adapter.quarantine(cohort)
                     save()
                     if state['attempts']>=20 and state['screen_rejects']*10>state['attempts']:
                         raise RuntimeError('Resting-screen rejection rate exceeds10percent after20attempts')
@@ -284,7 +343,7 @@ class Runner:
                 if restart:continue
                 down=self.adapter.stop();require_down(down);cohort['owned_down']=down
                 validation=self.adapter.export(cohort);require_export(validation)
-                cohort.update(selected=True,validation=validation,total_wall_s=time.monotonic()-cohort_started);state['selected_episodes']+=3;save()
+                cohort.update(selected=True,validation=validation,artifact_seal_sha256=validation['runner_artifact_seal_sha256'],total_wall_s=time.monotonic()-cohort_started);state['selected_episodes']+=3;save()
             state.update(complete=True,color_counts={c:state['selected_episodes']//3 for c in COLORS})
         except BaseException as exc:
             state.update(stopped=True,error=repr(exc),complete=False)
@@ -300,11 +359,13 @@ class Runner:
             state['unselected_prefix_wall_s']=sum(e['wall_s'] for e in prefixes)
             state['physical_accepted_episodes']=sum(e['outcome']['kind']=='accepted' for e in state['events'])
             state['quarantined_extra_wall_s']=sum(c.get('total_wall_s',0.) for c in state['cohorts'] if c.get('quarantined'))
-            state['selected_cohorts']=[dict(index=c['index'],dataset='cohort-%04d/run/dataset'%c['index'],
-                seed_start=c['base_seed'],seed_end=c['base_seed']+2,colors=dict(red=1,green=1,blue=1))
-                for c in state['cohorts'] if c.get('selected')]
+            try:
+                state['selected_cohorts']=(reconstruct_ledger(state,self.adapter.verify_prior(state)) if not state['stopped'] else [])
+            except BaseException as audit:
+                state.update(stopped=True,complete=False,selection_audit_error=repr(audit),selected_cohorts=[])
             save()
             if state.get('cleanup_error'):raise RuntimeError(state['cleanup_error'])
+            if state.get('selection_audit_error'):raise RuntimeError(state['selection_audit_error'])
         return state
 
 
@@ -324,7 +385,8 @@ class Processes:
             PYTHONDONTWRITEBYTECODE='1',PYTHONFAULTHANDLER='1',OMP_NUM_THREADS='1',OPENBLAS_NUM_THREADS='1')
         for key in ('ISAACSIM_EXTRA_ARGS','ROS_LOCALHOST_ONLY'):self.env.pop(key,None)
         self.wrapper=str(REPO/'linux-env/scripts/collect_sim.sh')
-    def stage(self,name,argv):
+    def stage(self,name,argv,invocation=None):
+        invocation=invocation or uuid.uuid4().hex
         frozen(self.config['cut']);self.stage_index+=1;log=self.output/('stage-%05d-%s.log'%(self.stage_index,name))
         if self.ledger is None:self.ledger=OwnedProcesses(self.runtime,time.time_ns())
         with log.open('x') as stream:
@@ -340,12 +402,32 @@ class Processes:
                     time.sleep(.1)
             finally:
                 self.ledger.scan()
-                value=dict(name=name,pid=p.pid,started_wall_ns=started,returncode=p.returncode,log=str(log))
+                value=dict(name=name,pid=p.pid,started_wall_ns=started,returncode=p.returncode,log=str(log),invocation=invocation)
                 atomic_json(log.with_suffix('.json'),value)
         return value
     def root(self,cohort):return self.output/('cohort-%04d'%cohort['index'])
+    def native_call(self,code):
+        import sys
+        sys.path.insert(0,str(REPO/'omni-kit-mcp'))
+        from kit_mcp.client import call
+        value=call('run_python',dict(code=code),host='127.0.0.1',port=8777+2*self.config['instance'],timeout=30)
+        return value['result'] if isinstance(value,dict) and 'result' in value else value
+    def observe(self,nonce):
+        code="import collection_runtime as c,os,time\nfrom pathlib import Path\nr=c.runtime()\nf=Path('/proc/self/stat').read_text().rsplit(')',1)[1].split()\nresult={'pid':os.getpid(),'start_ticks':f[19],'pgid':os.getpgid(0),'nonce':"+repr(nonce)+",'wall_ns':time.time_ns(),'epoch':r.epoch,'sim_ns':r.stamp(),'fault_path':r.native_miss_fault_path,'fault':getattr(r,'_miss_motion_fault',None),'fault_durable':getattr(r,'_miss_fault_durable',False),'failure':r.failure,'playing':r.timeline.is_playing(),'busy':r.busy,'loaded_sha256':c._LOADED_SHA256,'runtime_module':str(Path(c.__file__).resolve()),'snapshot':r.snapshot()}"
+        self.ledger.scan();value=self.native_call(code);self.ledger.scan()
+        own=self.ledger.known.get(value['pid']);current=identity(value['pid'])
+        keys=('pid','start_ticks','pgid')
+        if own is None or current is None or any(value[k]!=own[k] or value[k]!=current[k] for k in keys):
+            raise RuntimeError('Native transport did not answer from an owned process')
+        if value['runtime_module']!=str((REPO/'linux-env/scripts/collect/collection_runtime.py').resolve()):
+            raise RuntimeError('Native transport loaded another source tree')
+        if value['loaded_sha256']!=hashlib.sha256((REPO/'linux-env/scripts/collect/collection_runtime.py').read_bytes()).hexdigest():
+            raise RuntimeError('Native runtime source fingerprint differs')
+        value['owned_identity']={k:own[k] for k in keys}
+        return value
     def capacity(self):
         from host_config import profile
+        if profile()['name']!='rtx6000':raise RuntimeError('Production recovery is qualified only on rtx6000')
         import shutil
         root_free=shutil.disk_usage('/').free;bulk_free=shutil.disk_usage(CANONICAL_ROOT).free
         required=50*2**30
@@ -366,6 +448,10 @@ class Processes:
         if stage['returncode']:raise RuntimeError('Owned startup failed: '+stage['log'])
         clock=root/'clock.json';stage=self.stage('clock',['bash',self.wrapper,'clock-sanity',str(self.config['instance']),'--output',str(clock)])
         clock_status.require(clock,stage['pid'],stage['started_wall_ns'],stage['returncode'])
+        transport=self.native_call("import collection_runtime as c\nresult=c.install('collect')")
+        native=self.observe(uuid.uuid4().hex)
+        self.boot_record=dict(transport=transport,native=native)
+        atomic_json(root/'native-boot.json',self.boot_record)
     def attempt(self,cohort,trial,seed):
         self.capacity()
         run=self.root(cohort)/'run'
@@ -373,7 +459,12 @@ class Processes:
         argv=['bash',self.wrapper,'run',str(self.config['instance']),'--episodes','3','--seed',str(cohort['base_seed']),
               '--regrasp-only','--output',str(run),'--max-attempts',str(trial+1)]
         if trial:argv.append('--resume')
-        stage=self.stage('attempt',argv)
+        invocation=uuid.uuid4().hex;before=self.observe(invocation)
+        if os.path.lexists(before['fault_path']):raise RuntimeError('Native journal already exists before invocation')
+        stage=self.stage('attempt',argv,invocation=invocation)
+        after=self.observe(invocation)
+        observations=self.root(cohort)/'observations';observations.mkdir(exist_ok=True)
+        atomic_json(observations/('attempt-%04d.json'%trial),dict(version=1,invocation=invocation,stage=stage,before=before,after=after))
         if not (run/('attempt-%04d/receipt.json'%trial)).exists():
             from run_smoke import StartupFailure
             raise StartupFailure('attempt',stage['returncode'],Path(stage['log']))
@@ -428,31 +519,46 @@ class Processes:
                 source=self.runtime/name;target=root/name
                 if source.exists() and not target.exists():shutil.copyfile(source,target)
         return proof
+    def seal(self,cohort,kind):
+        root=self.root(cohort);checked_tree(root)
+        files={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest()
+               for p in root.rglob('*') if p.is_file() and p!=root/'artifact-seal.json'}
+        seal=dict(version=2,index=cohort['index'],kind=kind,events=copy.deepcopy(cohort['events']),files=files)
+        atomic_json(root/'artifact-seal.json',seal)
+        return digest(seal)
+    def quarantine(self,cohort):
+        return self.seal(cohort,'quarantined')
     def verify_prior(self,state):
-        for cohort in state['cohorts']:
-            if not cohort.get('selected'):continue
-            root=self.root(cohort);seal=leaf(root/'artifact-seal.json')
-            if digest(seal)!=cohort['validation']['runner_artifact_seal_sha256']:
+        roots=sorted(self.output.glob('cohort-*'));facts=[]
+        if [p.name for p in roots]!=['cohort-%04d'%i for i in range(len(state['cohorts']))]:
+            raise RuntimeError('Orphan or duplicate cohort directories')
+        for index,root in enumerate(roots):
+            checked_tree(root);cohort=state['cohorts'][index];seal=leaf(root/'artifact-seal.json')
+            if seal.get('version')!=2 or seal.get('index')!=index or digest(seal)!=cohort['artifact_seal_sha256']:
                 raise RuntimeError('Cohort artifact seal changed')
-            if any(p.is_symlink() for p in root.rglob('*')):raise RuntimeError('Sealed cohort contains symbolic links')
             current={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest()
-                     for p in root.rglob('*') if p.is_file() and p.name!='artifact-seal.json'}
+                     for p in root.rglob('*') if p.is_file() and p!=root/'artifact-seal.json'}
             if current!=seal['files']:raise RuntimeError('Sealed cohort files changed')
-            collection_status.require_finalized(root/'run')
+            if seal.get('events')!=cohort.get('events'):raise RuntimeError('Cohort events differ from their sealed source')
+            paths=sorted((root/'run').glob('attempt-*'))
+            if [p.name for p in paths]!=['attempt-%04d'%i for i in range(len(seal['events']))]:
+                raise RuntimeError('Sealed attempts do not cover event membership')
+            attempts=[]
+            for path in paths:
+                receipt=leaf(path/'receipt.json')
+                attempts.append(dict(params=receipt['params'],accepted=receipt['accepted'],receipt_sha256=digest(receipt)))
+            if seal['kind']=='selected':
+                collection_status.require_finalized(root/'run');require_export(leaf(root/'report/validation.json'))
+            elif seal['kind']!='quarantined':raise RuntimeError('Unknown sealed cohort status')
+            facts.append(dict(index=index,kind=seal['kind'],events=seal['events'],attempts=attempts))
+        return facts
     def export(self,cohort):
         run=self.root(cohort)/'run';report=self.root(cohort)/'report'
         stage=self.stage('export',['bash',self.wrapper,'export',str(self.config['instance']),str(run),
             '--repo-id','local/soarm101_synthetic_recovery','--report-dir',str(report)])
         value=leaf(report/'validation.json');require_export(value)
         if value.get('started_wall_ns',0)<stage['started_wall_ns']:raise RuntimeError('Export certificate predates its stage')
-        root=self.root(cohort)
-        files={}
-        for path in root.rglob('*'):
-            if path.is_symlink():raise RuntimeError('Cohort artifacts must not contain symbolic links')
-            if path.is_file():files[str(path.relative_to(root))]=hashlib.sha256(path.read_bytes()).hexdigest()
-        seal=dict(version=1,files=files)
-        atomic_json(root/'artifact-seal.json',seal)
-        return dict(value,runner_artifact_seal_sha256=digest(seal))
+        return dict(value,runner_artifact_seal_sha256=self.seal(cohort,'selected'))
 
 
 def main():
@@ -467,6 +573,8 @@ def main():
         seed_start=a.seed_start,seed_end=a.seed_end,cut=a.cut,host=os.uname().nodename,output=str(output))
     frozen(a.cut)
     if a.plan:print(json.dumps(config,indent=2));return
+    from host_config import profile
+    if profile()['name']!='rtx6000':raise RuntimeError('Production recovery is qualified only on rtx6000')
     runtime=confined(CANONICAL_ROOT/('runtime/instance-'+str(a.instance)));runtime.mkdir(parents=True,exist_ok=True)
     previous=leaf(output/'runner.json') if a.resume else None
     if not a.resume:output.mkdir(exist_ok=False,parents=True)

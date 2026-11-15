@@ -20,20 +20,30 @@ def exported():
 
 class Fake:
     def __init__(self,outcomes=(),fail_down=False,fail_export=False):
-        self.outcomes=iter(outcomes);self.calls=[];self.fail_down=fail_down;self.fail_export=fail_export
-    def verify_prior(self,state):self.calls.append(('verify',))
+        self.outcomes=iter(outcomes);self.calls=[];self.fail_down=fail_down;self.fail_export=fail_export;self.facts={};self.attempts={}
+    def verify_prior(self,state):
+        self.calls.append(('verify',))
+        return [copy.deepcopy(self.facts[i]) for i in sorted(self.facts)]
+    def sealed(self,c,kind):
+        value=dict(index=c['index'],kind=kind,events=copy.deepcopy(c['events']),attempts=copy.deepcopy(self.attempts[c['index']]))
+        self.facts[c['index']]=value
+        return digest(value)
+    def quarantine(self,c):return self.sealed(c,'quarantined')
     def start(self,c):self.calls.append(('start',c['index'],c['base_seed']))
     def attempt(self,c,t,s):
         self.calls.append(('attempt',c['index'],t,s))
         value=next(self.outcomes,'accepted')
         if value=='terminal':raise RuntimeError('Post-writer fault')
-        return dict(kind=value)
+        record=dict(params=dict(parameters(s,('red','green','blue')[t],regrasp=True),trial=t),accepted=value=='accepted')
+        record['receipt_sha256']=digest(record)
+        self.attempts.setdefault(c['index'],[]).append(copy.deepcopy(record))
+        return dict(kind=value,receipt_sha256=record['receipt_sha256'])
     def between(self,c,t):self.calls.append(('between',c['index'],t))
     def stop(self):self.calls.append(('down',));return down(not self.fail_down)
     def export(self,c):
         self.calls.append(('export',c['index']))
         if self.fail_export:raise RuntimeError('Corrupt decoded video')
-        return exported()
+        return dict(exported(),runner_artifact_seal_sha256=self.sealed(c,'selected'))
 
 
 class EngineTests(unittest.TestCase):
@@ -102,6 +112,16 @@ class EngineTests(unittest.TestCase):
         from regrasp_runner import Processes
         p=object.__new__(Processes);p.failed_cleanup={'remaining':[{'pid':1}]};p.ledger=None
         with self.assertRaisesRegex(RuntimeError,'Previous owned-down'):p.stop()
+    def test_duplicate_orphan_conflicting_or_relabelled_cohorts_refuse(self):
+        r,a,s=self.run_engine(cohorts=2);r.run();original=s[-1]
+        mutations=[]
+        bad=copy.deepcopy(original);bad['cohorts'][1]=copy.deepcopy(bad['cohorts'][0]);mutations.append(bad)
+        bad=copy.deepcopy(original);bad['cohorts'][1]['quarantined']=True;mutations.append(bad)
+        bad=copy.deepcopy(original);bad['cohorts'][1]['base_seed']=900000;mutations.append(bad)
+        bad=copy.deepcopy(original);bad['events']=[];bad['cohorts']=[];bad['attempts']=0;bad['next_seed']=600000;mutations.append(bad)
+        bad=copy.deepcopy(original);bad['events'].append(copy.deepcopy(bad['events'][-1]));mutations.append(bad)
+        for number,bad in enumerate(mutations):
+            with self.subTest(number=number),self.assertRaises(RuntimeError):r.run(bad)
     def test_empty_resume_refuses_before_publishing(self):
         r,a,s=self.run_engine()
         with self.assertRaises((KeyError,RuntimeError)):r.run({})
@@ -124,6 +144,11 @@ class EngineTests(unittest.TestCase):
         from regrasp_runner import Processes
         p=object.__new__(Processes);p.ledger=None;p.probe_ports=lambda:{'8783':True,'8784':False}
         with self.assertRaisesRegex(RuntimeError,'Owned-down'):p.stop()
+    def test_production_on_dual_is_refused_even_with_space(self):
+        from regrasp_runner import Processes
+        p=object.__new__(Processes)
+        with patch('host_config.profile',return_value={'name':'dual-a4500'}):
+            with self.assertRaisesRegex(RuntimeError,'only on rtx6000'):p.capacity()
     def test_pending_or_stopped_or_different_resume_refuses(self):
         r,a,s=self.run_engine();r.run()
         for key,value in [('pending',{'trial':0}),('stopped',True),('config',{})]:
@@ -132,11 +157,19 @@ class EngineTests(unittest.TestCase):
 
 
 class EvidenceTests(unittest.TestCase):
+    def boot(self,h):
+        return dict(finger_model=copy.deepcopy(h.collector.native_finger_model),effective_shape_offsets=copy.deepcopy(h.collector.native_shape_offsets))
     def make(self,kind='baseline'):
         def disturb(h,frame,step):
-            if frame==0 and step==1:h.bodies[h.neighbour]['velocity'][0]=POLICY['stationary_linear_m_s']*2
-        h=SetupHarness(disturb=disturb if kind=='substep' else None)
+            if frame==(1 if kind=='later' else 0) and step==1:h.bodies[h.neighbour]['velocity'][0]=POLICY['stationary_linear_m_s']*2
+        h=SetupHarness(disturb=disturb if kind in ('substep','later') else None)
         if kind=='baseline':h.bodies[h.neighbour]['velocity'][0]=POLICY['stationary_linear_m_s']*2
+        if kind=='final':
+            finish=h.runtime.finish_protected_frame
+            def final_screen():
+                h.bodies[h.neighbour]['velocity'][0]=POLICY['stationary_linear_m_s']*2
+                return finish()
+            h.runtime.finish_protected_frame=final_screen
         with patch.dict('sys.modules',{'collection_runtime':h.proxy}):
             try:h.collector._prepare_regrasp_start(h.params,h.result)
             except RuntimeError as error:h.runtime.fail_miss_motion(error)
@@ -145,10 +178,10 @@ class EvidenceTests(unittest.TestCase):
         receipt=dict(params=dict(h.params,trial=0),accepted=False,episode_id='fixture',recovery_report=report)
         return receipt,fault,h
     def test_real_precondition_and_substep_screen_proofs_classify(self):
-        for kind in ['baseline','substep']:
+        for kind in ['baseline','substep','final','later']:
             r,f,h=self.make(kind)
             with self.subTest(kind=kind):
-                p=screen_evidence(r,f);self.assertEqual(p['reason'],'protected_velocity_screen')
+                p=screen_evidence(r,f,self.boot(h));self.assertEqual(p['reason'],'protected_velocity_screen')
                 self.assertIn(h.neighbour,p['bodies'])
     def test_displacement_clock_and_drive_changes_are_terminal(self):
         r,f,h=self.make('substep')
@@ -159,24 +192,41 @@ class EvidenceTests(unittest.TestCase):
             if field=='drive':s['drive_targets'][0]+=.1
             if field=='base':s['robot_base_world_pose']['position'][0]+=.1
             if field=='nan':s['bodies'][h.neighbour]['position'][0]=float('nan')
-            with self.subTest(field=field),self.assertRaises((RuntimeError,ValueError)):screen_evidence(r,bad)
+            with self.subTest(field=field),self.assertRaises((RuntimeError,ValueError)):screen_evidence(r,bad,self.boot(h))
     def test_below_screen_and_unpublished_fault_refuse(self):
         r,f,h=self.make()
         for field,value in [('durability_unresolved',True),('dirty',True),('pause_error','failed'),('publication_attempts',0)]:
             bad=copy.deepcopy(f);bad[field]=value
-            with self.subTest(field=field),self.assertRaises(RuntimeError):screen_evidence(r,bad)
+            with self.subTest(field=field),self.assertRaises(RuntimeError):screen_evidence(r,bad,self.boot(h))
         bad=copy.deepcopy(r);s=bad['recovery_report']['baseline'];s['bodies'][h.neighbour]['velocity'][0]=0
         from test_tick_contract import checked_window
         bad['recovery_report']['baseline']=checked_window([s])[0]
+        bad['recovery_report']['pre_restore_observed']=copy.deepcopy(bad['recovery_report']['baseline'])
         from recovery_start import world_anchor
         bad['recovery_report']['world_anchor_sha256']=digest(world_anchor(bad['recovery_report']['baseline']))
-        with self.assertRaisesRegex(RuntimeError,'No measured'):screen_evidence(bad,f)
+        with self.assertRaisesRegex(RuntimeError,'No measured'):screen_evidence(bad,f,self.boot(h))
     def fixture_files(self,root,kind='baseline'):
         r,f,h=self.make(kind);run=root/'cohort/run';path=run/'attempt-0000';path.mkdir(parents=True)
         episode_id=__import__('hashlib').sha256((str(run)+':0:'+str(r['params']['seed'])).encode()).hexdigest()
         r['episode_id']=episode_id;r['recovery_report']['episode_id']=episode_id
         runtime=root/'runtime';native=runtime/'native-motion-faults/test.json';native.parent.mkdir(parents=True)
         native.write_text(json.dumps(f));message=semantic_error(f['error'])
+        stage=dict(pid=1234,started_wall_ns=90,invocation='c'*32)
+        native_id=dict(pid=99,start_ticks='native-birth',pgid=99,fault_path=str(native),
+            loaded_sha256='source-fingerprint',runtime_module='owned-native-module')
+        native_id['owned_identity']={k:native_id[k] for k in ('pid','start_ticks','pgid')}
+        boot=self.boot(h);boot.update(native_miss_fault_path=str(native),loaded_sha256=native_id['loaded_sha256'])
+        record=dict(transport=boot,native=copy.deepcopy(native_id))
+        before=dict(native_id,nonce='c'*32,wall_ns=80,epoch=r['recovery_report']['baseline']['epoch']-1,
+            sim_ns=r['recovery_report']['baseline']['sim_ns']-33333333,fault=None,failure=None,busy=False,playing=False)
+        before['snapshot']=copy.deepcopy(r['recovery_report']['baseline'])
+        before['snapshot'].update(epoch=before['epoch'],sim_ns=before['sim_ns'])
+        after=dict(native_id,nonce='c'*32,wall_ns=300,epoch=f['epoch']+1,sim_ns=f['sim_ns'],
+            fault=copy.deepcopy(f),fault_durable=True,failure=message,busy=False,playing=False,snapshot=h.runtime.snapshot())
+        after['snapshot'].update(epoch=after['epoch'],sim_ns=after['sim_ns'])
+        (run.parent/'native-boot.json').write_text(json.dumps(record))
+        (run.parent/'observations').mkdir()
+        (run.parent/'observations/attempt-0000.json').write_text(json.dumps(dict(version=1,invocation='c'*32,stage=stage,before=before,after=after)))
         events=[dict(source=s,error=repr(RuntimeError(message)),sensor_evidence=None,wall_ns=150) for s in ['synthetic start verification','attempt disposition','before cleanup','after cleanup']]
         marker=dict(version=1,events=events)
         r.update(error=repr(RuntimeError(message)),camera_boundary=dict(passed=True),camera_publishers={},capture_failures=[],
@@ -189,19 +239,19 @@ class EvidenceTests(unittest.TestCase):
         return run,path,r,runtime
     def test_actual_classification_requires_durable_matching_retirement_and_no_writer(self):
         with tempfile.TemporaryDirectory() as d:
-            run,path,r,runtime=self.fixture_files(Path(d));stage=dict(pid=1234,started_wall_ns=90)
+            run,path,r,runtime=self.fixture_files(Path(d));stage=dict(pid=1234,started_wall_ns=90,invocation='c'*32)
             self.assertEqual(classify(run,0,r['params']['seed'],stage,runtime)['kind'],'screen_reject')
             for name in ['frames.jsonl','wrist-encode.log','top.mp4']:
                 p=path/name;p.touch()
                 with self.subTest(name=name),self.assertRaisesRegex(RuntimeError,'writer'):classify(run,0,r['params']['seed'],stage,runtime)
                 p.unlink()
-            with self.assertRaisesRegex(RuntimeError,'retirement'):classify(run,0,r['params']['seed'],dict(pid=1235,started_wall_ns=90),runtime)
+            with self.assertRaisesRegex(RuntimeError,'retirement|producing stage'):classify(run,0,r['params']['seed'],dict(pid=1235,started_wall_ns=90,invocation='c'*32),runtime)
             native=Path(r['native_miss_fault_file']);native.unlink();native.symlink_to(path/'receipt.json')
             with self.assertRaises((OSError,RuntimeError)):classify(run,0,r['params']['seed'],stage,runtime)
     def test_cleanup_errors_and_changed_summary_refuse(self):
         for change in ['cleanup','summary','second_cause','late_writer','retirement']:
             with self.subTest(change=change),tempfile.TemporaryDirectory() as d:
-                run,path,r,runtime=self.fixture_files(Path(d));stage=dict(pid=1234,started_wall_ns=90)
+                run,path,r,runtime=self.fixture_files(Path(d));stage=dict(pid=1234,started_wall_ns=90,invocation='c'*32)
                 if change=='cleanup':
                     p=run/'collector-finalization.json';v=json.loads(p.read_text());v['cleanup_errors']=[{'stage':'executor'}];p.write_text(json.dumps(v))
                 if change=='summary':(run/'summary.json').write_text('{}')
@@ -216,18 +266,143 @@ class EvidenceTests(unittest.TestCase):
     def test_full_substep_fault_classifies_only_before_writer(self):
         with tempfile.TemporaryDirectory() as d:
             run,path,r,runtime=self.fixture_files(Path(d),'substep')
-            outcome=classify(run,0,r['params']['seed'],dict(pid=1234,started_wall_ns=90),runtime)
+            outcome=classify(run,0,r['params']['seed'],dict(pid=1234,started_wall_ns=90,invocation='c'*32),runtime)
             self.assertEqual(outcome['kind'],'screen_reject');self.assertIn('protected_settle',outcome['native_fault'])
+    def test_all_symlinks_and_special_entries_refuse_before_classification(self):
+        import os
+        for name,kind in [('top.mp4','dangling'),('unknown','symlink'),('unknown','fifo')]:
+            with self.subTest(kind=kind),tempfile.TemporaryDirectory() as d:
+                run,path,r,runtime=self.fixture_files(Path(d));entry=path/name
+                if kind=='dangling':entry.symlink_to(path/'missing')
+                elif kind=='symlink':entry.symlink_to(path/'receipt.json')
+                else:os.mkfifo(entry)
+                with self.assertRaisesRegex(RuntimeError,'Non-regular'):
+                    classify(run,0,r['params']['seed'],dict(pid=1234,started_wall_ns=90,invocation='c'*32),runtime)
+    def test_parent_directory_symlink_refuses(self):
+        with tempfile.TemporaryDirectory() as d:
+            run,path,r,runtime=self.fixture_files(Path(d));alias=Path(d)/'alias';alias.symlink_to(run,target_is_directory=True)
+            with self.assertRaisesRegex(RuntimeError,'ancestor|Non-regular'):classify(alias,0,r['params']['seed'],dict(pid=1234,started_wall_ns=90,invocation='c'*32),runtime)
     def test_changed_episode_identity_refuses(self):
         with tempfile.TemporaryDirectory() as d:
             run,path,r,runtime=self.fixture_files(Path(d));r['episode_id']='other'
             (path/'receipt.json').write_text(json.dumps(r))
-            with self.assertRaisesRegex(RuntimeError,'identity'):classify(run,0,r['params']['seed'],dict(pid=1234,started_wall_ns=90),runtime)
+            with self.assertRaisesRegex(RuntimeError,'identity'):classify(run,0,r['params']['seed'],dict(pid=1234,started_wall_ns=90,invocation='c'*32),runtime)
+    def test_epoch_and_copied_journal_refuse_at_actual_classifier(self):
+        for change in ('epoch','rename','fresh_copy','nonce','birth','source','startup_fault','late_scene','late_cause'):
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as d:
+                run,path,r,runtime=self.fixture_files(Path(d));stage=dict(pid=1234,started_wall_ns=90,invocation='c'*32)
+                native=Path(r['native_miss_fault_file']);fault=json.loads(native.read_text())
+                observation_path=run.parent/'observations/attempt-0000.json';obs=json.loads(observation_path.read_text())
+                if change=='epoch':
+                    fault['epoch']+=999;r['recovery_report']['fault_epoch']=fault['epoch']
+                    r['native_miss_faults']=[fault];native.write_text(json.dumps(fault));obs['after']['fault']=copy.deepcopy(fault)
+                if change in ('rename','fresh_copy'):
+                    replacement=native.with_name('another-current-file.json');replacement.write_bytes(native.read_bytes())
+                    r['native_miss_fault_file']=str(replacement)
+                    if change=='fresh_copy':
+                        import os
+                        stage['started_wall_ns']=1000;obs['stage']=copy.deepcopy(stage)
+                        cert_path=run/'collector-finalization.json';cert=json.loads(cert_path.read_text())
+                        cert.update(started_wall_ns=1100,completed_wall_ns=1200);cert_path.write_text(json.dumps(cert))
+                        for marker_path in (run/'terminal-fault.json',path/'terminal-fault.json'):
+                            marker=json.loads(marker_path.read_text())
+                            for e in marker['events']:e['wall_ns']=1150
+                            marker_path.write_text(json.dumps(marker));r['terminal_failure']=marker
+                        os.utime(replacement,None)
+                if change=='nonce':obs['after']['nonce']='d'*32
+                if change=='birth':obs['after']['start_ticks']='different-birth'
+                if change=='source':obs['after']['loaded_sha256']='changed-native-source'
+                if change=='startup_fault':obs['before']['fault']=fault
+                if change=='late_cause':obs['after']['failure']='another transport failure'
+                if change=='late_scene':obs['after']['snapshot']['bodies']['cup_red']['position'][0]+=.1
+                observation_path.write_text(json.dumps(obs));(path/'receipt.json').write_text(json.dumps(r))
+                with self.assertRaises(RuntimeError):classify(run,0,r['params']['seed'],stage,runtime)
+    def test_every_completed_setup_invariant_refuses_at_actual_classifier(self):
+        paths=[('selection','proof','passed'),('selection','proof','joints',0),
+            ('restore','command_baseline','drive_targets',0),('restore','command_baseline','epoch'),
+            ('restore','snapshot','physics_time_s'),('restore','snapshot','velocity',0),
+            ('fresh_offsets','epoch'),('fresh_offsets','block_offsets','contact_m',0),
+            ('model','all_robot_boxes',0,'half_extents_m',0),('protected_start','sim_ns'),
+            ('request','pose','x'),('request','bbox','sx'),
+            ('settle_checks',0,'scene_valid'),('settle_checks',0,'static','passed'),
+            ('settle_snapshots',0,'tick_contract','row','physics_drive_targets',0)]
+        for keys in paths:
+            with self.subTest(keys=keys),tempfile.TemporaryDirectory() as d:
+                run,path,r,runtime=self.fixture_files(Path(d),'later');value=r['recovery_report']
+                for key in keys[:-1]:value=value[key]
+                k=keys[-1];value[k]=False if isinstance(value[k],bool) else value[k]+1
+                (path/'receipt.json').write_text(json.dumps(r))
+                with self.assertRaises((RuntimeError,ValueError)):
+                    classify(run,0,r['params']['seed'],dict(pid=1234,started_wall_ns=90,invocation='c'*32),runtime)
+    def test_native_observer_verifies_actual_owned_birth_and_source(self):
+        from regrasp_runner import Processes,REPO
+        from types import SimpleNamespace as NS
+        import hashlib
+        p=object.__new__(Processes);own=dict(pid=99,start_ticks='birth',pgid=99)
+        p.ledger=NS(scan=lambda:None,known={99:own})
+        record=dict(own,runtime_module=str((REPO/'linux-env/scripts/collect/collection_runtime.py').resolve()),
+            loaded_sha256=hashlib.sha256((REPO/'linux-env/scripts/collect/collection_runtime.py').read_bytes()).hexdigest())
+        p.native_call=lambda code:copy.deepcopy(record)
+        with patch('regrasp_runner.identity',return_value=copy.deepcopy(own)):
+            self.assertEqual(p.observe('nonce')['owned_identity'],own)
+            for field in ('start_ticks','pgid','runtime_module','loaded_sha256'):
+                with self.subTest(field=field):
+                    old=record[field];record[field]='wrong'
+                    with self.assertRaises(RuntimeError):p.observe('nonce')
+                    record[field]=old
+        with patch('regrasp_runner.identity',return_value=dict(own,start_ticks='reused')):
+            with self.assertRaisesRegex(RuntimeError,'owned'):p.observe('nonce')
     def test_second_terminal_cause_and_changed_fault_refuse(self):
         with tempfile.TemporaryDirectory() as d:
             run,path,r,runtime=self.fixture_files(Path(d));r['capture_failures']=[dict(error='camera gap')]
             (path/'receipt.json').write_text(json.dumps(r))
-            with self.assertRaisesRegex(RuntimeError,'Camera'):classify(run,0,r['params']['seed'],dict(pid=1234,started_wall_ns=90),runtime)
+            with self.assertRaisesRegex(RuntimeError,'Camera'):classify(run,0,r['params']['seed'],dict(pid=1234,started_wall_ns=90,invocation='c'*32),runtime)
+
+
+class ArtifactLedgerTests(unittest.TestCase):
+    def on_disk(self,root):
+        from regrasp_runner import Processes
+        from storage import atomic_json
+        import hashlib
+        r,a,s=EngineTests().run_engine(cohorts=2);state=r.run()
+        p=object.__new__(Processes);p.output=root
+        for c in state['cohorts']:
+            folder=p.root(c);run=folder/'run';report=folder/'report';report.mkdir(parents=True)
+            for trial,record in enumerate(a.attempts[c['index']]):
+                receipt=dict(params=record['params'],accepted=record['accepted'])
+                path=run/('attempt-%04d'%trial);path.mkdir(parents=True)
+                atomic_json(path/'receipt.json',receipt)
+                event=c['events'][trial];event['outcome']['receipt_sha256']=digest(receipt)
+                state['events'][c['index']*3+trial]=copy.deepcopy(event)
+            summary=dict(producer_invocation=('a' if c['index']==0 else 'b')*32)
+            atomic_json(run/'summary.json',summary)
+            atomic_json(run/'collector-finalization.json',dict(version=1,invocation=summary['producer_invocation'],
+                producer_pid=1,started_wall_ns=1,completed_wall_ns=2,completed=True,passed=True,cleanup_errors=[],
+                summary_sha256=hashlib.sha256((run/'summary.json').read_bytes()).hexdigest()))
+            atomic_json(report/'validation.json',exported())
+            c['artifact_seal_sha256']=p.seal(c,'selected')
+        return r,state,p
+    def test_actual_disk_verifier_and_resume_reject_membership_edits(self):
+        from regrasp_runner import reconstruct_ledger
+        for change in ('none','duplicate','flags','base_seed','empty','orphan','receipt','missing_attempt','sealed_event','bad_seal'):
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as d:
+                r,state,p=self.on_disk(Path(d))
+                if change=='duplicate':state['cohorts'][1]=copy.deepcopy(state['cohorts'][0])
+                if change=='flags':state['cohorts'][1]['quarantined']=True
+                if change=='base_seed':state['cohorts'][1]['base_seed']=900000
+                if change=='empty':state.update(events=[],cohorts=[],attempts=0,next_seed=600000)
+                if change=='orphan':(Path(d)/'cohort-0002').mkdir()
+                if change=='receipt':(p.root(state['cohorts'][1])/'run/attempt-0002/receipt.json').write_text('{}')
+                if change=='missing_attempt':(p.root(state['cohorts'][1])/'run/attempt-0003').mkdir()
+                if change=='sealed_event':state['events'][0]['seed']+=20
+                if change=='bad_seal':state['cohorts'][0]['artifact_seal_sha256']='wrong'
+                p.stop=lambda:down();r.adapter=p
+                if change=='none':
+                    facts=p.verify_prior(state);manifest=reconstruct_ledger(state,facts)
+                    self.assertEqual([x['seed_start'] for x in manifest],[600000,600003])
+                    self.assertTrue(r.run(state)['complete'])
+                else:
+                    with self.assertRaises(RuntimeError):r.run(state)
 
 
 if __name__=='__main__':unittest.main()

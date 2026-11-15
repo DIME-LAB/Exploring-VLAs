@@ -1045,8 +1045,11 @@ within a healthy cohort; its verified initial arm baseline is restored between
 collector processes. Each new cohort gets fresh startup and clock certification.
 
 A protected-body velocity screen may reject a start only before any writer
-artifact exists. The outer runner replays the native proof's non-velocity
-clock/drive/base/displacement checks, binds the durable fault to that invocation,
+artifact exists. The outer runner replays every completed non-velocity setup
+check (candidate selection, measured model/offsets, static clearance, restore epoch/clock/drive
+baseline, returned tick contracts and scene checks, then native substeps). It
+binds the fault to the captured owned Kit process birth, loaded source, journal
+path, epoch range and a fresh before/after observation nonce for that invocation,
 and requires clean process retirement plus verified owned-down. The terminal
 cohort remains untouched as diagnostic data. Its next unused seed starts a fresh
 cohort and instance; terminal collector markers are never cleared or relabelled.
@@ -1060,11 +1063,18 @@ dataset: 50 cohorts per slot yield 150 selected episodes, 50 of each colour.
 `runner.json` also reports physical accepts, unselected valid prefixes, their
 collector wall time, and the whole quarantined-cohort extra wall time. Selected
 cohorts require native timing/recovery audits, full fresh LeRobot export/load and
-all-row/all-decoded-frame equivalence. Their file seals are checked before an
-outer resume; incomplete/pending or mandatory-stop checkpoints refuse.
+all-row/all-decoded-frame equivalence. All cohort files and per-attempt native
+observations are sealed, including quarantined prefixes. Every resume reconstructs a bijection between the sealed
+receipts, cohort events and the global ledger; it derives selected seed/colour
+counts and dataset membership from those verified attempts. Duplicate/orphan
+cohorts, conflicting flags, changed seed bases, empty quota claims and modified
+files refuse. Any symlink (including dangling links), special entry or linked
+ancestor in a cohort tree refuses. Incomplete/pending or mandatory-stop
+checkpoints also refuse; version-1 runner checkpoints cannot be resumed.
 
-These commands only prepare plans on a qualified RTX host. Actual `--go` needs
-the lead's released slots and launch window, the sealed training pull, and host
+Production execution is supported only by the qualified `rtx6000` host profile;
+other hosts refuse `--go` and capacity admission. These commands prepare plans.
+Actual `--go` needs the lead's released slots and launch window, the sealed training pull, and host
 ABI/clock/recovery qualification of the exact cut:
 
 ```bash
