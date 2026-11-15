@@ -278,6 +278,14 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       word reaches the model but its effect is weak. Training data has no idle prefix (median departure 5 frames).
       Open: execution-horizon / mode-switching diagnostic (re-plan every 10/25/50), mid-trajectory starts, closed loop
       on training layouts, then bank-v2 from the collector's own scene sampler (af0aa33).
+    - 2026-11-15 ~11-13Z: ACTUATION BUG found: deploy path (ROS JTC one-point targets, 1/30 s ahead, sent from the
+      FIFO dispatch thread) replaced every target before it applied (applied targets changed on 1-4% of ticks vs 67-69% in
+      training); expert actions replayed through it placed 0/3. All earlier closed-loop scores are labelled 'actuation path
+      defective'. Fixes: (a) SIM-only immediate targets (deployment realism, 2-4 tick residual latency; expert replay 3/3);
+      (b) PRIMARY eval = collector-identical native held-tick application at bf7336d (expert replay 6/6, <0.01 mm).
+      With (b), 30k primary on 5 TRAINING layouts: leaves home (0% dwell) but closes 24-95 mm off target, 0/5. With (a) on
+      bank-v1: 30k 0/30, unfreeze+10k 0/30 (~60 mm). Now: teacher-forced early-reach error + RTC-off/short re-observe test;
+      small-subset memorisation with vs without a top-camera workspace crop (visual localisation hypothesis).
 - [ ] 3.4 (only if 3.3 paraphrases fail) Prompt-variety run: relabel each training sample's task from a set
       of templates per colour at merge time (no new collection), hold some templates out for eval, and compare
       against the fixed-string model on both exact and held-out prompts. Published SmolVLA/LeRobot guidance is
