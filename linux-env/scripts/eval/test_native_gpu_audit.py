@@ -105,6 +105,14 @@ class RegistrationTests(unittest.TestCase):
         finally:
             path.write_text(json.dumps(original))
 
+class IsolatedEntrypointTests(unittest.TestCase):
+    def test_constructor_resolves_collector_without_test_path_injection(self):
+        with tempfile.TemporaryDirectory() as d:
+            folder=str(Path(__file__).resolve().parent)
+            code='import sys;from pathlib import Path;sys.path.insert(0,'+repr(folder)+');from native_gpu_audit import RegisteredGPUAudit;obj=RegisteredGPUAudit(Path('+repr(d)+'),Path('+repr(d)+')/"registry.json");obj.close();print("PASS isolated owner dependency path")'
+            result=subprocess.run([sys.executable,'-I','-c',code],env=dict(os.environ,CUDA_VISIBLE_DEVICES='',PYTHONDONTWRITEBYTECODE='1'),capture_output=True,text=True,check=True)
+            self.assertIn('PASS isolated',result.stdout)
+
 class OwnerThresholdTests(unittest.TestCase):
     def guard(self,root,owned=3700,global_used=500,total=1000):
         source=Path(__file__).with_name('run_native_replay_window.py').read_text()

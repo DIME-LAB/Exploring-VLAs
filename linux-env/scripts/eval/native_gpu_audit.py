@@ -1,6 +1,7 @@
 """Attribute native-eval GPU contexts to identities registered before sampling."""
 from pathlib import Path
-import ctypes,errno,hashlib,json,os,select,time
+import ctypes,errno,hashlib,json,os,select,sys,time
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'collect'))
 
 def birth(row):
     return row['pid'],row['start_ticks'],row['pgid']
