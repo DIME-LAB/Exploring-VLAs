@@ -454,6 +454,10 @@ def main():
     p.description = __doc__
     p.add_argument("--episode-manifest", type=Path, help="Ordered Phase3 rows; changes task/colour only while idle")
     p.add_argument("--sim-time", action="store_true", help="Opt-in /clock dispatch and physical Phase3 scoring")
+    p.add_argument("--diagnostic-reobserve-actions", type=int, choices=(10,25,50), default=10,
+                   help="Execution-horizon diagnostic only; frozen MAIN remains 10")
+    p.add_argument("--diagnostic-prediction-trace", action="store_true",
+                   help="Keep postprocessed predicted chunks and capture sim stamps, off the dispatch path")
     p.add_argument("--color", choices=("red", "green", "blue"), default="blue")
     p.add_argument("--warmup-actions", type=int, default=100)
     p.add_argument("--wall-watchdog-s", type=float, default=900)
@@ -468,6 +472,12 @@ def main():
     p.add_argument("--fresh-client-per-episode", action="store_true", help="Diagnose persistent-client resource accumulation")
     p.add_argument("--dataset-brightness", action="store_true", help="Diagnostic only: divide both policy RGB feeds by calibrated live gain")
     args = parse_args(parser=p)
+    if args.diagnostic_reobserve_actions != 10 and not args.sim_time:
+        p.error('Execution-horizon diagnostics require --sim-time')
+    if args.diagnostic_prediction_trace and not args.sim_time:
+        p.error('Prediction-chunk diagnostics require --sim-time')
+    if args.diagnostic_reobserve_actions == 50 and args.rtc_enabled:
+        p.error('The 50-action execution diagnostic requires --no-rtc')
     if args.sim_time and args.fresh_client_per_episode:
         p.error("Phase3 uses one persistent client per window")
     if args.dataset_brightness and args.sim_time:
@@ -505,7 +515,7 @@ def main():
         client_cmd = episode_client_command(client_cmd, args.dataset_brightness)
         if args.sim_time:
             server_cmd = server_cmd[:2]+[str(Path(__file__).with_name("sim_time.py")), "sim"]+server_cmd[4:]
-            client_cmd += ["--eval-clock=sim"]
+            client_cmd += ["--eval-clock=sim", f"--eval-observe-every-actions={args.diagnostic_reobserve_actions}"]
         print(
             json.dumps(
                 {
@@ -521,6 +531,8 @@ def main():
         return
     args.out.mkdir(parents=True, exist_ok=True)
     env = scrubbed_env(args.sim_time)
+    if args.diagnostic_prediction_trace:
+        env['SOARM_EVAL_RECORD_CHUNKS'] = '1'
     env.update(
         {k: v for k, v in rtc_environment(cfg).items() if k.startswith("LEROBOT_RTC_")}
     )
@@ -586,7 +598,7 @@ def main():
         # Same client configuration entrance as the deployment launcher.
         client_cmd = pixi+episode_client_command(commands[1], args.dataset_brightness)
         if args.sim_time:
-            client_cmd += ["--eval-clock=sim"]
+            client_cmd += ["--eval-clock=sim", f"--eval-observe-every-actions={args.diagnostic_reobserve_actions}"]
         client = Client(client_cmd, env, args.out)
         health_log = (args.out/'server.log').open(errors='replace')
         client_health_log = (args.out/'client.log').open(errors='replace')

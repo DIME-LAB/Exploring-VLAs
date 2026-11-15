@@ -55,6 +55,80 @@ class TimingTests(unittest.TestCase):
         install_client(client,False)
         self.assertFalse(client.eval_clock.use_sim_time)
         self.assertEqual(client.control_loop.__self__,client)
+        self.assertEqual(client.eval_observe_every_actions,10)
+
+    def test_diagnostic_cadence_runs_through_the_real_paced_loop(self):
+        import sys, threading, time
+        from queue import Queue
+        from types import SimpleNamespace, ModuleType
+        from unittest.mock import patch
+        from sim_time import paced_control_loop
+        native=ModuleType('lerobot.async_inference.robot_client')
+        native._configure_dispatch_thread=lambda config: {'test':True}
+        for cadence in (10,25,50):
+            class Clock:
+                use_sim_time=True
+                value=0.
+                def now(self):return self.value
+                def wait_until(self,deadline,stop):
+                    time.sleep(.002)
+                    self.value=deadline
+                    return None if stop.is_set() else deadline
+            client=SimpleNamespace(eval_clock=Clock(),eval_observe_every_actions=cadence,
+                start_barrier=threading.Barrier(1),_observation_process=None,running=True,
+                config=SimpleNamespace(dispatch_fifo_priority=0,fps=30),latest_action=-1,
+                action_queue=Queue(),must_go=threading.Event())
+            def action(verbose):
+                client.latest_action+=1;client._last_dispatch_cost_s=.0004
+                client._last_queue_wait_s=0.;client._last_dispatch_time=time.perf_counter()
+            client.control_loop_action=action
+            client.control_loop_observation=lambda task,verbose,finish: None
+            with patch.dict(sys.modules,{'lerobot.async_inference.robot_client':native}):
+                paced_control_loop(client,'test',max_actions=101)
+            stats=client.control_loop_stats
+            self.assertEqual(stats['actions_sent'],101)
+            self.assertEqual(stats['observe_every_actions'],cadence)
+            self.assertEqual(stats['missed_action_ticks_after_startup'],0)
+            events=stats['observation_cadence_events']
+            self.assertEqual(events[0]['executed_actions'],0)
+            self.assertGreaterEqual(len(events),101//cadence)
+            self.assertTrue(all(e['actions_since_request']>=cadence for e in events[1:]))
+
+    def test_complete_chunks_do_not_retry_or_blend_during_normal_latency(self):
+        import sys, threading, time
+        from queue import Queue
+        from types import SimpleNamespace, ModuleType
+        from unittest.mock import patch
+        from sim_time import paced_control_loop
+        class Clock:
+            use_sim_time=True
+            value=0.
+            def now(self):return self.value
+            def wait_until(self,deadline,stop):
+                time.sleep(.002);self.value=deadline
+                return None if stop.is_set() else deadline
+        native=ModuleType('lerobot.async_inference.robot_client');native._configure_dispatch_thread=lambda cfg: {}
+        client=SimpleNamespace(eval_clock=Clock(),eval_observe_every_actions=50,
+            start_barrier=threading.Barrier(1),_observation_process=None,running=True,
+            config=SimpleNamespace(dispatch_fifo_priority=0,fps=30),latest_action=-1,
+            action_queue=Queue(),must_go=threading.Event())
+        pending=[];requests=[];executed=[]
+        def observe(task,verbose,finish):
+            requests.append(client.latest_action+1)
+            pending.append((client.eval_clock.now()+13/30,client.latest_action+1))
+        def action(verbose):
+            if pending and client.eval_clock.now()+1e-8>=pending[0][0]:
+                _,start=pending.pop(0)
+                for step in range(start,start+50):client.action_queue.put(step)
+            step=client.action_queue.get_nowait();executed.append(step);client.latest_action=step
+            client._last_dispatch_cost_s=.0004;client._last_queue_wait_s=0.;client._last_dispatch_time=time.perf_counter()
+        client.control_loop_action=action;client.control_loop_observation=observe
+        with patch.dict(sys.modules,{'lerobot.async_inference.robot_client':native}):
+            paced_control_loop(client,'test',max_actions=101)
+        self.assertEqual(requests,[0,50,100]);self.assertEqual(executed,list(range(101)))
+        self.assertEqual(client.control_loop_stats['observation_retries'],0)
+        self.assertGreaterEqual(client.control_loop_stats['empty_action_ticks_after_startup'],24)
+        self.assertIsNone(client.control_loop_stats['empty_retry_slots'])
 
     def test_manifest_budget_and_pairing(self):
         m=manifest();self.assertEqual(len(m['per_checkpoint']),30);self.assertEqual(len(m['best_checkpoint_only']),102)

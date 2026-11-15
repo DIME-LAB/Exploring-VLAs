@@ -39,7 +39,10 @@ def main() -> int:
     diagnostic_parser = argparse.ArgumentParser(add_help=False)
     diagnostic_parser.add_argument("--dataset-brightness", action="store_true")
     diagnostic_parser.add_argument("--eval-clock", choices=("sim", "wall"))
+    diagnostic_parser.add_argument("--eval-observe-every-actions", type=int, choices=(10,25,50), default=10)
     diagnostic, remaining = diagnostic_parser.parse_known_args(sys.argv[1:])
+    if diagnostic.eval_observe_every_actions != 10 and not diagnostic.eval_clock:
+        raise ValueError('Diagnostic observation cadence requires an explicit eval clock')
     cfg = draccus.parse(RobotClientConfig, args=remaining)
     from observation_transform import enable_isolated_correction, transform_metadata
     correction = transform_metadata(diagnostic.dataset_brightness)
@@ -55,7 +58,7 @@ def main() -> int:
     client = RobotClient(cfg)
     if diagnostic.eval_clock:
         from sim_time import install_client
-        install_client(client, diagnostic.eval_clock == "sim")
+        install_client(client, diagnostic.eval_clock == "sim", diagnostic.eval_observe_every_actions)
     status_arrays = {}
     for label in ("arm", "gripper"):
         action_client = getattr(client.robot, f"_{label}_action_client", None)
@@ -154,6 +157,7 @@ def main() -> int:
                 arrival_wall_time=arrival, observation_timestamp=incoming[0].get_timestamp(),
                 first_step=incoming[0].get_timestep(), actions=len(incoming),
                 eval_rtc=getattr(incoming[0], 'eval_rtc', None),
+                **({'prediction_trace':incoming[0].eval_prediction} if hasattr(incoming[0],'eval_prediction') else {}),
                 observation_to_arrival_s=arrival-incoming[0].get_timestamp(),
                 queue_depth_before_merge=client.action_queue.qsize()))
             if state["first_chunk_t"] is None:

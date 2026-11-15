@@ -103,11 +103,12 @@ class PacingClock:
 
 def install_client(client, use_sim_time, observe_every=10):
     """Change only this episode client's control loop and observation cadence."""
-    if observe_every != 10:
-        raise ValueError('Phase3 freezes re-observation at ten executed actions')
+    if observe_every not in (10, 25, 50):
+        raise ValueError('Evaluation re-observation requires 10, 25 or 50 executed actions')
     clock = PacingClock(use_sim_time, getattr(client.robot, '_node', None))
     clock.wait_ready()
     client.eval_clock = clock
+    client.eval_observe_every_actions = observe_every
     client.control_loop = MethodType(paced_control_loop, client)
 
 
@@ -115,6 +116,10 @@ def paced_control_loop(self, task, verbose=False, *, stop_event=None, max_durati
     """Clock-paced actuator worker with one observation worker; no tick-thread I/O."""
     from lerobot.async_inference.robot_client import _configure_dispatch_thread
     clock = self.eval_clock
+    observe_every = self.eval_observe_every_actions
+    # A complete-chunk diagnostic must not blend a retry's chunk into the
+    # original prediction while waiting for normal boundary inference.
+    retry_empty_slots = None if observe_every == 50 else 10
     self.start_barrier.wait()
     if self._observation_process:
         self._observation_process.resume()
@@ -162,7 +167,7 @@ def paced_control_loop(self, task, verbose=False, *, stop_event=None, max_durati
                     counts['empty_action_ticks_after_startup'] += 1
                 # An observation/chunk can fail after the last ten-action
                 # trigger. Retry at ten empty sim slots, never on every tick.
-                if min(empty_streak, counts['empty_action_ticks']-request_baseline[1]) >= 10 and not observation_due.is_set():
+                if retry_empty_slots is not None and min(empty_streak, counts['empty_action_ticks']-request_baseline[1]) >= retry_empty_slots and not observation_due.is_set():
                     counts['observation_retries'] += 1
                     self.must_go.set()  # a retry must pass native duplicate-step filtering
                     observation_due.set()
@@ -177,7 +182,7 @@ def paced_control_loop(self, task, verbose=False, *, stop_event=None, max_durati
                                   wall_s=self._last_dispatch_time-wall_started, step=step))
                 send_costs.append(self._last_dispatch_cost_s*1000)
                 waits.append(self._last_queue_wait_s*1000)
-                if counts['actions_sent']-request_baseline[0] >= 10:
+                if counts['actions_sent']-request_baseline[0] >= observe_every:
                     observation_due.set()
                 if max_actions and counts['actions_sent'] >= max_actions:
                     finish.set()
@@ -229,7 +234,8 @@ def paced_control_loop(self, task, verbose=False, *, stop_event=None, max_durati
         self.control_loop_stats = dict(counts, duration_s=stopped-started,
             wall_duration_s=time.perf_counter()-wall_started, target_fps=self.config.fps,
             clock_basis='simulation' if clock.use_sim_time else 'wall',
-            dispatch_scheduler=scheduler, observe_every_actions=10,
+            dispatch_scheduler=scheduler, observe_every_actions=observe_every,
+            empty_retry_slots=retry_empty_slots,
             observation_cadence_events=observation_events,
             dispatch_times_s=[t['wall_s'] for t in trace], action_steps=[t['step'] for t in trace],
             sim_dispatch_trace=trace if clock.use_sim_time else [],
@@ -330,6 +336,12 @@ def install_server(use_sim_time):
             self.eval_prediction_s = max(0., self.eval_clock.now()-before)
             if result:
                 result[0].eval_rtc = dict(getattr(self, 'eval_rtc_trace', {}), measured_prediction_sim_s=self.eval_prediction_s)
+                if os.environ.get('SOARM_EVAL_RECORD_CHUNKS') == '1':
+                    raw = observation_t.get_observation()
+                    result[0].eval_prediction = dict(
+                        capture_clock_s=raw['_eval_capture_clock_s'],
+                        observation_step=observation_t.get_timestep(),
+                        actions_degrees=[action.get_action().detach().cpu().tolist() for action in result])
             return result
 
         def _get_action_chunk(self, observation):
