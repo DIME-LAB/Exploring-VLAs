@@ -25,3 +25,5 @@ Generation tests do not qualify deployment loading. Before scoring a new bank, p
       python3 -m unittest discover -s linux-env/scripts/collect -p test_scene_bank.py
 
 Seven boundary tests and independent static review pass. Live golden resampling and new-bank generation remain pending; these are not claims of live parity. The default collection path and sampler are checked against a sealed AST fixture; empty Python 3.12 type_params are normalized for the Python 3.10 deployment host.
+
+Bank destinations use the qualified host profile canonical root plus /eval: /mnt/a4500-backup/exploring-vlas/eval on dual and /mnt/storage3/aaugus11/exploring-vlas/eval on rtx6000. Both hosts pass the same seven CPU boundary/AST checks. The private rtx6000 bank worktree stays at bf7336d with this scene-only extraction; it does not modify the shared training checkout or the active native policy worktree. Live golden sampling and SHA sealing still require their own announced simulation window.

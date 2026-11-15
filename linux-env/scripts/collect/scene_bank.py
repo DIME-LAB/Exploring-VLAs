@@ -33,7 +33,8 @@ def configure_args(args,parser):
 class SceneBankSession:
     def __init__(self,args):
         self.args=args;self.root=Path(args.output);self.destination=Path(args.scene_bank_output).resolve()
-        if not self.destination.is_relative_to('/mnt/a4500-backup/exploring-vlas/eval'):raise ValueError('Bank destination must stay on eval backup storage')
+        from storage import CANONICAL_ROOT
+        if not self.destination.is_relative_to((CANONICAL_ROOT/'eval').resolve()):raise ValueError('Bank destination must stay on qualified host eval storage')
         if self.destination.exists():raise FileExistsError('Refusing to overwrite a sealed bank')
         self.destination.parent.mkdir(parents=True,exist_ok=True)
         if self.root.stat().st_dev!=self.destination.parent.stat().st_dev:raise ValueError('Bank draft and destination must share a filesystem for atomic publication')
