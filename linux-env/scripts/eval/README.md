@@ -221,8 +221,8 @@ All weights, caches and results belong under
 `/mnt/a4500-backup/exploring-vlas/eval/`. `sim_time.py` is eval-only; ordinary
 Phase1 launch defaults and the installed lerobot fork are unchanged. The
 adapter's `--eval-clock=wall` episode-client mode keeps wall pacing for real
-hardware. Run CPU regressions with `CUDA_VISIBLE_DEVICES='' pixi run python -m
-unittest discover -s linux-env/scripts/eval -p 'test_*.py' -v`.
+hardware. Run CPU regressions with `CUDA_VISIBLE_DEVICES='' ~/.pixi/bin/pixi run --manifest-path linux-env/pixi.toml
+python -m unittest discover -s linux-env/scripts/eval -p 'test_*.py' -v`.
 
 The bank manifest SHA is pinned in `phase3.py` and validated before each
 restore; comparisons require the same source/fork/backend/bank contracts.
