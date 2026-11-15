@@ -25,6 +25,23 @@ def semantic_error(value):
     return value
 
 
+def require_process_binding(value):
+    """A historical group change never substitutes for a live pidfd proof."""
+    try:
+        expected={k:value[k] for k in ('pid','start_ticks','pgid')};p=value['process_binding']
+        if (p['version']!=1 or value['owned_identity']!=expected or
+                p['kernel_before']!=expected or p['kernel_after']!=expected or
+                p['pidfd']!=dict(held_before_rpc=True,alive_before_rpc=True,alive_after_rpc=True) or
+                p['request_nonce']!=value['nonce'] or p['response_nonce']!=value['nonce'] or
+                not re.fullmatch('[0-9a-f]{32}',p['discovery']['nonce']) or
+                p['discovery']['nonce']==value['nonce'] or
+                any(p['spawn_identity'][k]!=expected[k] or p['discovery']['identity'][k]!=expected[k]
+                    for k in ('pid','start_ticks'))):
+            raise RuntimeError('Native pidfd/birth/nonce binding differs')
+    except (KeyError,TypeError,ValueError) as exc:
+        raise RuntimeError('Native pidfd/birth/nonce binding is incomplete') from exc
+
+
 def verify_transport(observation,boot,stage,runtime,receipt,fault=None):
     if observation.get('version')!=1 or not re.fullmatch('[0-9a-f]{32}',str(observation.get('invocation'))):
         raise RuntimeError('Independent native invocation observation is missing')
@@ -32,6 +49,7 @@ def verify_transport(observation,boot,stage,runtime,receipt,fault=None):
         raise RuntimeError('Native observation belongs to another producing stage')
     if observation['invocation']!=stage.get('invocation'):raise RuntimeError('Native invocation nonce differs')
     before,after=observation['before'],observation['after'];native=boot['native'];transport=boot['transport']
+    for value in (native,before,after):require_process_binding(value)
     expected_keys=('pid','start_ticks','pgid','fault_path','loaded_sha256','runtime_module')
     if any(before.get(k)!=native.get(k) or after.get(k)!=native.get(k) for k in expected_keys):
         raise RuntimeError('Native startup/transport identity changed')

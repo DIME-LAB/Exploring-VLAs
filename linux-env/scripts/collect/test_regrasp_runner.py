@@ -59,6 +59,111 @@ print(json.dumps(dict(selected=state['selected_episodes'],colors=state['color_co
         self.assertEqual(value['selected'],3);self.assertEqual(value['colors'],dict(red=1,green=1,blue=1))
         self.assertTrue(value['cpu_only'])
 
+class NativeBindingTests(unittest.TestCase):
+    def fake(self,spawn,current):
+        import ast,hashlib,re
+        from types import SimpleNamespace as NS
+        from regrasp_runner import Processes,REPO
+        p=object.__new__(Processes)
+        p.ledger=NS(scan=lambda:None,known={spawn['pid']:copy.deepcopy(spawn)},handles={spawn['pid']:42})
+        record=dict(current,runtime_module=str((REPO/'linux-env/scripts/collect/collection_runtime.py').resolve()),
+            loaded_sha256=hashlib.sha256((REPO/'linux-env/scripts/collect/collection_runtime.py').read_bytes()).hexdigest())
+        def call(code):
+            nonce=ast.literal_eval(re.search("'nonce':([^,}]+)",code).group(1))
+            return dict(record,nonce=nonce)
+        p.native_call=call
+        return p,record
+    def check(self,p,current):
+        with patch('regrasp_runner.identity',return_value=dict(current,state='S')),\
+                patch('regrasp_runner.os.dup',return_value=43),patch('regrasp_runner.os.close'),\
+                patch('regrasp_runner.select.select',return_value=([],[],[])):
+            return p.observe('c'*32)
+    def test_real_receipt_group_transitions_keep_owned_birth(self):
+        from regrasp_evidence import require_process_binding
+        f=json.loads((Path(__file__).with_name('fixtures')/'native-process-transitions.json').read_text())
+        self.assertEqual(len(f['slots']['3']['transitions']),2)
+        for change in f['slots']['3']['transitions']:
+            p,record=self.fake(change['spawn'],change['later'])
+            value=self.check(p,change['later']);require_process_binding(value)
+            self.assertEqual(value['owned_identity'],change['later'])
+            self.assertEqual(value['process_binding']['spawn_identity'],change['spawn'])
+            self.assertNotEqual(value['owned_identity']['pgid'],value['process_binding']['spawn_identity']['pgid'])
+    def test_changed_birth_foreign_pid_nonce_or_dead_pidfd_refuses(self):
+        current=dict(pid=99,start_ticks='birth',pgid=99)
+        for change in ('birth','foreign','nonce','fd_before','fd_after','kernel_after','group_during','closed_fd'):
+            with self.subTest(change=change):
+                p,record=self.fake(dict(current,pgid=98),current)
+                if change=='birth':record['start_ticks']='changed'
+                if change=='foreign':record['pid']=100
+                if change=='nonce':p.native_call=lambda code:dict(record,nonce='wrong')
+                with patch('regrasp_runner.identity',return_value=dict(current,state='S')) as kernel,\
+                        patch('regrasp_runner.os.dup',return_value=43) as duplicate,patch('regrasp_runner.os.close'),\
+                        patch('regrasp_runner.select.select',return_value=([],[],[])) as ready:
+                    if change=='fd_before':ready.return_value=([43],[],[])
+                    if change=='fd_after':ready.side_effect=[([],[],[]),([43],[],[])]
+                    if change=='kernel_after':kernel.side_effect=[dict(current,state='S'),None]
+                    if change=='group_during':kernel.side_effect=[dict(current,state='S'),dict(current,state='S',pgid=100)]
+                    if change=='closed_fd':duplicate.side_effect=OSError('released pidfd')
+                    with self.assertRaises((RuntimeError,OSError)):p.observe('c'*32)
+    def test_refusal_durably_records_spawn_and_current_identities(self):
+        current=dict(pid=99,start_ticks='birth',pgid=99)
+        with tempfile.TemporaryDirectory(dir=CANONICAL_ROOT/'tmp',prefix='native-binding-') as d:
+            p,_=self.fake(dict(current,pgid=98),current);p.output=Path(d)
+            with patch('regrasp_runner.identity',side_effect=[dict(current,state='S'),dict(current,state='S',pgid=100)]),\
+                    patch('regrasp_runner.os.dup',return_value=43),patch('regrasp_runner.os.close'),\
+                    patch('regrasp_runner.select.select',return_value=([],[],[])):
+                with self.assertRaises(RuntimeError):p.observe('c'*32)
+            files=list((Path(d)/'native-observation-failures').glob('*.json'));self.assertEqual(len(files),1)
+            proof=json.loads(files[0].read_text());self.assertEqual(proof['spawn_identity']['pgid'],98)
+            self.assertEqual(proof['kernel_before']['pgid'],99);self.assertEqual(proof['kernel_after']['pgid'],100)
+            self.assertEqual(proof['response_identity']['nonce'],'c'*32)
+            self.assertNotIn('diagnostic_publication_error',proof)
+    def test_live_owned_child_setsid_then_nonce_observation(self):
+        import subprocess,sys,hashlib,time
+        from regrasp_runner import Processes,REPO
+        from run_smoke import OwnedProcesses,identity
+        from regrasp_evidence import require_process_binding
+        module=REPO/'linux-env/scripts/collect/collection_runtime.py'
+        code="""import hashlib,json,os,sys,types
+from pathlib import Path
+module=Path(sys.argv[1]);r=types.SimpleNamespace(epoch=1,stamp=lambda:1000000000,native_miss_fault_path='test-only',failure=None,busy=False,timeline=types.SimpleNamespace(is_playing=lambda:False),snapshot=lambda:{'epoch':1,'sim_ns':1000000000})
+c=types.ModuleType('collection_runtime');c.__file__=str(module);c._LOADED_SHA256=hashlib.sha256(module.read_bytes()).hexdigest();c.runtime=lambda:r
+sys.modules['collection_runtime']=c
+print(json.dumps({'ready':True}),flush=True)
+for line in sys.stdin:
+ request=json.loads(line)
+ if request.get('setsid'):
+  os.setsid();print(json.dumps({'pgid':os.getpgid(0)}),flush=True);continue
+ scope={};exec(request['code'],scope);print(json.dumps(scope['result']),flush=True)
+"""
+        with tempfile.TemporaryDirectory(dir=CANONICAL_ROOT/'tmp',prefix='native-binding-') as d:
+            process=subprocess.Popen([sys.executable,'-B','-u','-c',code,str(module)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            p=object.__new__(Processes);p.output=Path(d);p.ledger=OwnedProcesses(Path(d),time.time_ns())
+            try:
+                self.assertTrue(json.loads(process.stdout.readline())['ready']);p.ledger.add(process.pid)
+                old=copy.deepcopy(p.ledger.known[process.pid])
+                process.stdin.write(json.dumps(dict(setsid=True))+'\n');process.stdin.flush()
+                self.assertEqual(json.loads(process.stdout.readline())['pgid'],process.pid)
+                self.assertNotEqual(old['pgid'],identity(process.pid)['pgid'])
+                def call(code):
+                    process.stdin.write(json.dumps(dict(code=code))+'\n');process.stdin.flush()
+                    return json.loads(process.stdout.readline())
+                p.native_call=call;value=p.observe('c'*32);require_process_binding(value)
+                self.assertEqual(value['pid'],process.pid);self.assertEqual(value['process_binding']['spawn_identity']['pgid'],old['pgid'])
+                self.assertEqual(value['owned_identity']['pgid'],process.pid)
+            finally:
+                process.stdin.close();process.wait(timeout=5);process.stdout.close();process.stderr.close()
+                for fd in p.ledger.handles.values():__import__('os').close(fd)
+    def test_stored_binding_must_keep_pidfd_and_nonce_proof(self):
+        from regrasp_evidence import require_process_binding
+        current=dict(pid=99,start_ticks='birth',pgid=99)
+        p,_=self.fake(dict(current,pgid=98),current);original=self.check(p,current)
+        for keys in (('pidfd','alive_after_rpc'),('kernel_before','pgid'),('spawn_identity','start_ticks'),('request_nonce',)):
+            bad=copy.deepcopy(original);x=bad['process_binding']
+            for key in keys[:-1]:x=x[key]
+            x[keys[-1]]=False
+            with self.subTest(keys=keys),self.assertRaises(RuntimeError):require_process_binding(bad)
+
 
 class Fake:
     def __init__(self,outcomes=(),fail_down=False,fail_export=False):
@@ -198,6 +303,16 @@ class EngineTests(unittest.TestCase):
             with self.subTest(key=key),self.assertRaises(RuntimeError):r.run(state)
 
 
+def fixture_binding(value):
+    expected={k:value[k] for k in ('pid','start_ticks','pgid')}
+    value['owned_identity']=copy.deepcopy(expected)
+    value['process_binding']=dict(version=1,spawn_identity=copy.deepcopy(expected),
+        discovery=dict(nonce='b'*32,identity=copy.deepcopy(expected)),kernel_before=copy.deepcopy(expected),
+        kernel_after=copy.deepcopy(expected),pidfd=dict(held_before_rpc=True,alive_before_rpc=True,alive_after_rpc=True),
+        request_nonce=value['nonce'],response_nonce=value['nonce'])
+    return value
+
+
 class EvidenceTests(unittest.TestCase):
     def boot(self,h):
         return dict(finger_model=copy.deepcopy(h.collector.native_finger_model),effective_shape_offsets=copy.deepcopy(h.collector.native_shape_offsets))
@@ -258,7 +373,7 @@ class EvidenceTests(unittest.TestCase):
             loaded_sha256='source-fingerprint',runtime_module='owned-native-module')
         native_id['owned_identity']={k:native_id[k] for k in ('pid','start_ticks','pgid')}
         boot=self.boot(h);boot.update(native_miss_fault_path=str(native),loaded_sha256=native_id['loaded_sha256'])
-        record=dict(transport=boot,native=copy.deepcopy(native_id))
+        record=dict(transport=boot,native=fixture_binding(dict(native_id,nonce='d'*32)))
         before=dict(native_id,nonce='c'*32,wall_ns=80,epoch=r['recovery_report']['baseline']['epoch']-1,
             sim_ns=r['recovery_report']['baseline']['sim_ns']-33333333,fault=None,failure=None,busy=False,playing=False)
         before['snapshot']=copy.deepcopy(r['recovery_report']['baseline'])
@@ -266,6 +381,7 @@ class EvidenceTests(unittest.TestCase):
         after=dict(native_id,nonce='c'*32,wall_ns=300,epoch=f['epoch']+1,sim_ns=f['sim_ns'],
             fault=copy.deepcopy(f),fault_durable=True,failure=message,busy=False,playing=False,snapshot=h.runtime.snapshot())
         after['snapshot'].update(epoch=after['epoch'],sim_ns=after['sim_ns'])
+        fixture_binding(before);fixture_binding(after)
         (run.parent/'native-boot.json').write_text(json.dumps(record))
         (run.parent/'observations').mkdir()
         (run.parent/'observations/attempt-0000.json').write_text(json.dumps(dict(version=1,invocation='c'*32,stage=stage,before=before,after=after)))
@@ -377,23 +493,12 @@ class EvidenceTests(unittest.TestCase):
                 with self.assertRaises((RuntimeError,ValueError)):
                     classify(run,0,r['params']['seed'],dict(pid=1234,started_wall_ns=90,invocation='c'*32),runtime)
     def test_native_observer_verifies_actual_owned_birth_and_source(self):
-        from regrasp_runner import Processes,REPO
-        from types import SimpleNamespace as NS
-        import hashlib
-        p=object.__new__(Processes);own=dict(pid=99,start_ticks='birth',pgid=99)
-        p.ledger=NS(scan=lambda:None,known={99:own})
-        record=dict(own,runtime_module=str((REPO/'linux-env/scripts/collect/collection_runtime.py').resolve()),
-            loaded_sha256=hashlib.sha256((REPO/'linux-env/scripts/collect/collection_runtime.py').read_bytes()).hexdigest())
-        p.native_call=lambda code:copy.deepcopy(record)
-        with patch('regrasp_runner.identity',return_value=copy.deepcopy(own)):
-            self.assertEqual(p.observe('nonce')['owned_identity'],own)
-            for field in ('start_ticks','pgid','runtime_module','loaded_sha256'):
-                with self.subTest(field=field):
-                    old=record[field];record[field]='wrong'
-                    with self.assertRaises(RuntimeError):p.observe('nonce')
-                    record[field]=old
-        with patch('regrasp_runner.identity',return_value=dict(own,start_ticks='reused')):
-            with self.assertRaisesRegex(RuntimeError,'owned'):p.observe('nonce')
+        current=dict(pid=99,start_ticks='birth',pgid=99)
+        for field in ('start_ticks','pgid','runtime_module','loaded_sha256'):
+            with self.subTest(field=field):
+                p,record=NativeBindingTests().fake(dict(current,pgid=98),current)
+                record[field]='wrong'
+                with self.assertRaises(RuntimeError):NativeBindingTests().check(p,current)
     def test_second_terminal_cause_and_changed_fault_refuse(self):
         with tempfile.TemporaryDirectory() as d:
             run,path,r,runtime=self.fixture_files(Path(d));r['capture_failures']=[dict(error='camera gap')]

@@ -1049,8 +1049,13 @@ artifact exists. The outer runner replays every completed non-velocity setup
 check (candidate selection, measured model/offsets, static clearance, restore epoch/clock/drive
 baseline, returned tick contracts and scene checks, then native substeps). It
 binds the fault to the captured owned Kit process birth, loaded source, journal
-path, epoch range and a fresh before/after observation nonce for that invocation,
-and requires clean process retirement plus verified owned-down. The terminal
+path, epoch range and a fresh before/after observation nonce for that invocation.
+An owned PID and birth time plus a held pidfd preserve ownership across startup
+process-group changes. A discovery nonce identifies the responder; a second
+nonce-bearing observation requires its current kernel identity to remain stable
+while that pidfd stays live. Both historical and current groups are retained,
+and any refusal records the compared identities. The runner also requires clean
+process retirement plus verified owned-down. The terminal
 cohort remains untouched as diagnostic data. Its next unused seed starts a fresh
 cohort and instance; terminal collector markers are never cleared or relabelled.
 Unknown causes, clock/reset/transport/scene failures, any fault after recording

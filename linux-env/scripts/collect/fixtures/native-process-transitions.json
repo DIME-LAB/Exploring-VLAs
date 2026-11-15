@@ -1,0 +1,69 @@
+{
+  "source": "Real stopped RTX f7e50e2 production receipts; no failed response snapshot was persisted",
+  "slots": {
+    "3": {
+      "transitions": [
+        {
+          "spawn": {
+            "pid": 3995981,
+            "start_ticks": "105002377",
+            "pgid": 3995978
+          },
+          "later": {
+            "pid": 3995981,
+            "start_ticks": "105002377",
+            "pgid": 3995981
+          },
+          "ownership_parent": {
+            "pid": 3995978,
+            "start_ticks": "105002373"
+          }
+        },
+        {
+          "spawn": {
+            "pid": 3996820,
+            "start_ticks": "105002611",
+            "pgid": 3995981
+          },
+          "later": {
+            "pid": 3996820,
+            "start_ticks": "105002611",
+            "pgid": 3996820
+          },
+          "ownership_parent": {
+            "pid": 3996815,
+            "start_ticks": "105002609"
+          }
+        }
+      ],
+      "workload": {
+        "pid": 3995981,
+        "start_ticks": "105002377",
+        "pgid": 3995981
+      },
+      "supervisor": {
+        "pid": 3995978,
+        "start_ticks": "105002373",
+        "pgid": 3995978
+      }
+    },
+    "4": {
+      "transitions": [],
+      "workload": {
+        "pid": 3995865,
+        "start_ticks": "105002337",
+        "pgid": 3995865
+      },
+      "supervisor": {
+        "pid": 3995854,
+        "start_ticks": "105002333",
+        "pgid": 3995854
+      },
+      "native_answer_identity": {
+        "pid": 3995865,
+        "start_ticks": "105002337",
+        "pgid": 3995865
+      }
+    }
+  }
+}

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Own one instance; select only certified RGB recovery cohorts for production."""
-import argparse,copy,ctypes,hashlib,json,math,os,re,signal,socket,subprocess,sys,time,uuid,stat
+import argparse,copy,ctypes,hashlib,json,math,os,re,select,signal,socket,subprocess,sys,time,uuid,stat
 from pathlib import Path
 # Use this frozen checkout's control code in standalone invocations.
 sys.path.insert(0,str(Path(__file__).resolve().parents[3]/'vla_SO-ARM101/src/so_arm101_control'))
@@ -415,18 +415,53 @@ class Processes:
         value=call('run_python',dict(code=code),host='127.0.0.1',port=8777+2*self.config['instance'],timeout=30)
         return value['result'] if isinstance(value,dict) and 'result' in value else value
     def observe(self,nonce):
-        code="import collection_runtime as c,os,time\nfrom pathlib import Path\nr=c.runtime()\nf=Path('/proc/self/stat').read_text().rsplit(')',1)[1].split()\nresult={'pid':os.getpid(),'start_ticks':f[19],'pgid':os.getpgid(0),'nonce':"+repr(nonce)+",'wall_ns':time.time_ns(),'epoch':r.epoch,'sim_ns':r.stamp(),'fault_path':r.native_miss_fault_path,'fault':getattr(r,'_miss_motion_fault',None),'fault_durable':getattr(r,'_miss_fault_durable',False),'failure':r.failure,'playing':r.timeline.is_playing(),'busy':r.busy,'loaded_sha256':c._LOADED_SHA256,'runtime_module':str(Path(c.__file__).resolve()),'snapshot':r.snapshot()}"
-        self.ledger.scan();value=self.native_call(code);self.ledger.scan()
-        own=self.ledger.known.get(value['pid']);current=identity(value['pid'])
-        keys=('pid','start_ticks','pgid')
-        if own is None or current is None or any(value[k]!=own[k] or value[k]!=current[k] for k in keys):
-            raise RuntimeError('Native transport did not answer from an owned process')
-        if value['runtime_module']!=str((REPO/'linux-env/scripts/collect/collection_runtime.py').resolve()):
-            raise RuntimeError('Native transport loaded another source tree')
-        if value['loaded_sha256']!=hashlib.sha256((REPO/'linux-env/scripts/collect/collection_runtime.py').read_bytes()).hexdigest():
-            raise RuntimeError('Native runtime source fingerprint differs')
-        value['owned_identity']={k:own[k] for k in keys}
-        return value
+        """Bind the live responder to an already owned birth and held pidfd."""
+        keys=('pid','start_ticks','pgid');context=dict(request_nonce=nonce);fd=None
+        prefix="import os,time\nfrom pathlib import Path\nf=Path('/proc/self/stat').read_text().rsplit(')',1)[1].split()\n"
+        discovery_nonce=uuid.uuid4().hex
+        probe=prefix+"result={'pid':os.getpid(),'start_ticks':f[19],'pgid':os.getpgid(0),'nonce':"+repr(discovery_nonce)+"}"
+        try:
+            self.ledger.scan();discovery=self.native_call(probe);self.ledger.scan()
+            context['discovery']=discovery
+            own=self.ledger.known.get(discovery['pid']);handle=self.ledger.handles.get(discovery['pid'])
+            context['spawn_identity']=own
+            if (discovery.get('nonce')!=discovery_nonce or own is None or handle is None or
+                    any(discovery[k]!=own[k] for k in ('pid','start_ticks'))):
+                raise RuntimeError('Native discovery is not an already owned process birth')
+            fd=os.dup(handle);before=identity(discovery['pid']);context['kernel_before']=before
+            if (before is None or before['state']=='Z' or
+                    any(before[k]!=own[k] for k in ('pid','start_ticks')) or select.select([fd],[],[],0)[0]):
+                raise RuntimeError('Native responder pidfd is not live before observation')
+            code=prefix+"import collection_runtime as c\nr=c.runtime()\nresult={'pid':os.getpid(),'start_ticks':f[19],'pgid':os.getpgid(0),'nonce':"+repr(nonce)+",'wall_ns':time.time_ns(),'epoch':r.epoch,'sim_ns':r.stamp(),'fault_path':r.native_miss_fault_path,'fault':getattr(r,'_miss_motion_fault',None),'fault_durable':getattr(r,'_miss_fault_durable',False),'failure':r.failure,'playing':r.timeline.is_playing(),'busy':r.busy,'loaded_sha256':c._LOADED_SHA256,'runtime_module':str(Path(c.__file__).resolve()),'snapshot':r.snapshot()}"
+            value=self.native_call(code);after=identity(discovery['pid']);context['kernel_after']=after
+            context['response_identity']={k:value.get(k) for k in (*keys,'nonce','runtime_module','loaded_sha256')}
+            if (value.get('nonce')!=nonce or after is None or after['state']=='Z' or
+                    any(value.get(k)!=before[k] or value.get(k)!=after[k] for k in keys) or
+                    select.select([fd],[],[],0)[0]):
+                raise RuntimeError('Native response changed its pinned birth/group/nonce or retired during observation')
+            if value['runtime_module']!=str((REPO/'linux-env/scripts/collect/collection_runtime.py').resolve()):
+                raise RuntimeError('Native transport loaded another source tree')
+            if value['loaded_sha256']!=hashlib.sha256((REPO/'linux-env/scripts/collect/collection_runtime.py').read_bytes()).hexdigest():
+                raise RuntimeError('Native runtime source fingerprint differs')
+            # PGID may change before this RPC (setsid); PID + birth + the held
+            # pidfd retain spawn ownership. The RPC itself requires a stable group.
+            value['owned_identity']={k:before[k] for k in keys}
+            value['process_binding']=dict(version=1,spawn_identity={k:own[k] for k in keys},
+                discovery=dict(nonce=discovery_nonce,identity={k:discovery[k] for k in keys}),
+                kernel_before={k:before[k] for k in keys},kernel_after={k:after[k] for k in keys},
+                pidfd=dict(held_before_rpc=True,alive_before_rpc=True,alive_after_rpc=True),
+                request_nonce=nonce,response_nonce=value['nonce'])
+            return value
+        except Exception as error:
+            context.update(error=repr(error),event='native_observation_refused',wall_ns=time.time_ns())
+            try:
+                destination=self.output/'native-observation-failures';destination.mkdir(exist_ok=True)
+                atomic_json(destination/(uuid.uuid4().hex+'.json'),context)
+            except Exception as publication:context['diagnostic_publication_error']=repr(publication)
+            print(json.dumps(context),flush=True)
+            raise
+        finally:
+            if fd is not None:os.close(fd)
     def capacity(self):
         from host_config import profile
         if profile()['name']!='rtx6000':raise RuntimeError('Production recovery is qualified only on rtx6000')
