@@ -17,6 +17,8 @@ MODEL_PRESETS = {
     "unfreeze30k+10000": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/unfreeze30k/010000/pretrained_model", "", "{}"),
     "phase3-40k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/smolvla-phase3-normal-60k-s42-20261114/checkpoints/040000/pretrained_model", "", "{}"),
     "phase3-60k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/smolvla-phase3-normal-60k-s42-20261114/checkpoints/060000/pretrained_model", "", "{}"),
+    # Crop checkpoint requires its bundled processor module on server PYTHONPATH; the native evaluator sets it.
+    "memorise24-crop-end": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/memorise24/workspace_crop/009102/pretrained_model", "", "{}"),
     "memorise24-original-end": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/memorise24/original/009102/pretrained_model", "", "{}"),
     "base-ft": ("/home/aaugus11/w_ckpt/smolvla-base-ft-rec222812-20k-s42-20261113", "", "{}"),
     "mix-75s25r": ("anirudhrani/smolvla_sim_100ep_75S_25R_fft__10ksteps_h200", "", "{}"),
