@@ -29,8 +29,9 @@ def main():
  cmd=[str(Path.home()/'.pixi/bin/pixi'),'run','--manifest-path',str(REPO/'linux-env/pixi.toml'),'python','-u',str(Path(__file__).with_name('replay_client.py')),'--recorded-replay',str(a.recorded_replay),'--actuation-mode',a.actuation_mode,'--policy_type=smolvla','--pretrained_name_or_path=replay-no-model','--actions_per_chunk=50','--fps=30','--robot.type=so101_ros2','--robot.actuate=true','--robot.use_degrees=true','--robot.joint_states_topic=/joint_states_measured','--robot.cameras={}','--robot.action_duration_s=0.03333333333333333']
  env=dict(os.environ,CUDA_VISIBLE_DEVICES='',PYTHONDONTWRITEBYTECODE='1',OMP_NUM_THREADS='1',OPENBLAS_NUM_THREADS='1',MKL_NUM_THREADS='1')
  for key in ('PYTHONPATH','AMENT_PREFIX_PATH','CMAKE_PREFIX_PATH','COLCON_PREFIX_PATH','LD_LIBRARY_PATH','ROS_DISTRO','ROS_VERSION','ROS_PYTHON_VERSION'):env.pop(key,None)
- client=Client(cmd,env,root/'client');ready=client.tagged('READY',90);(root/'ready.json').write_text(json.dumps(ready,indent=2)+'\n')
+ client=None;recording=False
  try:
+  client=Client(cmd,env,root/'client');ready=client.tagged('READY',90);(root/'ready.json').write_text(json.dumps(ready,indent=2)+'\n')
   for ep,record in episodes.items():
    out=root/ep;out.mkdir();state=entry(plan['bank'],record['seed'],plan['bank_sha256']);ros.home();ros.fjt(ros.arm,ARM_JOINTS,state['state'][:5],3);ros.fjt(ros.grip,['gripper_joint'],state['state'][5:],1)
    code=f'import sys;sys.path.insert(0,{str(Path(__file__).parent)!r});import scene_reset;result=scene_reset.prepare({record["seed"]},{plan["bank"]!r},("red","green","blue"),generate=False,training_start_sha256={plan["bank_sha256"]!r})'
@@ -40,14 +41,14 @@ def main():
     if time.monotonic()>deadline:raise TimeoutError('Replay physical reset fence')
     time.sleep(.02)
    baseline=ros.physical;score=new_score(record['color'],baseline);events.clear();ros.physical_drain();initial=baseline
-   mcp('soarm101.start_recording',{'file_name':str(out/'viewport_capture.mp4')});client.send('RUN '+ep+' 999');start=client.tagged('EPSTART',15);score.begin=start['clock_s'];score.budget=len(record['actions_degrees'])/30+1
+   mcp('soarm101.start_recording',{'file_name':str(out/'viewport_capture.mp4')});recording=True;client.send('RUN '+ep+' 999');start=client.tagged('EPSTART',15);score.begin=start['clock_s'];score.budget=len(record['actions_degrees'])/30+1
    physical=[initial];deadline=time.monotonic()+180;done=None
    while done is None:
     physical.extend(ros.physical_drain())
     try:done=client.tagged('EPDONE',.05)
     except queue.Empty:pass
     if time.monotonic()>deadline:raise TimeoutError('Recorded replay watchdog')
-   time.sleep(.15);physical.extend(ros.physical_drain());video=mcp('soarm101.stop_recording');unique={s['sim_ns']:s for s in physical};physical=[unique[k] for k in sorted(unique)]
+   time.sleep(.15);physical.extend(ros.physical_drain());video=mcp('soarm101.stop_recording');recording=False;unique={s['sim_ns']:s for s in physical};physical=[unique[k] for k in sorted(unique)]
    for snap in physical:
     stamp=snap['sim_ns']/1e9
     if start['clock_s']<=stamp<=done['stopped_clock_s']:score.update(snap)
@@ -55,5 +56,9 @@ def main():
    result=dict(seed=record['seed'],color=record['color'],mode=a.actuation_mode,start=start,client=done,reset=reset,cap=cap,video=video,source=record['source_frames'],source_sha256=record['source_frames_sha256'],code_sha256=hashes,**score.result())
    (out/'result.json').write_text(json.dumps(result,indent=2)+'\n');(out/'physical.jsonl').write_text(''.join(json.dumps(s)+'\n' for s in physical));(out/'controller-events.jsonl').write_text(''.join(json.dumps(e)+'\n' for e in events));print(json.dumps(dict(seed=result['seed'],mode=a.actuation_mode,missed=done['missed_action_ticks_after_startup'],success=result['success'],grasp=result['grasp_success'])),flush=True)
  finally:
-  client.close();ros.close()
+  if recording:
+   try:mcp('soarm101.stop_recording')
+   except Exception:pass
+  if client is not None:client.close()
+  ros.close()
 if __name__=='__main__':main()

@@ -56,6 +56,12 @@ def prepare(seed, bank, colors=('blue',), generate=True, training_start_sha256=N
         import collection_runtime
         reset = collection_runtime.runtime().cancel()
     timeline.pause()
+    pause_proof=None
+    if training is not None:
+        import sys
+        sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'collect'))
+        from pause_barrier import pause_committed
+        pause_proof=pause_committed(timeline)
     try:
         if not _VIEWS:
             for root in ('/World/Objects', '/World/Containers'):
@@ -144,7 +150,7 @@ def prepare(seed, bank, colors=('blue',), generate=True, training_start_sha256=N
         return dict(seed=seed, scene_file=str(target), bodies=bodies, visible_blue=visible.get('blue', []), visible_colors=visible,
                     reset_epoch=reset.get('epoch'), reset_stamp_ns=reset.get('invalid_through_ns'),
                     max_position_error_m=error, max_orientation_error=qerror,
-                    **({'training_start_restore':arm_restore} if training is not None else {}))
+                    **({'training_start_restore':arm_restore,'pause_barrier':pause_proof} if training is not None else {}))
     finally:
         if playing:
             timeline.play()
