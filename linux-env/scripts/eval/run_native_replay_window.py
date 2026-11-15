@@ -54,7 +54,7 @@ def main():
   if any('class' in step for step in preprocessor['steps']):
    assert a.processor_proof,'Custom saved processor requires actual checkpoint parity proof'
    processor_directory=json.loads(a.checkpoint_handoff.read_text())['source_before']['model'] if a.matched_reset_diagnostic else a.checkpoint
-   processor_proof=require_processor_proof(processor_directory,a.processor_proof,handoff['files'])
+   processor_proof=require_processor_proof(processor_directory,a.processor_proof,handoff['files'],published_handoff=a.checkpoint_handoff)
   if a.memorisation_diagnostic:
    selection=json.loads(a.replacement_selection.read_text());assert selection['complete'] is True and selection['selected_cadence']==a.best_replacement_cadence
    assert len(selection['files_sha256'])==15
