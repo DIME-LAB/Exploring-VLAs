@@ -5,7 +5,7 @@ import numpy as np
 from native_replay import REPO,require_environment,validate_collector_cut
 from held_tick import CollectorTransport
 from native_bank import load_bank
-from matched_reset_client import reset_scene
+from matched_reset_client import reset_scene,install_fenced_boundary
 from collect import mcp
 from native_environment import qualified_host
 
@@ -25,8 +25,8 @@ def main():
         for index,row in enumerate(rows):
             out=a.out/f'ep{index:02d}';out.mkdir();started=time.monotonic()
             # Capture the previous one-frame protocol as an unscored control.
-            old=mcp('run_python',{'code':'import collection_runtime as c\nresult=c.runtime().restore('+repr(dict(state=row['state'],drive_targets=row['recorded_drive_targets'],bodies=row['bodies']))+',arm=True,restore_drives=True)'})
-            transport.generation.install(old);transport.sensors.prune_durable_camera_history();mcp('run_python',{'code':'import collection_runtime as c\nresult=c.runtime().advance()'});transport.session.read()
+            old,_=install_fenced_boundary(transport,lambda:mcp('run_python',{'code':'import collection_runtime as c\nresult=c.runtime().restore('+repr(dict(state=row['state'],drive_targets=row['recorded_drive_targets'],bodies=row['bodies']))+',arm=True,restore_drives=True)'}))
+            mcp('run_python',{'code':'import collection_runtime as c\nresult=c.runtime().advance()'});transport.session.read()
             np.savez_compressed(out/'one-bootstrap-cameras.npz',**{cam:transport.sensors.image(transport.session.entry[cam][0]).copy() for cam in ('top','wrist')})
             reset,proof=reset_scene(transport,REPO,a.collector_root,row,out/'matched-reset');snapshot=transport.session.current
             images={cam:transport.sensors.image(transport.session.entry[cam][0]).copy() for cam in ('top','wrist')};assert all(im.shape==(480,640,3) and im.dtype==np.uint8 for im in images.values())

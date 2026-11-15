@@ -2,6 +2,20 @@
 from pathlib import Path
 import hashlib,json,os,shlex,signal,subprocess,sys
 
+def install_fenced_boundary(transport,native_mutation):
+    """Use the collector's generation cancellation/retirement ordering."""
+    retired={}
+    def retire():
+        with transport.sensors.condition:
+            retired.update(pending_groups=len(transport.sensors.pending),acks=len(transport.sensors.acks))
+            transport.sensors.pending.clear();transport.sensors.acks.clear()
+            transport.session.current=None;transport.session.entry=None
+    # Invalidate identity before retiring: in-flight camera callbacks finish
+    # before the clear, and later callbacks reject the invalid/old floor.
+    result=transport.generation.cancel(native_mutation,retire)
+    transport.sensors.prune_durable_camera_history()
+    return result,retired
+
 def prepare_scene(repo,collector_root,row,out):
     repo=Path(repo);collector_root=Path(collector_root);out=Path(out)
     receipt=Path(row['source_receipt']);reference=receipt.parent.parent/'run.json'
@@ -35,25 +49,24 @@ def reset_scene(transport,repo,collector_root,row,out):
     import numpy as np
     from collect import mcp
     repo=Path(repo)
-    pre=mcp('run_python',{'code':'import collection_runtime as c\nresult=c.runtime().restore('+repr(dict(state=row['state'],drive_targets=row['recorded_drive_targets'],bodies=row['bodies']))+',arm=True,restore_drives=True)'})
-    transport.generation.install(pre);transport.sensors.prune_durable_camera_history()
+    pre,pre_retired=install_fenced_boundary(transport,lambda:mcp('run_python',{'code':'import collection_runtime as c\nresult=c.runtime().restore('+repr(dict(state=row['state'],drive_targets=row['recorded_drive_targets'],bodies=row['bodies']))+',arm=True,restore_drives=True)'}))
     proof=prepare_scene(repo,collector_root,row,out)
     # Cleanup changes only the epoch and idle cap. No teleport is permitted
     # after normal collector preparation; retain its rendered scene history.
     mcp('run_python',{'code':(repo/'linux-env/scripts/collect/configure_clock.py').read_text()+'\nresult=configure(30)'})
-    reset=mcp('run_python',{'code':'import collection_runtime as c\nresult=c.install("collect")'})
+    reset,rejoin_retired=install_fenced_boundary(transport,lambda:mcp('run_python',{'code':'import collection_runtime as c\nresult=c.install("collect")'}))
     before=mcp('run_python',{'code':'import collection_runtime as c\nresult=c.runtime().snapshot()'});prepared=proof['prepared_snapshot']
     assert abs(before['sim_ns']-prepared['sim_ns'])<=1000,'Physics advanced during collector cleanup/rejoin'
     assert np.max(abs(np.asarray(before['state'])-prepared['state']))<=1e-9
     assert np.max(abs(np.asarray(before['drive_targets'])-prepared['drive_targets']))<=1e-9
     assert max(abs(x-y) for name in before['bodies'] for x,y in zip(before['bodies'][name]['position'],prepared['bodies'][name]['position']))<=1e-8
     proof['parent_prebootstrap_snapshot']=before
-    transport.generation.install(reset);transport.sensors.prune_durable_camera_history()
     mcp('run_python',{'code':'import collection_runtime as c\nresult=c.runtime().advance()'});transport.session.read();after=transport.session.current
     assert after['epoch']==reset['epoch'] and abs((after['sim_ns']-before['sim_ns'])-1e9/30)<=1000
     proof.update(first_observation_sim_ns=after['sim_ns'],first_observation_epoch=after['epoch'],measured_first_frame_offset_ns=after['sim_ns']-prepared['sim_ns'])
     assert transport.sensors.failure is None,'Parent sensor ambiguity after concurrent collector preparation'
     proof['parent_sensors']=dict(failure=None,duplicate_messages=dict(transport.sensors.duplicate_messages),rerender_messages=dict(transport.sensors.rerender_messages),stale_camera_messages=dict(transport.sensors.stale_camera_messages))
+    proof['retired_parent_buffers']=dict(before_worker=pre_retired,after_worker=rejoin_retired)
     return reset,proof
 
 def require_qualification(root,host,collector_root,bank_sha256,source_dir):
