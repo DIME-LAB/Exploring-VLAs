@@ -453,6 +453,8 @@ def main():
     p = build_parser()
     p.description = __doc__
     p.add_argument("--episode-manifest", type=Path, help="Ordered Phase3 rows; changes task/colour only while idle")
+    p.add_argument("--eval-actuation", choices=("native", "immediate"), default="native",
+                   help="SIM-only immediate targets; real hardware requires its own decision")
     p.add_argument("--sim-time", action="store_true", help="Opt-in /clock dispatch and physical Phase3 scoring")
     p.add_argument("--diagnostic-reobserve-actions", type=int, choices=(10,25,50), default=10,
                    help="Execution-horizon diagnostic only; frozen MAIN remains 10")
@@ -473,6 +475,8 @@ def main():
     p.add_argument("--fresh-client-per-episode", action="store_true", help="Diagnose persistent-client resource accumulation")
     p.add_argument("--dataset-brightness", action="store_true", help="Diagnostic only: divide both policy RGB feeds by calibrated live gain")
     args = parse_args(parser=p)
+    if args.eval_actuation == "immediate" and not args.sim_time:
+        p.error("Immediate-target evaluation requires --sim-time")
     if args.diagnostic_reobserve_actions != 10 and not args.sim_time:
         p.error('Execution-horizon diagnostics require --sim-time')
     if args.diagnostic_prediction_trace and not args.sim_time:
@@ -526,7 +530,7 @@ def main():
         client_cmd = episode_client_command(client_cmd, args.dataset_brightness)
         if args.sim_time:
             server_cmd = server_cmd[:2]+[str(Path(__file__).with_name("sim_time.py")), "sim"]+server_cmd[4:]
-            client_cmd += ["--eval-clock=sim", f"--eval-observe-every-actions={args.diagnostic_reobserve_actions}"]
+            client_cmd += ["--eval-clock=sim", f"--eval-observe-every-actions={args.diagnostic_reobserve_actions}", f"--eval-actuation={args.eval_actuation}"]
         print(
             json.dumps(
                 {
@@ -549,6 +553,9 @@ def main():
     )
     metadata = dict(vars(cfg))
     metadata.update(
+        eval_actuation=args.eval_actuation,
+        actuation_duration_s=0. if args.eval_actuation == "immediate" else cfg.action_duration_s,
+        evaluation_arm="deployment-realism, actuation v2" if args.eval_actuation == "immediate" else "original deployment",
         gpu_uuid=env["CUDA_VISIBLE_DEVICES"],
         inference_mode=env.get("SOARM_EVAL_INFERENCE_MODE", "eager" if args.sim_time else "checkpoint-default"),
         host_cpu_count=os.cpu_count(),
@@ -565,7 +572,7 @@ def main():
                                     Path(__file__).with_name("episode_client.py"),
                                     SCRIPTS / "run_async_inference_sim.py",
                                     Path(__file__).with_name("observation_transform.py")]+(
-                                    [Path(__file__).with_name(name) for name in ("sim_time.py", "phase3.py", "phase3_metrics.py")]+[
+                                    [Path(__file__).with_name(name) for name in ("sim_time.py", "phase3.py", "phase3_metrics.py", "actuation.py")]+[
                                     REPO/"vla_SO-ARM101/src/so_arm101_control/so_arm101_control/compute_workspace.py",
                                     SCRIPTS/"collect/success.py", SCRIPTS/"collect/cup_geometry.py", SCRIPTS/"collect/pose_math.py"] if args.sim_time else [])},
     )
@@ -612,7 +619,7 @@ def main():
         # Same client configuration entrance as the deployment launcher.
         client_cmd = pixi+episode_client_command(commands[1], args.dataset_brightness)
         if args.sim_time:
-            client_cmd += ["--eval-clock=sim", f"--eval-observe-every-actions={args.diagnostic_reobserve_actions}"]
+            client_cmd += ["--eval-clock=sim", f"--eval-observe-every-actions={args.diagnostic_reobserve_actions}", f"--eval-actuation={args.eval_actuation}"]
         client = Client(client_cmd, env, args.out)
         health_log = (args.out/'server.log').open(errors='replace')
         client_health_log = (args.out/'client.log').open(errors='replace')
@@ -658,6 +665,9 @@ def main():
             epdir.mkdir()
             result = {
                 "episode": ep,
+                "eval_actuation": args.eval_actuation,
+                "evaluation_arm": "deployment-realism, actuation v2" if args.eval_actuation == "immediate" else "original deployment",
+                "actuation_duration_s": 0. if args.eval_actuation == "immediate" else cfg.action_duration_s,
                 "outcome": "error",
                 "condition": args.condition,
                 "seed": args.seeds[index],

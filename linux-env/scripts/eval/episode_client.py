@@ -38,11 +38,14 @@ def emit(tag: str, payload: dict | None = None) -> None:
 def main() -> int:
     diagnostic_parser = argparse.ArgumentParser(add_help=False)
     diagnostic_parser.add_argument("--dataset-brightness", action="store_true")
+    diagnostic_parser.add_argument("--eval-actuation", choices=("native", "immediate"), default="native")
     diagnostic_parser.add_argument("--eval-clock", choices=("sim", "wall"))
     diagnostic_parser.add_argument("--eval-observe-every-actions", type=int, choices=(10,25,50), default=10)
     diagnostic, remaining = diagnostic_parser.parse_known_args(sys.argv[1:])
     if diagnostic.eval_observe_every_actions != 10 and not diagnostic.eval_clock:
         raise ValueError('Diagnostic observation cadence requires an explicit eval clock')
+    if diagnostic.eval_actuation == "immediate" and diagnostic.eval_clock != "sim":
+        raise ValueError("Immediate-target evaluation requires explicit simulation clock")
     cfg = draccus.parse(RobotClientConfig, args=remaining)
     from observation_transform import enable_isolated_correction, transform_metadata
     correction = transform_metadata(diagnostic.dataset_brightness)
@@ -59,6 +62,10 @@ def main() -> int:
     if diagnostic.eval_clock:
         from sim_time import install_client
         install_client(client, diagnostic.eval_clock == "sim", diagnostic.eval_observe_every_actions)
+    restore_actuation = lambda: None
+    if diagnostic.eval_actuation == "immediate":
+        from actuation import install
+        restore_actuation = install(client.robot, "immediate", True)
     status_arrays = {}
     for label in ("arm", "gripper"):
         action_client = getattr(client.robot, f"_{label}_action_client", None)
@@ -169,6 +176,7 @@ def main() -> int:
     t = time.perf_counter()
     if not client.start():  # Ready + SendPolicyInstructions (server loads policy)
         emit("FATAL", {"msg": "client.start() failed"})
+        restore_actuation()
         client.stop()
         return 1
     load_s = time.perf_counter() - t
@@ -260,6 +268,8 @@ def main() -> int:
                 {
                     "ep": ep,
                     "warmup_only": warming,
+                    "eval_actuation": diagnostic.eval_actuation,
+                    "actuation_duration_s": client.robot.config.action_duration_s,
                     "observation_transform": correction,
                     "observation_transform_proof": state.get("observation_transform_proof"),
                     "duration_s": round(dur, 2),
@@ -276,6 +286,7 @@ def main() -> int:
             )
 
     finally:
+        restore_actuation()
         client.stop()
         receiver.join(timeout=5)
     emit("BYE")
