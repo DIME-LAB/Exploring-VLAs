@@ -1,0 +1,84 @@
+{
+  "status": "READY",
+  "scope": "Evaluation plumbing/timing only; pilot outputs are never task scores",
+  "tested_commit": "c9199c3d67db2c2408e999016c79ee6eb43698b4",
+  "contract": {
+    "source_sha256": {
+      "linux-env/scripts/eval/run_episodes.py": "8c205120e7e5148d916e10b29c2dd44df2cd960a653136975df4c0bfe5054121",
+      "linux-env/scripts/eval/scene_reset.py": "1a93881558bbdd584aaa05b972d51aa60ab25271f0412715d09bf2154850d898",
+      "linux-env/scripts/eval/episode_client.py": "9e6ab8dbcd1a45419a20bd1cd93a990b61af8dbc2a9afd304acf5a512c475b98",
+      "linux-env/scripts/run_async_inference_sim.py": "6ce59f9a1444ba3c9d80fd8d80262ebedaed658d529d24c2239f7aea5521b928",
+      "linux-env/scripts/eval/observation_transform.py": "15d6e6871b6e805d121c0f5355c0111f707829d02dcd074fdb1900a4714410eb",
+      "linux-env/scripts/eval/sim_time.py": "05897e32bd12dc201587577a0bc2992465a6fa0cae34f5b83bc6885d8c0be7f9",
+      "linux-env/scripts/eval/phase3.py": "3e666e000173a0e056d440e7d98ea40a8346a281748740cfc8ba2e8202de8211",
+      "linux-env/scripts/eval/phase3_metrics.py": "7411a902f88ef56a813be2888b7caf6828eca7591ad7d05f9c77a05c1baa7a0b",
+      "vla_SO-ARM101/src/so_arm101_control/so_arm101_control/compute_workspace.py": "98785cfeaef64d41abc9eac4fdd798825a07bc0745e29915045e09a61263dcb4",
+      "linux-env/scripts/collect/success.py": "dc2d017185ab789191cd975e93ad17a0d7b6bae3dab0d4d59fbaa43c9aaa95b3",
+      "linux-env/scripts/collect/cup_geometry.py": "aa81774badcb6396335cf8c04606791cdf742ba956854a65417b42086a3a146f",
+      "linux-env/scripts/collect/pose_math.py": "e8a9235e64cfce9e55f5a4eb942d6185969846a8191e625e63adf0ec742b571c"
+    },
+    "fork_commit": "e1e201098b2056827908e76f58bbf5733beb4d82",
+    "inference_mode": "eager",
+    "scene_bank_sha256": "3b3569389d3301cc26fc0b9ed892c032888b2b4531f97156296f20f079648387"
+  },
+  "checks": [
+    {
+      "run": "qualification-final-rtc-on-45",
+      "rtc_enabled": true,
+      "validity": [],
+      "sim_s": 45.033333334,
+      "wall_s": 55.682897406979464,
+      "sim_hz": 30.000000000446768,
+      "actions": 1344,
+      "missed_slots": 0,
+      "empty_pct": 0.0,
+      "send_median_ms": 0.3029750077985227,
+      "send_p95_ms": 0.4965719999745488,
+      "sim_jitter_p95_ms": 6.666738272542716e-07,
+      "sim_jitter_max_ms": 33.33333366666125,
+      "guided_chunks": 126,
+      "median_inference_wall_s": 0.4113,
+      "physical_samples": 1350,
+      "maximum_physical_gap_sim_s": 0.033333334,
+      "load_start": [
+        30.06103515625,
+        20.90673828125,
+        23.25732421875
+      ],
+      "load_end": [
+        25.4130859375,
+        21.2080078125,
+        23.22998046875
+      ]
+    },
+    {
+      "run": "qualification-final-rtc-off-45",
+      "rtc_enabled": false,
+      "validity": [],
+      "sim_s": 45.0,
+      "wall_s": 58.89010517299175,
+      "sim_hz": 30.000000000000004,
+      "actions": 1339,
+      "missed_slots": 0,
+      "empty_pct": 0.0,
+      "send_median_ms": 0.3004400059580803,
+      "send_p95_ms": 0.36388399894349277,
+      "sim_jitter_p95_ms": 3.333582299092086e-07,
+      "sim_jitter_max_ms": 3.333582299092086e-07,
+      "guided_chunks": 0,
+      "median_inference_wall_s": 0.33594999999999997,
+      "physical_samples": 1350,
+      "maximum_physical_gap_sim_s": 0.033333334,
+      "load_start": [
+        23.640625,
+        21.75927734375,
+        23.18408203125
+      ],
+      "load_end": [
+        26.47412109375,
+        22.76513671875,
+        23.43310546875
+      ]
+    }
+  ]
+}

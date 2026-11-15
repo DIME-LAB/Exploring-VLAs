@@ -226,8 +226,10 @@ python -m unittest discover -s linux-env/scripts/eval -p 'test_*.py' -v`.
 
 The bank manifest SHA is pinned in `phase3.py` and validated before each
 restore; comparisons require the same source/fork/backend/bank contracts.
-Clock delivery uses RELIABLE/depth128. Preparation is **NOT-READY for scored
-checkpoints** until a complete45sim-second reliable-clock check has zero
-missed slots: the first best-effort45s test missed two slots, and the
-replacement was interrupted after13.43sim-s by the announced GPU handoff.
-Neither that interrupted test nor the short pilot episodes are task scores.
+Clock delivery uses RELIABLE/depth128. Preparation is **READY for scored checkpoints** after the unscored final
+qualification at functional commit c9199c3: both RTC-on and RTC-off ran45sim
+seconds at30.000simHz with zero missed slots and zero post-startup empty
+ticks. See `phase3-qualification.json` for source hashes, timings and physical
+snapshot checks. Earlier failed/interrupted attempts remain in the Mac report;
+none of the pilot episodes is a task score. Every actual checkpoint episode
+still passes the same validity gate. ROADMAP3.3 remains open for those scores.
