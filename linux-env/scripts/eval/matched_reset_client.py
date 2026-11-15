@@ -18,15 +18,15 @@ def install_fenced_boundary(transport,native_mutation):
 
 def prepare_scene(repo,collector_root,row,out):
     repo=Path(repo);collector_root=Path(collector_root);out=Path(out)
-    receipt=Path(row['source_receipt']);reference=receipt.parent.parent/'run.json'
+    receipt=Path(row['source_receipt']);reference=Path(row['reference_run'])
     assert hashlib.sha256(receipt.read_bytes()).hexdigest()==row['source_receipt_sha256']
-    assert reference.is_file()
+    assert hashlib.sha256(reference.read_bytes()).hexdigest()==row['reference_run_sha256']
     env=dict(os.environ)
     text=subprocess.check_output(['python3',str(collector_root/'linux-env/scripts/collect/gpu_device.py'),'--gpu','0','--kit-log',str(Path(env['SOARM_INSTANCE_ROOT'])/'isaac.log')],text=True)
     for line in text.splitlines():
         parts=shlex.split(line);assert len(parts)==2 and parts[0]=='export';key,value=parts[1].split('=',1);env[key]=value
     assert env['CUDA_VISIBLE_DEVICES'].startswith('GPU-') and env['SOARM_RENDERER_GPU_INDEX']=='0'
-    argv=['python3','-u',str(repo/'linux-env/scripts/eval/matched_reset.py'),'--collector-root',str(collector_root),'--receipt',str(receipt),'--receipt-sha256',row['source_receipt_sha256'],'--reference-run',str(reference),'--out',str(out)]
+    argv=['python3','-u',str(repo/'linux-env/scripts/eval/matched_reset.py'),'--collector-root',str(collector_root),'--bank',row['bank_root'],'--bank-sha256',row['bank_sha256'],'--seed',str(row['seed']),'--out',str(out)]
     with out.with_suffix('.log').open('w') as log:
         proc=subprocess.Popen(argv,env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
         try:
@@ -41,6 +41,7 @@ def prepare_scene(repo,collector_root,row,out):
     proof=json.loads((out/'matched-reset-proof.json').read_text())
     assert proof['status']=='PASS' and proof['seed']==row['seed'] and proof['source_receipt_sha256']==row['source_receipt_sha256']
     assert proof['protocol']=='collector-matched-reset-v1' and proof['finalization']['passed']
+    assert proof['suite']==row['suite'] and proof['bank_sha256']==row['bank_sha256'] and proof['reference_run_sha256']==row['reference_run_sha256']
     receipt_path=out/'attempt-0000/receipt.json';assert hashlib.sha256(receipt_path.read_bytes()).hexdigest()==proof['receipt_sha256'];prepared=json.loads(receipt_path.read_text())
     return dict(proof,path=str(out),prepared_snapshot=prepared['prepared_snapshot'],training_first_frame_offset_ns=prepared['training_first_frame_offset_ns'],proof_sha256=hashlib.sha256((out/'matched-reset-proof.json').read_bytes()).hexdigest(),post_cleanup_native_bootstrap_frames=1,post_cleanup_reteleport=False)
 
@@ -69,11 +70,22 @@ def reset_scene(transport,repo,collector_root,row,out):
     proof['retired_parent_buffers']=dict(before_worker=pre_retired,after_worker=rejoin_retired)
     return reset,proof
 
-def require_qualification(root,host,collector_root,bank_sha256,source_dir):
+def require_qualification(root,host,collector_root,bank_sha256,source_dir,*,suite='seen-training-home',reference_sha256=None):
     root=Path(root);ledger=json.loads((root/'window-ledger.json').read_text());summary=json.loads((root/'qualification/summary.json').read_text())
     assert ledger['status']=='matched-reset-qualified' and ledger['cleanup_exit_code']==0
     assert ledger['host_profile']==host and summary['bank_sha256']==bank_sha256 and Path(summary['reset_collector_root']).resolve()==Path(collector_root).resolve()
-    assert summary['status']=='PASS' and summary['episodes']==5 and summary['commands']==50
+    seeds=list(range(530000,530005)) if suite=='seen-training-home' else list(range(900000,900030))
+    assert suite in ('seen-training-home','heldout-bank-v2')
+    assert summary['status']=='PASS' and summary['suite']==suite and summary['seeds']==seeds
+    assert summary['episodes']==len(seeds) and summary['commands']==10*len(seeds)
+    if reference_sha256 is not None:assert summary['reference_run_sha256']==reference_sha256
     for name in ('matched_reset.py','matched_reset_client.py','native_bank.py','qualify_matched_reset.py'):
         assert hashlib.sha256((Path(source_dir)/name).read_bytes()).hexdigest()==ledger['source_sha256'][name],'Reset source differs from live qualification'
-    return dict(path=str(root),ledger_sha256=hashlib.sha256((root/'window-ledger.json').read_bytes()).hexdigest(),summary_sha256=hashlib.sha256((root/'qualification/summary.json').read_bytes()).hexdigest())
+    if suite=='heldout-bank-v2':
+        from native_bank import SEEN_BANK_SHA
+        control=summary['bootstrap_control']
+        assert control['bank_sha256']==SEEN_BANK_SHA,'Bootstrap control must use the fixed training-home bank'
+        actual=require_qualification(control['path'],host,collector_root,control['bank_sha256'],source_dir,suite='seen-training-home',reference_sha256=summary['reference_run_sha256'])
+        assert actual==control,'Bootstrap control changed since held-out qualification'
+    else:assert summary.get('bootstrap_control') is None
+    return dict(path=str(root),bank_sha256=bank_sha256,ledger_sha256=hashlib.sha256((root/'window-ledger.json').read_bytes()).hexdigest(),summary_sha256=hashlib.sha256((root/'qualification/summary.json').read_bytes()).hexdigest())

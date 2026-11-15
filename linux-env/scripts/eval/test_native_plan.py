@@ -18,6 +18,11 @@ class Tests(unittest.TestCase):
         p=policy_plan(args(matched_reset_diagnostic=True))
         self.assertEqual([r['cadence'] for r in p],[10,50]);self.assertEqual([r['rtc'] for r in p],[True,False])
         with self.assertRaises(ValueError):policy_plan(args(matched_reset_diagnostic=True,codec_diagnostic=True))
+    def test_single_matched_reset_arms_keep_the_frozen_settings(self):
+        for name in ('default','whole50'):
+            both=policy_plan(args(matched_reset_diagnostic=True))
+            self.assertEqual(policy_plan(args(matched_reset_diagnostic=True,matched_reset_arms=name)),[r for r in both if r['name']==name])
+        with self.assertRaises(ValueError):policy_plan(args(matched_reset_diagnostic=True,matched_reset_arms='missing'))
     def test_default_and_existing_diagnostics_keep_their_protocol(self):
         self.assertEqual(policy_plan(args()),[dict(name='attempt-01',cadence=10,rtc=True,aggregation='weighted_average',codec=False)])
         self.assertTrue(policy_plan(args(codec_diagnostic=True))[0]['codec'])

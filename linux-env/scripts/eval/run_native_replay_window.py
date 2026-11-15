@@ -9,6 +9,9 @@ def policy_plan(args):
  if sum(modes)>1:raise ValueError('Select only one native diagnostic')
  if args.matched_reset_diagnostic:
   settings=[('default',10,True,'weighted_average'),('whole50',50,False,'latest_only')]
+  selection=getattr(args,'matched_reset_arms','both')
+  if selection not in ('both','default','whole50'):raise ValueError('Unknown matched reset arm')
+  if selection!='both':settings=[row for row in settings if row[0]==selection]
  elif args.memorisation_diagnostic:
   if args.best_replacement_cadence not in (10,25,50):raise ValueError('Memorisation requires a selected replacement cadence')
   settings=[('default',10,True,'weighted_average'),(f'best{args.best_replacement_cadence}',args.best_replacement_cadence,False,'latest_only')]
@@ -17,7 +20,18 @@ def policy_plan(args):
  else:settings=[('attempt-01',10,True,'weighted_average')]
  return [dict(name=name,cadence=cadence,rtc=rtc,aggregation=aggregation,codec=args.codec_diagnostic) for name,cadence,rtc,aggregation in settings]
 def main():
- p=argparse.ArgumentParser();p.add_argument('--out',type=Path,required=True);p.add_argument('--fixture',type=Path);p.add_argument('--fixture-sha256');p.add_argument('--checkpoint',type=Path);p.add_argument('--weights-sha256');p.add_argument('--bank',type=Path);p.add_argument('--bank-sha256');p.add_argument('--cadence-diagnostic',action='store_true');p.add_argument('--stop-by-utc',required=True);p.add_argument('--codec-diagnostic',action='store_true');p.add_argument('--replacement-diagnostic',action='store_true');p.add_argument('--memorisation-diagnostic',action='store_true');p.add_argument('--matched-reset-diagnostic',action='store_true');p.add_argument('--matched-reset-qualification',action='store_true');p.add_argument('--reset-collector-root',type=Path);p.add_argument('--reset-qualification',type=Path);p.add_argument('--cpu-rpc-proof',type=Path);p.add_argument('--source-preflight-proof',type=Path);p.add_argument('--best-replacement-cadence',type=int,choices=(10,25,50));p.add_argument('--replay-commands',choices=('clean','executed','both'),default='both');p.add_argument('--capture-home-checks',action='store_true');p.add_argument('--policy-python',type=Path);p.add_argument('--processor-proof',type=Path);p.add_argument('--checkpoint-handoff',type=Path);p.add_argument('--replacement-selection',type=Path);a=p.parse_args();plan=policy_plan(a);guarded=a.cadence_diagnostic or a.codec_diagnostic or a.replacement_diagnostic or a.memorisation_diagnostic or a.matched_reset_diagnostic or a.matched_reset_qualification;host=qualified_host(REPO);HOST=Path(host['root']);interpreter=policy_python(host,a.policy_python) if a.checkpoint else None;root=a.out.resolve();assert root.is_relative_to(HOST/'eval/runs') and not root.exists()
+ p=argparse.ArgumentParser();p.add_argument('--out',type=Path,required=True);p.add_argument('--fixture',type=Path);p.add_argument('--fixture-sha256');p.add_argument('--checkpoint',type=Path);p.add_argument('--weights-sha256');p.add_argument('--bank',type=Path);p.add_argument('--bank-sha256');p.add_argument('--cadence-diagnostic',action='store_true');p.add_argument('--stop-by-utc',required=True);p.add_argument('--codec-diagnostic',action='store_true');p.add_argument('--replacement-diagnostic',action='store_true');p.add_argument('--memorisation-diagnostic',action='store_true');p.add_argument('--matched-reset-diagnostic',action='store_true');p.add_argument('--matched-reset-qualification',action='store_true');p.add_argument('--matched-reset-arms',choices=('both','default','whole50'),default='both');p.add_argument('--bank-offset',type=int,default=0);p.add_argument('--bank-count',type=int);p.add_argument('--bootstrap-control',type=Path);p.add_argument('--reset-collector-root',type=Path);p.add_argument('--reset-qualification',type=Path);p.add_argument('--cpu-rpc-proof',type=Path);p.add_argument('--source-preflight-proof',type=Path);p.add_argument('--best-replacement-cadence',type=int,choices=(10,25,50));p.add_argument('--replay-commands',choices=('clean','executed','both'),default='both');p.add_argument('--capture-home-checks',action='store_true');p.add_argument('--policy-python',type=Path);p.add_argument('--processor-proof',type=Path);p.add_argument('--checkpoint-handoff',type=Path);p.add_argument('--replacement-selection',type=Path);a=p.parse_args();plan=policy_plan(a);guarded=a.cadence_diagnostic or a.codec_diagnostic or a.replacement_diagnostic or a.memorisation_diagnostic or a.matched_reset_diagnostic or a.matched_reset_qualification;host=qualified_host(REPO);HOST=Path(host['root']);interpreter=policy_python(host,a.policy_python) if a.checkpoint else None;root=a.out.resolve();assert root.is_relative_to(HOST/'eval/runs') and not root.exists()
+ bank_rows=[];selected_rows=[];suite=None
+ if a.checkpoint or a.matched_reset_qualification:
+  from native_bank import load_bank,select_policy_rows
+  bank_rows,suite=load_bank(a.bank,a.bank_sha256)
+  if a.checkpoint:
+   selected_rows=select_policy_rows(bank_rows,suite,a.bank_offset,a.bank_count)
+   if suite=='heldout-bank-v2':assert a.matched_reset_diagnostic and a.matched_reset_arms!='both','Held-out scoring is one arm and one fixed15-seed chunk per window'
+  else:
+   assert a.bank_offset==0 and a.bank_count is None,'Qualification must visit the entire sealed bank'
+   assert (suite=='heldout-bank-v2')==(a.bootstrap_control is not None),'Held-out qualification requires a seen bootstrap control'
+ if a.matched_reset_arms!='both':assert a.matched_reset_diagnostic
  deadline=datetime.datetime.strptime(a.stop_by_utc,'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc).timestamp()-180;assert deadline>time.time()+600
  if a.checkpoint:
   arms=[row['name'] for row in plan]
@@ -34,14 +48,19 @@ def main():
  if a.matched_reset_qualification or a.matched_reset_diagnostic:
   from matched_reset import validate_collector_root
   assert a.reset_collector_root;validate_collector_root(a.reset_collector_root)
+ bootstrap_control_proof=None
+ if a.matched_reset_qualification and suite=='heldout-bank-v2':
+  from native_bank import SEEN_BANK_SHA
+  from matched_reset_client import require_qualification
+  bootstrap_control_proof=require_qualification(a.bootstrap_control,host,a.reset_collector_root,SEEN_BANK_SHA,Path(__file__).parent,suite='seen-training-home',reference_sha256=bank_rows[0]['reference_run_sha256'])
  if a.matched_reset_diagnostic:
   from matched_reset_client import require_qualification
   assert a.reset_qualification
-  reset_qualification=require_qualification(a.reset_qualification,host,a.reset_collector_root,a.bank_sha256,Path(__file__).parent)
+  reset_qualification=require_qualification(a.reset_qualification,host,a.reset_collector_root,a.bank_sha256,Path(__file__).parent,suite=suite,reference_sha256=bank_rows[0]['reference_run_sha256'])
   assert a.cpu_rpc_proof and a.source_preflight_proof
   cpu=json.loads(a.cpu_rpc_proof.read_text());preflight=json.loads(a.source_preflight_proof.read_text())
   assert cpu['status']=='PASS' and cpu['cuda_visible_devices']=='' and cpu['rtc_enabled'] and cpu['prefix_steps']==[0,40] and Path(cpu['checkpoint']).resolve()==a.checkpoint.resolve()
-  assert preflight['status']=='PASS' and Path(preflight['checkpoint']).resolve()==a.checkpoint.resolve() and preflight['weights_sha256']==a.weights_sha256 and preflight['bank_sha256']==a.bank_sha256
+  assert preflight['status']=='PASS' and Path(preflight['checkpoint']).resolve()==a.checkpoint.resolve() and preflight['weights_sha256']==a.weights_sha256 and preflight['bank_sha256']==a.bank_sha256 and preflight['suite']==suite and preflight['seeds']==[r['seed'] for r in selected_rows]
   reset_qualification['cpu_rpc_proof']=dict(path=str(a.cpu_rpc_proof),sha256=hashlib.sha256(a.cpu_rpc_proof.read_bytes()).hexdigest())
   reset_qualification['source_preflight_proof']=dict(path=str(a.source_preflight_proof),sha256=hashlib.sha256(a.source_preflight_proof.read_bytes()).hexdigest())
  handoff=None;selection=None;processor_proof=None
@@ -76,7 +95,7 @@ def main():
   code="import json,sys,torch;assert not torch.cuda.is_available() and not torch.cuda.is_initialized();print(json.dumps(dict(executable=sys.executable,prefix=sys.prefix,torch=torch.__version__,cuda_build=torch.version.cuda,cuda_initialized=torch.cuda.is_initialized())))"
   interpreter_metadata=json.loads(subprocess.check_output([interpreter,'-c',code],env=dict(env,CUDA_VISIBLE_DEVICES=''),text=True,timeout=60))
  root.mkdir(parents=True)
- ledger=dict(bank=str(a.bank) if a.bank else None,bank_sha256=a.bank_sha256,reset_collector_root=str(a.reset_collector_root) if a.reset_collector_root else None,interpreter_metadata=interpreter_metadata,policy_python_sha256=hashlib.sha256(Path(interpreter).read_bytes()).hexdigest() if interpreter else None,reset_qualification=reset_qualification,host_profile=host,policy_python=interpreter,processor_proof=processor_proof,checkpoint_handoff=handoff,replacement_selection=selection,gpu_budget_gib=7 if guarded else None,global_memory_ceiling=.79 if guarded else None,started_utc=time.strftime('%FT%TZ',time.gmtime()),kind='UNSCORED matched collector reset qualification' if a.matched_reset_qualification else 'DIAGNOSTIC matched collector reset default and whole chunk' if a.matched_reset_diagnostic else 'DIAGNOSTIC native memorisation default and replacement' if a.memorisation_diagnostic else 'DIAGNOSTIC native replacement-only RTC off' if a.replacement_diagnostic else 'DIAGNOSTIC native codec held-filler' if a.codec_diagnostic else 'DIAGNOSTIC native cadence RTC off' if a.cadence_diagnostic else 'PRIMARY native held-tick training-home policy test' if a.checkpoint else 'native held-tick actuation qualification',root=str(root),status='starting',arms=[],source_sha256={name:hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in ('run_native_replay_window.py','native_replay.py','held_tick.py','phase3_metrics.py','native_policy.py','native_policy_client.py','native_policy_robot.py','native_policy_server.py','codec_stream.py','checkpoint_contract.py','select_replacement.py','native_environment.py','native_home_capture.py','matched_reset.py','matched_reset_client.py','native_bank.py','qualify_matched_reset.py')})
+ ledger=dict(bootstrap_control_proof=bootstrap_control_proof,suite=suite,selected_seeds=[r['seed'] for r in selected_rows],bank_offset=a.bank_offset,bank_count=len(selected_rows) if selected_rows else None,bootstrap_control=str(a.bootstrap_control) if a.bootstrap_control else None,bank=str(a.bank) if a.bank else None,bank_sha256=a.bank_sha256,reset_collector_root=str(a.reset_collector_root) if a.reset_collector_root else None,interpreter_metadata=interpreter_metadata,policy_python_sha256=hashlib.sha256(Path(interpreter).read_bytes()).hexdigest() if interpreter else None,reset_qualification=reset_qualification,host_profile=host,policy_python=interpreter,processor_proof=processor_proof,checkpoint_handoff=handoff,replacement_selection=selection,gpu_budget_gib=7 if guarded else None,global_memory_ceiling=.79 if guarded else None,started_utc=time.strftime('%FT%TZ',time.gmtime()),kind='UNSCORED matched collector reset qualification' if a.matched_reset_qualification else ('PRIMARY native held-tick heldout-bank-v2' if suite=='heldout-bank-v2' else 'DIAGNOSTIC matched collector reset seen-layout') if a.matched_reset_diagnostic else 'DIAGNOSTIC native memorisation default and replacement' if a.memorisation_diagnostic else 'DIAGNOSTIC native replacement-only RTC off' if a.replacement_diagnostic else 'DIAGNOSTIC native codec held-filler' if a.codec_diagnostic else 'DIAGNOSTIC native cadence RTC off' if a.cadence_diagnostic else 'PRIMARY native held-tick training-home policy test' if a.checkpoint else 'native held-tick actuation qualification',root=str(root),status='starting',arms=[],source_sha256={name:hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in ('run_native_replay_window.py','native_replay.py','held_tick.py','phase3_metrics.py','native_policy.py','native_policy_client.py','native_policy_robot.py','native_policy_server.py','codec_stream.py','checkpoint_contract.py','select_replacement.py','native_environment.py','native_home_capture.py','matched_reset.py','matched_reset_client.py','native_bank.py','qualify_matched_reset.py')})
  def save():
   tmp=root/'window-ledger.tmp';tmp.write_text(json.dumps(ledger,indent=2)+'\n');os.replace(tmp,root/'window-ledger.json')
  last_gpu_sample=[0.];bad_samples=[0]
@@ -120,20 +139,21 @@ def main():
  try:
   assert run(['bash','linux-env/scripts/collect_sim.sh','up','2'],'launch.log')==0,'Private runtime launch failed'
   if a.matched_reset_qualification:
-   argv=['python3','-u',str(REPO/'linux-env/scripts/eval/qualify_matched_reset.py'),'--bank',str(a.bank),'--bank-sha256',a.bank_sha256,'--collector-root',str(a.reset_collector_root),'--out',str(root/'qualification')]
+   argv=['python3','-u',str(REPO/'linux-env/scripts/eval/qualify_matched_reset.py'),'--bank',str(a.bank),'--bank-sha256',a.bank_sha256,'--collector-root',str(a.reset_collector_root),'--out',str(root/'qualification')]+(['--bootstrap-control',str(a.bootstrap_control)] if a.bootstrap_control else [])
    shell='source /opt/ros/humble/setup.bash && source '+shlex.quote(str(REPO/'vla_SO-ARM101/install/setup.bash'))+host_source+' && unset ROS_LOCALHOST_ONLY ROS_AUTOMATIC_DISCOVERY_RANGE ROS_STATIC_PEERS && exec '+shlex.join(argv)
    ledger['status']='matched-reset-qualification';save();assert run(['bash','-c',shell],'qualification.log')==0,'Matched reset qualification failed; preserve evidence, no retry'
-   proof=json.loads((root/'qualification/summary.json').read_text());assert proof['status']=='PASS' and proof['episodes']==5 and proof['commands']==50
+   proof=json.loads((root/'qualification/summary.json').read_text());assert proof['status']=='PASS' and proof['suite']==suite and proof['seeds']==[r['seed'] for r in bank_rows] and proof['episodes']==len(bank_rows) and proof['commands']==10*len(bank_rows)
    ledger['status']='matched-reset-qualified'
   elif a.checkpoint:
    for arm in plan:
-    cadence=arm['cadence'];rtc=arm['rtc'];folder=root/arm['name'];argv=['python3','-u',str(REPO/'linux-env/scripts/eval/native_policy.py'),'--out',str(folder),'--checkpoint',str(a.checkpoint),'--weights-sha256',a.weights_sha256,'--bank',str(a.bank),'--bank-sha256',a.bank_sha256,'--observe-every-actions',str(cadence),'--queue-aggregation',arm['aggregation']]+([] if rtc else ['--rtc-off'])
+    cadence=arm['cadence'];rtc=arm['rtc'];folder=root/arm['name'];argv=['python3','-u',str(REPO/'linux-env/scripts/eval/native_policy.py'),'--out',str(folder),'--checkpoint',str(a.checkpoint),'--weights-sha256',a.weights_sha256,'--bank',str(a.bank),'--bank-sha256',a.bank_sha256,'--observe-every-actions',str(cadence),'--queue-aggregation',arm['aggregation'],'--bank-offset',str(a.bank_offset)]+(['--bank-count',str(a.bank_count)] if a.bank_count is not None else [])+([] if rtc else ['--rtc-off'])
     if arm['codec']:argv.append('--eval-codec-roundtrip')
     if a.memorisation_diagnostic:argv.extend(['--evaluation-kind','DIAGNOSTIC memorisation seen-layout'])
-    if a.matched_reset_diagnostic:argv.extend(['--collector-matched-reset','--reset-collector-root',str(a.reset_collector_root),'--evaluation-kind','DIAGNOSTIC matched collector reset seen-layout'])
+    if a.matched_reset_diagnostic:argv.extend(['--collector-matched-reset','--reset-collector-root',str(a.reset_collector_root),'--evaluation-kind','PRIMARY native held-tick heldout-bank-v2' if suite=='heldout-bank-v2' else 'DIAGNOSTIC matched collector reset seen-layout'])
     shell='source /opt/ros/humble/setup.bash && source '+shlex.quote(str(REPO/'vla_SO-ARM101/install/setup.bash'))+host_source+' && unset ROS_LOCALHOST_ONLY ROS_AUTOMATIC_DISCOVERY_RANGE ROS_STATIC_PEERS && exec '+shlex.join(argv)
     ledger['status']='scoring-'+folder.name;ledger['arms'].append(dict(arm));save();rc=run(['bash','-c',shell],folder.name+'.log');assert rc==0,'Native policy window failed; preserve evidence, no retry'
-    received=sorted(folder.glob('ep*/result.json'));assert len(received)==5
+    received=sorted(folder.glob('ep*/result.json'));assert len(received)==len(selected_rows)
+    assert [json.loads(f.read_text())['seed'] for f in received]==[r['seed'] for r in selected_rows]
     for file in received:
      row=json.loads(file.read_text());print(json.dumps(dict(event='native-policy',cadence=cadence,rtc=rtc,seed=row['seed'],grasp=row.get('grasp_success'),success=row.get('success'),valid=row.get('valid'))),flush=True)
    ledger['status']='matrix-finished'

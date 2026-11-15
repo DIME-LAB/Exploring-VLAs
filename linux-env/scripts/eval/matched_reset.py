@@ -2,8 +2,7 @@
 from pathlib import Path
 import argparse,copy,hashlib,json,math,os,signal,subprocess,sys,time
 
-COLLECTOR_SHA='09f86817b46e2b1ad4695fce29e059ea387a0bbc97d9568786a70c818308ae90'
-HELPER_SHA='eb41cef2e7bee6a972e646a26963c8a0d01142895223969c880144401e4ee868'
+from native_bank import COLLECTOR_SHA,HELPER_SHA
 
 def orientation_errors(actual,expected):
     cup={};lego={}
@@ -25,11 +24,16 @@ def validate_collector_root(root):
     return dict(root=str(root),collector_sha256=COLLECTOR_SHA,scene_helper_sha256=HELPER_SHA)
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--collector-root',type=Path,required=True);p.add_argument('--receipt',type=Path,required=True);p.add_argument('--receipt-sha256',required=True);p.add_argument('--reference-run',type=Path,required=True);p.add_argument('--out',type=Path,required=True);a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--collector-root',type=Path,required=True);p.add_argument('--bank',type=Path,required=True);p.add_argument('--bank-sha256',required=True);p.add_argument('--seed',type=int,required=True);p.add_argument('--out',type=Path,required=True);a=p.parse_args()
     root=a.collector_root.resolve();folder=root/'linux-env/scripts/collect'
     source_validation=validate_collector_root(root)
-    raw=a.receipt.read_bytes();assert hashlib.sha256(raw).hexdigest()==a.receipt_sha256;source=json.loads(raw);reference=json.loads(a.reference_run.read_text())
-    assert source['accepted'] and source['params']['recovery']=='none' and source['params']['seed'] in range(530000,530005)
+    from native_bank import load_bank
+    rows,suite=load_bank(a.bank,a.bank_sha256);row=next(r for r in rows if r['seed']==a.seed)
+    receipt_path=Path(row['source_receipt']);receipt_sha=row['source_receipt_sha256'];reference_path=Path(row['reference_run'])
+    raw=receipt_path.read_bytes();assert hashlib.sha256(raw).hexdigest()==receipt_sha;source=json.loads(raw);reference=json.loads(reference_path.read_text())
+    assert hashlib.sha256(reference_path.read_bytes()).hexdigest()==row['reference_run_sha256']
+    assert source['accepted'] and source['params']['recovery']=='none'
+    assert (suite=='seen-training-home' and source['params']['seed'] in range(530000,530005)) or (suite=='heldout-bank-v2' and source['scene_bank_only'] and source['params']['split']=='eval' and source['params']['seed'] in range(900000,900030))
     assert os.environ['ROS_DOMAIN_ID']=='92' and os.environ['SOARM_KIT_MCP_PORT']=='8781' and os.environ['RMW_IMPLEMENTATION']=='rmw_cyclonedds_cpp'
     assert all(k not in os.environ for k in ('ROS_LOCALHOST_ONLY','ROS_AUTOMATIC_DISCOVERY_RANGE','ROS_STATIC_PEERS'))
     assert 'torch' not in sys.modules,'Scene preparation never imports a model or Torch'
@@ -50,14 +54,17 @@ def main():
         # itself restores CUP_LAYOUT before sampling, exactly as in one normal
         # multi-episode collector run; a prior policy episode is not a baseline.
         collector.baseline_cup_layout=copy.deepcopy(reference['baseline_cup_layout']);baseline=copy.deepcopy(reference['baseline'])
-        atomic_json(a.out/'run.json',dict(protocol='collector-matched-reset-v1',baseline=baseline,baseline_cup_layout=collector.baseline_cup_layout,live_startup_baseline=live_baseline,collector_source_sha256=sources,source_reference_run=str(a.reference_run),source_reference_sha256=hashlib.sha256(a.reference_run.read_bytes()).hexdigest()))
+        atomic_json(a.out/'run.json',dict(protocol='collector-matched-reset-v1',baseline=baseline,baseline_cup_layout=collector.baseline_cup_layout,live_startup_baseline=live_baseline,collector_source_sha256=sources,source_reference_run=str(reference_path),source_reference_sha256=hashlib.sha256(reference_path.read_bytes()).hexdigest()))
         path=a.out/'attempt-0000';path.mkdir();receipt=dict(params=copy.deepcopy(source['params']),accepted=False,scene_only=True,episode_id=hashlib.sha256(str(a.out).encode()).hexdigest());epochs=set()
         collector._prepare_scene_attempt(receipt['params'],baseline,receipt,epochs,a.out,path)
         receipt['retirement']=collector.workers.retire();receipt['camera_boundary']=collector.sensors.require_camera_boundary(collector.generation.floor_ns);receipt['gpu_isolation_after']=collector.gpu_footprint()
         actual=collector.last_snapshot;expected=source['episode_start_physical']
         assert actual['sim_ns']==collector.episode_start_physical['sim_ns']
-        with a.receipt.with_name('frames.jsonl').open() as stream:first_training=json.loads(stream.readline())
-        training_offset=first_training['sim_ns']-expected['sim_ns'];assert abs(training_offset-1e9/30)<=1000
+        training_offset=None
+        if row['first_frame_reference'] is not None:
+            with Path(row['first_frame_reference']).open() as stream:first_training=json.loads(stream.readline())
+            training_offset=first_training['sim_ns']-expected['sim_ns'];assert abs(training_offset-1e9/30)<=1000
+        else:assert suite=='heldout-bank-v2','Only a held-out scene may lack training frames'
         import numpy as np
         q_error=float(np.max(abs(np.degrees(np.array(actual['state'])-expected['state']))))
         position_error=max(abs(x-y) for name in expected['bodies'] for x,y in zip(actual['bodies'][name]['position'],expected['bodies'][name]['position']))
@@ -71,7 +78,7 @@ def main():
         print(json.dumps(dict(event='matched-reset-pose-validation',seed=source['params']['seed'],**{k:validation[k] for k in ('passed','joint_max_error_deg','body_max_position_error_m','body_max_quaternion_error','exact_cup_sampler')})),flush=True)
         assert validation['passed'],'Normal collector prepared pose differs from source; see pose-validation.json'
         assert receipt['retirement']['passed'] and receipt['camera_boundary']['passed'] and receipt['gpu_isolation_after']['passed']
-        receipt.update(accepted=True,matched_reset_protocol='collector-matched-reset-v1',source_receipt=str(a.receipt),source_receipt_sha256=a.receipt_sha256,training_first_frame_offset_ns=training_offset,prepared_joint_max_error_deg=q_error,prepared_body_max_position_error_m=position_error,prepared_body_max_quaternion_error=quaternion_error,prepared_snapshot=actual,sequence='normal Collector._prepare_scene_attempt: reset_release,request_home,settle_home(before),scene(randomize6+barrier2),settle_home(after),restore_velocity,verification6,sync_scene',camera_priming='Exact normal collector functions; no fixed-N or render-only replacement',wall_s=time.monotonic()-started)
+        receipt.update(accepted=True,matched_reset_protocol='collector-matched-reset-v1',source_receipt=str(receipt_path),source_receipt_sha256=receipt_sha,training_first_frame_offset_ns=training_offset,first_frame_offset_basis='measured training first frame' if training_offset is not None else 'inherited one-tick from same-source seen qualification',suite=suite,reference_run_sha256=row['reference_run_sha256'],prepared_joint_max_error_deg=q_error,prepared_body_max_position_error_m=position_error,prepared_body_max_quaternion_error=quaternion_error,prepared_snapshot=actual,sequence='normal Collector._prepare_scene_attempt: reset_release,request_home,settle_home(before),scene(randomize6+barrier2),settle_home(after),restore_velocity,verification6,sync_scene',camera_priming='Exact normal collector functions; no fixed-N or render-only replacement',wall_s=time.monotonic()-started)
         atomic_json(path/'receipt.json',receipt);atomic_json(a.out/'summary.json',dict(producer_invocation=collector.finalization_certificate['invocation'],complete=True,scene_only=True,prepared=1,end_marker='COLLECTION_FINISHED'));ok=True
     except BaseException as error:
         atomic_json(a.out/'reset-error.json',dict(error=repr(error),scored=False))
@@ -83,6 +90,6 @@ def main():
     if ok:
         certificate=c.collection_status.require_finalized(a.out)
         assert 'torch' not in sys.modules,'Scene preparation imported Torch unexpectedly'
-        atomic_json(a.out/'matched-reset-proof.json',dict(status='PASS',protocol='collector-matched-reset-v1',seed=source['params']['seed'],source_receipt_sha256=a.receipt_sha256,source_validation=source_validation,collector_sha256=COLLECTOR_SHA,scene_helper_sha256=HELPER_SHA,torch_imported=False,cyclonedds_uri=uri,cyclonedds_sha256=hashlib.sha256(Path(uri[7:]).read_bytes()).hexdigest(),finalization=certificate,receipt_sha256=hashlib.sha256((a.out/'attempt-0000/receipt.json').read_bytes()).hexdigest(),post_cleanup_semantics='Collector closes with native cancellation; caller must join a fresh epoch without re-teleporting'))
+        atomic_json(a.out/'matched-reset-proof.json',dict(status='PASS',protocol='collector-matched-reset-v1',seed=source['params']['seed'],suite=suite,bank_sha256=a.bank_sha256,reference_run_sha256=row['reference_run_sha256'],source_receipt_sha256=receipt_sha,source_validation=source_validation,collector_sha256=COLLECTOR_SHA,scene_helper_sha256=HELPER_SHA,torch_imported=False,cyclonedds_uri=uri,cyclonedds_sha256=hashlib.sha256(Path(uri[7:]).read_bytes()).hexdigest(),finalization=certificate,receipt_sha256=hashlib.sha256((a.out/'attempt-0000/receipt.json').read_bytes()).hexdigest(),post_cleanup_semantics='Collector closes with native cancellation; caller must join a fresh epoch without re-teleporting'))
         print(json.dumps(dict(status='PASS',protocol='collector-matched-reset-v1',seed=source['params']['seed'])),flush=True)
 if __name__=='__main__':main()
