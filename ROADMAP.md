@@ -269,6 +269,15 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       <colour> cup"). Evaluate (a) colour swap: same scene layout, ask for each colour in turn (does the target
       follow the prompt, not the layout?); (b) paraphrases: held-out rewordings per colour ("put the red brick
       in the red cup", "red block to the red bin", ...), scored separately from the exact-string matrix.
+    - Results 2026-11-15 (bank-v1, 30 held-out scenes, RTC on, eager; bank-v1 later found to use a fixed red-green-blue
+      cup line, an OOD joint cup arrangement vs the collector's randomized arc/line layouts, so all bank-v1 scores
+      are labelled OOD): primary frozen-VLM 10k/20k/30k all 0/30; 20k RTC-off 0/30; unfreeze-from-30k +2500/+5000/
+      +7500/+10000: 0/30 each (2 target lifts at +5000, not sustained). Diagnosis: start pose and images match training;
+      open-loop from moving states fits (~3 mm); from HOME the policy predicts fast but directionally inconsistent
+      motion (net ~8 mm per 10 steps vs expert), closed-loop dwell 90-99.7%, nearest-requested colour at chance; colour
+      word reaches the model but its effect is weak. Training data has no idle prefix (median departure 5 frames).
+      Open: execution-horizon / mode-switching diagnostic (re-plan every 10/25/50), mid-trajectory starts, closed loop
+      on training layouts, then bank-v2 from the collector's own scene sampler (af0aa33).
 - [ ] 3.4 (only if 3.3 paraphrases fail) Prompt-variety run: relabel each training sample's task from a set
       of templates per colour at merge time (no new collection), hold some templates out for eval, and compare
       against the fixed-string model on both exact and held-out prompts. Published SmolVLA/LeRobot guidance is
