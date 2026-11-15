@@ -20,6 +20,7 @@ MODEL_PRESETS = {
     # Crop checkpoint requires its bundled processor module on server PYTHONPATH; the native evaluator sets it.
     "robust-crop-5k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/recorder-crf18-crop/005000/pretrained_model", "", "{}"),
     "robust-crop-10k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/recorder-crf18-crop/010000/pretrained_model", "", "{}"),
+    "robust-crop-15k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/recorder-crf18-crop/015000/pretrained_model", "", "{}"),
     "memorise24-crop-end": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/memorise24/workspace_crop/009102/pretrained_model", "", "{}"),
     "memorise24-original-end": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/memorise24/original/009102/pretrained_model", "", "{}"),
     "base-ft": ("/home/aaugus11/w_ckpt/smolvla-base-ft-rec222812-20k-s42-20261113", "", "{}"),
