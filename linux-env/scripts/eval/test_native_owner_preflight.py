@@ -19,7 +19,7 @@ def exercise(xml,scenario="pass"):
         (repo/'linux-env').mkdir(parents=True)
         (repo/'linux-env/cyclonedds.xml').write_bytes(Path(xml).read_bytes())
         instance=host/'eval/runtime/instance92';instance.mkdir(parents=True)
-        paths=[];calls=[];registered=[];tick=[0.]
+        paths=[];calls=[];registered=[];tick=[0.];external_claim=None
         cards=[dict(uuid='gpu0',index=0),dict(uuid='gpu1',index=1)]
         external=os.getppid()
         def nvml(_):
@@ -34,6 +34,13 @@ def exercise(xml,scenario="pass"):
                 calls.append(cmd)
                 if cmd[:2]==['bash','linux-env/scripts/collect_sim.sh']:
                     assert (out/'external-graphics-baseline.json').exists(),'Baseline must precede runtime launch'
+                    fd=int(kw['env']['SOARM_INSTANCE_CLAIM_FD']);assert kw['pass_fds']==(fd,)
+                    helper=folder.parent/'collect/instance_claim.sh'
+                    subprocess.run(['bash','-c','source "$1"; claim_collection_instance "$2"','bash',str(helper),str(instance)],env=kw['env'],pass_fds=(fd,),check=True)
+                    from run_smoke import InstanceClaim
+                    try:other=InstanceClaim(instance)
+                    except RuntimeError:pass
+                    else:other.close();raise AssertionError('Owner did not hold exclusive instance claim')
                     for name in ('isaacsim-soarm101.pid','control.pid'):
                         path=instance/name
                         start(path,instance/(name+'.log'),[sys.executable,'-c','import time;time.sleep(120)']);paths.append(path)
@@ -48,6 +55,7 @@ def exercise(xml,scenario="pass"):
             def wait(self,timeout=None):self.returncode=0;return 0
         def clean(cmd,**kw):
             assert cmd==['bash','linux-env/scripts/collect_sim.sh','down','2']
+            fd=int(kw['env']['SOARM_INSTANCE_CLAIM_FD']);assert kw['pass_fds']==(fd,)
             for path in reversed(paths):stop(path)
             paths.clear()
             return SimpleNamespace(returncode=0)
@@ -56,15 +64,22 @@ def exercise(xml,scenario="pass"):
         fake_time=SimpleNamespace(time=time.time,time_ns=time.time_ns,strftime=time.strftime,gmtime=time.gmtime,monotonic=monotonic,sleep=lambda _:None)
         deadline=(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(minutes=20)).strftime('%Y-%m-%dT%H:%M:%SZ')
         argv=[str(folder/'run_native_replay_window.py'),'--out',str(out),'--stop-by-utc',deadline,'--matched-reset-qualification','--bank',str(base/'bank'),'--bank-sha256','fixture','--reset-collector-root',str(repo)]
+        if scenario=='occupied-instance':
+            path=instance/'control.pid'
+            start(path,instance/'prior-control.log',[sys.executable,'-c','import time;time.sleep(120)']);paths.append(path)
+        if scenario=='claimed-instance':
+            from run_smoke import InstanceClaim
+            external_claim=InstanceClaim(instance)
         try:
-            with mock.patch.object(owner,'REPO',repo),mock.patch.object(owner,'qualified_host',return_value=dict(root=str(host))),mock.patch.object(owner,'subprocess',fake_subprocess),mock.patch.object(owner,'time',fake_time),mock.patch.object(native_bank,'load_bank',return_value=([dict(seed=530000+i) for i in range(5)],'seen-training-home')),mock.patch.object(matched_reset,'validate_collector_root'),mock.patch.object(gpu_device,'inventory',return_value=cards),mock.patch.object(nvml_processes,'sample',side_effect=nvml),mock.patch.object(sys,'argv',argv):
+            with mock.patch.object(owner,'REPO',repo),mock.patch.object(owner,'preflight_sources',return_value={'run_episodes.py':'fixture'}),mock.patch.object(owner,'qualified_host',return_value=dict(root=str(host))),mock.patch.object(owner,'subprocess',fake_subprocess),mock.patch.object(owner,'time',fake_time),mock.patch.object(native_bank,'load_bank',return_value=([dict(seed=530000+i) for i in range(5)],'seen-training-home')),mock.patch.object(matched_reset,'validate_collector_root'),mock.patch.object(gpu_device,'inventory',return_value=cards),mock.patch.object(nvml_processes,'sample',side_effect=nvml),mock.patch.object(sys,'argv',argv):
                 error=None
                 try:owner.main()
                 except RuntimeError as failure:
                     if scenario=='pass':raise
                     error=str(failure)
             ledger=json.loads((out/'window-ledger.json').read_text())
-            assert ledger['cleanup_exit_code']==0 and ledger['stopped_utc'] and not paths
+            assert ledger['cleanup_exit_code']==0 and ledger['stopped_utc']
+            assert not paths or scenario=='occupied-instance'
             samplefile=out/'gpu-memory.jsonl'
             samples=[json.loads(l) for l in samplefile.read_text().splitlines()] if samplefile.exists() else []
             if scenario=='pass':
@@ -75,14 +90,22 @@ def exercise(xml,scenario="pass"):
                 assert len(calls)==2
             elif scenario=='prelaunch-compute':
                 assert ledger['status']=='stopped-with-error' and 'before launch' in error and not calls
+            elif scenario in ('occupied-instance','claimed-instance'):
+                assert ledger['status']=='stopped-with-error' and not calls
+                assert ledger['cleanup_skipped_no_owned_launch'] is True
+                if scenario=='occupied-instance':
+                    from managed_process import verified
+                    assert verified(paths[0]) is not None,'Pre-existing process was stopped'
+                else:assert 'already claimed' in error
             else:
                 assert scenario=='late-graphics' and ledger['status']=='stopped-with-error'
                 assert 'unverified for3samples' in error and len(calls)==2
                 assert sum('audit_error' in s for s in samples)==3
             assert 'torch' not in sys.modules,'Owner CPU preflight must not import model/CUDA'
-            print(json.dumps(dict(status='PASS',scenario=scenario,entrypoint=str(folder/'run_native_replay_window.py'),scope='actual owner CLI lifecycle; fake Kit/collector/NVML, no model/GPU',samples=len(samples),baseline_before_launch=scenario!='prelaunch-compute',cleanup=0,torch_imported=False)))
+            print(json.dumps(dict(status='PASS',scenario=scenario,entrypoint=str(folder/'run_native_replay_window.py'),scope='actual owner CLI lifecycle; fake Kit/collector/NVML, no model/GPU',samples=len(samples),baseline_before_launch=scenario in ('pass','late-graphics'),cleanup=0,torch_imported=False)))
         finally:
             for path in reversed(paths):stop(path)
+            if external_claim is not None:external_claim.close()
 
 class OwnerEntrypointTests(unittest.TestCase):
     def run_scenario(self,scenario):
@@ -94,6 +117,8 @@ class OwnerEntrypointTests(unittest.TestCase):
     def test_clean_interpreter_actual_owner_lifecycle(self):self.run_scenario('pass')
     def test_prelaunch_compute_refusal_still_records_stop_and_cleanup(self):self.run_scenario('prelaunch-compute')
     def test_new_graphics_after_launch_refuses_three_times_and_cleans(self):self.run_scenario('late-graphics')
+    def test_preexisting_managed_process_survives_refused_window(self):self.run_scenario('occupied-instance')
+    def test_preexisting_instance_claim_survives_refused_window(self):self.run_scenario('claimed-instance')
 
 if __name__=='__main__':
     if len(sys.argv)>1 and sys.argv[1]=='--exercise':exercise(sys.argv[2],sys.argv[3] if len(sys.argv)>3 else 'pass')

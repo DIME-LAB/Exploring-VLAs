@@ -3,7 +3,7 @@ from pathlib import Path
 import argparse,datetime,hashlib,json,os,signal,subprocess,time,shlex
 from checkpoint_contract import require_handoff,require_processor_proof
 REPO=Path(__file__).resolve().parents[3]
-from native_environment import qualified_host,policy_python
+from native_environment import qualified_host,policy_python,preflight_sources,require_preflight_sources,require_rpc_sources
 def policy_plan(args):
  modes=(args.cadence_diagnostic,args.codec_diagnostic,args.replacement_diagnostic,args.memorisation_diagnostic,args.matched_reset_diagnostic)
  if sum(modes)>1:raise ValueError('Select only one native diagnostic')
@@ -20,7 +20,7 @@ def policy_plan(args):
  else:settings=[('attempt-01',10,True,'weighted_average')]
  return [dict(name=name,cadence=cadence,rtc=rtc,aggregation=aggregation,codec=args.codec_diagnostic) for name,cadence,rtc,aggregation in settings]
 def main():
- p=argparse.ArgumentParser();p.add_argument('--out',type=Path,required=True);p.add_argument('--fixture',type=Path);p.add_argument('--fixture-sha256');p.add_argument('--checkpoint',type=Path);p.add_argument('--weights-sha256');p.add_argument('--bank',type=Path);p.add_argument('--bank-sha256');p.add_argument('--cadence-diagnostic',action='store_true');p.add_argument('--stop-by-utc',required=True);p.add_argument('--codec-diagnostic',action='store_true');p.add_argument('--replacement-diagnostic',action='store_true');p.add_argument('--memorisation-diagnostic',action='store_true');p.add_argument('--matched-reset-diagnostic',action='store_true');p.add_argument('--matched-reset-qualification',action='store_true');p.add_argument('--matched-reset-arms',choices=('both','default','whole50'),default='both');p.add_argument('--bank-offset',type=int,default=0);p.add_argument('--bank-count',type=int);p.add_argument('--bootstrap-control',type=Path);p.add_argument('--reset-collector-root',type=Path);p.add_argument('--reset-qualification',type=Path);p.add_argument('--cpu-rpc-proof',type=Path);p.add_argument('--source-preflight-proof',type=Path);p.add_argument('--best-replacement-cadence',type=int,choices=(10,25,50));p.add_argument('--replay-commands',choices=('clean','executed','both'),default='both');p.add_argument('--capture-home-checks',action='store_true');p.add_argument('--policy-python',type=Path);p.add_argument('--processor-proof',type=Path);p.add_argument('--checkpoint-handoff',type=Path);p.add_argument('--replacement-selection',type=Path);a=p.parse_args();plan=policy_plan(a);guarded=a.cadence_diagnostic or a.codec_diagnostic or a.replacement_diagnostic or a.memorisation_diagnostic or a.matched_reset_diagnostic or a.matched_reset_qualification;host=qualified_host(REPO);HOST=Path(host['root']);interpreter=policy_python(host,a.policy_python) if a.checkpoint else None;root=a.out.resolve();assert root.is_relative_to(HOST/'eval/runs') and not root.exists()
+ p=argparse.ArgumentParser();p.add_argument('--out',type=Path,required=True);p.add_argument('--fixture',type=Path);p.add_argument('--fixture-sha256');p.add_argument('--checkpoint',type=Path);p.add_argument('--weights-sha256');p.add_argument('--bank',type=Path);p.add_argument('--bank-sha256');p.add_argument('--cadence-diagnostic',action='store_true');p.add_argument('--stop-by-utc',required=True);p.add_argument('--codec-diagnostic',action='store_true');p.add_argument('--replacement-diagnostic',action='store_true');p.add_argument('--memorisation-diagnostic',action='store_true');p.add_argument('--matched-reset-diagnostic',action='store_true');p.add_argument('--matched-reset-qualification',action='store_true');p.add_argument('--matched-reset-arms',choices=('both','default','whole50'),default='both');p.add_argument('--bank-offset',type=int,default=0);p.add_argument('--bank-count',type=int);p.add_argument('--bootstrap-control',type=Path);p.add_argument('--reset-collector-root',type=Path);p.add_argument('--reset-qualification',type=Path);p.add_argument('--cpu-rpc-proof',type=Path);p.add_argument('--source-preflight-proof',type=Path);p.add_argument('--best-replacement-cadence',type=int,choices=(10,25,50));p.add_argument('--replay-commands',choices=('clean','executed','both'),default='both');p.add_argument('--capture-home-checks',action='store_true');p.add_argument('--policy-python',type=Path);p.add_argument('--processor-proof',type=Path);p.add_argument('--checkpoint-handoff',type=Path);p.add_argument('--replacement-selection',type=Path);a=p.parse_args();plan=policy_plan(a);guarded=a.cadence_diagnostic or a.codec_diagnostic or a.replacement_diagnostic or a.memorisation_diagnostic or a.matched_reset_diagnostic or a.matched_reset_qualification;host=qualified_host(REPO);support=preflight_sources(REPO);HOST=Path(host['root']);interpreter=policy_python(host,a.policy_python) if a.checkpoint else None;root=a.out.resolve();assert root.is_relative_to(HOST/'eval/runs') and not root.exists()
  bank_rows=[];selected_rows=[];suite=None
  if a.checkpoint or a.matched_reset_qualification:
   from native_bank import load_bank,select_policy_rows
@@ -58,7 +58,7 @@ def main():
   assert a.reset_qualification
   reset_qualification=require_qualification(a.reset_qualification,host,a.reset_collector_root,a.bank_sha256,Path(__file__).parent,suite=suite,reference_sha256=bank_rows[0]['reference_run_sha256'])
   assert a.cpu_rpc_proof and a.source_preflight_proof
-  cpu=json.loads(a.cpu_rpc_proof.read_text());preflight=json.loads(a.source_preflight_proof.read_text())
+  cpu=json.loads(a.cpu_rpc_proof.read_text());preflight=json.loads(a.source_preflight_proof.read_text());require_preflight_sources(preflight,REPO);require_rpc_sources(cpu,REPO)
   assert cpu['status']=='PASS' and cpu['cuda_visible_devices']=='' and cpu['rtc_enabled'] and cpu['prefix_steps']==[0,40] and Path(cpu['checkpoint']).resolve()==a.checkpoint.resolve()
   assert preflight['status']=='PASS' and Path(preflight['checkpoint']).resolve()==a.checkpoint.resolve() and preflight['weights_sha256']==a.weights_sha256 and preflight['bank_sha256']==a.bank_sha256 and preflight['suite']==suite and preflight['seeds']==[r['seed'] for r in selected_rows]
   reset_qualification['cpu_rpc_proof']=dict(path=str(a.cpu_rpc_proof),sha256=hashlib.sha256(a.cpu_rpc_proof.read_bytes()).hexdigest())
@@ -84,6 +84,7 @@ def main():
  LOOPBACK_SHA256='d1247d7edefc8f507f43ff15c129aeb5754e70bd7fd34bf4022966c879482a91'
  assert hashlib.sha256((REPO/'linux-env/cyclonedds.xml').read_bytes()).hexdigest()==LOOPBACK_SHA256
  instance=HOST/'eval/runtime/instance92';env=dict(os.environ,CUDA_VISIBLE_DEVICES='',SOARM_COLLECTION_ROOT=str(HOST),SOARM_INSTANCE_ROOT=str(instance),ISAACSIM_GPU='0',ROS_DOMAIN_ID='92',SOARM_KIT_MCP_PORT='8781',RMW_IMPLEMENTATION='rmw_cyclonedds_cpp',CYCLONEDDS_URI=f'file://{REPO}/linux-env/cyclonedds.xml',PYTHONDONTWRITEBYTECODE='1',OMP_NUM_THREADS='1',OPENBLAS_NUM_THREADS='1',MKL_NUM_THREADS='1')
+ env.pop('SOARM_INSTANCE_CLAIM_FD',None)
  if interpreter:env['SOARM_EVAL_POLICY_PYTHON']=interpreter
  host_source=(' && source '+shlex.quote(str(REPO/'linux-env/scripts/collect'/host['environment']))) if host.get('environment') else ''
  if guarded:env['SOARM_EVAL_TORCH_MEMORY_GIB']='3.0'
@@ -97,10 +98,10 @@ def main():
  root.mkdir(parents=True)
  from native_gpu_audit import RegisteredGPUAudit
  registered_audit=RegisteredGPUAudit(instance,root/'gpu-ownership-registry.json') if guarded else None
- ledger=dict(external_graphics_baseline=None,bootstrap_control_proof=bootstrap_control_proof,suite=suite,selected_seeds=[r['seed'] for r in selected_rows],bank_offset=a.bank_offset,bank_count=len(selected_rows) if selected_rows else None,bootstrap_control=str(a.bootstrap_control) if a.bootstrap_control else None,bank=str(a.bank) if a.bank else None,bank_sha256=a.bank_sha256,reset_collector_root=str(a.reset_collector_root) if a.reset_collector_root else None,interpreter_metadata=interpreter_metadata,policy_python_sha256=hashlib.sha256(Path(interpreter).read_bytes()).hexdigest() if interpreter else None,reset_qualification=reset_qualification,host_profile=host,policy_python=interpreter,processor_proof=processor_proof,checkpoint_handoff=handoff,replacement_selection=selection,gpu_budget_gib=7 if guarded else None,global_memory_ceiling=.79 if guarded else None,started_utc=time.strftime('%FT%TZ',time.gmtime()),kind='UNSCORED matched collector reset qualification' if a.matched_reset_qualification else ('PRIMARY native held-tick heldout-bank-v2' if suite=='heldout-bank-v2' else 'DIAGNOSTIC matched collector reset seen-layout') if a.matched_reset_diagnostic else 'DIAGNOSTIC native memorisation default and replacement' if a.memorisation_diagnostic else 'DIAGNOSTIC native replacement-only RTC off' if a.replacement_diagnostic else 'DIAGNOSTIC native codec held-filler' if a.codec_diagnostic else 'DIAGNOSTIC native cadence RTC off' if a.cadence_diagnostic else 'PRIMARY native held-tick training-home policy test' if a.checkpoint else 'native held-tick actuation qualification',root=str(root),status='starting',arms=[],source_sha256={name:hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in ('run_native_replay_window.py','native_replay.py','held_tick.py','phase3_metrics.py','native_policy.py','native_policy_client.py','native_policy_robot.py','native_policy_server.py','codec_stream.py','checkpoint_contract.py','select_replacement.py','native_environment.py','native_gpu_audit.py','native_home_capture.py','matched_reset.py','matched_reset_client.py','native_bank.py','qualify_matched_reset.py')})
+ ledger=dict(support_source_sha256=support,external_graphics_baseline=None,bootstrap_control_proof=bootstrap_control_proof,suite=suite,selected_seeds=[r['seed'] for r in selected_rows],bank_offset=a.bank_offset,bank_count=len(selected_rows) if selected_rows else None,bootstrap_control=str(a.bootstrap_control) if a.bootstrap_control else None,bank=str(a.bank) if a.bank else None,bank_sha256=a.bank_sha256,reset_collector_root=str(a.reset_collector_root) if a.reset_collector_root else None,interpreter_metadata=interpreter_metadata,policy_python_sha256=hashlib.sha256(Path(interpreter).read_bytes()).hexdigest() if interpreter else None,reset_qualification=reset_qualification,host_profile=host,policy_python=interpreter,processor_proof=processor_proof,checkpoint_handoff=handoff,replacement_selection=selection,gpu_budget_gib=7 if guarded else None,global_memory_ceiling=.79 if guarded else None,started_utc=time.strftime('%FT%TZ',time.gmtime()),kind='UNSCORED matched collector reset qualification' if a.matched_reset_qualification else ('PRIMARY native held-tick heldout-bank-v2' if suite=='heldout-bank-v2' else 'DIAGNOSTIC matched collector reset seen-layout') if a.matched_reset_diagnostic else 'DIAGNOSTIC native memorisation default and replacement' if a.memorisation_diagnostic else 'DIAGNOSTIC native replacement-only RTC off' if a.replacement_diagnostic else 'DIAGNOSTIC native codec held-filler' if a.codec_diagnostic else 'DIAGNOSTIC native cadence RTC off' if a.cadence_diagnostic else 'PRIMARY native held-tick training-home policy test' if a.checkpoint else 'native held-tick actuation qualification',root=str(root),status='starting',arms=[],source_sha256={name:hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in ('run_native_replay_window.py','native_replay.py','held_tick.py','phase3_metrics.py','native_policy.py','native_policy_client.py','native_policy_robot.py','native_policy_server.py','codec_stream.py','checkpoint_contract.py','select_replacement.py','native_environment.py','native_gpu_audit.py','native_home_capture.py','matched_reset.py','matched_reset_client.py','native_bank.py','qualify_matched_reset.py')})
  def save():
   tmp=root/'window-ledger.tmp';tmp.write_text(json.dumps(ledger,indent=2)+'\n');os.replace(tmp,root/'window-ledger.json')
- last_gpu_sample=[0.];bad_samples=[0]
+ last_gpu_sample=[0.];bad_samples=[0];instance_claim=None;runtime_started=False
  def memory_guard(logname):
   if not guarded or time.monotonic()-last_gpu_sample[0]<1:return
   last_gpu_sample[0]=time.monotonic()
@@ -123,7 +124,9 @@ def main():
   if bad_samples[0]>=3:raise RuntimeError('Owned GPU attribution unverified for3samples')
  def run(cmd,logname):
   with (root/logname).open('w') as log:
-   proc=subprocess.Popen(cmd,cwd=REPO,env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True);ledger['active_pid']=proc.pid;save()
+   child_env=dict(env);inherited=()
+   if logname=='launch.log':child_env['SOARM_INSTANCE_CLAIM_FD']=str(instance_claim.fd);inherited=(instance_claim.fd,)
+   proc=subprocess.Popen(cmd,cwd=REPO,env=child_env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True,pass_fds=inherited);ledger['active_pid']=proc.pid;save()
    try:
     while proc.poll() is None:
      if time.time()>deadline:raise TimeoutError('Native qualification deadline')
@@ -138,11 +141,20 @@ def main():
     ledger.pop('active_pid',None);save()
  save()
  try:
+  from run_smoke import InstanceClaim
+  from managed_process import verified
+  def require_idle():
+   for name in ('isaacsim-soarm101.pid','control.pid'):
+    if verified(instance/name) is not None:raise RuntimeError('Refusing existing managed instance before launch')
+  require_idle()
+  instance_claim=InstanceClaim(instance);require_idle()
+  ledger['instance_claim']=dict(path=str(instance/'instance.lock'),held_through_cleanup=True);save()
   if guarded:
    from gpu_device import inventory
    from nvml_processes import sample
    cards=inventory();expected=next(c['uuid'] for c in cards if c['index']==0)
    ledger['external_graphics_baseline']=registered_audit.freeze_external(expected,cards,sample);save()
+  runtime_started=True
   assert run(['bash','linux-env/scripts/collect_sim.sh','up','2'],'launch.log')==0,'Private runtime launch failed'
   if a.matched_reset_qualification:
    argv=['python3','-u',str(REPO/'linux-env/scripts/eval/qualify_matched_reset.py'),'--bank',str(a.bank),'--bank-sha256',a.bank_sha256,'--collector-root',str(a.reset_collector_root),'--out',str(root/'qualification')]+(['--bootstrap-control',str(a.bootstrap_control)] if a.bootstrap_control else [])
@@ -179,7 +191,19 @@ def main():
  except BaseException as error:
   ledger.update(status='stopped-with-error',error=f'{type(error).__name__}: {error}');raise
  finally:
-  with (root/'cleanup.log').open('w') as log:stopped=subprocess.run(['bash','linux-env/scripts/collect_sim.sh','down','2'],cwd=REPO,env=env,stdout=log,stderr=subprocess.STDOUT,timeout=90)
-  if registered_audit is not None:registered_audit.close()
-  ledger.update(cleanup_exit_code=stopped.returncode,stopped_utc=time.strftime('%FT%TZ',time.gmtime()));save();print(json.dumps(dict(event='GPU-window-stopped',status=ledger['status'],stopped_utc=ledger['stopped_utc'],cleanup_exit_code=stopped.returncode)),flush=True)
+  cleanup_code=0
+  try:
+   if runtime_started:
+    cleanup_env=dict(env,SOARM_INSTANCE_CLAIM_FD=str(instance_claim.fd))
+    with (root/'cleanup.log').open('w') as log:stopped=subprocess.run(['bash','linux-env/scripts/collect_sim.sh','down','2'],cwd=REPO,env=cleanup_env,stdout=log,stderr=subprocess.STDOUT,timeout=90,pass_fds=(instance_claim.fd,))
+    cleanup_code=stopped.returncode
+   else:ledger['cleanup_skipped_no_owned_launch']=True
+  except BaseException as error:
+   cleanup_code=1;ledger['cleanup_error']=f'{type(error).__name__}: {error}'
+   raise
+  finally:
+   if registered_audit is not None:registered_audit.close()
+   if instance_claim is not None:instance_claim.close()
+   if cleanup_code!=0:ledger.update(status_before_cleanup=ledger['status'],status='cleanup-failed')
+   ledger.update(cleanup_exit_code=cleanup_code,stopped_utc=time.strftime('%FT%TZ',time.gmtime()));save();print(json.dumps(dict(event='GPU-window-stopped',status=ledger['status'],stopped_utc=ledger['stopped_utc'],cleanup_exit_code=cleanup_code)),flush=True)
 if __name__=='__main__':main()

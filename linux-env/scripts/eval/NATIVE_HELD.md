@@ -42,9 +42,9 @@ The parent uses the existing StepGeneration.cancel boundary protocol around matc
 Matched-reset source parity uses the lead-approved physical tolerances: joint max0.01degree, position max0.1mm, LEGO quaternion component1e-4 with sign aliasing, and cup geodesic rotation0.1degree, plus exact seeded cup-sampler output. Every reset records per-joint, per-body position and orientation errors before enforcing the gate. The initial uniform quaternion-component guard rejected a non-target cup's0.0796degree settling difference (maximum collision-corner displacement0.0817mm); that failed unscored attempt remains archived. The approved cup-specific rule requires a new five-home live qualification before any matched-reset policy score.
 
 
-For dual, launch the owner with system python3 from the private eval worktree. --policy-python is mandatory for policy windows and names the qualified wrapper; the owner records its hash and a CUDA-disabled backend identity probe. --checkpoint must be the staging receipt's published_model, not its original RTX source path. --reset-qualification takes the completed window ROOT directory, not window-ledger.json. --processor-proof is required for every custom saved processor, including memorisation B and the robustness crop checkpoints. A refused preflight does not create the requested --out. All START/STOP announcements remain required.
+For dual, launch the owner with system python3 from the private eval worktree. --policy-python is mandatory for policy windows and names the qualified wrapper; the owner records its hash and a CUDA-disabled backend identity probe. --checkpoint must be the staging receipt's published_model, not its original RTX source path. --reset-qualification takes the completed window ROOT directory, not window-ledger.json. --processor-proof is required for every custom saved processor, including memorisation B and the robustness crop checkpoints. A model/source preflight refusal creates no requested --out. Later ownership/baseline refusals are archived in a new output root with a STOP ledger and skip down until this window has attempted up; never reuse that root. All START/STOP announcements remain required.
 
-Size the window from measured throughput and include preparation: old standalone RTX five-seen models averaged about98–127wallseconds per45simsecond episode; dual and matched reset add work, so use an initial40minute per-model window for both arms and report actual episode wall times. The owner reserves three minutes for cleanup and fails at the deadline; watchdog maxima are safety limits, not expected durations. If the allocation is insufficient, retain attempted outcomes and report an incomplete matrix; do not silently retry or substitute seeds. The held-native path guarantees simulated timing, not real-time wall throughput.
+Size windows from measured dual matched-reset throughput: roughly188–200wallseconds per45simsecond default episode and140–150 for whole50, plus startup, warmup and reset work. Use40minutes for both seen arms; report actual episode wall times. The owner reserves three minutes for cleanup and fails at the deadline. Retain interrupted outcomes rather than silently retrying or substituting seeds. Held-native timing is in simulation time; it does not establish real-time wall throughput.
 
 The sealed native bank loader supports both seen-training-home (530000–530004) and heldout-bank-v2 (900000–900029). It binds each row to the original receipt and reference run SHA; held-out provenance must name the original i3-b00 baseline, exact collector/helper source pins and finalization. The held-out expected prepared state is episode_start_physical, after the six verification ticks; it is not the earlier initial_physical snapshot. There are no held-out training frames: training_first_frame_offset_ns is null, and the one-tick bootstrap is inherited from a bound same-source seen qualification.
 
@@ -58,14 +58,14 @@ Operator roots on dual:
 - Seen bank: /mnt/a4500-backup/exploring-vlas/eval/training-home-v1, SHA dbae9bdc10cc5755d6aeba9a6038de3b778614572c6950afa5d258f61502b2d6
 - Held-out bank: /mnt/a4500-backup/exploring-vlas/eval/scene-bank-v2, SHA cedd3f3db23170abfa9f53069c7f4f0c9cab11e0686ed0746a1024e3b4ec1fe3
 - Qualified policy interpreter wrapper: /mnt/a4500-backup/exploring-vlas/eval/prep33/dual-policy-python.sh
-- Checkpoint010000: /mnt/a4500-backup/exploring-vlas/eval/checkpoints/recorder-crf18-crop/010000/pretrained_model, weights3ca674da34f8b818adc145219c60222f1fc0ac4fa5ff45e98f74217633bdb608
-- Handoff/crop proof: /mnt/a4500-backup/exploring-vlas/eval/prep33/reset-r010000-{handoff,crop-proof}.json
-- CPU model RPC: /mnt/a4500-backup/exploring-vlas/eval/runs/reset-cpu-r010000/result.json
+- Checkpoint020000: /mnt/a4500-backup/exploring-vlas/eval/checkpoints/recorder-crf18-crop/020000/pretrained_model, weightse8a8a423069380ed252428d1f2b1b0d28db0f3774180436de47f2fde76c46c91
+- Handoff/crop proof: /mnt/a4500-backup/exploring-vlas/eval/prep33/reset-r020000-{handoff,crop-proof}.json
+- CPU model RPC: /mnt/a4500-backup/exploring-vlas/eval/runs/reset-cpu-r020000-v8-final/result.json
 - Planned new qualifier roots: /mnt/a4500-backup/exploring-vlas/eval/runs/native-reset-qual-v8-seen and native-reset-qual-v8-bank2. These are PLANNED paths until each actual summary/ledger and cleanup gate passes; do not infer readiness from the name.
 
 The six integration files (native_bank.py, matched_reset.py, matched_reset_client.py, qualify_matched_reset.py, native_policy.py and run_native_replay_window.py) stay frozen after live qualification through every checkpoint window that cites it. The qualification consumer automatically checks the four reset helpers; the owner and policy entrypoint are additionally frozen operationally. The new native_gpu_audit.py and the other eleven files in each window source_sha256 ledger are also frozen, making eighteen runtime files. A bank or source change needs a new qualification, not a stale-gate override. Checkpoint watching and full-folder SHA copying are CPU-only. Each new robustness checkpoint gets seen-five x both arms first. Between fixed held-out chunks, evaluate the newest staged checkpoint's seen-five arms; choose the most promising checkpoint by placements then grasps, breaking checkpoint ties toward the later save and arm ties toward default. Deferred cells stay pending, not failures. Main held-out results remain separate from seen selection and from earlier bank-v1 OOD/defective-actuation scores.
 
-New-source qualification commands below run ON DUAL from system Python, one window at a time. Announce START to the lead before each; read its actual window-ledger.json and send STOP after cleanup. The owner sets domain92/loopback/GPU0 isolation and reserves three minutes for cleanup. No model or --policy-python is needed for these unscored windows. The second command is valid only after the first window has cleanly completed:
+New-source qualification commands below run ON DUAL from system Python, one window at a time. Announce START to the lead before each; read its actual window-ledger.json and send STOP after cleanup. The owner refuses any already-running managed instance, acquires the collector InstanceClaim for the whole window and passes its inherited descriptor only to up/down. A pre-launch refusal skips down and preserves the existing instance. It sets domain92/loopback/GPU0 isolation and reserves three minutes for cleanup. No model or --policy-python is needed for these unscored windows. The second command is valid only after the first window has cleanly completed:
 ```bash
 EVAL_NATIVE_REPO=/mnt/a4500-backup/exploring-vlas/eval-native-bank-next
 EVAL_OUTPUT_ROOT=/mnt/a4500-backup/exploring-vlas/eval
@@ -87,41 +87,41 @@ python3 "$EVAL_NATIVE_REPO/linux-env/scripts/eval/run_native_replay_window.py" \
 ```
 The control is checked before Kit launch and again inside the qualifier; its bank SHA is pinned to dbae9bdc... . Bank body files retain the sealed initial_physical poses, which differ from the prepared reference by at most0.18micrometres in the current bank; the worker still checks the full episode_start_physical at the approved pose tolerances. Actual source errors remain per-reset output, not an assumed bound for new runs.
 
-After the seen qualification passes, the010000 seen window uses --matched-reset-diagnostic, --reset-qualification "$EVAL_OUTPUT_ROOT/runs/native-reset-qual-v8-seen", the full published checkpoint/handoff/crop proof and CPU-RPC/source-preflight paths listed above, plus --policy-python and --stop-by-utc. Leave --matched-reset-arms at both and omit --bank-count/--bank-offset for the full seen five. For a held-out chunk use the bank2 qualification, --matched-reset-arms default (or whole50), --bank-offset 0 (or15) and --bank-count 15. The matching010000 source preflights are reset-pre-r010000/preflight.json for seen and reset-pre-r010000-held0/preflight.json or reset-pre-r010000-held1/preflight.json for held-out chunks. These preflights and the CPU-RPC proof are PASS CPU-only; they do not stand in for the new live qualifiers.
+After the seen qualification passes, the020000 seen window uses --matched-reset-diagnostic, --reset-qualification "$EVAL_OUTPUT_ROOT/runs/native-reset-qual-v8-seen", the full published checkpoint/handoff/crop proof and CPU-RPC/source-preflight paths listed above, plus --policy-python and --stop-by-utc. Leave --matched-reset-arms at both and omit --bank-count/--bank-offset for the full seen five. For a held-out chunk use the bank2 qualification, --matched-reset-arms default (or whole50), --bank-offset 0 (or15) and --bank-count 15. The matching020000 source preflights are reset-pre-r020000-bank-v8-final-seen/preflight.json for seen and reset-pre-r020000-bank-v8-final-held0/preflight.json or reset-pre-r020000-bank-v8-final-held1/preflight.json for held-out chunks. These preflights and the CPU-RPC proof are PASS CPU-only; they do not stand in for the new live qualifiers.
 
-Complete010000 policy examples: seen scoring requires only the clean seen qualification; held-out scoring additionally requires the clean all30 bank2 qualification. A failed held-out qualification does not invalidate the independently qualified seen path. Only one window uses instance92 at a time. Announce every START/STOP. The seen-five both-arm window allows40minutes; a held-out15 allows65minutes from the measured dual matched-reset throughput (default about198wallseconds/episode, whole50about148, plus startup/warmup/cleanup). The safety deadline is longer than expected work, not permission to ignore the newest-checkpoint queue. Between chunks, run the newest staged checkpoint's seen-five arms.
+Complete020000 policy examples: seen scoring requires only the clean seen qualification; held-out scoring additionally requires the clean all30 bank2 qualification. A failed held-out qualification does not invalidate the independently qualified seen path. Only one window uses instance92 at a time. Announce every START/STOP. The seen-five both-arm window allows40minutes; a held-out15 allows65minutes from the measured dual matched-reset throughput (default about198wallseconds/episode, whole50about148, plus startup/warmup/cleanup). The safety deadline is longer than expected work, not permission to ignore the newest-checkpoint queue. Between chunks, run the newest staged checkpoint's seen-five arms.
 ```bash
 EVAL_NATIVE_REPO=/mnt/a4500-backup/exploring-vlas/eval-native-bank-next
 EVAL_OUTPUT_ROOT=/mnt/a4500-backup/exploring-vlas/eval
 EVAL_RESET_COLLECTOR=/mnt/a4500-backup/exploring-vlas/eval-bank-bf7336d
-EVAL_CHECKPOINT="$EVAL_OUTPUT_ROOT/checkpoints/recorder-crf18-crop/010000/pretrained_model"
+EVAL_CHECKPOINT="$EVAL_OUTPUT_ROOT/checkpoints/recorder-crf18-crop/020000/pretrained_model"
 # Seen-five, both arms:
 python3 "$EVAL_NATIVE_REPO/linux-env/scripts/eval/run_native_replay_window.py" \
-  --out "$EVAL_OUTPUT_ROOT/runs/native-reset-r010000-v2" \
+  --out "$EVAL_OUTPUT_ROOT/runs/native-reset-r020000-v2" \
   --matched-reset-diagnostic --reset-collector-root "$EVAL_RESET_COLLECTOR" \
   --reset-qualification "$EVAL_OUTPUT_ROOT/runs/native-reset-qual-v8-seen" \
   --checkpoint "$EVAL_CHECKPOINT" \
-  --weights-sha256 3ca674da34f8b818adc145219c60222f1fc0ac4fa5ff45e98f74217633bdb608 \
-  --checkpoint-handoff "$EVAL_OUTPUT_ROOT/prep33/reset-r010000-handoff.json" \
-  --processor-proof "$EVAL_OUTPUT_ROOT/prep33/reset-r010000-crop-proof.json" \
-  --cpu-rpc-proof "$EVAL_OUTPUT_ROOT/runs/reset-cpu-r010000/result.json" \
-  --source-preflight-proof "$EVAL_OUTPUT_ROOT/runs/reset-pre-r010000/preflight.json" \
+  --weights-sha256 e8a8a423069380ed252428d1f2b1b0d28db0f3774180436de47f2fde76c46c91 \
+  --checkpoint-handoff "$EVAL_OUTPUT_ROOT/prep33/reset-r020000-handoff.json" \
+  --processor-proof "$EVAL_OUTPUT_ROOT/prep33/reset-r020000-crop-proof.json" \
+  --cpu-rpc-proof "$EVAL_OUTPUT_ROOT/runs/reset-cpu-r020000-v8-final/result.json" \
+  --source-preflight-proof "$EVAL_OUTPUT_ROOT/runs/reset-pre-r020000-bank-v8-final-seen/preflight.json" \
   --bank "$EVAL_OUTPUT_ROOT/training-home-v1" \
   --bank-sha256 dbae9bdc10cc5755d6aeba9a6038de3b778614572c6950afa5d258f61502b2d6 \
   --policy-python "$EVAL_OUTPUT_ROOT/prep33/dual-policy-python.sh" \
   --stop-by-utc "$(date -u -d '+40 minutes' +%Y-%m-%dT%H:%M:%SZ)"
 # After its clean STOP and checkpoint/arm selection, a separate held-out chunk0:
 python3 "$EVAL_NATIVE_REPO/linux-env/scripts/eval/run_native_replay_window.py" \
-  --out "$EVAL_OUTPUT_ROOT/runs/native-v2-r010000-d0" \
+  --out "$EVAL_OUTPUT_ROOT/runs/native-v2-r020000-d0" \
   --matched-reset-diagnostic --matched-reset-arms default --bank-offset 0 --bank-count 15 \
   --reset-collector-root "$EVAL_RESET_COLLECTOR" \
   --reset-qualification "$EVAL_OUTPUT_ROOT/runs/native-reset-qual-v8-bank2" \
   --checkpoint "$EVAL_CHECKPOINT" \
-  --weights-sha256 3ca674da34f8b818adc145219c60222f1fc0ac4fa5ff45e98f74217633bdb608 \
-  --checkpoint-handoff "$EVAL_OUTPUT_ROOT/prep33/reset-r010000-handoff.json" \
-  --processor-proof "$EVAL_OUTPUT_ROOT/prep33/reset-r010000-crop-proof.json" \
-  --cpu-rpc-proof "$EVAL_OUTPUT_ROOT/runs/reset-cpu-r010000/result.json" \
-  --source-preflight-proof "$EVAL_OUTPUT_ROOT/runs/reset-pre-r010000-held0/preflight.json" \
+  --weights-sha256 e8a8a423069380ed252428d1f2b1b0d28db0f3774180436de47f2fde76c46c91 \
+  --checkpoint-handoff "$EVAL_OUTPUT_ROOT/prep33/reset-r020000-handoff.json" \
+  --processor-proof "$EVAL_OUTPUT_ROOT/prep33/reset-r020000-crop-proof.json" \
+  --cpu-rpc-proof "$EVAL_OUTPUT_ROOT/runs/reset-cpu-r020000-v8-final/result.json" \
+  --source-preflight-proof "$EVAL_OUTPUT_ROOT/runs/reset-pre-r020000-bank-v8-final-held0/preflight.json" \
   --bank "$EVAL_OUTPUT_ROOT/scene-bank-v2" \
   --bank-sha256 cedd3f3db23170abfa9f53069c7f4f0c9cab11e0686ed0746a1024e3b4ec1fe3 \
   --policy-python "$EVAL_OUTPUT_ROOT/prep33/dual-policy-python.sh" \
@@ -132,17 +132,21 @@ For chunk1 change the output suffix d0 to d1, --bank-offset to15, and the prefli
 
 The bank-qualification source runs separately from the approved b589f6f/V4 seen-scoring runtime. It requires a fresh seen-five qualification and then an all-30 held-out qualification before held-out policy scores. Completed and interrupted scoring attempts remain separate; neither prior successes nor invalid resets are merged into a fresh attempt.
 
-Before launching its runtime, the owner freezes an external-graphics baseline with PID, process birth, PGID, GPU UUID and API. These rows are explicitly not owned. Only the same pre-existing graphics contexts with unchanged identities are accepted later and excluded from owned memory; their memory still counts toward the global ceiling. A new GPU0 context, a graphics-to-compute transition, or an unregistered descendant of ours on either card is refused. Baseline refusal runs through the same STOP ledger and owned cleanup as a mid-window refusal.
+Before launching its runtime, the owner freezes an external-graphics baseline with PID, process birth, PGID, GPU UUID and API. These rows are explicitly not owned. Only the same pre-existing graphics contexts with unchanged identities are accepted later and excluded from owned memory; their memory still counts toward the global ceiling. A new GPU0 context, a graphics-to-compute transition, or an unregistered descendant of ours on either card is refused. A baseline refusal records STOP and skips down because no owned launch was attempted; partial launches and mid-window refusals clean up only under this window’s held instance claim.
 
 The owner reuses the collector's pidfd OwnedProcesses ledger and verified managed Kit/control receipts to record PID, birth and current PGID BEFORE NVML sampling. Only GPU holders are post-checked; CPU child creation/exit/regrouping does not invalidate stable GPU attribution. Changed GPU-holder identity, missing coverage/memory or any context of ours on GPU1 makes the tick unverified. Other users' GPU1 contexts are ignored. Exited pidfds are pruned, with bounded retries for transient scan errors. Three unverified ticks stop the window; the own7GiB and global79% limits remain. Registry and baseline receipts/digests are logged by the owner, with no dispatch-thread I/O.
 
 The cup rejection sampler reads live world bounds, so resampling a held-out seed in a fresh world does not reproduce a sequentially sealed bank. The held-out worker restores sealed initial_physical bodies through native restore(arm=False), zeros velocities, advances the six sampling-tail ticks and holds the current snapshot. The normal scene two-tick barrier/sync, settle_home(after), velocity reset, six verification ticks/sync and one parent bootstrap follow. It calls neither sampler. Copied cup parameters are sealed provenance, exact_cup_sampler is null and sampler_invocations is0. The held-out protocol is collector-sealed-postsample-v1. Seen layouts retain the full normal sampler and collector-matched-reset-v1. All approved pose tolerances and actual error records remain; the all-30 live qualifier must measure any extra settling before scoring.
 
-CPU preflight uses the actual owner CLI in a clean isolated interpreter with fake Kit/collector/NVML, real owned-process bookkeeping and managed CPU children. It checks successful qualification, pre-launch compute refusal, and a new post-launch graphics context causing three strikes. Each case verifies STOP and owned cleanup without importing Torch. Run on Linux with CUDA hidden and TMPDIR under the backup root:
+CPU preflight uses the actual owner CLI in a clean isolated interpreter with fake Kit/collector/NVML, real owned-process bookkeeping and managed CPU children. It checks successful qualification, pre-launch compute refusal, a new post-launch graphics context causing three strikes, an existing managed process and an already-held instance claim. Each case verifies STOP and owned cleanup without importing Torch. Run on Linux with CUDA hidden and TMPDIR under the backup root:
 ```bash
-CUDA_VISIBLE_DEVICES= TMPDIR=/mnt/a4500-backup/exploring-vlas/eval/tmp \
+CUDA_VISIBLE_DEVICES= PYTHONDONTWRITEBYTECODE=1 TMPDIR=/mnt/a4500-backup/exploring-vlas/eval/tmp \
   python3 -m unittest discover -s "$EVAL_NATIVE_REPO/linux-env/scripts/eval" -p 'test_native*.py' -v
-CUDA_VISIBLE_DEVICES= TMPDIR=/mnt/a4500-backup/exploring-vlas/eval/tmp \
+CUDA_VISIBLE_DEVICES= PYTHONDONTWRITEBYTECODE=1 TMPDIR=/mnt/a4500-backup/exploring-vlas/eval/tmp \
   python3 -m unittest discover -s "$EVAL_NATIVE_REPO/linux-env/scripts/eval" -p test_matched_reset.py -v
 ```
-The 33 native tests and six matched-reset tests prove CPU logic, not a live GPU qualification. The frozen owner ledger lists the 18 intended runtime files; unrelated scratch files do not qualify source.
+The 37 native tests and six matched-reset tests prove CPU logic, not a live GPU qualification. The frozen owner ledger lists the 18 intended runtime files; unrelated scratch files do not qualify source.
+
+The CPU preflight binds seven source hashes, including the collector-side run_episodes.Client pinned to bf7336d. The owner rejects receipts made before any of those files changed and records the support-source hashes beside its18 runtime hashes. Re-run native_policy.py --check-only into a fresh output after source changes. The tracked qualified XML fixture supports clean-checkout CPU tests; private runtime XML must match its d1247d7e SHA. Private setup also requires the qualified MCP and LeRobot dependencies plus the existing Humble build/install links before import/preflight. The source preflight and live qualification prove different gates; neither replaces the other.
+
+The actual CPU RPC proof also records five source hashes covering its smoke, native production client/server/robot and source helper. The owner checks those hashes independently of the source-only preflight. It clears any inherited claim variable before spawning work, reports cleanup failures explicitly and writes STOP even if down raises. Regenerate both proof types after a bound source changes.

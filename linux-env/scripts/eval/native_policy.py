@@ -9,13 +9,13 @@ from collect import mcp
 from held_tick import CollectorTransport,validate_policy_features,validate_policy_requests
 from native_replay import require_environment,validate_collector_cut
 from checkpoint_contract import checkpoint_files
-from native_environment import qualified_host,policy_python
+from native_environment import qualified_host,policy_python,preflight_sources
 from run_episodes import Client
 from phase3_metrics import PhysicalScore
 FEATURES=('shoulder_pan.pos','shoulder_lift.pos','elbow_flex.pos','wrist_flex.pos','wrist_roll.pos','gripper.pos')
 
 def main():
- p=argparse.ArgumentParser();p.add_argument('--out',type=Path,required=True);p.add_argument('--checkpoint',type=Path,required=True);p.add_argument('--weights-sha256',required=True);p.add_argument('--bank',type=Path,required=True);p.add_argument('--bank-sha256',required=True);p.add_argument('--server-port',type=int,default=18092);p.add_argument('--max-actions',type=int,default=1350);p.add_argument('--rtc-off',action='store_true');p.add_argument('--check-only',action='store_true');p.add_argument('--observe-every-actions',type=int,choices=(1,5,10,25,50),default=10);p.add_argument('--evaluation-kind');p.add_argument('--queue-aggregation',choices=('weighted_average','latest_only'),default='weighted_average');p.add_argument('--eval-codec-roundtrip',action='store_true');p.add_argument('--collector-matched-reset',action='store_true');p.add_argument('--reset-collector-root',type=Path);p.add_argument('--bank-offset',type=int,default=0);p.add_argument('--bank-count',type=int);a=p.parse_args();host=qualified_host(REPO);HOST=Path(host['root']);require_environment();core=validate_collector_cut()
+ p=argparse.ArgumentParser();p.add_argument('--out',type=Path,required=True);p.add_argument('--checkpoint',type=Path,required=True);p.add_argument('--weights-sha256',required=True);p.add_argument('--bank',type=Path,required=True);p.add_argument('--bank-sha256',required=True);p.add_argument('--server-port',type=int,default=18092);p.add_argument('--max-actions',type=int,default=1350);p.add_argument('--rtc-off',action='store_true');p.add_argument('--check-only',action='store_true');p.add_argument('--observe-every-actions',type=int,choices=(1,5,10,25,50),default=10);p.add_argument('--evaluation-kind');p.add_argument('--queue-aggregation',choices=('weighted_average','latest_only'),default='weighted_average');p.add_argument('--eval-codec-roundtrip',action='store_true');p.add_argument('--collector-matched-reset',action='store_true');p.add_argument('--reset-collector-root',type=Path);p.add_argument('--bank-offset',type=int,default=0);p.add_argument('--bank-count',type=int);a=p.parse_args();host=qualified_host(REPO);HOST=Path(host['root']);require_environment();core=validate_collector_cut();support=preflight_sources(REPO)
  assert not a.collector_matched_reset or a.reset_collector_root,'Matched reset requires the qualified private collector root'
  assert a.out.resolve().is_relative_to(HOST/'eval/runs') and not a.out.exists();a.out.mkdir();assert a.max_actions==1350
  checkpoint_inventory=checkpoint_files(a.checkpoint)
@@ -27,7 +27,7 @@ def main():
  all_rows,suite=load_bank(a.bank,a.bank_sha256);rows=select_policy_rows(all_rows,suite,a.bank_offset,a.bank_count)
  assert suite!='heldout-bank-v2' or a.collector_matched_reset,'Held-out scoring requires the qualified collector matched reset'
  if a.check_only:
-  proof=dict(checkpoint=str(a.checkpoint.resolve()),status='PASS',scope='Native policy source/model/bank/environment preflight; no GPU or simulation',weights_sha256=a.weights_sha256,bank_sha256=a.bank_sha256,suite=suite,seeds=[r['seed'] for r in rows],collector_source_sha256=core)
+  proof=dict(checkpoint=str(a.checkpoint.resolve()),status='PASS',scope='Native policy source/model/bank/environment preflight; no GPU or simulation',source_sha256=support,weights_sha256=a.weights_sha256,bank_sha256=a.bank_sha256,suite=suite,seeds=[r['seed'] for r in rows],collector_source_sha256=core)
   (a.out/'preflight.json').write_text(json.dumps(proof,indent=2)+'\n');print(json.dumps(proof),flush=True);return
  fkpath=REPO/'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/compute_workspace.py';spec=importlib.util.spec_from_file_location('native_policy_fk',fkpath);fk=importlib.util.module_from_spec(spec);spec.loader.exec_module(fk)
  limits_path=REPO/'vla_SO-ARM101/src/so_arm101_control';sys.path.insert(0,str(limits_path));from so_arm101_control.grasp_geometry import JOINT_LIMITS
