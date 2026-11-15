@@ -29,6 +29,16 @@ POLICY=dict(version=3,strategy=STRATEGY,phenotypes=dict(closed=.5,partly_closed=
     training='all recorded frames train on normal-speed corrective expert; no miss prefix is recorded')
 
 
+def native_bbox(snapshot,target):
+    """Use the held physical shape bounds, in metres, for synthetic geometry."""
+    corners=np.asarray(snapshot['local_corners'][target],dtype=float)
+    if corners.shape!=(8,3) or not np.isfinite(corners).all():
+        raise ValueError('Synthetic target native corners are incomplete or non-finite')
+    extents=np.ptp(corners,axis=0)
+    if np.any(extents<=0):raise ValueError('Synthetic target native dimensions are not positive')
+    return dict(zip(('sx','sy','sz'),map(float,extents)))
+
+
 def candidates(request):
     rng=random.Random(request['seed'] ^ 0x71A53F)
     u=rng.random();kind='closed' if u<.5 else 'partly_closed' if u<.8 else 'open_hover'

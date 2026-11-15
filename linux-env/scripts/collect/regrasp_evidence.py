@@ -1,10 +1,10 @@
 """Validate an observed native invocation and the completed synthetic setup prefix."""
-import ast,copy,re
+import ast,copy,json,re
 from pathlib import Path
-from comparisons import matches,interval
+from comparisons import matches,interval,comparison
 from tick_contract import digest,require_snapshots,STEP_NS,world_step_errors
 from recovery_start import (POLICY,STRATEGY,StaticClearance,candidates,geometry,world_anchor,
-    replay_baseline,replay_model_binding,restore_world_checks,protected_state)
+    replay_baseline,replay_model_binding,restore_world_checks,protected_state,native_bbox)
 from miss_clearance import bind_target_offsets,proof_differences
 from scene_sync import physical_pose_caches
 from contract import JOINTS
@@ -116,10 +116,11 @@ def setup_prefix(receipt,transport,stage):
     poses,_=physical_pose_caches(baseline,primitive_cups=True)
     if proof_differences(report['request']['pose'],poses[target],'synthetic.request.pose'):
         raise RuntimeError('Synthetic request pose is not the measured target')
-    corners=baseline['local_corners'][target]
-    dims=[max(c[i] for c in corners)-min(c[i] for c in corners) for i in range(3)]
-    if not matches([report['request']['bbox'][n] for n in ('sx','sy','sz')],dims,'float32_readback'):
-        raise RuntimeError('Synthetic request dimensions differ')
+    expected_bbox=native_bbox(baseline,target)
+    bounds=comparison('synthetic.request.bbox',[report['request']['bbox'][n] for n in ('sx','sy','sz')],
+        [expected_bbox[n] for n in ('sx','sy','sz')],'float32_readback')
+    if not bounds['passed']:
+        raise RuntimeError('Synthetic request dimensions differ: '+json.dumps(bounds,sort_keys=True))
     oracle=StaticClearance(model,baseline,target)
     if stage=='baseline':
         if report['epoch']!=baseline['epoch']:raise RuntimeError('Precondition screen epoch differs')

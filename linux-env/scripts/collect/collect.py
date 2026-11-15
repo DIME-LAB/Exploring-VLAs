@@ -1295,7 +1295,7 @@ class Collector:
 
     def _prepare_regrasp_start(self,params,result):
         """Create an unrecorded synthetic miss state, then hand over normal dynamics."""
-        from recovery_start import POLICY as START_POLICY,STRATEGY,StaticClearance,choose,protected_state,world_anchor,replay_baseline,setup_error,replay_model_binding
+        from recovery_start import POLICY as START_POLICY,STRATEGY,StaticClearance,choose,protected_state,world_anchor,replay_baseline,setup_error,replay_model_binding,native_bbox
         if self.writer is not None:raise RuntimeError('Synthetic reset cannot run while recording')
         epoch=self.generation.epoch;self.generation.require(epoch)
         observed=self.held_snapshot(epoch);before=observed;previous=None
@@ -1303,8 +1303,8 @@ class Collector:
             replay=json.loads(self.args.replay_receipt.read_text());previous=replay.get('recovery_report',{})
             if setup_error(replay):raise ValueError('Replay requires a certified complete synthetic world anchor')
             before=replay_baseline(observed,world_anchor(previous['baseline']))
-        name=params['object'];bbox=self.node._lookup_bbox(name)
-        if not bbox:raise ValueError('Synthetic recovery target has no dimensions')
+        name=params['object'];bbox=native_bbox(before,name)
+        published_bbox=copy.deepcopy(self.node._lookup_bbox(name))
         with self.node.objects_lock:pose=dict(self.node.objects_data[name])
         settings=dict(cross=self.node._grasp_cross_var.get() if hasattr(self.node,'_grasp_cross_var') else False,
             current_wrist_roll=before['state'][4],tcp_clearance=self.node._tcp_clearance_var.get()/1000,
@@ -1312,7 +1312,8 @@ class Collector:
         report=dict(strategy=STRATEGY,origin=START_POLICY['origin'],policy=START_POLICY,
             episode_id=self.current_episode_id,epoch=epoch,passed=False,baseline=copy.deepcopy(before),
             pre_restore_observed=copy.deepcopy(observed),world_anchor_sha256=digest(world_anchor(before)),
-            request=dict(pose=pose,bbox=bbox,settings=settings))
+            request=dict(pose=pose,bbox=bbox,settings=settings,
+                bbox_source='native_local_corners',published_bbox=published_bbox))
         if previous is not None:report['replay_world_anchor']=world_anchor(previous['baseline'])
         result['recovery_report']=report
         # Keep the target and every other obstacle in the synchronized planning scene.
@@ -1337,6 +1338,9 @@ class Collector:
         if self.args.replay_receipt:
             selection=copy.deepcopy(previous['selection'])
             report['selection']=selection
+            if not matches([previous['request']['bbox'][k] for k in ('sx','sy','sz')],
+                    [bbox[k] for k in ('sx','sy','sz')],'float32_readback'):
+                raise ValueError('Replay synthetic request dimensions differ from native bounds')
             report['request']=copy.deepcopy(previous['request'])
             report['replay_source_sha256']=hashlib.sha256(self.args.replay_receipt.read_bytes()).hexdigest()
             from command_geometry import checked_segment

@@ -1140,3 +1140,12 @@ manifest empty. Previously sealed `cohorts[].selected` entries and
 `selected_episodes` are retained, together with their exports and backups.
 They are partial results, not a completed production run or a resumable stopped
 checkpoint. Verify their seals separately before selecting them for another job.
+
+Synthetic-reset request geometry uses the target extents from the held native
+physical snapshot, in metres. The request records `bbox_source=native_local_corners`;
+`published_bbox` retains the ROS publisher dimensions as diagnostics and never
+controls the synthetic pose. Replay compares the request against native bounds
+under the unchanged 1 micrometre readback rule, including when replaying a saved
+request. A mismatching saved request is refused rather than silently rewritten.
+This applies to the unrecorded synthetic start; normal/GUI grasp geometry and
+the protected-body velocity/displacement screens are unchanged.
