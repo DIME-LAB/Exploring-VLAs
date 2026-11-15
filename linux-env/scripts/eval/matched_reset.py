@@ -51,12 +51,22 @@ def main():
         q_error=float(np.max(abs(np.degrees(np.array(actual['state'])-expected['state']))))
         position_error=max(abs(x-y) for name in expected['bodies'] for x,y in zip(actual['bodies'][name]['position'],expected['bodies'][name]['position']))
         quaternion_error=max(min(max(abs(x-y) for x,y in zip(actual['bodies'][name]['orientation'],expected['bodies'][name]['orientation'])),max(abs(x+y) for x,y in zip(actual['bodies'][name]['orientation'],expected['bodies'][name]['orientation']))) for name in expected['bodies'])
-        assert q_error<=.01 and position_error<=1e-4 and quaternion_error<=1e-4
-        assert receipt['cup_randomization']==source['cup_randomization'],'Normal collector sampler differs from recorded scene'
+        sampler_equal=receipt['cup_randomization']==source['cup_randomization']
+        validation=dict(passed=q_error<=.01 and position_error<=1e-4 and quaternion_error<=1e-4 and sampler_equal,joint_max_error_deg=q_error,body_max_position_error_m=position_error,body_max_quaternion_error=quaternion_error,exact_cup_sampler=sampler_equal,joint_error_deg=np.degrees(np.array(actual['state'])-expected['state']).tolist(),body_position_errors_m={n:(np.array(actual['bodies'][n]['position'])-expected['bodies'][n]['position']).tolist() for n in expected['bodies']},actual=actual,expected=expected,actual_cup_sampler=receipt['cup_randomization'],expected_cup_sampler=source['cup_randomization'])
+        atomic_json(a.out/'pose-validation.json',validation)
+        receipt.update(prepared_snapshot=actual,pose_validation=validation)
+        atomic_json(path/'receipt.json',receipt)
+        print(json.dumps(dict(event='matched-reset-pose-validation',seed=source['params']['seed'],**{k:validation[k] for k in ('passed','joint_max_error_deg','body_max_position_error_m','body_max_quaternion_error','exact_cup_sampler')})),flush=True)
+        assert validation['passed'],'Normal collector prepared pose differs from source; see pose-validation.json'
         assert receipt['retirement']['passed'] and receipt['camera_boundary']['passed'] and receipt['gpu_isolation_after']['passed']
         receipt.update(accepted=True,matched_reset_protocol='collector-matched-reset-v1',source_receipt=str(a.receipt),source_receipt_sha256=a.receipt_sha256,training_first_frame_offset_ns=training_offset,prepared_joint_max_error_deg=q_error,prepared_body_max_position_error_m=position_error,prepared_body_max_quaternion_error=quaternion_error,prepared_snapshot=actual,sequence='normal Collector._prepare_scene_attempt: reset_release,request_home,settle_home(before),scene(randomize6+barrier2),settle_home(after),restore_velocity,verification6,sync_scene',camera_priming='Exact normal collector functions; no fixed-N or render-only replacement',wall_s=time.monotonic()-started)
         atomic_json(path/'receipt.json',receipt);atomic_json(a.out/'summary.json',dict(producer_invocation=collector.finalization_certificate['invocation'],complete=True,scene_only=True,prepared=1,end_marker='COLLECTION_FINISHED'));ok=True
-    finally:
+    except BaseException as error:
+        atomic_json(a.out/'reset-error.json',dict(error=repr(error),scored=False))
+        try:collector.close()
+        except BaseException as cleanup_error:print('Secondary collector cleanup failure: '+repr(cleanup_error),file=sys.stderr,flush=True)
+        raise
+    else:
         collector.close()
     if ok:
         certificate=c.collection_status.require_finalized(a.out)
