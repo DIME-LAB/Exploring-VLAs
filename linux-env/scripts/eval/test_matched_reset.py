@@ -4,9 +4,30 @@ from pathlib import Path
 from matched_reset_client import require_qualification,install_fenced_boundary
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'collect'))
 from protocol import StepGeneration
-from matched_reset import orientation_errors
+from matched_reset import orientation_errors,install_sealed_scene
 from native_bank import SEEN_BANK_SHA
 class Tests(unittest.TestCase):
+    def test_sealed_restore_skips_sampler_and_preserves_post_sampling_order(self):
+        calls=[];source=dict(params={'seed':900028},initial_physical=dict(bodies={'cup_red':{'position':[.1,.2,0.]}},state=[0]*6),cup_randomization={'params':{'mode':'line'}})
+        collector=types.SimpleNamespace()
+        def restore(code):
+            calls.append(('restore',code));return {'snapshot':{'test':'held'}}
+        collector.restore_physical=restore
+        collector.mutate_kit=lambda tool,args:calls.append(('mutate',tool,args))
+        collector.advance_ticks=lambda n:calls.append(('advance',n))
+        before=copy.deepcopy(source);evidence=install_sealed_scene(collector,source)
+        result=collector.randomize_scene(source['params'],{})
+        self.assertEqual([r[0] for r in calls],['restore','mutate','advance','restore'])
+        self.assertIn(repr(source['initial_physical'])+',arm=False',calls[0][1])
+        self.assertIn('reset_velocities()',calls[1][2]['code']);self.assertEqual(calls[2],('advance',6))
+        self.assertIn('r.restore(s,arm=True)',calls[3][1]);self.assertEqual(collector.scene_restore,{'snapshot':{'test':'held'}})
+        self.assertEqual(result,source['cup_randomization']);self.assertIsNot(result,source['cup_randomization'])
+        self.assertEqual(source,before);self.assertEqual(evidence,[dict(mode='sealed-body-restore',sampler_invocations=0)])
+        with self.assertRaisesRegex(RuntimeError,'only once'):collector.randomize_scene(source['params'],{})
+    def test_wrong_sealed_parameters_are_refused_before_teleport(self):
+        collector=types.SimpleNamespace();source=dict(params={'seed':900028},initial_physical={},cup_randomization={})
+        install_sealed_scene(collector,source)
+        with self.assertRaisesRegex(ValueError,'parameters differ'):collector.randomize_scene({'seed':900029},{})
     def test_cup_geodesic_limit_does_not_relax_lego_limit(self):
         expected=dict(bodies={n:dict(orientation=[1.,0.,0.,0.]) for n in ('cup_red','red_2x3_0')});actual=copy.deepcopy(expected)
         def rotate(name,degrees):actual['bodies'][name]['orientation']=[math.cos(math.radians(degrees)/2),0.,0.,math.sin(math.radians(degrees)/2)]

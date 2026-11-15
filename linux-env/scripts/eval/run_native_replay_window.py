@@ -95,7 +95,9 @@ def main():
   code="import json,sys,torch;assert not torch.cuda.is_available() and not torch.cuda.is_initialized();print(json.dumps(dict(executable=sys.executable,prefix=sys.prefix,torch=torch.__version__,cuda_build=torch.version.cuda,cuda_initialized=torch.cuda.is_initialized())))"
   interpreter_metadata=json.loads(subprocess.check_output([interpreter,'-c',code],env=dict(env,CUDA_VISIBLE_DEVICES=''),text=True,timeout=60))
  root.mkdir(parents=True)
- ledger=dict(bootstrap_control_proof=bootstrap_control_proof,suite=suite,selected_seeds=[r['seed'] for r in selected_rows],bank_offset=a.bank_offset,bank_count=len(selected_rows) if selected_rows else None,bootstrap_control=str(a.bootstrap_control) if a.bootstrap_control else None,bank=str(a.bank) if a.bank else None,bank_sha256=a.bank_sha256,reset_collector_root=str(a.reset_collector_root) if a.reset_collector_root else None,interpreter_metadata=interpreter_metadata,policy_python_sha256=hashlib.sha256(Path(interpreter).read_bytes()).hexdigest() if interpreter else None,reset_qualification=reset_qualification,host_profile=host,policy_python=interpreter,processor_proof=processor_proof,checkpoint_handoff=handoff,replacement_selection=selection,gpu_budget_gib=7 if guarded else None,global_memory_ceiling=.79 if guarded else None,started_utc=time.strftime('%FT%TZ',time.gmtime()),kind='UNSCORED matched collector reset qualification' if a.matched_reset_qualification else ('PRIMARY native held-tick heldout-bank-v2' if suite=='heldout-bank-v2' else 'DIAGNOSTIC matched collector reset seen-layout') if a.matched_reset_diagnostic else 'DIAGNOSTIC native memorisation default and replacement' if a.memorisation_diagnostic else 'DIAGNOSTIC native replacement-only RTC off' if a.replacement_diagnostic else 'DIAGNOSTIC native codec held-filler' if a.codec_diagnostic else 'DIAGNOSTIC native cadence RTC off' if a.cadence_diagnostic else 'PRIMARY native held-tick training-home policy test' if a.checkpoint else 'native held-tick actuation qualification',root=str(root),status='starting',arms=[],source_sha256={name:hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in ('run_native_replay_window.py','native_replay.py','held_tick.py','phase3_metrics.py','native_policy.py','native_policy_client.py','native_policy_robot.py','native_policy_server.py','codec_stream.py','checkpoint_contract.py','select_replacement.py','native_environment.py','native_home_capture.py','matched_reset.py','matched_reset_client.py','native_bank.py','qualify_matched_reset.py')})
+ from native_gpu_audit import RegisteredGPUAudit
+ registered_audit=RegisteredGPUAudit(instance,root/'gpu-ownership-registry.json') if guarded else None
+ ledger=dict(bootstrap_control_proof=bootstrap_control_proof,suite=suite,selected_seeds=[r['seed'] for r in selected_rows],bank_offset=a.bank_offset,bank_count=len(selected_rows) if selected_rows else None,bootstrap_control=str(a.bootstrap_control) if a.bootstrap_control else None,bank=str(a.bank) if a.bank else None,bank_sha256=a.bank_sha256,reset_collector_root=str(a.reset_collector_root) if a.reset_collector_root else None,interpreter_metadata=interpreter_metadata,policy_python_sha256=hashlib.sha256(Path(interpreter).read_bytes()).hexdigest() if interpreter else None,reset_qualification=reset_qualification,host_profile=host,policy_python=interpreter,processor_proof=processor_proof,checkpoint_handoff=handoff,replacement_selection=selection,gpu_budget_gib=7 if guarded else None,global_memory_ceiling=.79 if guarded else None,started_utc=time.strftime('%FT%TZ',time.gmtime()),kind='UNSCORED matched collector reset qualification' if a.matched_reset_qualification else ('PRIMARY native held-tick heldout-bank-v2' if suite=='heldout-bank-v2' else 'DIAGNOSTIC matched collector reset seen-layout') if a.matched_reset_diagnostic else 'DIAGNOSTIC native memorisation default and replacement' if a.memorisation_diagnostic else 'DIAGNOSTIC native replacement-only RTC off' if a.replacement_diagnostic else 'DIAGNOSTIC native codec held-filler' if a.codec_diagnostic else 'DIAGNOSTIC native cadence RTC off' if a.cadence_diagnostic else 'PRIMARY native held-tick training-home policy test' if a.checkpoint else 'native held-tick actuation qualification',root=str(root),status='starting',arms=[],source_sha256={name:hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in ('run_native_replay_window.py','native_replay.py','held_tick.py','phase3_metrics.py','native_policy.py','native_policy_client.py','native_policy_robot.py','native_policy_server.py','codec_stream.py','checkpoint_contract.py','select_replacement.py','native_environment.py','native_gpu_audit.py','native_home_capture.py','matched_reset.py','matched_reset_client.py','native_bank.py','qualify_matched_reset.py')})
  def save():
   tmp=root/'window-ledger.tmp';tmp.write_text(json.dumps(ledger,indent=2)+'\n');os.replace(tmp,root/'window-ledger.json')
  last_gpu_sample=[0.];bad_samples=[0]
@@ -106,13 +108,12 @@ def main():
   if logname!='launch.log':
    import sys
    sys.path.insert(0,str(REPO/'linux-env/scripts/collect'))
-   from gpu_device import owned_snapshot,inventory,audit_sample,birth_set
+   from gpu_device import inventory
    from nvml_processes import sample
    try:
-    cards=inventory();expected=next(c['uuid'] for c in cards if c['index']==0);before=owned_snapshot(instance);observed=sample(cards);after=owned_snapshot(instance)
-    assert birth_set(before)==birth_set(after),'Owned process births changed during GPU sample'
-    audit=audit_sample(expected,before,cards,observed);assert audit['outcome']=='verified' and not audit['foreign_gpu_contexts'],audit
-    owned=audit['per_gpu_memory_mib'][expected];entry['owned_mib']=owned;bad_samples[0]=0;ledger['peak_owned_mib']=max(ledger.get('peak_owned_mib',0),owned)
+    cards=inventory();expected=next(c['uuid'] for c in cards if c['index']==0)
+    audit,registration=registered_audit.sample(expected,cards,sample)
+    owned=audit['per_gpu_memory_mib'][expected];entry.update(registration);entry['owned_mib']=owned;bad_samples[0]=0;ledger['peak_owned_mib']=max(ledger.get('peak_owned_mib',0),owned)
    except Exception as error:
     entry['audit_error']=str(error);bad_samples[0]+=1
   ledger['peak_global_fraction']=max(ledger.get('peak_global_fraction',0),entry['global_fraction'])
@@ -174,5 +175,6 @@ def main():
   ledger.update(status='stopped-with-error',error=f'{type(error).__name__}: {error}');raise
  finally:
   with (root/'cleanup.log').open('w') as log:stopped=subprocess.run(['bash','linux-env/scripts/collect_sim.sh','down','2'],cwd=REPO,env=env,stdout=log,stderr=subprocess.STDOUT,timeout=90)
+  if registered_audit is not None:registered_audit.close()
   ledger.update(cleanup_exit_code=stopped.returncode,stopped_utc=time.strftime('%FT%TZ',time.gmtime()));save();print(json.dumps(dict(event='GPU-window-stopped',status=ledger['status'],stopped_utc=ledger['stopped_utc'],cleanup_exit_code=stopped.returncode)),flush=True)
 if __name__=='__main__':main()

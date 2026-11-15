@@ -40,7 +40,7 @@ def prepare_scene(repo,collector_root,row,out):
                 except subprocess.TimeoutExpired:os.killpg(proc.pid,signal.SIGTERM);proc.wait(timeout=15)
     proof=json.loads((out/'matched-reset-proof.json').read_text())
     assert proof['status']=='PASS' and proof['seed']==row['seed'] and proof['source_receipt_sha256']==row['source_receipt_sha256']
-    assert proof['protocol']=='collector-matched-reset-v1' and proof['finalization']['passed']
+    assert proof['protocol']==('collector-matched-reset-v1' if row['suite']=='seen-training-home' else 'collector-sealed-postsample-v1') and proof['finalization']['passed']
     assert proof['suite']==row['suite'] and proof['bank_sha256']==row['bank_sha256'] and proof['reference_run_sha256']==row['reference_run_sha256']
     receipt_path=out/'attempt-0000/receipt.json';assert hashlib.sha256(receipt_path.read_bytes()).hexdigest()==proof['receipt_sha256'];prepared=json.loads(receipt_path.read_text())
     return dict(proof,path=str(out),prepared_snapshot=prepared['prepared_snapshot'],training_first_frame_offset_ns=prepared['training_first_frame_offset_ns'],proof_sha256=hashlib.sha256((out/'matched-reset-proof.json').read_bytes()).hexdigest(),post_cleanup_native_bootstrap_frames=1,post_cleanup_reteleport=False)
