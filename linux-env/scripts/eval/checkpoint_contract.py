@@ -26,3 +26,16 @@ def require_handoff(directory,receipt_path,weights_sha256):
     if actual!=expected:raise ValueError('Checkpoint files differ from verified handoff')
     if actual['model.safetensors']['sha256']!=weights_sha256:raise ValueError('Checkpoint weights differ')
     return dict(receipt=str(receipt_path),receipt_sha256=hashlib.sha256(receipt_path.read_bytes()).hexdigest(),files=actual)
+
+def require_processor_proof(directory,proof_path,files):
+    directory=Path(directory);proof_path=Path(proof_path);proof=json.loads(proof_path.read_text())
+    if not (proof['passed'] is True and proof['cpu_only'] is True and proof['training_written_processor_reloaded'] is True and proof['fixture_only'] is False):raise ValueError('Actual saved training processor proof required')
+    if Path(proof['checkpoint']).resolve()!=directory.resolve() or Path(proof['completed_last_marker']).resolve()!=directory.parent.resolve():raise ValueError('Processor proof belongs to another checkpoint')
+    if proof['module_sha256']!=files['workspace_crop_step.py']['sha256']:raise ValueError('Processor module differs from proof')
+    if proof['raw_policy_input_keys']!=['observation.state','observation.images.top','observation.images.wrist']:raise ValueError('Processor input keys differ')
+    for name,size in proof['stable_file_sizes'].items():
+        if files[name]['size']!=size:raise ValueError('Processor proof file size differs')
+    required={'observation.images.top','observation.images.wrist','observation.language.tokens','observation.state','top_after_native_resize'}
+    hashes=proof['pixel_state_token_and_resize_hashes']
+    if set(hashes)!=required or any(len(value)!=64 for value in hashes.values()):raise ValueError('Incomplete processor parity hashes')
+    return dict(path=str(proof_path),sha256=hashlib.sha256(proof_path.read_bytes()).hexdigest(),proof=proof)

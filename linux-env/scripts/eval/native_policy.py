@@ -27,7 +27,7 @@ def main():
  for seed in bank['seeds']:
   state=json.loads((a.bank/f'state-{seed}.json').read_text());bodies=json.loads((a.bank/f'seed-{seed}.json').read_text());rows.append(dict(state,bodies=bodies))
  if a.check_only:
-  proof=dict(status='PASS',scope='Native policy source/model/bank/environment preflight; no GPU or simulation',weights_sha256=a.weights_sha256,bank_sha256=a.bank_sha256,seeds=[r['seed'] for r in rows],collector_source_sha256=core)
+  proof=dict(checkpoint=str(a.checkpoint.resolve()),status='PASS',scope='Native policy source/model/bank/environment preflight; no GPU or simulation',weights_sha256=a.weights_sha256,bank_sha256=a.bank_sha256,seeds=[r['seed'] for r in rows],collector_source_sha256=core)
   (a.out/'preflight.json').write_text(json.dumps(proof,indent=2)+'\n');print(json.dumps(proof),flush=True);return
  fkpath=REPO/'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/compute_workspace.py';spec=importlib.util.spec_from_file_location('native_policy_fk',fkpath);fk=importlib.util.module_from_spec(spec);spec.loader.exec_module(fk)
  limits_path=REPO/'vla_SO-ARM101/src/so_arm101_control';sys.path.insert(0,str(limits_path));from so_arm101_control.grasp_geometry import JOINT_LIMITS
