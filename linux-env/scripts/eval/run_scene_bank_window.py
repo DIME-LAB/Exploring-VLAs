@@ -4,7 +4,7 @@ import argparse,datetime,hashlib,json,os,signal,subprocess,time
 REPO=Path(__file__).resolve().parents[3]
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--out',type=Path,required=True);p.add_argument('--qualification',type=Path,required=True);p.add_argument('--reference-proof',type=Path,required=True);p.add_argument('--stop-by-utc',required=True);a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--out',type=Path,required=True);p.add_argument('--qualification',type=Path,required=True);p.add_argument('--reference-proof',type=Path,required=True);p.add_argument('--golden-destination',type=Path);p.add_argument('--stop-by-utc',required=True);a=p.parse_args()
     import sys
     sys.path.insert(0,str(REPO/'linux-env/scripts/collect'))
     from host_config import profile
@@ -17,8 +17,9 @@ def main():
     assert homes['status']=='PASS' and len(homes['rows'])==2
     assert subprocess.check_output(['git','rev-parse','HEAD'],cwd=REPO,text=True).strip()=='bf7336d93d5ba054c5edc66cea685725eb30eb40'
     for name,sha in {'collect.py':'09f86817b46e2b1ad4695fce29e059ea387a0bbc97d9568786a70c818308ae90','scene_bank.py':'eb41cef2e7bee6a972e646a26963c8a0d01142895223969c880144401e4ee868'}.items():assert hashlib.sha256((REPO/'linux-env/scripts/collect'/name).read_bytes()).hexdigest()==sha,'Reviewed scene sampler source drift'
-    subprocess.run(['git','diff','--exit-code','HEAD','--','linux-env/scripts/collect',':(exclude)linux-env/scripts/collect/collect.py'],cwd=REPO,check=True)
-    assert all(not (base/'eval'/name).exists() for name in ('scene-bank-golden-v2','scene-bank-v2'))
+    subprocess.run(['git','diff','--exit-code','HEAD','--','linux-env/scripts/collect',':(exclude)linux-env/scripts/collect/collect.py','isaac/exts','linux-env/scripts/collect_sim.sh','linux-env/scripts/isaac'],cwd=REPO,check=True)
+    golden=(a.golden_destination or base/'eval/scene-bank-golden-v2').resolve();heldout=base/'eval/scene-bank-v2'
+    assert golden.is_relative_to(base/'eval') and golden!=heldout and not golden.exists() and not heldout.exists()
     xml=REPO/'linux-env/cyclonedds.xml';assert hashlib.sha256(xml.read_bytes()).hexdigest()=='d1247d7edefc8f507f43ff15c129aeb5754e70bd7fd34bf4022966c879482a91'
     expected=subprocess.check_output(['nvidia-smi','-i','0','--query-gpu=uuid','--format=csv,noheader'],text=True).strip()
     apps=subprocess.check_output(['nvidia-smi','--query-compute-apps=gpu_uuid,pid','--format=csv,noheader'],text=True)
@@ -55,7 +56,14 @@ def main():
     try:
         run(['bash','linux-env/scripts/collect_sim.sh','up','2'],'launch')
         for mode,name in [('receipts','golden-five'),('eval','heldout-thirty')]:
-            destination=base/'eval'/('scene-bank-golden-v2' if mode=='receipts' else 'scene-bank-v2')
+            if mode=='eval':
+                # The sampler mutates the extension's CUP_LAYOUT dictionary.
+                # A fresh Kit process restores the same startup baseline that
+                # trained episodes used; no sampler reset or tolerance changes.
+                ledger['status']='restart-before-heldout';save()
+                run(['bash','linux-env/scripts/collect_sim.sh','down','2'],'golden-stop')
+                run(['bash','linux-env/scripts/collect_sim.sh','up','2'],'heldout-launch')
+            destination=golden if mode=='receipts' else heldout
             assert not destination.exists()
             argv=['bash','linux-env/scripts/collect_sim.sh','run','2','--scene-bank',mode,'--scene-bank-reference-run',str(reference/'run.json'),'--output',str(root/name),'--scene-bank-output',str(destination)]
             if mode=='receipts':argv+=['--scene-bank-receipts',*[str(f) for f in receipts]]
