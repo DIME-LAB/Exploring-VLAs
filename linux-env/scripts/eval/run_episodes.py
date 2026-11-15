@@ -842,7 +842,7 @@ def main():
                     result["failure_note"] = "" if result["success"] else "sim-time budget; see physical characterization"
                     result["wall_time_s"] = done["wall_duration_s"]
                     result["sim_time_s"] = done["duration_s"]
-            except Exception as error:
+            except (Exception, KeyboardInterrupt) as error:
                 result["outcome"] = "error"
                 result["failure_note"] = f"{type(error).__name__}: {error}"
                 if client.fatal:
