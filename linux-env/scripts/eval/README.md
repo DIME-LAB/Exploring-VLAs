@@ -232,7 +232,7 @@ seconds at30.000simHz with zero missed slots and zero post-startup empty
 ticks. See `phase3-qualification.json` for source hashes, timings and physical
 snapshot checks. Earlier failed/interrupted attempts remain in the Mac report;
 none of the pilot episodes is a task score. Every actual checkpoint episode
-still passes the same validity gate. ROADMAP3.3 remains open for those scores.
+is checked against the same validity gate. ROADMAP3.3 remains open for those scores.
 
 ## Read-only checkpoint handoff
 
@@ -256,3 +256,27 @@ prevents duplicate watchers, and failures preserve unpublished incoming data.
 Source reads stay under our RTX storage root; all target writes are confined
 to `/mnt/a4500-backup/exploring-vlas/eval/`. GPU use still requires a separate
 announced GO after staging.
+
+
+## Scored MAIN window report
+
+`python3 linux-env/scripts/eval/report_scored_window.py RUN_ROOT --step 10000 --out REPORT_DIR`
+reads `attempt-NN` manifests, health/config receipts and per-episode results.
+All30 planned MAIN seeds stay in the denominator. Started episodes without a
+result are invalid; unstarted seeds are not-run. Duplicate attempts are refused,
+including crashed attempts followed by retries. Every attempt must share its
+checkpoint/source/bank/backend contract, and each result must match its manifest
+position. A preflight source fingerprint is checked when provided.
+
+Invalid rows preserve observed physical signals but cannot contribute confirmed
+successes. Starvation overlaps with outcome and is not an exclusion. Timing and
+distance averages describe all observed rows; valid-only counts/means are also
+saved. Use a separate output directory to preserve delivered evidence.
+
+The first10k MAIN window completed30 attempts:0 confirmed target grasps or
+placements,1 wrong-colour lift,29 timing-valid episodes and1 missed-slot invalid
+(seed900021), with zero queue starvation. `phase3-10k-main-proof.json` binds the
+counts, frozen source/model/bank hashes, per-colour results, cleanup and diagnostic
+summary. The Mac delivery has raw traces, selected videos, expert comparisons,
+seen/held-out open-loop checks, matched live images and CPU colour-word probes.
+ROADMAP3.3 remains open for20k/40k/60k and best-checkpoint deployment/language arms.
