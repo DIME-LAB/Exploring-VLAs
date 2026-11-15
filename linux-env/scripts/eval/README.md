@@ -280,3 +280,23 @@ counts, frozen source/model/bank hashes, per-colour results, cleanup and diagnos
 summary. The Mac delivery has raw traces, selected videos, expert comparisons,
 seen/held-out open-loop checks, matched live images and CPU colour-word probes.
 ROADMAP3.3 remains open for20k/40k/60k and best-checkpoint deployment/language arms.
+
+
+## 20k paired checkpoint result
+
+The20k MAIN window also completed30 attempts with0 target grasps/successes or
+placements,0 wrong-colour lifts,28 timing-valid episodes and2 one-slot invalids
+(seeds900010/900021), with zero queue starvation. All30 outcomes remain counted;
+28 scenes are valid at both10k and20k. Mean first-closing distance changed
+79.96→59.75mm and first closure nearest requested colour8/30→14/30, while
+low-motion TCP dwell rose91.03→95.54%. Task success remains0/30 at both.
+
+At the same six HOME observations and fixed noise, mean CPU colour-word endpoint
+separation fell12.97→8.12mm. The pair pattern changed: red/green17.65→8.84mm,
+red/blue14.83→5.71mm, green/blue6.44→9.81mm. Task tokens differ and predictions
+respond; these probes do not establish adequate language grounding or isolate a
+training-recipe/controller/RTC cause. The checkpoint config and normalizers are
+byte-identical; only model weights differ. `phase3-20k-main-proof.json` records
+the counts, all paired differences, source/model/bank hashes and cleanup. The Mac
+20k delivery contains paired seed/probe CSVs, plots, raw traces and selected videos.
+The40k/60k and best-checkpoint deployment/language evaluations remain pending.
