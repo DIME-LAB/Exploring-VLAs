@@ -286,6 +286,15 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       With (b), 30k primary on 5 TRAINING layouts: leaves home (0% dwell) but closes 24-95 mm off target, 0/5. With (a) on
       bank-v1: 30k 0/30, unfreeze+10k 0/30 (~60 mm). Now: teacher-forced early-reach error + RTC-off/short re-observe test;
       small-subset memorisation with vs without a top-camera workspace crop (visual localisation hypothesis).
+    - 2026-11-15 ~13-18Z on the native held-tick path (seen layouts 530000-530004): primary 30k 0/5 under every
+      execution variant (RTC on/off, re-observe 1/5/10/25/50, weighted vs latest-only). Memorisation (24 episodes,
+      ~10 epochs, full fine-tune from 30k): A original images default 0/5, whole-chunk 2/5; B top-camera workspace crop
+      default 3/5, whole-chunk 0/5 = first end-to-end successes (independent physics audit). Image gaps found: training
+      frames passed two lossy encodes (CRF18 + CRF30) and are smoother than raw renders (live vs dataset shifts the
+      50-step prediction 11-21 mm; codec round trip halves it); eval observed after 1 frame post-reset vs >=20 in the
+      collector, so first frames carry denoiser ghosts of the previous layout. Now: main run 'recorder-crf18-crop'
+      (single-encode data + top crop (99,128,559,473) + image-robustness augmentation, full fine-tune from 30k, 30k
+      steps, started 17:50Z); eval to adopt the collector's own post-reset sequence; bank-v2 sealed (cedd3f3d).
 - [ ] 3.4 (only if 3.3 paraphrases fail) Prompt-variety run: relabel each training sample's task from a set
       of templates per colour at merge time (no new collection), hold some templates out for eval, and compare
       against the fixed-string model on both exact and held-out prompts. Published SmolVLA/LeRobot guidance is
