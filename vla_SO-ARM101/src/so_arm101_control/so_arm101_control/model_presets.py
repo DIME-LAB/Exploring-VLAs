@@ -12,6 +12,7 @@ MODEL_PRESETS = {
     "phase3-20k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/smolvla-phase3-normal-60k-s42-20261114/checkpoints/020000/pretrained_model", "", "{}"),
     "phase3-30k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/smolvla-phase3-normal-60k-s42-20261114/checkpoints/030000/pretrained_model", "", "{}"),
     "unfreeze30k+2500": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/unfreeze30k/002500/pretrained_model", "", "{}"),
+    "unfreeze30k+5000": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/unfreeze30k/005000/pretrained_model", "", "{}"),
     "phase3-40k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/smolvla-phase3-normal-60k-s42-20261114/checkpoints/040000/pretrained_model", "", "{}"),
     "phase3-60k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/smolvla-phase3-normal-60k-s42-20261114/checkpoints/060000/pretrained_model", "", "{}"),
     "base-ft": ("/home/aaugus11/w_ckpt/smolvla-base-ft-rec222812-20k-s42-20261113", "", "{}"),
