@@ -607,6 +607,9 @@ class Processes:
         run=self.root(cohort)/'run';report=self.root(cohort)/'report'
         stage=self.stage('export',['bash',self.wrapper,'export',str(self.config['instance']),str(run),
             '--repo-id','local/soarm101_synthetic_recovery','--report-dir',str(report)])
+        if not (report/'validation.json').exists():
+            from run_smoke import StartupFailure
+            raise StartupFailure('export',stage['returncode'],Path(stage['log']))
         value=leaf(report/'validation.json');require_export(value)
         if value.get('started_wall_ns',0)<stage['started_wall_ns']:raise RuntimeError('Export certificate predates its stage')
         return dict(value,runner_artifact_seal_sha256=self.seal(cohort,'selected'))

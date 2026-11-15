@@ -46,7 +46,7 @@ def main():
     if before != json.loads(PIN.read_text()):
         raise RuntimeError('Shared export dependencies changed since qualification')
     target = Path(sys.argv[1]).resolve()
-    expected = ROOT/'repo/Exploring-VLAs/linux-env/scripts/collect/export.py'
+    expected = Path(__file__).resolve().parents[1]/'export.py'
     if target != expected:
         raise RuntimeError('Unexpected collector export entrypoint: ' + str(target))
     sys.argv = sys.argv[1:]
