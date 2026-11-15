@@ -18,6 +18,48 @@ def exported():
         export_content=dict(metadata=dict(passed=True),video=dict(passed=True,scope='ALL frames',decoded_frame_pairs=600)))
 
 
+class StandaloneTests(unittest.TestCase):
+    def clean_process(self,argv,cwd):
+        import os,subprocess,sys
+        env=dict(os.environ,PYTHONPATH='',PYTHONNOUSERSITE='1',PYTHONDONTWRITEBYTECODE='1',CUDA_VISIBLE_DEVICES='')
+        result=subprocess.run([sys.executable,'-B',*argv],env=env,cwd=cwd,text=True,capture_output=True,timeout=60)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        return json.loads(result.stdout)
+    def test_documented_plan_with_empty_pythonpath(self):
+        import subprocess
+        from regrasp_runner import REPO
+        cut=subprocess.check_output(['git','rev-parse','HEAD'],cwd=REPO,text=True).strip()
+        with tempfile.TemporaryDirectory(dir=CANONICAL_ROOT/'tmp',prefix='runner-bootstrap-') as d:
+            output=Path(d)/'standalone-plan'
+            value=self.clean_process(['linux-env/scripts/collect/regrasp_runner.py','--plan',
+                '--instance','3','--gpu','0','--cohorts','50','--seed-start','600000','--seed-end','604239',
+                '--cut',cut,'--output',str(output)],REPO)
+            self.assertEqual(value['cohorts'],50);self.assertEqual(value['seed_start'],600000)
+            self.assertEqual(value['cut'],cut);self.assertFalse(output.exists())
+    def test_cpu_cohort_dry_path_with_empty_pythonpath(self):
+        from regrasp_runner import REPO
+        entry=REPO/'linux-env/scripts/collect/regrasp_runner.py'
+        # A direct script gets its own directory on sys.path; run_path needs the
+        # same script-directory entrance, never the control-package directory.
+        code="""import json,runpy,sys
+from pathlib import Path
+entry=Path(sys.argv[1]);sys.path.insert(0,str(entry.parent))
+runner=runpy.run_path(str(entry))
+import so_arm101_control.grasp_geometry as geometry
+expected=entry.parents[3]/'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/grasp_geometry.py'
+assert Path(geometry.__file__).resolve()==expected.resolve()
+from test_regrasp_runner import Fake
+config=dict(cohorts=1,seed_start=600000,seed_end=600002)
+saved=[];state=runner['Runner'](config,Fake(),saved.append).run()
+assert state['complete'] and not state['stopped']
+print(json.dumps(dict(selected=state['selected_episodes'],colors=state['color_counts'],source=str(Path(geometry.__file__).resolve()),cpu_only=True)))
+"""
+        with tempfile.TemporaryDirectory(dir=CANONICAL_ROOT/'tmp',prefix='runner-bootstrap-') as d:
+            value=self.clean_process(['-c',code,str(entry)],Path(d))
+        self.assertEqual(value['selected'],3);self.assertEqual(value['colors'],dict(red=1,green=1,blue=1))
+        self.assertTrue(value['cpu_only'])
+
+
 class Fake:
     def __init__(self,outcomes=(),fail_down=False,fail_export=False):
         self.outcomes=iter(outcomes);self.calls=[];self.fail_down=fail_down;self.fail_export=fail_export;self.facts={};self.attempts={}

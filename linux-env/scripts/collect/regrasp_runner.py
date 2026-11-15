@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Own one instance; select only certified RGB recovery cohorts for production."""
-import argparse,copy,ctypes,hashlib,json,math,os,re,signal,socket,subprocess,time,uuid,stat
+import argparse,copy,ctypes,hashlib,json,math,os,re,signal,socket,subprocess,sys,time,uuid,stat
 from pathlib import Path
+# Use this frozen checkout's control code in standalone invocations.
+sys.path.insert(0,str(Path(__file__).resolve().parents[3]/'vla_SO-ARM101/src/so_arm101_control'))
 from contract import COLORS,parameters,timing_audit
 from recovery import receipt_error
 from recovery_start import POLICY,ProtectedSettle,protected_state,world_anchor,sample_snapshot
