@@ -10,8 +10,8 @@ from managed_process import start,stop
 CARDS=[dict(uuid='gpu0',index=0),dict(uuid='gpu1',index=1)]
 def observation(rows):
     return dict(rows=rows,coverage={c['uuid']:dict(compute='verified',graphics='verified') for c in CARDS},errors=[])
-def context(pid,gpu='gpu0',memory=3700*1024**2):
-    return dict(pid=pid,gpu_uuid=gpu,memory_bytes=memory,api='compute')
+def context(pid,gpu='gpu0',memory=3700*1024**2,api='compute'):
+    return dict(pid=pid,gpu_uuid=gpu,memory_bytes=memory,api=api)
 
 class RegistrationTests(unittest.TestCase):
     def setUp(self):
@@ -86,6 +86,34 @@ class RegistrationTests(unittest.TestCase):
             attribute('gpu0',registered,CARDS,observation([context(os.getpid())]),lambda pid:None)
         with self.assertRaisesRegex(RuntimeError,'coverage, memory'):
             self.audit.sample('gpu0',CARDS,lambda _:observation([context(os.getpid(),memory=None)]))
+    def test_prelaunch_external_graphics_is_not_owned_and_new_contexts_still_refuse(self):
+        external=context(os.getppid(),memory=4096,api='graphics')
+        baseline=self.audit.freeze_external('gpu0',CARDS,lambda _:observation([external]))
+        self.assertFalse(baseline['owned'])
+        result,metadata=self.audit.sample('gpu0',CARDS,lambda _:observation([external,context(os.getpid())]))
+        self.assertEqual(result['per_gpu_memory_mib']['gpu0'],3700)
+        self.assertEqual(len(metadata['external_graphics_rows']),1)
+        self.assertNotIn(os.getppid(),[r['pid'] for r in result['processes']])
+        with self.assertRaisesRegex(RuntimeError,'Unregistered'):
+            self.audit.sample('gpu0',CARDS,lambda _:observation([dict(external,api='compute'),context(os.getpid())]))
+        with self.assertRaisesRegex(RuntimeError,'already frozen'):
+            self.audit.freeze_external('gpu0',CARDS,lambda _:observation([]))
+    def test_external_baseline_never_allows_pid_reuse_or_new_owned_gpu1(self):
+        external=context(os.getppid(),memory=4096,api='graphics')
+        self.audit.freeze_external('gpu0',CARDS,lambda _:observation([external]))
+        certificate=self.audit.external_graphics[(os.getppid(),'gpu0','graphics')]
+        certificate['start_ticks']='wrong'
+        with self.assertRaisesRegex(RuntimeError,'External graphics identity changed'):
+            self.audit.sample('gpu0',CARDS,lambda _:observation([external,context(os.getpid())]))
+        with self.assertRaisesRegex(RuntimeError,'owned device attribution'):
+            self.audit.sample('gpu0',CARDS,lambda _:observation([context(os.getpid(),'gpu1')]))
+    def test_external_baseline_refuses_compute_unreadable_memory_and_incomplete_coverage(self):
+        for row in [context(os.getppid()),context(os.getppid(),memory=None,api='graphics'),context(os.getpid(),api='graphics')]:
+            with self.assertRaisesRegex(RuntimeError,'before launch|unavailable'):
+                self.audit.freeze_external('gpu0',CARDS,lambda _,row=row:observation([row]))
+        with self.assertRaisesRegex(RuntimeError,'coverage unverified'):
+            self.audit.freeze_external('gpu0',CARDS,lambda _:dict(observation([]),errors=['unavailable']))
+
     def test_pruning_closes_only_exited_pidfds(self):
         proc=self.worker();self.audit.registry();oldfd=self.audit.children.handles[proc.pid]
         proc.terminate();proc.wait(timeout=5);self.audit.prune()

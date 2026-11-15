@@ -21,16 +21,22 @@ def owned_ancestor(pid,registered,identity):
         pid=row['ppid']
     return False
 
-def attribute(expected,registered,cards,observed,identity):
+def attribute(expected,registered,cards,observed,identity,external_graphics=None):
     """CPU tree churn is irrelevant; every admitted GPU holder needs a certificate."""
     from gpu_device import audit_sample
-    admitted={};ignored=0
+    admitted={};ignored=0;external_graphics=external_graphics or {};external_seen=[]
     for row in observed['rows']:
         pid=row['pid'];old=registered.get(pid)
         if old is not None:
             if not still_same(old,identity):raise RuntimeError('Registered GPU holder exited, reused PID or changed PGID')
             admitted[pid]=old
-        elif row['gpu_uuid']==expected or owned_ancestor(pid,registered,identity):
+        elif owned_ancestor(pid,registered,identity):
+            raise RuntimeError('Unregistered GPU context; a fresh registered sample is required')
+        elif (pid,row['gpu_uuid'],row['api']) in external_graphics:
+            certificate=external_graphics[(pid,row['gpu_uuid'],row['api'])]
+            if not still_same(certificate,identity):raise RuntimeError('External graphics identity changed')
+            external_seen.append(dict(row,identity=certificate))
+        elif row['gpu_uuid']==expected:
             raise RuntimeError('Unregistered GPU context; a fresh registered sample is required')
         else:
             # Other users' contexts on other cards are never claimed as ours.
@@ -38,7 +44,7 @@ def attribute(expected,registered,cards,observed,identity):
     result=audit_sample(expected,admitted,cards,observed)
     if result['outcome']!='verified' or result['foreign_gpu_contexts']:
         raise RuntimeError('GPU coverage, memory or owned device attribution failed: '+repr(result))
-    return result,dict(admitted_births=[list(birth(v)) for v in admitted.values()],ignored_other_card_rows=ignored)
+    return result,dict(admitted_births=[list(birth(v)) for v in admitted.values()],ignored_other_card_rows=ignored,external_graphics_rows=external_seen)
 
 class RegisteredGPUAudit:
     """Reuse launcher receipts and the collector's pidfd ownership ledger."""
@@ -49,6 +55,34 @@ class RegisteredGPUAudit:
             raise OSError(ctypes.get_errno(),'Child subreaper unavailable')
         self.runtime=Path(runtime);self.receipt=Path(receipt)
         self.children=OwnedProcesses(self.runtime,time.time_ns())
+        self.external_graphics={};self.external_baseline=None
+
+    def freeze_external(self,expected,cards,sampler):
+        """Record existing external graphics before any runtime launch, never own them."""
+        from gpu_device import audit_sample
+        from run_smoke import identity
+        from managed_process import save
+        if self.external_baseline is not None:raise RuntimeError('External graphics baseline already frozen')
+        before=time.time_ns();observed=sampler(cards)
+        coverage=audit_sample(expected,{},cards,observed)
+        if coverage['outcome']!='verified':raise RuntimeError('External graphics baseline coverage unverified')
+        owner={self.children.root['pid']:self.children.root}
+        rows=[];certificates={}
+        for row in observed['rows']:
+            if row['gpu_uuid']!=expected:continue
+            if row['api']!='graphics' or owned_ancestor(row['pid'],owner,identity):
+                raise RuntimeError('Assigned GPU has non-external-graphics context before launch')
+            certificate=identity(row['pid'])
+            if certificate is None or certificate['state']=='Z' or row['memory_bytes'] is None:
+                raise RuntimeError('External graphics baseline identity or memory unavailable')
+            key=(row['pid'],row['gpu_uuid'],row['api'])
+            certificates[key]=certificate
+            rows.append(dict(row,identity=certificate))
+        value=dict(recorded_before_launch_ns=before,completed_ns=time.time_ns(),assigned_gpu_uuid=expected,owned=False,rows=rows,coverage=observed['coverage'])
+        path=self.receipt.with_name('external-graphics-baseline.json');save(path,value)
+        self.external_graphics=certificates
+        self.external_baseline=dict(path=str(path),sha256=hashlib.sha256(path.read_bytes()).hexdigest(),**value)
+        return self.external_baseline
 
     def prune(self):
         for pid,fd in list(self.children.handles.items()):
@@ -91,7 +125,7 @@ class RegisteredGPUAudit:
         from run_smoke import identity
         registered,metadata=self.registry()
         observed=sampler(cards)
-        result,checked=attribute(expected,registered,cards,observed,identity)
+        result,checked=attribute(expected,registered,cards,observed,identity,self.external_graphics)
         return result,dict(metadata,**checked)
 
     def close(self):
