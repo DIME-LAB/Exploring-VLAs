@@ -31,10 +31,16 @@ def probe():
     return dict(samples=samples, max_wall_gap_s=max(gaps, default=None))
 
 
-def prepare(seed, bank, colors=('blue',), generate=True):
+def prepare(seed, bank, colors=('blue',), generate=True, training_start_sha256=None):
+    training = None
     if not generate:
-        from phase3 import validate_bank
-        validate_bank(bank)
+        if training_start_sha256:
+            from training_starts import entry
+            training=entry(bank,seed,training_start_sha256)
+        else:
+            from phase3 import validate_bank
+            validate_bank(bank)
+    elif training_start_sha256:raise ValueError('Training starts must use sealed recorded scenes')
     import numpy as np
     import omni.timeline
     import omni.usd
@@ -120,13 +126,25 @@ def prepare(seed, bank, colors=('blue',), generate=True):
             target.write_text(json.dumps(bodies, indent=2) + '\n')
         bodies = json.loads(target.read_text())
         error, qerror = restore(bodies)
+        arm_restore = None
+        if training is not None:
+            import collection_runtime
+            arm_restore=collection_runtime.runtime().restore(dict(state=training['state'],bodies=bodies),arm=True)
+            actual_base=arm_restore['snapshot']['robot_base_world_pose'];expected_base=training['robot_base_world_pose']
+            if max(abs(a-b) for a,b in zip(actual_base['position'],expected_base['position']))>1e-6:
+                raise RuntimeError('Training and live physical robot bases differ')
+            aq,eq=actual_base['orientation'],expected_base['orientation']
+            if min(max(abs(a-b) for a,b in zip(aq,eq)),max(abs(a+b) for a,b in zip(aq,eq)))>1e-6:
+                raise RuntimeError('Training and live physical robot base orientations differ')
+            reset=arm_restore
         visible = {color: [name for name, body in bodies.items() if name.startswith(color)
                    and ext._is_in_camera_view(body['position'], margin_px=30)] for color in colors}
-        if any(not names for names in visible.values()):
+        if training is None and any(not names for names in visible.values()):
             raise RuntimeError(f'Seed {seed} lacks requested colour visibility: {visible}')
         return dict(seed=seed, scene_file=str(target), bodies=bodies, visible_blue=visible.get('blue', []), visible_colors=visible,
                     reset_epoch=reset.get('epoch'), reset_stamp_ns=reset.get('invalid_through_ns'),
-                    max_position_error_m=error, max_orientation_error=qerror)
+                    max_position_error_m=error, max_orientation_error=qerror,
+                    **({'training_start_restore':arm_restore} if training is not None else {}))
     finally:
         if playing:
             timeline.play()

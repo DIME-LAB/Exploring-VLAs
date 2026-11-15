@@ -458,6 +458,7 @@ def main():
                    help="Execution-horizon diagnostic only; frozen MAIN remains 10")
     p.add_argument("--diagnostic-prediction-trace", action="store_true",
                    help="Keep postprocessed predicted chunks and capture sim stamps, off the dispatch path")
+    p.add_argument("--training-start-bank-sha256", help="Explicit sealed five-training-scene start diagnostic; never MAIN")
     p.add_argument("--color", choices=("red", "green", "blue"), default="blue")
     p.add_argument("--warmup-actions", type=int, default=100)
     p.add_argument("--wall-watchdog-s", type=float, default=900)
@@ -476,6 +477,8 @@ def main():
         p.error('Execution-horizon diagnostics require --sim-time')
     if args.diagnostic_prediction_trace and not args.sim_time:
         p.error('Prediction-chunk diagnostics require --sim-time')
+    if args.training_start_bank_sha256 and not args.sim_time:
+        p.error('Training-start diagnostics require --sim-time')
     if args.diagnostic_reobserve_actions == 50 and args.rtc_enabled:
         p.error('The 50-action execution diagnostic requires --no-rtc')
     if args.sim_time and args.fresh_client_per_episode:
@@ -497,7 +500,15 @@ def main():
     cfg = args
     if args.sim_time:
         from phase3 import validate_bank
-        args.scene_bank_sha256 = validate_bank(args.scene_bank)
+        if args.training_start_bank_sha256:
+            from training_starts import validate_bank as validate_training_bank, entry as training_entry
+            training_manifest=validate_training_bank(args.scene_bank,args.training_start_bank_sha256)
+            training_entries={seed:training_entry(args.scene_bank,seed,args.training_start_bank_sha256) for seed in args.seeds}
+            if episode_rows is None or any(r['color']!=training_entries[r['seed']]['color'] or r['task']!=training_entries[r['seed']]['task'] or r['suite']!='seen-training-'+training_manifest['mode'] for r in episode_rows):
+                p.error('Training diagnostic rows differ from accepted source episodes')
+            args.scene_bank_sha256=args.training_start_bank_sha256
+            args.training_start_mode=training_manifest['mode']
+        else:args.scene_bank_sha256 = validate_bank(args.scene_bank)
         for name in ("ROS_LOCALHOST_ONLY", "ROS_AUTOMATIC_DISCOVERY_RANGE", "ROS_STATIC_PEERS"):
             os.environ.pop(name, None)
         os.environ["CYCLONEDDS_URI"] = f"file://{REPO}/linux-env/cyclonedds-eval.xml"
@@ -558,6 +569,9 @@ def main():
                                     REPO/"vla_SO-ARM101/src/so_arm101_control/so_arm101_control/compute_workspace.py",
                                     SCRIPTS/"collect/success.py", SCRIPTS/"collect/cup_geometry.py", SCRIPTS/"collect/pose_math.py"] if args.sim_time else [])},
     )
+    if args.training_start_bank_sha256:
+        source=Path(__file__).with_name('training_starts.py')
+        metadata['source_sha256'][str(source.relative_to(REPO))]=hashlib.sha256(source.read_bytes()).hexdigest()
     (args.out / "run_config.json").write_text(
         json.dumps(metadata, indent=2, default=str) + "\n"
     )
@@ -673,6 +687,11 @@ def main():
             running = False
             try:
                 result["home_error_deg"] = ros.home()
+                if args.training_start_bank_sha256:
+                    target=training_entries[args.seeds[index]]
+                    ros.fjt(ros.arm,ARM_JOINTS,target['state'][:5],3)
+                    ros.fjt(ros.grip,['gripper_joint'],target['state'][5:],1)
+                    result['training_start']={k:v for k,v in target.items() if k!='bodies'}
                 result["controller_status_start"] = ros.status_snapshot()
                 result["randomize"] = mcp("run_python", {"code":
                     f"import sys; sys.path.insert(0, {str(Path(__file__).parent)!r}); "
@@ -681,7 +700,8 @@ def main():
                     "scene_current=hashlib.sha256(Path(scene_reset.__file__).read_bytes()).hexdigest(); "
                     "scene_reset._FRAME_SUB = None if getattr(scene_reset, '_SOURCE_SHA256', None) != scene_current else scene_reset._FRAME_SUB; "
                     "scene_reset = importlib.reload(scene_reset) if getattr(scene_reset, '_SOURCE_SHA256', None) != scene_current else scene_reset; "
-                    f"result = scene_reset.prepare({args.seeds[index]}, {str(args.scene_bank)!r}, {('red', 'green', 'blue') if args.sim_time else ('blue',)!r}, generate={not args.sim_time!r})"})
+                    f"result = scene_reset.prepare({args.seeds[index]}, {str(args.scene_bank)!r}, {('red', 'green', 'blue') if args.sim_time else ('blue',)!r}, generate={not args.sim_time!r}"
+                    +(f", training_start_sha256={args.training_start_bank_sha256!r}" if args.training_start_bank_sha256 else '')+")"})
                 result["host_load_start"] = list(os.getloadavg())
                 result["gpu_start"] = subprocess.check_output([
                     "nvidia-smi", "--query-gpu=index,uuid,utilization.gpu,memory.used", "--format=csv"], text=True)
@@ -720,6 +740,13 @@ def main():
                             raise TimeoutError("No post-reset physical scoring baseline")
                         time.sleep(.02)
                     baseline = dict(ros.physical, bodies=result["randomize"]["bodies"])
+                    if args.training_start_bank_sha256:
+                        target=training_entries[args.seeds[index]]['state']
+                        handoff=ros.physical
+                        qerror=max(abs(math.degrees(a-b)) for a,b in zip(handoff['state'],target))
+                        derror=max(abs(math.degrees(a-b)) for a,b in zip(handoff['drive_targets'],target))
+                        result['training_start']['held_handoff']=dict(sim_ns=handoff['sim_ns'],state=handoff['state'],drive_targets=handoff['drive_targets'],max_state_error_deg=qerror,max_drive_error_deg=derror)
+                        if qerror>.25 or derror>1e-4:raise RuntimeError('Training start drifted or disagrees with controller-held targets')
                     result["physical_baseline"] = dict(epoch=ros.physical["epoch"], stamp_ns=ros.physical["sim_ns"], starts_from="verified saved reset bodies")
                     score = new_score(args.color, baseline)
                     ros.physical_drain()
