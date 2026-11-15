@@ -164,7 +164,11 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       Collection 34.57 accepted episodes/hour; uncapped FJT RTF 0.716, so real-time deployment remains unproven.
       Historical smoke: own instance down (35 tracked processes gone); superseded by the pilot proof above.
       Mac: coursework-eee598/roadmap-2026-11/phase3/3.1-collection/smoke-a8fc78b/.
-    - [ ] Full collection: ~900 episodes; lead schedules after pilot review.
+    - [x] Full collection: ~900 episodes; lead schedules after pilot review.
+      DONE 2026-11-15 00:5xZ: 900 accepted / 905 attempts, exactly 300R/300G/300B, 550,755 frames, 30 batches on
+      rtx6000 (4 instances, ~95 validated/h), all SHA-verified on dual (datasets/rtx6000-normal-*; index
+      datasets/rtx6000-normal-900-index). Independent content QA: all 900 episodes timestamp/task/index/state/action
+      vs raw PASS; 60 full sampled episodes (73,568 frame pairs) decoded vs raw PASS (min PSNR 34.2 dB).
       2026-11-14: runs on rtx6000 (operator: long runs there, not dual GPU 0). Host qualified (MoveIt 26 pkgs
       apt-installed at dual's exact versions with operator OK; rtx-only charset_normalizer preload; own ABI
       manifest ec82d39; export dependency drift refusal bf7336d). Smoke 5/5; 2 instances ~42 accepted/h each,
@@ -235,6 +239,9 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       check before the write, settle + stationary-target gate, then the normal-speed corrective cycle is recorded
       (all frames phase 2). Valid for the one-observation policy; labelled synthetic post-miss resets.
       Fallback (B) gravity-off position-set experiment documented, not built.
+      Qualified 2026-11-15 on dual at ff35d9f (smoke-synthetic-reset-v3): 3/3 (partly closed/closed/open hover,
+      R/G/B), protected-settle 30 samples/body, export+validate-existing PASS. Production: 300 (2 instances on
+      rtx6000 alongside training, 3-episode RGB cohorts, one attempt per process); runner under review.
 - [ ] 3.1j Simpler physics and a deeper grasp (Aldrin, 2026-11-14): the gripper barely grips the lego. Lego -> box
       collider (now SDF); cup -> compound of native primitives (now a 16-piece convex decomposition with a floor
       1.7 mm too high and asymmetric walls); robot/gripper colliders -> few primitives with accurate finger pads;
@@ -246,6 +253,9 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       20 um rest contact, and verifies CPU dynamics. Fixed-base normal smoke 5/5 and pilot-3.1-v4 50/50
       pass: fresh native offsets 0.1 mm/0, 13 boxes/cup and 1/lego; fixed_base=true and base drift zero.
 - [ ] 3.2 Fine-tune (more steps/episodes than 10k/100), sim/real mix per the coursework findings.
+    - 2026-11-15 01:04Z: primary normal-only run launched on rtx6000 (60k steps, decay 60k, eager eval later),
+      merged on dual (8.7 GB), hash-verified pull; ~1.8-2.0 steps/s; loss 0.40 -> 0.022 by 3k. Full-FT ablation defined,
+      not launched. Second model (normal + re-grasp) after the re-grasp batches.
     - Published guidance (2026-11-14 review, coursework 3.2-train-prep/reference-guidance-2026-11-14.md):
       set scheduler_decay_steps = steps (smolvla_base bakes 30k); 60k steps (~6.4 epochs) not 187.5k;
       closed-loop eval at 10k/20k/40k/60k; verify camera1/camera2 key mapping end to end; second job:
