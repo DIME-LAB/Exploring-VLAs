@@ -233,3 +233,26 @@ ticks. See `phase3-qualification.json` for source hashes, timings and physical
 snapshot checks. Earlier failed/interrupted attempts remain in the Mac report;
 none of the pilot episodes is a task score. Every actual checkpoint episode
 still passes the same validity gate. ROADMAP3.3 remains open for those scores.
+
+## Read-only checkpoint handoff
+
+`stage_checkpoints.py` is a stdlib CPU watcher, normally launched detached on
+the Mac so it can notify the lead through the local ask.py session tool. It
+requires the native post-save `checkpoints/last` marker and60seconds of stable
+model-file sizes/mtimes, then checks source SHA256, target SHA256, processor
+state references and the existing checkpoint feature contract. It rehashes the
+source after target copy and publishes by directory rename. It copies only
+`pretrained_model/` plus `handoff.json`; optimizer state stays on the trainer.
+No source write, GPU/model load, policy or Isaac launch occurs. Existing
+checkpoint destinations are verified and never overwritten.
+
+Pass `--source-checkpoints` (RTX job's `training/checkpoints`), `--destination`
+(dual backup eval checkpoint root), and a persistent local `--state-dir`.
+Default steps are10000,20000,40000,60000; poll/stability are60s. Optional
+`--notify-command-json` is an argv prefix that accepts `--prompt-file`.
+`status.json` tracks staged/notified checkpoints; per-step receipts and the
+published target's `handoff.json` preserve the full file hashes. A state lock
+prevents duplicate watchers, and failures preserve unpublished incoming data.
+Source reads stay under our RTX storage root; all target writes are confined
+to `/mnt/a4500-backup/exploring-vlas/eval/`. GPU use still requires a separate
+announced GO after staging.
