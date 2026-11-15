@@ -6,6 +6,8 @@ def main():
  p=argparse.ArgumentParser();p.add_argument('--out',type=Path,required=True);p.add_argument('--fixture',type=Path);p.add_argument('--fixture-sha256');p.add_argument('--checkpoint',type=Path);p.add_argument('--weights-sha256');p.add_argument('--bank',type=Path);p.add_argument('--bank-sha256');p.add_argument('--cadence-diagnostic',action='store_true');p.add_argument('--stop-by-utc',required=True);p.add_argument('--codec-diagnostic',action='store_true');p.add_argument('--replacement-diagnostic',action='store_true');a=p.parse_args();assert sum((a.cadence_diagnostic,a.codec_diagnostic,a.replacement_diagnostic))<=1;guarded=a.cadence_diagnostic or a.codec_diagnostic or a.replacement_diagnostic;root=a.out.resolve();assert root.is_relative_to(HOST/'eval/runs') and not root.exists();root.mkdir(parents=True)
  deadline=datetime.datetime.strptime(a.stop_by_utc,'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc).timestamp()-180;assert deadline>time.time()+600
  if a.checkpoint:
+  arms=['repl10','repl25','repl50'] if a.replacement_diagnostic else ['rtc-off-exec1','rtc-off-exec5'] if a.cadence_diagnostic else ['attempt-01']
+  assert all(len(str(root/name/'rpc.sock').encode())<104 for name in arms),'Native IPC path exceeds Unix socket limit'
   assert a.weights_sha256 and a.bank and a.bank_sha256
   assert hashlib.sha256((a.checkpoint/'model.safetensors').read_bytes()).hexdigest()==a.weights_sha256
  else:
@@ -64,7 +66,7 @@ def main():
   if a.checkpoint:
    settings=[(10,False),(25,False),(50,False)] if a.replacement_diagnostic else [(1,False),(5,False)] if a.cadence_diagnostic else [(10,True)]
    for cadence,rtc in settings:
-    folder=root/(f'replacement-rtc-off-exec{cadence}' if a.replacement_diagnostic else f'rtc-off-exec{cadence}' if a.cadence_diagnostic else 'attempt-01');argv=['python3','-u',str(REPO/'linux-env/scripts/eval/native_policy.py'),'--out',str(folder),'--checkpoint',str(a.checkpoint),'--weights-sha256',a.weights_sha256,'--bank',str(a.bank),'--bank-sha256',a.bank_sha256,'--observe-every-actions',str(cadence)]+([] if rtc else ['--rtc-off'])
+    folder=root/(f'repl{cadence}' if a.replacement_diagnostic else f'rtc-off-exec{cadence}' if a.cadence_diagnostic else 'attempt-01');argv=['python3','-u',str(REPO/'linux-env/scripts/eval/native_policy.py'),'--out',str(folder),'--checkpoint',str(a.checkpoint),'--weights-sha256',a.weights_sha256,'--bank',str(a.bank),'--bank-sha256',a.bank_sha256,'--observe-every-actions',str(cadence)]+([] if rtc else ['--rtc-off'])
     if a.codec_diagnostic:argv.append('--eval-codec-roundtrip')
     if a.replacement_diagnostic:argv.extend(['--queue-aggregation','latest_only'])
     import shlex
