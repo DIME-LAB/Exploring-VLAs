@@ -7,7 +7,7 @@ import numpy as np
 def main():
  p=argparse.ArgumentParser();p.add_argument('--out',type=Path,required=True);p.add_argument('--checkpoint',required=True);p.add_argument('--actions',type=int,default=20);p.add_argument('--observe-every-actions',type=int,choices=(1,5,10,25,50),default=10);p.add_argument('--rtc-off',action='store_true');p.add_argument('--queue-aggregation',choices=('weighted_average','latest_only'),default='weighted_average');p.add_argument('--eval-codec-roundtrip',action='store_true');a=p.parse_args();assert not a.out.exists();a.out.mkdir(parents=True)
  assert os.environ.get('CUDA_VISIBLE_DEVICES')==''
- root=Path(__file__).resolve().parents[3];env=dict(os.environ,PYTHONPATH=str(root/'lerobot/src'),SOARM_EVAL_NATIVE_HELD='1',LEROBOT_RTC_ENABLED='0' if a.rtc_off else '1',LEROBOT_RTC_EXECUTION_HORIZON='10',LEROBOT_RTC_MAX_GUIDANCE_WEIGHT='10',OMP_NUM_THREADS='4',OPENBLAS_NUM_THREADS='1',MKL_NUM_THREADS='1',PYTHONDONTWRITEBYTECODE='1')
+ root=Path(__file__).resolve().parents[3];env=dict(os.environ,PYTHONPATH=str(Path(a.checkpoint).resolve())+os.pathsep+str(root/'lerobot/src'),SOARM_EVAL_NATIVE_HELD='1',LEROBOT_RTC_ENABLED='0' if a.rtc_off else '1',LEROBOT_RTC_EXECUTION_HORIZON='10',LEROBOT_RTC_MAX_GUIDANCE_WEIGHT='10',OMP_NUM_THREADS='4',OPENBLAS_NUM_THREADS='1',MKL_NUM_THREADS='1',PYTHONDONTWRITEBYTECODE='1')
  for name in ('TMPDIR','HF_HOME','XDG_CACHE_HOME','TORCH_HOME'):
   if name not in env:env[name]=str(a.out/'cache'/name);Path(env[name]).mkdir(parents=True,exist_ok=True)
  key=a.out/'key';key.write_bytes(secrets.token_bytes(32));key.chmod(0o600);address=str(a.out/'ipc');assert len(address)<104
