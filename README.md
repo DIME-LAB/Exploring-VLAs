@@ -1121,3 +1121,22 @@ keeps cleanup failures latched, and bounds every subprocess stage. Collector
 success depends on affirmative receipts, not a shutdown exit code. A recorded
 native screen fault remains terminal inside its original collector; only this
 outer selection policy permits a new process after the old instance is gone.
+
+Collection notifications run in their own process session on the Mac. Start the
+notifier with `python3 linux-env/scripts/collect/notify_collection.py --spawn
+--remote-root <rtx-setup-directory> --out <mac-delivery-directory>
+--ask-script <session-tools/ask/scripts/ask.py> --recipient so-arm-101-vla`.
+The launcher returns only after a fresh remote read and a PID/token/PGID heartbeat.
+Keep the returned spawn receipt: a foreground tool session is not a durable
+notification owner. The worker catches up from persisted remote stop/final
+receipts, records each send before calling ask, and records delivery only after
+an accepted outcome. An unknown/failed send remains unresolved and is never
+retried automatically. The outbox is bound to its host, run and recipient.
+The detached-worker regression delivers a fault after its launcher has exited;
+CPU tests do not certify a future Mac outage or app shutdown.
+
+A stopped runner deliberately leaves its completed-run `selected_cohorts`
+manifest empty. Previously sealed `cohorts[].selected` entries and
+`selected_episodes` are retained, together with their exports and backups.
+They are partial results, not a completed production run or a resumable stopped
+checkpoint. Verify their seals separately before selecting them for another job.
