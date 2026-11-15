@@ -13,7 +13,10 @@ REPO=Path.home()/'Downloads/Exploring-VLAs';BASE=Path('/mnt/a4500-backup/explori
 
 def main():
  p=argparse.ArgumentParser();p.add_argument('--out',type=Path,required=True);p.add_argument('--starts',type=Path,required=True);p.add_argument('--recorded-replay',type=Path,required=True);p.add_argument('--actuation-mode',choices=('native','immediate'),required=True);p.add_argument('--calibration',action='store_true');a=p.parse_args();root=a.out.resolve();assert root.is_relative_to(BASE/'runs') and not root.exists();root.mkdir()
- assert os.environ.get('ROS_DOMAIN_ID')=='92';plan=json.loads((a.starts/'home-plan.json').read_text());validate_bank(plan['bank'],plan['bank_sha256']);episodes=json.loads(a.recorded_replay.read_text());assert len(episodes)==(1 if a.calibration else 3)
+ assert os.environ.get('ROS_DOMAIN_ID')=='92'
+ os.environ['RMW_IMPLEMENTATION']='rmw_cyclonedds_cpp';os.environ['CYCLONEDDS_URI']=f'file://{REPO}/linux-env/cyclonedds-eval.xml'
+ for name in ('ROS_LOCALHOST_ONLY','ROS_AUTOMATIC_DISCOVERY_RANGE','ROS_STATIC_PEERS'):os.environ.pop(name,None)
+ plan=json.loads((a.starts/'home-plan.json').read_text());validate_bank(plan['bank'],plan['bank_sha256']);episodes=json.loads(a.recorded_replay.read_text());assert len(episodes)==(1 if a.calibration else 3)
  ros=Ros(True,'/joint_states_measured');deployment=require_deployment(ros,mcp);events=[];clock=lambda stamp:stamp.sec+stamp.nanosec/1e9
  def trajectory(label,message):events.append(dict(kind='received-command',controller=label,wall_s=time.time(),clock_s=ros.clock_s,joint_names=list(message.joint_names),positions_rad=list(message.points[0].positions),time_from_start_s=message.points[0].time_from_start.sec+message.points[0].time_from_start.nanosec/1e9))
  def controller(label,message):

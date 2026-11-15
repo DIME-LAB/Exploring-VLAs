@@ -32,7 +32,7 @@ def main():
    arms.append((name,cadence,rtc,bank,banksha,rows,[]))
  start=time.time();deadline=start+74*60
  if a.stop_by_utc:deadline=min(deadline,datetime.datetime.strptime(a.stop_by_utc,'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc).timestamp()-120)
- env=dict(os.environ,SOARM_EVAL_LOCALHOST_ONLY='1',SOARM_COLLECTION_ROOT=str(BASE/'runtime33'),SOARM_INSTANCE_ROOT=str(BASE/'runtime33/instance92'),ISAACSIM_GPU='0',SOARM_POLICY_GPU='0',ROS_DOMAIN_ID='92',SOARM_KIT_MCP_PORT='8781',PYTHONDONTWRITEBYTECODE='1',SOARM_EVAL_INFERENCE_MODE='eager',OMP_NUM_THREADS='1',OPENBLAS_NUM_THREADS='1',MKL_NUM_THREADS='1')
+ env=dict(os.environ,SOARM_EVAL_LOCALHOST_ONLY='1',SOARM_COLLECTION_ROOT=str(BASE/'runtime33'),SOARM_INSTANCE_ROOT=str(BASE/'runtime33/instance92'),ISAACSIM_GPU='0',SOARM_POLICY_GPU='0',ROS_DOMAIN_ID='92',SOARM_KIT_MCP_PORT='8781',RMW_IMPLEMENTATION='rmw_cyclonedds_cpp',CYCLONEDDS_URI=f'file://{REPO}/linux-env/cyclonedds-eval.xml',PYTHONDONTWRITEBYTECODE='1',SOARM_EVAL_INFERENCE_MODE='eager',OMP_NUM_THREADS='1',OPENBLAS_NUM_THREADS='1',MKL_NUM_THREADS='1')
  for name in ('ROS_LOCALHOST_ONLY','ROS_AUTOMATIC_DISCOVERY_RANGE','ROS_STATIC_PEERS'):env.pop(name,None)
  for name,sub in [('TORCHINDUCTOR_CACHE_DIR','inductor'),('TRITON_CACHE_DIR','triton'),('TORCH_HOME','torch'),('TMPDIR','tmp'),('HF_HOME','huggingface'),('ROS_LOG_DIR','ros-logs'),('XDG_CACHE_HOME','')]:
   directory=BASE/'cache'/sub;directory.mkdir(parents=True,exist_ok=True);env[name]=str(directory)
