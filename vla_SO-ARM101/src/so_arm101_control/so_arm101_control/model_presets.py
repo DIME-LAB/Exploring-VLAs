@@ -20,6 +20,7 @@ MODEL_PRESETS = {
     # Crop checkpoint requires its bundled processor module on server PYTHONPATH; the native evaluator sets it.
     "next120-primary-10k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/next120-primary-init/010000/pretrained_model", "", "{}"),
     "next120-primary-20k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/next120-primary-init/020000/pretrained_model", "", "{}"),
+    "next120-primary-30k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/next120-primary-init/030000/pretrained_model", "", "{}"),
     "robust-crop-5k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/recorder-crf18-crop/005000/pretrained_model", "", "{}"),
     "robust-crop-10k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/recorder-crf18-crop/010000/pretrained_model", "", "{}"),
     "robust-crop-15k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/recorder-crf18-crop/015000/pretrained_model", "", "{}"),
