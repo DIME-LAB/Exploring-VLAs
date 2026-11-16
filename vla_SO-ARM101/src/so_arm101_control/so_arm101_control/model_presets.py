@@ -23,6 +23,7 @@ MODEL_PRESETS = {
     "robust-crop-15k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/recorder-crf18-crop/015000/pretrained_model", "", "{}"),
     "robust-crop-20k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/recorder-crf18-crop/020000/pretrained_model", "", "{}"),
     "robust-crop-25k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/recorder-crf18-crop/025000/pretrained_model", "", "{}"),
+    "robust-crop-30k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/recorder-crf18-crop/030000/pretrained_model", "", "{}"),
     "memorise24-crop-end": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/memorise24/workspace_crop/009102/pretrained_model", "", "{}"),
     "memorise24-original-end": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/memorise24/original/009102/pretrained_model", "", "{}"),
     "base-ft": ("/home/aaugus11/w_ckpt/smolvla-base-ft-rec222812-20k-s42-20261113", "", "{}"),
