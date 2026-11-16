@@ -62,7 +62,7 @@ import support_contact
 from base_drift import summary as base_drift_summary
 from tick_contract import TickContract, TickContractError, require_snapshots, digest, verify_proof, CLOCK_POLICY, STEP_NS
 from scene_bank import SceneBankSession, configure_args as configure_scene_bank_args
-from target_triplets import TripletSession,member as triplet_member,configure_args as configure_triplet_args,validate_run as validate_triplet_run
+from target_triplets import TripletSession,member as triplet_member,configure_args as configure_triplet_args,require_mode as require_triplet_mode,seal_run as seal_triplet_run
 from episode_policy import (POLICY, QualityReject, ConvergenceFailure, WorkerRegistry,
                             PLANNER_REJECTIONS, FailureStreak, disposition)
 
@@ -1103,6 +1103,7 @@ class Collector:
                         # completion is persisted separately, never by mutating this row.
                         row['wall_profile']=copy.deepcopy(profile);profile_frozen=True
                         if self.writer:
+                            if triplet is not None:triplet.record_start(checked,row,self.current_attempt_path)
                             self.writer.add(row,images)
                             self.episode_snapshots.append(checked)
                     if physical_failure is not None:profile['error']=repr(physical_failure)
@@ -1552,7 +1553,7 @@ class Collector:
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/compute_workspace.py',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/ik_calibration.yaml',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/workspace_bounds.yaml']
-        tracked_sources.extend(['linux-env/scripts/collect/scene_identity.py','linux-env/scripts/collect/target_triplets.py'])
+        tracked_sources.extend(['linux-env/scripts/collect/scene_identity.py','linux-env/scripts/collect/target_triplets.py','linux-env/scripts/collect/triplet_boundary.py'])
         tracked_sources.append(PROFILE['source'])
         source_hashes = {name: hashlib.sha256((REPO / name).read_bytes()).hexdigest() for name in tracked_sources}
         image_source=self.executor.image_take.metadata
@@ -1704,6 +1705,7 @@ class Collector:
         if previous and previous.get('counterfactual_triplet') is not None:
             raise ValueError('A partial or stopped counterfactual triplet cannot be resumed')
         triplet_config=getattr(args,'counterfactual_config',None)
+        require_triplet_mode(root,previous or ({'counterfactual_triplet':triplet_config} if triplet_config is not None else {}))
         mode = require_recovery_mode(previous,args.regrasp_only,args.normal_only)
         root.mkdir(parents=True, exist_ok=args.resume)
         with self.status_lock:self.finalization_certificate=collection_status.begin(root)
@@ -1976,7 +1978,7 @@ class Collector:
             disk_wait_seconds=disk_wait,
             episodes_per_wall_hour=accepted * 3600 / max(previous_wall + time.monotonic() - start, 1), end_marker='COLLECTION_FINISHED')
         if triplet_config is not None and summary['complete']:
-            atomic_json(root/'counterfactual-triplet.json',validate_triplet_run(root))
+            summary['counterfactual_triplet_seal']=seal_triplet_run(root)
         atomic_json(root / 'summary.json',summary)
         print(json.dumps(summary), flush=True)
         if not summary['complete']:

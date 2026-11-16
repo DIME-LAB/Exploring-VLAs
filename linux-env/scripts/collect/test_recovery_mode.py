@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from checkpoint import progress,episode_regrasp,require_recovery_mode
 from contract import COLORS,parameters
+from target_triplets import require_mode as require_triplet_mode
 
 
 class RecoveryModeTests(unittest.TestCase):
@@ -36,7 +37,7 @@ class RecoveryModeTests(unittest.TestCase):
         stop=next(i for i,n in enumerate(run.body) if isinstance(n,ast.Expr) and isinstance(n.value,ast.Call) and isinstance(n.value.func,ast.Attribute) and n.value.func.attr=='mkdir')
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);prior=root/'run.json';raw=json.dumps(dict(regrasp_only=False,normal_only=True,recovery_mode='normal_only'));prior.write_text(raw)
-            events=[];scope=dict(self=NS(args=NS(output=root,resume=True,regrasp_only=False,normal_only=False)),confined=lambda p:p,json=json,collection_status=NS(require_finalized=lambda p:events.append('validated'),begin=lambda p:self.fail('begin changed predecessor')),require_recovery_mode=require_recovery_mode)
+            events=[];scope=dict(self=NS(args=NS(output=root,resume=True,regrasp_only=False,normal_only=False)),confined=lambda p:p,json=json,collection_status=NS(require_finalized=lambda p:events.append('validated'),begin=lambda p:self.fail('begin changed predecessor')),require_recovery_mode=require_recovery_mode,require_triplet_mode=require_triplet_mode)
             with self.assertRaisesRegex(ValueError,'mode differs'):exec(compile(ast.Module(body=run.body[:stop],type_ignores=[]),'actual run mode entrance','exec'),scope)
             self.assertEqual(prior.read_text(),raw);self.assertEqual(events,['validated'])
 

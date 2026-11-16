@@ -38,6 +38,7 @@ class BankTests(unittest.TestCase):
     if isinstance(node.value,ast.Call) and isinstance(node.value.func,ast.Attribute) and node.value.func.attr=='_initialize_scene_session':return copy.deepcopy(new['_initialize_scene_session'].body[1:-1])
     return self.generic_visit(node)
    def visit_Expr(self,node):
+    if isinstance(node.value,ast.Call) and isinstance(node.value.func,ast.Name) and node.value.func.id=='require_triplet_mode':return None
     if isinstance(node.value,ast.Call) and isinstance(node.value.func,ast.Attribute) and node.value.func.attr=='_prepare_scene_attempt':return copy.deepcopy([new['_prepare_scene_attempt'].body[0],*new['_prepare_normal_scene_attempt'].body[1:]])
     return self.generic_visit(node)
   class DefaultPath(ast.NodeTransformer):
@@ -55,7 +56,7 @@ class BankTests(unittest.TestCase):
     if node.arg is None and isinstance(node.value,ast.IfExp) and any(isinstance(v,ast.Constant) and v.value=='counterfactual_triplet' for v in ast.walk(node.value.body)):return None
     return self.generic_visit(node)
    def visit_Expr(self,node):
-    if isinstance(node.value,ast.Call) and isinstance(node.value.func,ast.Attribute) and node.value.func.attr=='extend' and ast.dump(node.value.args[0])==ast.dump(ast.parse("['linux-env/scripts/collect/scene_identity.py','linux-env/scripts/collect/target_triplets.py']",mode='eval').body):return None
+    if isinstance(node.value,ast.Call) and isinstance(node.value.func,ast.Attribute) and node.value.func.attr=='extend' and ast.dump(node.value.args[0])==ast.dump(ast.parse("['linux-env/scripts/collect/scene_identity.py','linux-env/scripts/collect/target_triplets.py','linux-env/scripts/collect/triplet_boundary.py']",mode='eval').body):return None
     return self.generic_visit(node)
   def digest(tree):
    tree=copy.deepcopy(tree)

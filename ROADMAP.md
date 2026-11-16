@@ -259,6 +259,9 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       730000–730019 heldout; split datasets and layout/triplet metadata enforced at export. All-row metadata
       and all-frame video validation use the existing exporter. Independent review and a two-triplet live
       smoke remain required before production; no live collection authorized by this implementation.
+      Native bootstrap/first-recorded tick proofs, observed-scene target admission and cross-member
+      epoch/clock ordering are checked at capture and export. The finalized summary binds configuration,
+      group/native certificates and raw episode inputs; inconsistent mode markers refuse normal export.
 - [ ] 3.2 Fine-tune (more steps/episodes than 10k/100), sim/real mix per the coursework findings.
     - 2026-11-15 01:04Z: primary normal-only run launched on rtx6000 (60k steps, decay 60k, eager eval later),
       merged on dual (8.7 GB), hash-verified pull; ~1.8-2.0 steps/s; loss 0.40 -> 0.022 by 3k. Full-FT ablation defined,

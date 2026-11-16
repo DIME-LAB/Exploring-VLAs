@@ -338,6 +338,25 @@ the collector refuses a hidden target instead of changing the selection rule.
 Image pixels are not included in physical identity because repeated RTX renders
 can differ. Live PhysX repeatability still requires qualification.
 
+Preparation and the capture loop re-evaluate all three visible-target choices
+on the bootstrap and first recorded scene, requiring >5 mm margins and the same
+targets as the anchor. Their evidence includes the corresponding physical hash
+and native clock identity. Before the writer accepts its first row, capture
+publishes `first-recorded-native.json` with the checked native snapshot and
+command/ACK tick proof. A same-tick start must equal bootstrap exactly; a
+next-tick start must name that bootstrap row as its checked predecessor.
+Export compares the raw first row with this independent capture document.
+Later members' restore epochs and both native clocks must advance past the
+preceding member's recording window; copied or overlapping native provenance
+is refused.
+
+The completed summary seals the run configuration, anchor, group certificate,
+native start documents, receipts and raw frame tables by SHA256. The existing
+collector finalization certificate binds that summary. Export verifies both
+layers. Missing/null mode configuration is refused if any triplet path, seed,
+receipt, frame ID or certificate remains; it cannot silently produce a normal
+dataset. Normal runs retain their existing control sequence and parameter RNG.
+
 Generate a CPU-only four-instance plan, without starting any simulator:
 
 ```bash

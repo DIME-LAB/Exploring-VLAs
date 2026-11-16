@@ -6,10 +6,12 @@ from comparisons import matches,interval
 from scene_identity import physical_state,identity,require_identical
 from tick_contract import STEP_NS
 from storage import atomic_json,CANONICAL_ROOT,confined
+import triplet_boundary as boundary
+from tick_contract import digest
 
 TRAIN_SEEDS=COUNTERFACTUAL_TRAIN_SEEDS
 HELDOUT_SEEDS=COUNTERFACTUAL_HELDOUT_SEEDS
-POLICY=dict(version=2,kind='counterfactual-target-triplet',colors=list(COLORS),normal_only=True,
+POLICY=dict(version=3,kind='counterfactual-target-triplet',colors=list(COLORS),normal_only=True,
     order='six counterbalanced permutations by layout ordinal',
     target_rule=dict(name=VISIBLE_TARGET_RULE,frame='/World/base',refuse_margin_le_m=.005),camera_prime_ticks=20,
     initial_observation_ticks=1,state_identity='soarm101-native-physical-state-v1',
@@ -40,6 +42,9 @@ def configure_args(args,parser):
     seed=getattr(args,'counterfactual_layout_seed',None)
     if seed is None:
         if getattr(args,'counterfactual_split','train')!='train':parser.error('Counterfactual split needs a layout seed')
+        if getattr(args,'seed',None) in TRAIN_SEEDS+HELDOUT_SEEDS:parser.error('Reserved triplet seed requires explicit counterfactual mode')
+        try:require_mode(args.output,{})
+        except ValueError as error:parser.error(str(error))
         return None
     if args.resume or args.replay_receipt or args.scene_bank or args.regrasp_only:
         parser.error('Counterfactual triplets require a fresh normal run; no replay, resume or scene-only bank')
@@ -59,6 +64,7 @@ class TripletSession:
         if config!=spec(config['layout_seed'],config['split']):raise ValueError('Triplet configuration differs from the fixed recipe')
         self.root=Path(root);self.config=copy.deepcopy(config);self.anchor=None;self.bootstrap=None
         self.cup_sampler=None;self.sampled=0
+        self.starts={};self.recorded_starts=set()
         if (self.root/'triplet-anchor.json').exists():raise ValueError('A triplet anchor cannot be silently adopted')
     def save(self):
         atomic_json(self.root/'triplet-anchor.json',dict(config=self.config,anchor=self.anchor,
@@ -90,8 +96,8 @@ class TripletSession:
         restored=c.restore_physical(restore_code(self.anchor,True))
         proof=require_identical(restored['snapshot'],self.anchor)
         observed=c.advance_ticks(POLICY['initial_observation_ticks'])[-1]
-        if observed['epoch']!=restored['epoch'] or not matches(observed['sim_ns']-restored['snapshot']['sim_ns'],STEP_NS,'native_ns'):
-            raise RuntimeError('Triplet initial observation crosses a reset epoch or skips a tick')
+        boundary.bootstrap(restored['snapshot'],{k:v for k,v in restored.items() if k!='snapshot'},observed)
+        observed_rule=boundary.selections(observed,self.anchor)
         if self.bootstrap is None:self.bootstrap=copy.deepcopy(observed);self.save()
         bootstrap_proof=require_identical(observed,self.bootstrap)
         c.sync_scene(snapshot=observed);c.update_pose_cache(observed)
@@ -105,6 +111,7 @@ class TripletSession:
         c.episode_start_physical=observed;c.scene_restore=restored
         c.node.approach_offset=params['approach_offset_m'];c.node._grasp_approach_height_var.set(params['approach_height_m']);c.node.speed_scale=params['speed_scale']
         motion_epochs.add(observed['epoch'])
+        self.starts[receipt['episode_id']]=copy.deepcopy(observed)
         receipt.update(cup_randomization=copy.deepcopy(self.cup_sampler),initial_objects=dict(c.node.objects_data),initial_cups=dict(c.node._drop_data),
             initial_physical=restored['snapshot'],episode_start_physical=observed,initial_arm_check=dict(passed=True,exact_restore=proof),
             initial_restore_check={k:v for k,v in restored.items() if k!='snapshot'},initial_restore_error_m=restored['max_position_error_m'],
@@ -113,7 +120,16 @@ class TripletSession:
             counterfactual=dict(layout_id=self.config['layout_id'],triplet_id=self.triplet_id,layout_seed=self.config['layout_seed'],split=self.config['split'],
                 anchor_sha256=identity(self.anchor),initial_observation_sha256=identity(self.bootstrap),restore_proof=proof,
                 initial_observation_proof=bootstrap_proof,visibility=visibility,sampler_invocations=self.sampled,
+                observed_target_rule=observed_rule,
                 camera_prime_ticks=POLICY['camera_prime_ticks'],scene_clear_before_restore=cleared))
+
+    def record_start(self,snapshot,row,path):
+        episode=row['episode_id']
+        if episode in self.recorded_starts:return
+        record=boundary.recorded(snapshot,row,self.starts[episode],self.anchor,episode,self.triplet_id)
+        path=Path(path);path.mkdir(parents=True,exist_ok=True)
+        if (path/'first-recorded-native.json').exists():raise ValueError('Cannot replace a native start certificate')
+        atomic_json(path/'first-recorded-native.json',record);self.recorded_starts.add(episode)
 
 
 def validate(config,anchor,receipts):
@@ -135,8 +151,13 @@ def validate(config,anchor,receipts):
         proof=require_identical(r['initial_physical'],anchor['anchor']);bootstrap=require_identical(r['episode_start_physical'],anchor['bootstrap'])
         if m['restore_proof']!=proof or m['initial_observation_proof']!=bootstrap:raise ValueError('Triplet restore proof differs')
         restored=r['initial_physical'];observed=r['episode_start_physical']
-        if (restored['epoch']!=r['initial_restore_check']['epoch'] or observed['epoch']!=restored['epoch'] or
-                not matches(observed['sim_ns']-restored['sim_ns'],STEP_NS,'native_ns')):raise ValueError('Triplet clock/epoch boundary differs')
+        boundary.bootstrap(restored,r['initial_restore_check'],observed)
+        boundary.later(restored,receipts[index-1]['episode_start_physical'] if index else anchor['anchor'])
+        boot_row=observed['tick_contract']['row']
+        if (boot_row['episode_id']!=r['episode_id'] or boot_row['layout_id']!=config['layout_id'] or boot_row['triplet_id']!=triplet_id):
+            raise ValueError('Bootstrap native proof belongs to another member/group')
+        if index==0 and boundary.clocks(observed)!=boundary.clocks(anchor['bootstrap']):raise ValueError('Stored bootstrap native identity differs from first member')
+        if m['observed_target_rule']!=boundary.selections(observed,anchor['anchor']):raise ValueError('Observed visible target rule evidence differs')
         visible={member(config,i,anchor['anchor'])['object'] for i in range(3)}
         if r['cup_randomization']!=anchor['cup_sampler'] or set(m['visibility'])!=visible or not all(v is True for v in m['visibility'].values()):raise ValueError('Triplet scene/visibility differs')
     return dict(version=1,complete=True,layout_id=config['layout_id'],triplet_id=triplet_id,layout_seed=config['layout_seed'],split=config['split'],
@@ -144,29 +165,70 @@ def validate(config,anchor,receipts):
         target_selections=selections,episodes=[dict(episode_index=i,episode_id=r['episode_id'],task=r['params']['task'],target=r['params']['object']) for i,r in enumerate(receipts)])
 
 
-def validate_run(run,base=CANONICAL_ROOT):
-    run=Path(run);config=json.loads((run/'run.json').read_text()).get('counterfactual_triplet')
+def require_mode(run,document):
+    """A lost field must not reinterpret a triplet as a normal run."""
+    run=Path(run);config=document.get('counterfactual_triplet')
+    if config is not None:return config
+    marker=('counterfactual_triplet' in document or 'counterfactual-targets' in run.resolve().parts or
+        any((run/name).exists() or (run/name).is_symlink() for name in ('triplet-anchor.json','counterfactual-triplet.json','dataset/meta/counterfactual_triplets.json')))
+    summary=run/'summary.json'
+    if summary.exists() and 'counterfactual_triplet_seal' in json.loads(summary.read_text()):marker=True
+    for path in run.glob('attempt-*/receipt.json'):
+        r=json.loads(path.read_text());p=r.get('params',{})
+        if 'counterfactual' in r or 'target_selection' in p or p.get('seed') in TRAIN_SEEDS+HELDOUT_SEEDS:marker=True
+    if any(run.glob('attempt-*/first-recorded-native.json')):marker=True
+    if not marker:
+        for path in run.glob('attempt-*/frames.jsonl'):
+            with path.open() as stream:
+                if any('layout_id' in r or 'triplet_id' in r for r in map(json.loads,stream)):marker=True;break
+    if marker:raise ValueError('Triplet artifacts require a valid counterfactual run configuration')
+    return None
+
+
+def seal_identity(run):
+    paths=['run.json','triplet-anchor.json','counterfactual-triplet.json']
+    paths += [f'attempt-{i:04d}/{name}' for i in range(3) for name in ('receipt.json','frames.jsonl','first-recorded-native.json')]
+    return dict(version=1,files_sha256={p:hashlib.sha256((run/p).read_bytes()).hexdigest() for p in paths})
+
+
+def seal_run(run,base=CANONICAL_ROOT):
+    run=Path(run);result=validate_run(run,base,sealed=False)
+    if result is None:raise ValueError('Cannot seal a normal run as a triplet')
+    atomic_json(run/'counterfactual-triplet.json',result)
+    return seal_identity(run)
+
+
+def validate_run(run,base=CANONICAL_ROOT,sealed=True):
+    run=Path(run);config=require_mode(run,json.loads((run/'run.json').read_text()))
     if config is None:return None
     destination(run,config,base);anchor=json.loads((run/'triplet-anchor.json').read_text())
     receipts=[json.loads(p.read_text()) for p in sorted(run.glob('attempt-*/receipt.json'))]
-    result=validate(config,anchor,receipts);first=[];offsets=[]
+    result=validate(config,anchor,receipts);first=[];offsets=[];native_proofs=[];previous_last=None
     for index,r in enumerate(receipts):
-        row=None
+        row=None;last=None
         with (run/f'attempt-{index:04d}/frames.jsonl').open() as stream:
             for line in stream:
                 current=json.loads(line)
                 if current['episode_id']!=r['episode_id'] or current['layout_id']!=result['layout_id'] or current['triplet_id']!=result['triplet_id']:raise ValueError('Recorded frame belongs to another triplet')
                 if row is None:row=current
+                last=current
         if row is None:raise ValueError('Triplet member has no recorded frames')
+        if previous_last is not None:boundary.later(r['initial_physical'],previous_last)
+        previous_last=boundary.from_row(last)
+        record=json.loads((run/f'attempt-{index:04d}/first-recorded-native.json').read_text())
+        boundary.verify_record(record,row,r['episode_start_physical'],anchor['anchor'],r['episode_id'],result['triplet_id'])
+        native_proofs.append(dict(episode_id=r['episode_id'],certificate_sha256=digest(record),observed_rule=record['observed_rule']))
         offset=row['pose_stamp_ns']-r['episode_start_physical']['sim_ns']
-        if row['epoch']!=r['episode_start_physical']['epoch'] or offset<0 or not interval(offset,0,STEP_NS,'native_ns'):
-            raise ValueError('First triplet frame crosses its preparation epoch or clock window')
         offsets.append(offset)
         first.append(dict(state=row['physics_state'],velocity=row['physics_velocity'],drive_targets=row['physics_drive_targets'],
             bodies=row['physical_bodies'],base_world_pose=row['base_world_pose'],robot_base_world_pose=row['robot_base_world_pose']))
     for observed in first:require_identical(observed,first[0])
     if any(not matches(offsets[0],v,'native_ns') for v in offsets):raise ValueError('Triplet first observation offsets differ')
-    result.update(first_recorded_scene_sha256=identity(first[0]),first_recorded_offsets_ns=offsets);return result
+    result.update(first_recorded_scene_sha256=identity(first[0]),first_recorded_offsets_ns=offsets,native_start_proofs=native_proofs)
+    if sealed:
+        if json.loads((run/'counterfactual-triplet.json').read_text())!=result:raise ValueError('Stored triplet group certificate differs')
+        if json.loads((run/'summary.json').read_text()).get('counterfactual_triplet_seal')!=seal_identity(run):raise ValueError('Finalized triplet inputs/configuration changed')
+    return result
 
 
 def plan(base,instances,train_layouts=120,heldout_layouts=20):
@@ -193,7 +255,7 @@ def main():
     repo=Path(__file__).resolve().parents[3]
     value['source_commit']=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
     value['source_sha256']={name:hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-        for name in ('target_triplets.py','scene_identity.py','collect.py','contract.py','collection_runtime.py','export.py','export_content.py','export_video.py')}
+        for name in ('target_triplets.py','triplet_boundary.py','scene_identity.py','collect.py','contract.py','collection_runtime.py','export.py','export_content.py','export_video.py')}
     if out.exists():raise FileExistsError('Plan already exists')
     out.parent.mkdir(parents=True,exist_ok=True);atomic_json(out,value);print(json.dumps(value))
 

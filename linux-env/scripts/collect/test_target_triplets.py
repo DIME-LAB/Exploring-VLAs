@@ -5,13 +5,13 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 import numpy as np
-from contract import parameters,EVAL_SEEDS
+from contract import parameters,EVAL_SEEDS,corrective_action
 from scene_identity import BODY_NAMES,identity
-from target_triplets import TripletSession,POLICY,TRAIN_SEEDS,HELDOUT_SEEDS,spec,member,plan,destination,configure_args,validate_run
+from target_triplets import TripletSession,POLICY,TRAIN_SEEDS,HELDOUT_SEEDS,spec,member,plan,destination,configure_args,validate_run,seal_run,require_mode
 import test_scene_identity
 from test_review_regressions import load_class
 from storage import CANONICAL_ROOT
-from tick_contract import STEP_NS
+from tick_contract import STEP_NS,TickContract
 
 
 class Harness:
@@ -19,6 +19,9 @@ class Harness:
         self.root=root;self.config=config;self.runtime,self.data=test_scene_identity.SceneIdentityTests().runtime()
         for color in ('red','green','blue'):self.data['bodies'][color+'_2x3_1']['position'][0]+=.125
         self.runtime.stamp=lambda:self.data['sim_ns'];self.normal_calls=0;self.visible=True;self.bad=None;self.advances=[]
+        native=self.runtime.snapshot
+        self.runtime.snapshot=lambda:dict(native(),state_source='isaac_articulation',robot_base_pose_source='physx_rigid_body')
+        self.audit=TickContract();self.after_bootstrap=None
         Collector,_=load_class('collect.py','Collector');c=object.__new__(Collector);self.collector=c
         @contextmanager
         def own(*a):yield
@@ -34,13 +37,14 @@ class Harness:
         def restore(code):
             scope={}
             with patch.dict('sys.modules',{'collection_runtime':NS(runtime=lambda:self.runtime)}):exec(code,scope)
-            c.generation.epoch=scope['result']['epoch'];return scope['result']
+            c.generation.epoch=scope['result']['epoch'];self.audit.install_boundary(scope['result'],restore=True);return scope['result']
         c.restore_physical=restore
         def advance(count):
             self.advances.append(count);out=[]
             for _ in range(count):
                 self.data['sim_ns']+=STEP_NS;self.data['physics_time_s']+=1/30
-                value=self.runtime.snapshot()
+                if count==1 and self.after_bootstrap:self.after_bootstrap(self.data)
+                value=self.checked_snapshot()
                 if count==1 and self.bad:
                     if self.bad=='body':value['bodies']['cup_green']['position'][0]=float(np.nextafter(np.float32(.125),np.float32(1.)))
                     if self.bad=='epoch':value['epoch']-=1
@@ -57,25 +61,46 @@ class Harness:
             c.node._drop_data={n[4:]:copy.deepcopy(b) for n,b in s['bodies'].items() if n.startswith('cup_')}
         c.update_pose_cache=cache;c.servo=NS(configure=lambda p:None);c.sensors=NS(duplicate_messages={})
         c.mutate_kit=lambda *a:{member(config,i,c.triplet_session.anchor)['object']:self.visible for i in range(3)}
+    def checked_snapshot(self):
+        s=self.runtime.snapshot();stamp=s['sim_ns'];epoch=s['epoch'];target=list(s['drive_targets'])
+        session=self.collector.triplet_session
+        row=dict(tick_contract_version=1,epoch=epoch,observation_epoch=epoch,expert_epoch=epoch,sim_ns=stamp,pose_stamp_ns=stamp,
+            physics_time_s=s['physics_time_s'],invalid_through_ns=self.runtime.invalid_through_ns,state_source='isaac_articulation',
+            state=s['state'],physics_state=s['state'],velocity=s['velocity'],physics_velocity=s['velocity'],physics_drive_targets=target,
+            physical_bodies=s['bodies'],base_world_pose=s['base_world_pose'],robot_base_world_pose=s['robot_base_world_pose'],robot_base_pose_source='physx_rigid_body',
+            episode_id=self.collector.current_episode_id,layout_id=session.config['layout_id'],triplet_id=session.triplet_id,
+            camera_layout={k:dict(encoding='rgb8',width=640,height=480,step=1920,bytes=921600) for k in ('wrist','top')},
+            execution_geometry=dict(passed=True,epoch=epoch,sim_ns=stamp,target=target),executing=True,phase='fixture',
+            action=corrective_action(s['state'],target),executed_action=target,expert_reference=target,
+            expert_observation_stamp_ns=stamp,observation_stamp_ns=stamp,declared_application_stamp_ns=stamp,application_stamp_ns=stamp,
+            command_clock_ns=stamp,applied_command=target,planner_execution_reference=target,dart_offset=[0.]*6,
+            command_filter_delta=[0.]*6,command_velocity=[0.]*5)
+        for k in ('joint_stamp_ns','wrist_stamp_ns','top_stamp_ns'):row[k]=stamp
+        for k in ('wall_ns','joint_receive_ns','wrist_receive_ns','top_receive_ns'):row[k]=stamp+10**9
+        self.audit.observe(row);s['tick_contract']=self.audit.finish(row)
+        return s
     def prepare(self,index):
         c=self.collector;p=member(self.config,index);receipt=dict(params=p,episode_id='episode-'+str(index))
         c._prepare_scene_attempt(p,{},receipt,set(),self.root,self.root/f'attempt-{index:04d}')
         return receipt
-    def complete(self):
+    def complete(self,recorded_ticks=1,first_offset_ticks=0):
         receipts=[]
         for index in range(3):
             r=self.prepare(index);r.update(accepted=True,timing=dict(passed=True));receipts.append(r)
-            directory=self.root/f'attempt-{index:04d}';directory.mkdir()
+            directory=self.root/f'attempt-{index:04d}';rows=[]
+            for tick in range(recorded_ticks):
+                if tick or first_offset_ticks:
+                    self.data['sim_ns']+=STEP_NS;self.data['physics_time_s']+=1/30
+                    if tick:self.data['state'][0]=float(np.float32(.125+.001*tick));self.data['velocity'][0]=.03
+                    s=self.checked_snapshot()
+                else:s=r['episode_start_physical']
+                row=copy.deepcopy(s['tick_contract']['row']);self.collector.triplet_session.record_start(s,row,directory);rows.append(row)
             (directory/'receipt.json').write_text(json.dumps(r))
-            s=r['episode_start_physical'];m=r['counterfactual']
-            row=dict(episode_id=r['episode_id'],layout_id=m['layout_id'],triplet_id=m['triplet_id'],
-                epoch=s['epoch'],sim_ns=s['sim_ns'],pose_stamp_ns=s['sim_ns'],
-                physics_state=s['state'],physics_velocity=s['velocity'],physics_drive_targets=s['drive_targets'],
-                physical_bodies=s['bodies'],base_world_pose=s['base_world_pose'],robot_base_world_pose=s['robot_base_world_pose'])
-            (directory/'frames.jsonl').write_text(json.dumps(row)+'\n')
+            (directory/'frames.jsonl').write_text(''.join(json.dumps(row)+'\n' for row in rows))
             for b in self.data['bodies'].values():b['position'][0]+=.5
             self.data['state'][0]+=.25
         (self.root/'run.json').write_text(json.dumps(dict(counterfactual_triplet=self.config)))
+        seal=seal_run(self.root,base=self.root.parents[3]);(self.root/'summary.json').write_text(json.dumps(dict(counterfactual_triplet_seal=seal)))
         return receipts
 
 
@@ -129,6 +154,87 @@ class TripletTests(unittest.TestCase):
             h=self.fixture(d);h.visible=False
             with self.assertRaisesRegex(RuntimeError,'target must be visible'):h.prepare(0)
             self.assertEqual(h.normal_calls,1);self.assertIsNone(h.collector.writer)
+    def test_common_first_row_substitution_refuses_at_zero_and_next_tick(self):
+        for offset in (0,1):
+            with self.subTest(offset=offset),tempfile.TemporaryDirectory() as d:
+                h=self.fixture(d);h.complete(first_offset_ticks=offset)
+                for path in h.root.glob('attempt-*/frames.jsonl'):
+                    row=json.loads(path.read_text());row['physical_bodies']['red_2x3_0']['position'][0]+=.25;path.write_text(json.dumps(row)+'\n')
+                with self.assertRaisesRegex(ValueError,'native tick proof'):validate_run(h.root,base=Path(d),sealed=False)
+    def test_bootstrap_rule_rejects_ambiguous_or_swapped_observed_candidates(self):
+        for kind in ('ambiguous','swapped'):
+            with self.subTest(kind=kind),tempfile.TemporaryDirectory() as d:
+                h=self.fixture(d)
+                for color in ('red','green','blue'):
+                    for i,x in enumerate((.100,.106)):h.data['bodies'][f'{color}_2x3_{i}']['position']=[x,0.,0.]
+                def move(data):
+                    for color in ('red','green','blue'):
+                        for i,x in enumerate((.100,.104) if kind=='ambiguous' else (.106,.100)):
+                            data['bodies'][f'{color}_2x3_{i}']['position']=[x,0.,0.]
+                h.after_bootstrap=move
+                with self.assertRaisesRegex(ValueError,'<=5 mm|differs from anchor'):h.prepare(0)
+                self.assertIsNone(h.collector.writer)
+    def test_next_recorded_tick_rechecks_rule_before_native_certificate_or_row(self):
+        with tempfile.TemporaryDirectory() as d:
+            h=self.fixture(d);r=h.prepare(0);path=h.root/'attempt-0000'
+            for i,x in enumerate((.100,.104)):h.data['bodies'][f'red_2x3_{i}']['position']=[x,0.,0.]
+            h.data['sim_ns']+=STEP_NS;h.data['physics_time_s']+=1/30;s=h.checked_snapshot()
+            with self.assertRaisesRegex(ValueError,'<=5 mm'):h.collector.triplet_session.record_start(s,s['tick_contract']['row'],path)
+            self.assertFalse((path/'first-recorded-native.json').exists())
+    def test_reused_native_member_chain_refuses_before_group_seal_checks(self):
+        with tempfile.TemporaryDirectory() as d:
+            h=self.fixture(d);receipts=h.complete()
+            for i in (1,2):
+                r=receipts[i]
+                for key in ('initial_physical','episode_start_physical','initial_restore_check'):r[key]=copy.deepcopy(receipts[0][key])
+                (h.root/f'attempt-{i:04d}/receipt.json').write_text(json.dumps(r))
+            with self.assertRaisesRegex(ValueError,'reused or overlapped'):validate_run(h.root,base=Path(d),sealed=False)
+    def test_member_priming_requires_both_independent_clocks_to_advance(self):
+        from triplet_boundary import later
+        previous=dict(epoch=1,sim_ns=10**9,physics_time_s=1.)
+        current=dict(epoch=2,sim_ns=10**9+20*STEP_NS,physics_time_s=1.+20/30)
+        later(current,previous)
+        for key in ('sim_ns','physics_time_s'):
+            changed=dict(current);changed[key]=previous[key]+1
+            if key=='physics_time_s':changed[key]=previous[key]+.001
+            with self.subTest(clock=key),self.assertRaisesRegex(ValueError,'overlapped'):later(changed,previous)
+    def test_missing_or_null_mode_and_edited_configuration_cannot_unbind_group(self):
+        for change in ('missing','null','extra'):
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as d:
+                h=self.fixture(d);h.complete();path=h.root/'run.json';doc=json.loads(path.read_text())
+                if change=='missing':doc.pop('counterfactual_triplet')
+                elif change=='null':doc['counterfactual_triplet']=None
+                else:doc['unbound_change']=True
+                path.write_text(json.dumps(doc))
+                with self.assertRaisesRegex(ValueError,'configuration|inputs'):validate_run(h.root,base=Path(d))
+    def test_each_triplet_mode_marker_alone_refuses_normal_export_interpretation(self):
+        for marker in ('path','anchor','group','dataset','receipt','first_native','later_frame','reserved_seed','summary','null'):
+            with self.subTest(marker=marker),tempfile.TemporaryDirectory() as d:
+                root=Path(d)/('counterfactual-targets' if marker=='path' else 'normal');root.mkdir();doc={}
+                names=dict(anchor='triplet-anchor.json',group='counterfactual-triplet.json',dataset='dataset/meta/counterfactual_triplets.json',
+                    receipt='attempt-0000/receipt.json',first_native='attempt-0000/first-recorded-native.json',later_frame='attempt-0000/frames.jsonl',
+                    reserved_seed='attempt-0000/receipt.json',summary='summary.json')
+                if marker=='null':doc['counterfactual_triplet']=None
+                elif marker in names:
+                    p=root/names[marker];p.parent.mkdir(parents=True,exist_ok=True)
+                    value={'counterfactual':{}} if marker=='receipt' else {'params':{'seed':720000}} if marker=='reserved_seed' else {'counterfactual_triplet_seal':{}} if marker=='summary' else {}
+                    p.write_text('{}\n'+json.dumps(dict(layout_id='layout-720000'))+'\n' if marker=='later_frame' else json.dumps(value))
+                with self.assertRaisesRegex(ValueError,'configuration'):require_mode(root,doc)
+    def test_actual_capture_certifies_start_before_writer_and_refuses_failed_certificate(self):
+        from test_review_regressions import ReviewRegressions
+        for fail in (False,True):
+            with self.subTest(fail=fail),tempfile.TemporaryDirectory() as d:
+                c,_,entry=ReviewRegressions().collector();events=[]
+                entry['tick'][0]['base_world_pose']=dict(position=[0.]*3,orientation=[1.,0.,0.,0.])
+                def record(snapshot,row,path):
+                    events.append('native')
+                    self.assertEqual(snapshot['tick_contract']['row'],{k:v for k,v in row.items() if k!='wall_profile'})
+                    if fail:raise ValueError('Native first-record certificate refused')
+                c.triplet_session=NS(anchor=True,config=dict(layout_id='layout'),triplet_id='triplet',record_start=record)
+                c.current_attempt_path=Path(d);c.writer=NS(add=lambda *a:events.append('write'))
+                c.capture.__func__.__globals__['Sensors']=NS(image=lambda msg:np.zeros((2,2,3),dtype=np.uint8))
+                c.capture();self.assertEqual(events,['native'] if fail else ['native','write'])
+                if fail:self.assertIn('certificate refused',c.failure)
     def test_partial_or_edited_members_cannot_export(self):
         for edit in ('partial','task','noise','layout','visibility','physical','first_row','later_id','duplicate_episode','selection'):
             with self.subTest(edit=edit),tempfile.TemporaryDirectory() as d:

@@ -136,7 +136,7 @@ def main():
             '-filter_complex', '[0:v][1:v]hstack=inputs=2', '-c:v', 'libx264', '-threads', '2', '-crf', '20',
             str(report / f'sample-{color}.mp4')], check=True)
     validation = dict(passed=True,status='VALIDATION_FINISHED',completed_wall_ns=time.time_ns(),
-                     validator_source_sha256={n:hashlib.sha256(Path(__file__).with_name(n).read_bytes()).hexdigest() for n in ('export.py','export_content.py','export_video.py','target_triplets.py','scene_identity.py')},
+                     validator_source_sha256={n:hashlib.sha256(Path(__file__).with_name(n).read_bytes()).hexdigest() for n in ('export.py','export_content.py','export_video.py','target_triplets.py','triplet_boundary.py','scene_identity.py','contract.py','tick_contract.py','comparisons.py')},
                      counterfactual_triplet=triplet,export_content=dict(metadata=content,video=videos),
                      recovery=recovery,loaded=True, fps=loaded.fps, episodes=loaded.num_episodes,
                      frames=len(loaded), features=loaded.features, timing_passed=all(a['passed'] for a in audits),
