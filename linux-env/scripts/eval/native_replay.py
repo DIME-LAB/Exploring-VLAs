@@ -32,7 +32,7 @@ def validate_collector_cut():
 
 
 def main():
- p=argparse.ArgumentParser();p.add_argument('--fixture',type=Path,required=True);p.add_argument('--fixture-sha256',required=True);p.add_argument('--out',type=Path,required=True);p.add_argument('--commands',choices=('clean','executed'),required=True);a=p.parse_args()
+ p=argparse.ArgumentParser();p.add_argument('--grasp-telemetry',action='store_true');p.add_argument('--fixture',type=Path,required=True);p.add_argument('--fixture-sha256',required=True);p.add_argument('--out',type=Path,required=True);p.add_argument('--commands',choices=('clean','executed'),required=True);a=p.parse_args()
  hostroot=Path(qualified_host(REPO)['root']);assert a.out.resolve().is_relative_to(hostroot) and not a.out.exists();a.out.mkdir(parents=True)
  require_environment()
  core=validate_collector_cut()
@@ -46,6 +46,10 @@ def main():
   assert installed['loaded_sha256']==core['collection_runtime.py'] and installed['physics_config']['dynamics']=='cpu' and installed['articulation_audit']['fixed_base'] is True
   assert installed['cuda_device_count']==1 and installed['cuda_device']==0 and installed['renderer_multi_gpu'] is False
   transport.generation.install(installed)
+  if a.grasp_telemetry:
+   telemetry=mcp('run_python',{'code':f'import sys\nsys.path.insert(0,{str(REPO/"linux-env/scripts/eval")!r})\nimport grasp_telemetry\nimport collection_runtime as c\nresult=grasp_telemetry.install(c.runtime(),enabled=True)'})
+   assert telemetry['enabled'] is True
+   (a.out/'grasp-telemetry-install.json').write_text(json.dumps(telemetry,indent=2)+'\n')
   deadline=time.monotonic()+20
   while transport.publisher.get_subscription_count()<1:
    if time.monotonic()>deadline:raise TimeoutError('Collector command graph discovery')
@@ -69,6 +73,10 @@ def main():
     proof,current=transport.session.step(action);steps.append(dict(action_index=action_index,**proof));snapshots.append(current);scorer.update(current)
    # Finish on the final recorded tick; no unrecorded hold steps for scoring.
    video=mcp('soarm101.stop_recording');recording=False
+   if a.grasp_telemetry:
+    from grasp_telemetry import validate_intervals
+    contact_summary=validate_intervals(snapshots)
+    (out/'grasp-telemetry-summary.json').write_text(json.dumps(contact_summary,indent=2)+'\n')
    q=np.asarray([s['state'] for s in snapshots[:-1]]);reference=np.asarray(episode['recorded_states_rad']);error=np.degrees(q-reference)
    start_q=episode['recorded_states_rad'][0][5];max_grip=start_q;closure=len(actions)
    for i,ref in enumerate(episode['recorded_states_rad']):

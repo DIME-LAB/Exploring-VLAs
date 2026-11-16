@@ -24,7 +24,7 @@ class CleanupTests(unittest.TestCase):
             class Actor:
                 def close(self):actor_process.terminate();actor_process.wait(timeout=5);closed.append('actor')
             def terminate(process):process.terminate();process.wait(timeout=5);closed.append('server')
-            def fail(*args):raise PrimaryFailure('forced-primary-rollout-error')
+            def fail(*args,**kwargs):raise PrimaryFailure('forced-primary-rollout-error')
             log=(root/'server.log').open('w')
             env=dict(json=json,recording=True,mcp=lambda *a:closed.append('recorder'),out=out,color='blue',row=dict(seed=900002,task='Pick a blue lego and place it in blue cup'),a=types.SimpleNamespace(out=root,max_actions=1350,evaluation_kind='TEST',weights_sha256='weight',bank_sha256='bank'),run_actor=fail,active=dict(physical=[dict(partial=True)],commands=[dict(partial=True)],captures=[]),actor=Actor(),server=server_process,terminate=terminate,serverlog=log,connection=Closer('connection'),listener=Closer('listener'),transport=Closer('transport'),rpc_key=key,key=key)
             try:

@@ -36,6 +36,11 @@ def install():
             # the response if physics advanced: measured inference delay is0.
             kwargs=dict(prev_chunk_left_over=tail,inference_delay=0) if enabled else {}
             self.native_rtc=dict(enabled=enabled,step=step,prefix_steps=tail.shape[1] if enabled and tail is not None else 0,inference_delay=0,capture_sim_ns=context['sim_ns'],epoch=context['epoch'],execution_horizon=rtc.execution_horizon if enabled else None,max_guidance_weight=rtc.max_guidance_weight if enabled else None)
+            if context.get('flow_noise') is not None:
+                from flow_noise import prediction_noise
+                state=observation['observation.state']
+                noise,proof=prediction_noise(context['flow_noise'],step,state.shape[0],self.policy.config.chunk_size,self.policy.config.max_action_dim,state.device)
+                kwargs['noise']=noise;self.native_rtc['flow_noise']=proof
             chunk=self.policy.predict_action_chunk(observation,**kwargs)
             if chunk.ndim!=3:chunk=chunk.unsqueeze(0)
             chunk=chunk[:,:self.actions_per_chunk,:];self._rtc_previous_chunk=chunk.detach().clone();self._rtc_chunk_start=step

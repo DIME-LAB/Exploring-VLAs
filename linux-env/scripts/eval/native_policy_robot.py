@@ -42,6 +42,8 @@ class HeldTickRobot(Robot):
         return response
     def get_observation(self):
         response=self.exchange(dict(op='capture'));self.capture_metadata=dict(response['metadata'])
+        if getattr(self,'flow_noise_identity',None) is not None:
+            self.capture_metadata['flow_noise']=dict(self.flow_noise_identity)
         observation=response['observation']
         if self.config.eval_codec_roundtrip:
             assert self.capture_metadata['mode']=='collect' and self.capture_metadata['held']

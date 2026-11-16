@@ -25,7 +25,7 @@ def preflight_sources(repo):
     client=folder/'run_episodes.py'
     original=subprocess.check_output(['git','-C',str(repo),'show','bf7336d:linux-env/scripts/eval/run_episodes.py'])
     if client.read_bytes()!=original:raise ValueError('Native collector-side Client differs from bf7336d')
-    names=('native_policy.py','native_environment.py','native_bank.py','native_replay.py','held_tick.py','checkpoint_contract.py','run_episodes.py')
+    names=('native_policy.py','flow_noise.py','grasp_telemetry.py','native_environment.py','native_bank.py','native_replay.py','held_tick.py','checkpoint_contract.py','run_episodes.py')
     return {name:hashlib.sha256((folder/name).read_bytes()).hexdigest() for name in names}
 
 def require_preflight_sources(proof,repo):
@@ -36,7 +36,7 @@ def rpc_sources(repo):
     """Fingerprint the actual CPU RPC smoke and production native actor path."""
     import hashlib
     folder=Path(repo)/'linux-env/scripts/eval'
-    names=('native_policy_client.py','native_policy_server.py','native_policy_robot.py','cpu_rpc_smoke.py','native_environment.py')
+    names=('native_policy_client.py','native_policy_server.py','native_policy_robot.py','flow_noise.py','cpu_rpc_smoke.py','native_environment.py')
     return {name:hashlib.sha256((folder/name).read_bytes()).hexdigest() for name in names}
 
 def require_rpc_sources(proof,repo):

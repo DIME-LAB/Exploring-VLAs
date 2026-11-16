@@ -37,8 +37,14 @@ def main():
    parts=line.strip().split(maxsplit=3)
    if not parts:continue
    if parts[0]=='QUIT':break
-   if parts[0] not in ('RUN','WARM'):raise ValueError('Expected RUN/WARM/QUIT')
+   if parts[0] not in ('RUN','WARM','RUNSEEDED'):raise ValueError('Expected RUN/RUNSEEDED/WARM/QUIT')
    ep=parts[1];actions=int(parts[2]);task=json.loads(parts[3]);assert actions>0
+   identity=None
+   if parts[0]=='RUNSEEDED':
+    from flow_noise import validate_identity
+    identity=validate_identity(task['flow_noise']);task=task['task']
+    if not isinstance(task,str):raise ValueError('Task must be a string')
+   client.robot.flow_noise_identity=identity
    with condition:state.update(paused=True,epoch_wall=float('inf'),chunks=[],latest_chunk=None)
    client.stub.Ready(services_pb2.Empty())
    with client.action_queue_lock:client.action_queue=Queue()
@@ -51,13 +57,13 @@ def main():
     client.robot.codec_audit_path=a.codec_audit_dir/(ep+'-first-encoded.npz')
    client.robot.reset_eval_codec()
    started=time.monotonic();requests=[];sent=[]
-   emit('EPSTART',dict(ep=ep,warmup=parts[0]=='WARM'))
+   emit('EPSTART',dict(ep=ep,warmup=parts[0]=='WARM',flow_noise=identity))
    for i in range(actions):
     if i%a.observe_every_actions==0:requests.append(request(task))
     performed=client.control_loop_action();sent.append(dict(action_index=i,requested=dict(client.robot.last_requested_action),performed=performed))
    with condition:state['paused']=True
    client.stub.Ready(services_pb2.Empty())
-   emit('EPDONE',dict(ep=ep,actions_sent=len(sent),wall_s=time.monotonic()-started,requests=requests,chunks=state['chunks'],sent=sent,observe_every_actions=a.observe_every_actions,observation_trigger="fixed executed-action cadence; threshold not used as trigger",chunk_size_threshold=.8,actions_per_chunk=50,queue_aggregation=a.queue_aggregation,eval_codec_roundtrip=a.eval_codec_roundtrip,clock_basis='collector-native-held',inference_clock='simulation; physics waits during RPC'))
+   emit('EPDONE',dict(ep=ep,flow_noise=identity,actions_sent=len(sent),wall_s=time.monotonic()-started,requests=requests,chunks=state['chunks'],sent=sent,observe_every_actions=a.observe_every_actions,observation_trigger="fixed executed-action cadence; threshold not used as trigger",chunk_size_threshold=.8,actions_per_chunk=50,queue_aggregation=a.queue_aggregation,eval_codec_roundtrip=a.eval_codec_roundtrip,clock_basis='collector-native-held',inference_clock='simulation; physics waits during RPC'))
  finally:
   client.stop();receiver.join(timeout=5)
 if __name__=='__main__':main()
