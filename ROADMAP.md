@@ -302,6 +302,14 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       restore) qualified 30/300. Next (GPT second opinion agrees): 120k-step full fine-tune from the primary 30k with the
       crop, LIGHT augmentation (50% identity) and 25% sampling from movement onset to first closure; started ~00:30Z
       2026-11-16 (~26 h); judge at 20k/40k on 15 seen + 15 held-out.
+    - 2026-11-16 ~01-07Z: robustness run closed (30k seen-5 0/5 both arms, ~46 mm; 20k bank-v2 chunk0 0/15 valid,
+      chunk1 deliberately not run). 120k primary-init (1.29 steps/s, end ~Nov 17 02:30Z) on corrected seen-15 (global
+      episodes 0-14, 5/colour; an earlier seen-15 draft had 9 unseen seeds) + bank-v2 held-15, DEFAULT arm, all 0
+      grasps so far: 10k seen 0/13 valid (closest mean 37.7 mm, first close 57.7 mm); 20k seen 0/15 (26.8 / 38.7 mm),
+      20k held 0/15 (35.3 / 59.5 mm). Closest approach shrinking on seen layouts; held-out lags. Eval guard now admits
+      foreign GPU0 graphics-only <=16 MiB (Kit restarts on GPU1) and refuses any foreign compute; a DroidStack job on
+      GPU0 stopped the 10k window, and plan47 now schedules DroidStack around our START/STOP lines. Next: 30k seen
+      trend point, 40k full judgment.
 - [ ] 3.4 (only if 3.3 paraphrases fail) Prompt-variety run: relabel each training sample's task from a set
       of templates per colour at merge time (no new collection), hold some templates out for eval, and compare
       against the fixed-string model on both exact and held-out prompts. Published SmolVLA/LeRobot guidance is
