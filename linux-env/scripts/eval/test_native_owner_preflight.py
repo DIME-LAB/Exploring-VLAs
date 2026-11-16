@@ -46,6 +46,15 @@ def exercise(xml,scenario="pass"):
                     for name in ('isaacsim-soarm101.pid','control.pid'):
                         path=instance/name
                         start(path,instance/(name+'.log'),[sys.executable,'-c','import time;time.sleep(120)']);paths.append(path)
+                elif 'native_replay.py' in cmd[-1]:
+                    import shlex
+                    assert '--grasp-telemetry' in shlex.split(cmd[-1]),'Telemetry must be in the shell actually executed'
+                    assert (out/'external-graphics-baseline.json').exists()
+                    q=out/'executed';q.mkdir()
+                    rows=[dict(seed=530000+i,grasp_success=True,success=True,tcp_tracking=dict(preclosure_rms_mm=0)) for i in range(3)]
+                    (q/'summary.json').write_text(json.dumps(rows));(q/'grasp-telemetry-install.json').write_text(json.dumps(dict(enabled=True)))
+                    for i in range(3):
+                        ep=q/f'ep{i:02d}';ep.mkdir();(ep/'grasp-telemetry-summary.json').write_text(json.dumps(dict(contact_ticks=3,physics_substeps=900)))
                 else:
                     assert 'qualify_matched_reset.py' in cmd[-1]
                     q=out/'qualification';q.mkdir()
@@ -66,6 +75,9 @@ def exercise(xml,scenario="pass"):
         fake_time=SimpleNamespace(time=time.time,time_ns=time.time_ns,strftime=time.strftime,gmtime=time.gmtime,monotonic=monotonic,sleep=lambda _:None)
         deadline=(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(minutes=20)).strftime('%Y-%m-%dT%H:%M:%SZ')
         argv=[str(folder/'run_native_replay_window.py'),'--out',str(out),'--stop-by-utc',deadline,'--matched-reset-qualification','--bank',str(base/'bank'),'--bank-sha256','fixture','--reset-collector-root',str(repo)]
+        if scenario=='grasp-replay':
+            (base/'fixture.json').write_text(json.dumps(dict(kind='native-held-replay-v1',episodes=[dict(seed=530000+i,color=('red','green','blue')[i]) for i in range(3)])))
+        if scenario=='grasp-replay':argv=[str(folder/'run_native_replay_window.py'),'--out',str(out),'--stop-by-utc',deadline,'--grasp-telemetry','--fixture',str(base/'fixture.json'),'--fixture-sha256',hashlib.sha256((base/'fixture.json').read_bytes()).hexdigest(),'--replay-commands','executed']
         if scenario=='qualification-subset-refusal':argv+=['--episode-seeds','530000']
         if scenario=='occupied-instance':
             path=instance/'control.pid'
@@ -98,6 +110,10 @@ def exercise(xml,scenario="pass"):
                 assert len(calls)==2
                 if scenario=='late-benign-graphics':
                     assert any(any(r['pid']==1 and r['memory_mib']==3 for r in sample.get('benign_foreign_graphics_rows',[])) for sample in samples)
+            elif scenario=='grasp-replay':
+                assert ledger['status']=='replay-finished' and error is None
+                assert ledger['grasp_telemetry'] is True and ledger['gpu_budget_gib']==7
+                assert any(s.get('owned_mib')==3700 for s in samples) and len(calls)==2
             elif scenario=='prelaunch-compute':
                 assert ledger['status']=='stopped-with-error' and 'before launch' in error and not calls
             elif scenario in ('occupied-instance','claimed-instance'):
@@ -125,6 +141,7 @@ class OwnerEntrypointTests(unittest.TestCase):
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
         self.assertIn('"scenario": "'+scenario+'"',result.stdout)
     def test_clean_interpreter_seen15_owner_lifecycle(self):self.run_scenario('seen15')
+    def test_grasp_replay_shell_keeps_flag_and_guard(self):self.run_scenario('grasp-replay')
     def test_clean_interpreter_actual_owner_lifecycle(self):self.run_scenario('pass')
     def test_prelaunch_compute_refusal_still_records_stop_and_cleanup(self):self.run_scenario('prelaunch-compute')
     def test_new_graphics_after_launch_refuses_three_times_and_cleans(self):self.run_scenario('late-graphics')
