@@ -131,12 +131,12 @@ class TripletPosePolicyTests(unittest.TestCase):
                                 self.assertTrue(member['anchor_drift'][key]['passed'])
                             self.assertTrue(group['complete']);self.assertEqual(len(receipts),3)
 
-    def test_persisted_anchor_drift_evidence_is_reconstructed_before_seal(self):
+    def test_persisted_anchor_drift_source_identity_is_reconstructed_before_seal(self):
         for phase in ('bootstrap','first_recorded'):
             with self.subTest(phase=phase),tempfile.TemporaryDirectory() as d:
                 h=test_target_triplets.TripletTests().fixture(d);h.complete(first_offset_ticks=1)
                 path=h.root/'attempt-0000/receipt.json';receipt=json.loads(path.read_text())
-                receipt['counterfactual'][phase+'_anchor_drift']['per_body']['cup_red']['position_error_m']=.0001
+                receipt['counterfactual'][phase+'_anchor_drift']['exact_bits']['actual_sha256']='changed'
                 path.write_text(json.dumps(receipt))
                 with self.assertRaisesRegex(ValueError,'anchor drift evidence differs'):validate_run(h.root,base=Path(d),sealed=False)
 

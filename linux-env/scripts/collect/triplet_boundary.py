@@ -1,7 +1,7 @@
 """Native observation evidence for triplet preparation and recording boundaries."""
 import copy,math
 from contract import COLORS,visible_target
-from scene_identity import identity,require_identical,require_pose_agreement,compare,require_observation_drift
+from scene_identity import identity,require_identical,require_pose_agreement,compare,require_observation_drift,verify_pose_evidence
 from comparisons import matches
 from tick_contract import TickContract,STEP_NS,CLOCK_POLICY,digest,require_snapshots
 
@@ -47,7 +47,7 @@ def restore_admission(restored,check,anchor):
     expected=dict(against_target=require_pose_agreement(restored,anchor),reread_snapshot=reread,
         reread_exact_bits=compare(reread,restored),reread_agreement=require_pose_agreement(reread,restored),
         reread_against_target=require_pose_agreement(reread,anchor),native_clocks_unchanged=True)
-    if proof!=expected:raise ValueError('Restore pose/reread evidence differs')
+    verify_pose_evidence(proof,expected,'Restore pose/reread evidence differs')
     return expected
 
 
@@ -90,5 +90,5 @@ def recorded(snapshot,row,initial,anchor,episode_id,triplet_id):
 
 def verify_record(record,row,initial,anchor,episode_id,triplet_id):
     expected=recorded(record['native'],row,initial,anchor,episode_id,triplet_id)
-    if record!=expected:raise ValueError('Native start certificate differs')
+    verify_pose_evidence(record,expected,'Native start certificate differs')
     return expected

@@ -1,0 +1,1363 @@
+{
+  "producer_python": "3.12.15 (main, Oct  1 2026, 15:41:07) [GCC 11.4.0]",
+  "real_simulation": false,
+  "source_fixture": "native-pose-roundtrip-6ba20ab.json",
+  "anchor": {
+    "state": [
+      0.015254565514624119,
+      -0.25822943449020386,
+      0.25919410586357117,
+      1.5708166360855103,
+      -1.5220954418182373,
+      0.11321747303009033
+    ],
+    "velocity": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "drive_targets": [
+      0.015254178084433079,
+      -0.25881487131118774,
+      0.25881487131118774,
+      1.5707963705062866,
+      -1.5220962762832642,
+      0.11321762204170227
+    ],
+    "bodies": {
+      "blue_2x3_0": {
+        "position": [
+          0.27166056632995605,
+          -0.09970579296350479,
+          0.006390681955963373
+        ],
+        "orientation": [
+          0.31707361340522766,
+          3.63835766847842e-07,
+          4.445995216428855e-07,
+          0.9484009742736816
+        ],
+        "velocity": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "blue_2x3_1": {
+        "position": [
+          0.1758178174495697,
+          0.0853237435221672,
+          0.0063906945288181305
+        ],
+        "orientation": [
+          0.5087658762931824,
+          4.402389208735258e-08,
+          1.7094562565489468e-07,
+          0.8609049320220947
+        ],
+        "velocity": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "cup_blue": {
+        "position": [
+          0.1571972668170929,
+          -0.2278788685798645,
+          0.0011616051197052002
+        ],
+        "orientation": [
+          0.581963837146759,
+          0.012318086810410023,
+          0.013831219635903835,
+          0.8130038380622864
+        ],
+        "velocity": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "cup_green": {
+        "position": [
+          0.07508397102355957,
+          -0.2143963724374771,
+          -2.60770320892334e-08
+        ],
+        "orientation": [
+          0.6677797436714172,
+          3.969031467931927e-07,
+          -5.077414471088559e-07,
+          0.7443590760231018
+        ],
+        "velocity": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "cup_red": {
+        "position": [
+          0.0014343821676447988,
+          -0.17667527496814728,
+          0.0011326596140861511
+        ],
+        "orientation": [
+          0.7621212601661682,
+          -0.01515058521181345,
+          -0.01286726538091898,
+          0.647129237651825
+        ],
+        "velocity": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "green_2x3_0": {
+        "position": [
+          0.16760239005088806,
+          -0.07481182366609573,
+          0.006390686612576246
+        ],
+        "orientation": [
+          0.3313555419445038,
+          -2.5794921754140887e-08,
+          -5.2496993419026694e-08,
+          0.9435059428215027
+        ],
+        "velocity": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "green_2x3_1": {
+        "position": [
+          0.23280911147594452,
+          0.06459330022335052,
+          0.006390677765011787
+        ],
+        "orientation": [
+          -0.1714998334646225,
+          -1.555260809027459e-07,
+          3.839428472929285e-07,
+          0.9851841926574707
+        ],
+        "velocity": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "red_2x3_0": {
+        "position": [
+          0.1660371571779251,
+          0.015457913279533386,
+          0.006390705239027739
+        ],
+        "orientation": [
+          0.7725088000297546,
+          -3.7515746953431517e-07,
+          1.274308033316629e-06,
+          -0.6350041627883911
+        ],
+        "velocity": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "red_2x3_1": {
+        "position": [
+          0.2347981035709381,
+          -0.05281601846218109,
+          0.006390695460140705
+        ],
+        "orientation": [
+          0.8806617856025696,
+          5.066875132797577e-07,
+          6.839844957085006e-08,
+          0.4737454354763031
+        ],
+        "velocity": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    "base_world_pose": {
+      "position": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "orientation": [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "robot_base_world_pose": {
+      "position": [
+        -1.4901161193847656e-08,
+        -9.458744898438454e-11,
+        -3.725290298461914e-08
+      ],
+      "orientation": [
+        1.0000001192092896,
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  },
+  "snapshot": {
+    "state": [
+      0.015254565514624119,
+      -0.25822943449020386,
+      0.25919410586357117,
+      1.5708166360855103,
+      -1.5220954418182373,
+      0.11321747303009033
+    ],
+    "velocity": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "drive_targets": [
+      0.015254178084433079,
+      -0.25881487131118774,
+      0.25881487131118774,
+      1.5707963705062866,
+      -1.5220962762832642,
+      0.11321762204170227
+    ],
+    "bodies": {
+      "blue_2x3_0": {
+        "position": [
+          0.27166056632995605,
+          -0.09970579296350479,
+          0.006390681955963373
+        ],
+        "orientation": [
+          0.31707361340522766,
+          3.63835766847842e-07,
+          4.445995216428855e-07,
+          0.9484009742736816
+        ],
+        "velocity": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "blue_2x3_1": {
+        "position": [
+          0.1758178174495697,
+          0.0853237435221672,
+          0.0063906945288181305
+        ],
+        "orientation": [
+          0.5087658762931824,
+          4.402389208735258e-08,
+          1.7094562565489468e-07,
+          0.8609049320220947
+        ],
+        "velocity": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "cup_blue": {
+        "position": [
+          0.1571972668170929,
+          -0.2278788685798645,
+          0.0011616051197052002
+        ],
+        "orientation": [
+          0.581963837146759,
+          0.012318087741732597,
+          0.013831221498548985,
+          0.8130038976669312
+        ],
+        "velocity": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "cup_green": {
+        "position": [
+          0.07508397102355957,
+          -0.2143963724374771,
+          -3.3527612686157227e-08
+        ],
+        "orientation": [
+          0.6677796840667725,
+          3.969031467931927e-07,
+          -5.077413334220182e-07,
+          0.7443590760231018
+        ],
+        "velocity": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "cup_red": {
+        "position": [
+          0.0014343829825520515,
+          -0.17667527496814728,
+          0.001132626086473465
+        ],
+        "orientation": [
+          0.762121319770813,
+          -0.015150587074458599,
+          -0.01286726538091898,
+          0.6471292972564697
+        ],
+        "velocity": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "green_2x3_0": {
+        "position": [
+          0.16760239005088806,
+          -0.07481182366609573,
+          0.006390686612576246
+        ],
+        "orientation": [
+          0.3313555419445038,
+          -2.5794921754140887e-08,
+          -5.2496993419026694e-08,
+          0.9435059428215027
+        ],
+        "velocity": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "green_2x3_1": {
+        "position": [
+          0.23280911147594452,
+          0.06459330022335052,
+          0.006390677765011787
+        ],
+        "orientation": [
+          -0.1714998334646225,
+          -1.555260809027459e-07,
+          3.839428472929285e-07,
+          0.9851841926574707
+        ],
+        "velocity": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "red_2x3_0": {
+        "position": [
+          0.1660371571779251,
+          0.015457913279533386,
+          0.006390705239027739
+        ],
+        "orientation": [
+          0.7725088000297546,
+          -3.7515746953431517e-07,
+          1.274308033316629e-06,
+          -0.6350041627883911
+        ],
+        "velocity": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "red_2x3_1": {
+        "position": [
+          0.2347981035709381,
+          -0.05281601846218109,
+          0.006390695460140705
+        ],
+        "orientation": [
+          0.8806619048118591,
+          5.066875701231766e-07,
+          6.839845667627742e-08,
+          0.4737454950809479
+        ],
+        "velocity": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    "base_world_pose": {
+      "position": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "orientation": [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "robot_base_world_pose": {
+      "position": [
+        -1.4901161193847656e-08,
+        -9.458744898438454e-11,
+        -3.725290298461914e-08
+      ],
+      "orientation": [
+        1.0000001192092896,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "epoch": 1,
+    "sim_ns": 1000000000,
+    "physics_time_s": 1.0
+  },
+  "check": {
+    "triplet_physical_state": {
+      "against_target": {
+        "passed": true,
+        "policy": {
+          "version": 1,
+          "position_m": 1e-06,
+          "orientation_geodesic_deg": 0.001,
+          "arm_joint_rad": 0.0,
+          "drive_target_rad": 0.0,
+          "joint_velocity_rad_s": 0.0,
+          "body_velocity": 0.0,
+          "base_pose_bits_exact": true,
+          "strict": "arm positions/velocities/drives, body velocities and both base poses retain exact native bits",
+          "scope": "only body position/orientation comparisons across independent restores or member observations",
+          "quaternion": "normalized shortest geodesic via atan2; exact bits retained diagnostically"
+        },
+        "per_body": {
+          "blue_2x3_0": {
+            "position_delta_m": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "position_error_m": 0.0,
+            "orientation_geodesic_deg": 0.0,
+            "position_passed": true,
+            "orientation_passed": true
+          },
+          "blue_2x3_1": {
+            "position_delta_m": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "position_error_m": 0.0,
+            "orientation_geodesic_deg": 0.0,
+            "position_passed": true,
+            "orientation_passed": true
+          },
+          "cup_blue": {
+            "position_delta_m": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "position_error_m": 0.0,
+            "orientation_geodesic_deg": 3.978134251031373e-06,
+            "position_passed": true,
+            "orientation_passed": true
+          },
+          "cup_green": {
+            "position_delta_m": [
+              0.0,
+              0.0,
+              -7.450580596923828e-09
+            ],
+            "position_error_m": 7.450580596923828e-09,
+            "orientation_geodesic_deg": 5.084112390027713e-06,
+            "position_passed": true,
+            "orientation_passed": true
+          },
+          "cup_red": {
+            "position_delta_m": [
+              8.149072527885437e-10,
+              0.0,
+              -3.3527612686157227e-08
+            ],
+            "position_error_m": 3.353751461071047e-08,
+            "orientation_geodesic_deg": 7.981471193924645e-07,
+            "position_passed": true,
+            "orientation_passed": true
+          },
+          "green_2x3_0": {
+            "position_delta_m": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "position_error_m": 0.0,
+            "orientation_geodesic_deg": 0.0,
+            "position_passed": true,
+            "orientation_passed": true
+          },
+          "green_2x3_1": {
+            "position_delta_m": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "position_error_m": 0.0,
+            "orientation_geodesic_deg": 0.0,
+            "position_passed": true,
+            "orientation_passed": true
+          },
+          "red_2x3_0": {
+            "position_delta_m": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "position_error_m": 0.0,
+            "orientation_geodesic_deg": 0.0,
+            "position_passed": true,
+            "orientation_passed": true
+          },
+          "red_2x3_1": {
+            "position_delta_m": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "position_error_m": 0.0,
+            "orientation_geodesic_deg": 4.5645526955699186e-07,
+            "position_passed": true,
+            "orientation_passed": true
+          }
+        },
+        "strict_differences": [],
+        "exact_bits": {
+          "schema": "soarm101-native-physical-state-v1",
+          "passed": false,
+          "actual_sha256": "c5f327cfbc0c57bdcf4146ee5527a200ace31a044ed13f7a7a9b6a4c6c714851",
+          "expected_sha256": "05c91b8b09d5d59fc521d4095f553c8b4e611b10d0195a5235c2a1f4278c40d1",
+          "differences": [
+            {
+              "field": "scene.bodies.cup_blue.orientation[1]",
+              "actual": 0.012318087741732597,
+              "expected": 0.012318086810410023,
+              "actual_bits": "3c49d1ce",
+              "expected_bits": "3c49d1cd"
+            },
+            {
+              "field": "scene.bodies.cup_blue.orientation[2]",
+              "actual": 0.013831221498548985,
+              "expected": 0.013831219635903835,
+              "actual_bits": "3c629c59",
+              "expected_bits": "3c629c57"
+            },
+            {
+              "field": "scene.bodies.cup_blue.orientation[3]",
+              "actual": 0.8130038976669312,
+              "expected": 0.8130038380622864,
+              "actual_bits": "3f502106",
+              "expected_bits": "3f502105"
+            },
+            {
+              "field": "scene.bodies.cup_green.position[2]",
+              "actual": -3.3527612686157227e-08,
+              "expected": -2.60770320892334e-08,
+              "actual_bits": "b3100000",
+              "expected_bits": "b2e00000"
+            },
+            {
+              "field": "scene.bodies.cup_green.orientation[0]",
+              "actual": 0.6677796840667725,
+              "expected": 0.6677797436714172,
+              "actual_bits": "3f2af39c",
+              "expected_bits": "3f2af39d"
+            },
+            {
+              "field": "scene.bodies.cup_green.orientation[2]",
+              "actual": -5.077413334220182e-07,
+              "expected": -5.077414471088559e-07,
+              "actual_bits": "b5084bb8",
+              "expected_bits": "b5084bba"
+            },
+            {
+              "field": "scene.bodies.cup_red.position[0]",
+              "actual": 0.0014343829825520515,
+              "expected": 0.0014343821676447988,
+              "actual_bits": "3abc01e8",
+              "expected_bits": "3abc01e1"
+            },
+            {
+              "field": "scene.bodies.cup_red.position[2]",
+              "actual": 0.001132626086473465,
+              "expected": 0.0011326596140861511,
+              "actual_bits": "3a9474a0",
+              "expected_bits": "3a9475c0"
+            },
+            {
+              "field": "scene.bodies.cup_red.orientation[0]",
+              "actual": 0.762121319770813,
+              "expected": 0.7621212601661682,
+              "actual_bits": "3f431a62",
+              "expected_bits": "3f431a61"
+            },
+            {
+              "field": "scene.bodies.cup_red.orientation[1]",
+              "actual": -0.015150587074458599,
+              "expected": -0.01515058521181345,
+              "actual_bits": "bc783a2b",
+              "expected_bits": "bc783a29"
+            },
+            {
+              "field": "scene.bodies.cup_red.orientation[3]",
+              "actual": 0.6471292972564697,
+              "expected": 0.647129237651825,
+              "actual_bits": "3f25aa44",
+              "expected_bits": "3f25aa43"
+            },
+            {
+              "field": "scene.bodies.red_2x3_1.orientation[0]",
+              "actual": 0.8806619048118591,
+              "expected": 0.8806617856025696,
+              "actual_bits": "3f61730f",
+              "expected_bits": "3f61730d"
+            },
+            {
+              "field": "scene.bodies.red_2x3_1.orientation[1]",
+              "actual": 5.066875701231766e-07,
+              "expected": 5.066875132797577e-07,
+              "actual_bits": "3508034e",
+              "expected_bits": "3508034d"
+            },
+            {
+              "field": "scene.bodies.red_2x3_1.orientation[2]",
+              "actual": 6.839845667627742e-08,
+              "expected": 6.839844957085006e-08,
+              "actual_bits": "3392e273",
+              "expected_bits": "3392e272"
+            },
+            {
+              "field": "scene.bodies.red_2x3_1.orientation[3]",
+              "actual": 0.4737454950809479,
+              "expected": 0.4737454354763031,
+              "actual_bits": "3ef28ec5",
+              "expected_bits": "3ef28ec3"
+            }
+          ],
+          "excluded_fields": [
+            "sim_ns",
+            "physics_time_s",
+            "epoch",
+            "wall_profile_native"
+          ]
+        }
+      },
+      "reread_snapshot": {
+        "state": [
+          0.015254565514624119,
+          -0.25822943449020386,
+          0.25919410586357117,
+          1.5708166360855103,
+          -1.5220954418182373,
+          0.11321747303009033
+        ],
+        "velocity": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drive_targets": [
+          0.015254178084433079,
+          -0.25881487131118774,
+          0.25881487131118774,
+          1.5707963705062866,
+          -1.5220962762832642,
+          0.11321762204170227
+        ],
+        "bodies": {
+          "blue_2x3_0": {
+            "position": [
+              0.27166056632995605,
+              -0.09970579296350479,
+              0.006390681955963373
+            ],
+            "orientation": [
+              0.31707361340522766,
+              3.63835766847842e-07,
+              4.445995216428855e-07,
+              0.9484009742736816
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "blue_2x3_1": {
+            "position": [
+              0.1758178174495697,
+              0.0853237435221672,
+              0.0063906945288181305
+            ],
+            "orientation": [
+              0.5087658762931824,
+              4.402389208735258e-08,
+              1.7094562565489468e-07,
+              0.8609049320220947
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "cup_blue": {
+            "position": [
+              0.1571972668170929,
+              -0.2278788685798645,
+              0.0011616051197052002
+            ],
+            "orientation": [
+              0.581963837146759,
+              0.012318087741732597,
+              0.013831221498548985,
+              0.8130038976669312
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "cup_green": {
+            "position": [
+              0.07508397102355957,
+              -0.2143963724374771,
+              -3.3527612686157227e-08
+            ],
+            "orientation": [
+              0.6677796840667725,
+              3.969031467931927e-07,
+              -5.077413334220182e-07,
+              0.7443590760231018
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "cup_red": {
+            "position": [
+              0.0014343829825520515,
+              -0.17667527496814728,
+              0.001132626086473465
+            ],
+            "orientation": [
+              0.762121319770813,
+              -0.015150587074458599,
+              -0.01286726538091898,
+              0.6471292972564697
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "green_2x3_0": {
+            "position": [
+              0.16760239005088806,
+              -0.07481182366609573,
+              0.006390686612576246
+            ],
+            "orientation": [
+              0.3313555419445038,
+              -2.5794921754140887e-08,
+              -5.2496993419026694e-08,
+              0.9435059428215027
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "green_2x3_1": {
+            "position": [
+              0.23280911147594452,
+              0.06459330022335052,
+              0.006390677765011787
+            ],
+            "orientation": [
+              -0.1714998334646225,
+              -1.555260809027459e-07,
+              3.839428472929285e-07,
+              0.9851841926574707
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "red_2x3_0": {
+            "position": [
+              0.1660371571779251,
+              0.015457913279533386,
+              0.006390705239027739
+            ],
+            "orientation": [
+              0.7725088000297546,
+              -3.7515746953431517e-07,
+              1.274308033316629e-06,
+              -0.6350041627883911
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "red_2x3_1": {
+            "position": [
+              0.2347981035709381,
+              -0.05281601846218109,
+              0.006390695460140705
+            ],
+            "orientation": [
+              0.8806619048118591,
+              5.066875701231766e-07,
+              6.839845667627742e-08,
+              0.4737454950809479
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        "base_world_pose": {
+          "position": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "orientation": [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "robot_base_world_pose": {
+          "position": [
+            -1.4901161193847656e-08,
+            -9.458744898438454e-11,
+            -3.725290298461914e-08
+          ],
+          "orientation": [
+            1.0000001192092896,
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "epoch": 1,
+        "sim_ns": 1000000000,
+        "physics_time_s": 1.0
+      },
+      "reread_exact_bits": {
+        "schema": "soarm101-native-physical-state-v1",
+        "passed": true,
+        "actual_sha256": "c5f327cfbc0c57bdcf4146ee5527a200ace31a044ed13f7a7a9b6a4c6c714851",
+        "expected_sha256": "c5f327cfbc0c57bdcf4146ee5527a200ace31a044ed13f7a7a9b6a4c6c714851",
+        "differences": [],
+        "excluded_fields": [
+          "sim_ns",
+          "physics_time_s",
+          "epoch",
+          "wall_profile_native"
+        ]
+      },
+      "reread_agreement": {
+        "passed": true,
+        "policy": {
+          "version": 1,
+          "position_m": 1e-06,
+          "orientation_geodesic_deg": 0.001,
+          "arm_joint_rad": 0.0,
+          "drive_target_rad": 0.0,
+          "joint_velocity_rad_s": 0.0,
+          "body_velocity": 0.0,
+          "base_pose_bits_exact": true,
+          "strict": "arm positions/velocities/drives, body velocities and both base poses retain exact native bits",
+          "scope": "only body position/orientation comparisons across independent restores or member observations",
+          "quaternion": "normalized shortest geodesic via atan2; exact bits retained diagnostically"
+        },
+        "per_body": {
+          "blue_2x3_0": {
+            "position_delta_m": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "position_error_m": 0.0,
+            "orientation_geodesic_deg": 0.0,
+            "position_passed": true,
+            "orientation_passed": true
+          },
+          "blue_2x3_1": {
+            "position_delta_m": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "position_error_m": 0.0,
+            "orientation_geodesic_deg": 0.0,
+            "position_passed": true,
+            "orientation_passed": true
+          },
+          "cup_blue": {
+            "position_delta_m": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "position_error_m": 0.0,
+            "orientation_geodesic_deg": 0.0,
+            "position_passed": true,
+            "orientation_passed": true
+          },
+          "cup_green": {
+            "position_delta_m": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "position_error_m": 0.0,
+            "orientation_geodesic_deg": 0.0,
+            "position_passed": true,
+            "orientation_passed": true
+          },
+          "cup_red": {
+            "position_delta_m": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "position_error_m": 0.0,
+            "orientation_geodesic_deg": 0.0,
+            "position_passed": true,
+            "orientation_passed": true
+          },
+          "green_2x3_0": {
+            "position_delta_m": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "position_error_m": 0.0,
+            "orientation_geodesic_deg": 0.0,
+            "position_passed": true,
+            "orientation_passed": true
+          },
+          "green_2x3_1": {
+            "position_delta_m": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "position_error_m": 0.0,
+            "orientation_geodesic_deg": 0.0,
+            "position_passed": true,
+            "orientation_passed": true
+          },
+          "red_2x3_0": {
+            "position_delta_m": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "position_error_m": 0.0,
+            "orientation_geodesic_deg": 0.0,
+            "position_passed": true,
+            "orientation_passed": true
+          },
+          "red_2x3_1": {
+            "position_delta_m": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "position_error_m": 0.0,
+            "orientation_geodesic_deg": 0.0,
+            "position_passed": true,
+            "orientation_passed": true
+          }
+        },
+        "strict_differences": [],
+        "exact_bits": {
+          "schema": "soarm101-native-physical-state-v1",
+          "passed": true,
+          "actual_sha256": "c5f327cfbc0c57bdcf4146ee5527a200ace31a044ed13f7a7a9b6a4c6c714851",
+          "expected_sha256": "c5f327cfbc0c57bdcf4146ee5527a200ace31a044ed13f7a7a9b6a4c6c714851",
+          "differences": [],
+          "excluded_fields": [
+            "sim_ns",
+            "physics_time_s",
+            "epoch",
+            "wall_profile_native"
+          ]
+        }
+      },
+      "reread_against_target": {
+        "passed": true,
+        "policy": {
+          "version": 1,
+          "position_m": 1e-06,
+          "orientation_geodesic_deg": 0.001,
+          "arm_joint_rad": 0.0,
+          "drive_target_rad": 0.0,
+          "joint_velocity_rad_s": 0.0,
+          "body_velocity": 0.0,
+          "base_pose_bits_exact": true,
+          "strict": "arm positions/velocities/drives, body velocities and both base poses retain exact native bits",
+          "scope": "only body position/orientation comparisons across independent restores or member observations",
+          "quaternion": "normalized shortest geodesic via atan2; exact bits retained diagnostically"
+        },
+        "per_body": {
+          "blue_2x3_0": {
+            "position_delta_m": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "position_error_m": 0.0,
+            "orientation_geodesic_deg": 0.0,
+            "position_passed": true,
+            "orientation_passed": true
+          },
+          "blue_2x3_1": {
+            "position_delta_m": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "position_error_m": 0.0,
+            "orientation_geodesic_deg": 0.0,
+            "position_passed": true,
+            "orientation_passed": true
+          },
+          "cup_blue": {
+            "position_delta_m": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "position_error_m": 0.0,
+            "orientation_geodesic_deg": 3.978134251031373e-06,
+            "position_passed": true,
+            "orientation_passed": true
+          },
+          "cup_green": {
+            "position_delta_m": [
+              0.0,
+              0.0,
+              -7.450580596923828e-09
+            ],
+            "position_error_m": 7.450580596923828e-09,
+            "orientation_geodesic_deg": 5.084112390027713e-06,
+            "position_passed": true,
+            "orientation_passed": true
+          },
+          "cup_red": {
+            "position_delta_m": [
+              8.149072527885437e-10,
+              0.0,
+              -3.3527612686157227e-08
+            ],
+            "position_error_m": 3.353751461071047e-08,
+            "orientation_geodesic_deg": 7.981471193924645e-07,
+            "position_passed": true,
+            "orientation_passed": true
+          },
+          "green_2x3_0": {
+            "position_delta_m": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "position_error_m": 0.0,
+            "orientation_geodesic_deg": 0.0,
+            "position_passed": true,
+            "orientation_passed": true
+          },
+          "green_2x3_1": {
+            "position_delta_m": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "position_error_m": 0.0,
+            "orientation_geodesic_deg": 0.0,
+            "position_passed": true,
+            "orientation_passed": true
+          },
+          "red_2x3_0": {
+            "position_delta_m": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "position_error_m": 0.0,
+            "orientation_geodesic_deg": 0.0,
+            "position_passed": true,
+            "orientation_passed": true
+          },
+          "red_2x3_1": {
+            "position_delta_m": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "position_error_m": 0.0,
+            "orientation_geodesic_deg": 4.5645526955699186e-07,
+            "position_passed": true,
+            "orientation_passed": true
+          }
+        },
+        "strict_differences": [],
+        "exact_bits": {
+          "schema": "soarm101-native-physical-state-v1",
+          "passed": false,
+          "actual_sha256": "c5f327cfbc0c57bdcf4146ee5527a200ace31a044ed13f7a7a9b6a4c6c714851",
+          "expected_sha256": "05c91b8b09d5d59fc521d4095f553c8b4e611b10d0195a5235c2a1f4278c40d1",
+          "differences": [
+            {
+              "field": "scene.bodies.cup_blue.orientation[1]",
+              "actual": 0.012318087741732597,
+              "expected": 0.012318086810410023,
+              "actual_bits": "3c49d1ce",
+              "expected_bits": "3c49d1cd"
+            },
+            {
+              "field": "scene.bodies.cup_blue.orientation[2]",
+              "actual": 0.013831221498548985,
+              "expected": 0.013831219635903835,
+              "actual_bits": "3c629c59",
+              "expected_bits": "3c629c57"
+            },
+            {
+              "field": "scene.bodies.cup_blue.orientation[3]",
+              "actual": 0.8130038976669312,
+              "expected": 0.8130038380622864,
+              "actual_bits": "3f502106",
+              "expected_bits": "3f502105"
+            },
+            {
+              "field": "scene.bodies.cup_green.position[2]",
+              "actual": -3.3527612686157227e-08,
+              "expected": -2.60770320892334e-08,
+              "actual_bits": "b3100000",
+              "expected_bits": "b2e00000"
+            },
+            {
+              "field": "scene.bodies.cup_green.orientation[0]",
+              "actual": 0.6677796840667725,
+              "expected": 0.6677797436714172,
+              "actual_bits": "3f2af39c",
+              "expected_bits": "3f2af39d"
+            },
+            {
+              "field": "scene.bodies.cup_green.orientation[2]",
+              "actual": -5.077413334220182e-07,
+              "expected": -5.077414471088559e-07,
+              "actual_bits": "b5084bb8",
+              "expected_bits": "b5084bba"
+            },
+            {
+              "field": "scene.bodies.cup_red.position[0]",
+              "actual": 0.0014343829825520515,
+              "expected": 0.0014343821676447988,
+              "actual_bits": "3abc01e8",
+              "expected_bits": "3abc01e1"
+            },
+            {
+              "field": "scene.bodies.cup_red.position[2]",
+              "actual": 0.001132626086473465,
+              "expected": 0.0011326596140861511,
+              "actual_bits": "3a9474a0",
+              "expected_bits": "3a9475c0"
+            },
+            {
+              "field": "scene.bodies.cup_red.orientation[0]",
+              "actual": 0.762121319770813,
+              "expected": 0.7621212601661682,
+              "actual_bits": "3f431a62",
+              "expected_bits": "3f431a61"
+            },
+            {
+              "field": "scene.bodies.cup_red.orientation[1]",
+              "actual": -0.015150587074458599,
+              "expected": -0.01515058521181345,
+              "actual_bits": "bc783a2b",
+              "expected_bits": "bc783a29"
+            },
+            {
+              "field": "scene.bodies.cup_red.orientation[3]",
+              "actual": 0.6471292972564697,
+              "expected": 0.647129237651825,
+              "actual_bits": "3f25aa44",
+              "expected_bits": "3f25aa43"
+            },
+            {
+              "field": "scene.bodies.red_2x3_1.orientation[0]",
+              "actual": 0.8806619048118591,
+              "expected": 0.8806617856025696,
+              "actual_bits": "3f61730f",
+              "expected_bits": "3f61730d"
+            },
+            {
+              "field": "scene.bodies.red_2x3_1.orientation[1]",
+              "actual": 5.066875701231766e-07,
+              "expected": 5.066875132797577e-07,
+              "actual_bits": "3508034e",
+              "expected_bits": "3508034d"
+            },
+            {
+              "field": "scene.bodies.red_2x3_1.orientation[2]",
+              "actual": 6.839845667627742e-08,
+              "expected": 6.839844957085006e-08,
+              "actual_bits": "3392e273",
+              "expected_bits": "3392e272"
+            },
+            {
+              "field": "scene.bodies.red_2x3_1.orientation[3]",
+              "actual": 0.4737454950809479,
+              "expected": 0.4737454354763031,
+              "actual_bits": "3ef28ec5",
+              "expected_bits": "3ef28ec3"
+            }
+          ],
+          "excluded_fields": [
+            "sim_ns",
+            "physics_time_s",
+            "epoch",
+            "wall_profile_native"
+          ]
+        }
+      },
+      "native_clocks_unchanged": true
+    }
+  }
+}

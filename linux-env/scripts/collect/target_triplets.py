@@ -3,7 +3,7 @@ import argparse,copy,hashlib,itertools,json,subprocess
 from pathlib import Path
 from contract import COLORS,parameters,COUNTERFACTUAL_TRAIN_SEEDS,COUNTERFACTUAL_HELDOUT_SEEDS,VISIBLE_TARGET_RULE,apply_target_rule
 from comparisons import matches,interval
-from scene_identity import physical_state,identity,require_identical,require_pose_agreement,prior_agreements,TRIPLET_POSE_POLICY,require_observation_drift,TRIPLET_OBSERVATION_DRIFT_POLICY
+from scene_identity import physical_state,identity,require_identical,require_pose_agreement,prior_agreements,TRIPLET_POSE_POLICY,require_observation_drift,TRIPLET_OBSERVATION_DRIFT_POLICY,verify_pose_evidence
 from tick_contract import STEP_NS
 from storage import atomic_json,CANONICAL_ROOT,confined
 import triplet_boundary as boundary
@@ -11,7 +11,7 @@ from tick_contract import digest
 
 TRAIN_SEEDS=COUNTERFACTUAL_TRAIN_SEEDS
 HELDOUT_SEEDS=COUNTERFACTUAL_HELDOUT_SEEDS
-POLICY=dict(version=5,kind='counterfactual-target-triplet',colors=list(COLORS),normal_only=True,
+POLICY=dict(version=6,kind='counterfactual-target-triplet',colors=list(COLORS),normal_only=True,
     order='six counterbalanced permutations by layout ordinal',
     target_rule=dict(name=VISIBLE_TARGET_RULE,frame='/World/base',refuse_margin_le_m=.005),camera_prime_ticks=20,
     initial_observation_ticks=1,state_identity='soarm101-native-physical-state-v1',pose_agreement=copy.deepcopy(TRIPLET_POSE_POLICY),
@@ -154,25 +154,25 @@ def validate(config,anchor,receipts):
     triplet_id=hashlib.sha256(json.dumps(dict(config=config,state=anchor['anchor_sha256']),sort_keys=True).encode()).hexdigest()
     if anchor['triplet_id']!=triplet_id:raise ValueError('Triplet identity differs from its anchor')
     selections={member(config,i,anchor['anchor'])['color']:member(config,i,anchor['anchor'])['target_selection'] for i in range(3)}
-    if anchor['target_selections']!=selections:raise ValueError('Triplet visible target selections differ')
+    verify_pose_evidence(anchor['target_selections'],selections,'Triplet visible target selections differ')
     if len({r['episode_id'] for r in receipts})!=3:raise ValueError('Triplet episode identities must be unique')
     for index,r in enumerate(receipts):
-        if r['params']!=member(config,index,anchor['anchor']):raise ValueError('Triplet task/target/common parameters differ')
+        verify_pose_evidence(r['params'],member(config,index,anchor['anchor']),'Triplet task/target/common parameters differ')
         m=r['counterfactual']
         for key,value in dict(layout_id=config['layout_id'],layout_seed=config['layout_seed'],split=config['split'],triplet_id=triplet_id,
                 anchor_sha256=anchor['anchor_sha256'],initial_observation_sha256=identity(r['episode_start_physical']),sampler_invocations=1,camera_prime_ticks=POLICY['camera_prime_ticks']).items():
             if m[key]!=value:raise ValueError('Triplet metadata differs: '+key)
         proof=require_pose_agreement(r['initial_physical'],anchor['anchor']);bootstrap=require_pose_agreement(r['episode_start_physical'],anchor['bootstrap'])
-        if m['restore_proof']!=proof or m['initial_observation_proof']!=bootstrap:raise ValueError('Triplet restore proof differs')
+        verify_pose_evidence([m['restore_proof'],m['initial_observation_proof']],[proof,bootstrap],'Triplet restore proof differs')
         restored=r['initial_physical'];observed=r['episode_start_physical']
-        if m['bootstrap_anchor_drift']!=require_observation_drift(observed,anchor['anchor']):
-            raise ValueError('Bootstrap anchor drift evidence differs')
+        verify_pose_evidence(m['bootstrap_anchor_drift'],require_observation_drift(observed,anchor['anchor']),'Bootstrap anchor drift evidence differs')
         boundary.restore_admission(restored,r['initial_restore_check'],anchor['anchor'])
         prime=m['priming_restore'];boundary.restore_admission(prime['snapshot'],prime,anchor['anchor'])
-        if (m['priming_prior']!=boundary.restore_prior(prime,[p['counterfactual']['priming_restore'] for p in receipts[:index]]) or
-            m['restore_prior']!=boundary.restore_prior(dict(r['initial_restore_check'],snapshot=restored),[dict(p['initial_restore_check'],snapshot=p['initial_physical']) for p in receipts[:index]]) or
-            m['bootstrap_prior']!=prior_agreements(observed,[p['episode_start_physical'] for p in receipts[:index]])):
-            raise ValueError('Cross-member restore/bootstrap pose agreement evidence differs')
+        verify_pose_evidence([m['priming_prior'],m['restore_prior'],m['bootstrap_prior']],
+            [boundary.restore_prior(prime,[p['counterfactual']['priming_restore'] for p in receipts[:index]]),
+             boundary.restore_prior(dict(r['initial_restore_check'],snapshot=restored),[dict(p['initial_restore_check'],snapshot=p['initial_physical']) for p in receipts[:index]]),
+             prior_agreements(observed,[p['episode_start_physical'] for p in receipts[:index]])],
+            'Cross-member restore/bootstrap pose agreement evidence differs')
         boundary.bootstrap(restored,r['initial_restore_check'],observed)
         boundary.later(restored,receipts[index-1]['episode_start_physical'] if index else anchor['anchor'])
         boot_row=observed['tick_contract']['row']
@@ -180,7 +180,7 @@ def validate(config,anchor,receipts):
             raise ValueError('Bootstrap native proof belongs to another member/group')
         if index==0 and boundary.clocks(observed)!=boundary.clocks(anchor['bootstrap']):raise ValueError('Stored bootstrap native identity differs from first member')
         if index==0:require_identical(observed,anchor['bootstrap'])
-        if m['observed_target_rule']!=boundary.selections(observed,anchor['anchor']):raise ValueError('Observed visible target rule evidence differs')
+        verify_pose_evidence(m['observed_target_rule'],boundary.selections(observed,anchor['anchor']),'Observed visible target rule evidence differs')
         visible={member(config,i,anchor['anchor'])['object'] for i in range(3)}
         if r['cup_randomization']!=anchor['cup_sampler'] or set(m['visibility'])!=visible or not all(v is True for v in m['visibility'].values()):raise ValueError('Triplet scene/visibility differs')
     return dict(version=1,complete=True,layout_id=config['layout_id'],triplet_id=triplet_id,layout_seed=config['layout_seed'],split=config['split'],
@@ -240,12 +240,11 @@ def validate_run(run,base=CANONICAL_ROOT,sealed=True):
         previous_last=boundary.from_row(last)
         record=json.loads((run/f'attempt-{index:04d}/first-recorded-native.json').read_text())
         boundary.verify_record(record,row,r['episode_start_physical'],anchor['anchor'],r['episode_id'],result['triplet_id'])
-        if r['counterfactual']['first_recorded_anchor_drift']!=record['anchor_drift']:
-            raise ValueError('First recorded anchor drift evidence differs')
+        verify_pose_evidence(r['counterfactual']['first_recorded_anchor_drift'],require_observation_drift(record['native'],anchor['anchor']),'First recorded anchor drift evidence differs')
         deviations=prior_agreements(record['native'],first)
-        if r['counterfactual']['first_recorded_prior']!=deviations:raise ValueError('First recorded cross-member pose agreement evidence differs')
+        verify_pose_evidence(r['counterfactual']['first_recorded_prior'],deviations,'First recorded cross-member pose agreement evidence differs')
         reference_deviation=require_pose_agreement(record['native'],first[0] if first else record['native'])
-        if r['counterfactual']['first_recorded_deviation']!=reference_deviation:raise ValueError('First recorded reference deviation evidence differs')
+        verify_pose_evidence(r['counterfactual']['first_recorded_deviation'],reference_deviation,'First recorded reference deviation evidence differs')
         native_proofs.append(dict(episode_id=r['episode_id'],certificate_sha256=digest(record),observed_rule=record['observed_rule']))
         offset=row['pose_stamp_ns']-r['episode_start_physical']['sim_ns']
         offsets.append(offset)
@@ -260,7 +259,7 @@ def validate_run(run,base=CANONICAL_ROOT,sealed=True):
             first_recorded=r['counterfactual']['first_recorded_deviation'],first_recorded_prior=r['counterfactual']['first_recorded_prior'],reread=r['initial_restore_check']['triplet_physical_state']) for r in receipts],
         first_recorded_offsets_ns=offsets,native_start_proofs=native_proofs)
     if sealed:
-        if json.loads((run/'counterfactual-triplet.json').read_text())!=result:raise ValueError('Stored triplet group certificate differs')
+        verify_pose_evidence(json.loads((run/'counterfactual-triplet.json').read_text()),result,'Stored triplet group certificate differs')
         if json.loads((run/'summary.json').read_text()).get('counterfactual_triplet_seal')!=seal_identity(run):raise ValueError('Finalized triplet inputs/configuration changed')
     return result
 

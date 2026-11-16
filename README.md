@@ -360,6 +360,17 @@ a triplet-only sanity gate: the normal home-settle gate checks the arm and does
 not bound these body poses. A common 2 µm drift may pass; a common drift beyond
 the sanity bound refuses before first-frame admission and during export.
 
+Pose admission is recomputed from the exact native fields and source hashes in
+each interpreter. Stored error/angle/verdict diagnostics do not require numeric
+equality with another interpreter's calculation. The checker verifies the exact
+source-bit identity and fixed policy, then applies its locally recomputed gates;
+arithmetic uses explicit math.fsum reductions. This covers native restore proofs,
+pairwise and anchor-drift evidence, visible-rule distances/transformed positions,
+native-start certificates and group/export checks. The visible target, candidate
+IDs, base, policy and ambiguity decision are still checked against the locally
+recomputed rule. Seals still bind the producer's original diagnostic bytes. Source or
+policy mismatches retain structured actual/expected evidence in the failure.
+
 Preparation and the capture loop re-evaluate all three visible-target choices
 on the bootstrap and first recorded scene, requiring >5 mm margins and the same
 targets as the anchor. Their evidence includes the corresponding physical hash
@@ -409,7 +420,10 @@ required. CPU checks start no simulator:
 
 ```bash
 cd linux-env/scripts/collect
-CUDA_VISIBLE_DEVICES='' python3 -B -m unittest test_scene_identity test_target_triplets test_triplet_pose_policy
+CUDA_VISIBLE_DEVICES='' python3 -B -m unittest test_scene_identity test_target_triplets test_triplet_pose_policy test_triplet_interpreters
+CUDA_VISIBLE_DEVICES='' python3 -B interpreter_pose_regression.py \
+  --native-python /home/aaugus11/env_isaacsim61/bin/python \
+  --output /mnt/a4500-backup/exploring-vlas/tmp/collection-codex/interpreter-pose-replay.json
 # Run in the existing LeRobot environment (PyArrow, PyAV and the pinned fork).
 CUDA_VISIBLE_DEVICES='' python3 -B export_content_regression.py
 CUDA_VISIBLE_DEVICES='' python3 -B triplet_export_regression.py \
