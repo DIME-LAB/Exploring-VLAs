@@ -1,10 +1,13 @@
 """Replay and export agree with the immutable mode declared in run.json."""
 import argparse,ast,io,json,math,os,tempfile,unittest
+import time
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 from checkpoint import require_episode_mode,require_recovery_mode
 from contract import parameters
+from target_triplets import configure_args as configure_triplet_args,validate_run as validate_triplet_run
+from scene_bank import configure_args as configure_scene_bank_args
 
 
 class ReplayModeTests(unittest.TestCase):
@@ -14,7 +17,8 @@ class ReplayModeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             receipt=Path(directory)/'receipt.json';receipt.write_text(json.dumps(dict(params=parameters(1,'red',regrasp=True))))
             argv=['collect.py','--instance','0','--output',directory,'--normal-only','--replay-receipt',str(receipt)]
-            scope=dict(argparse=argparse,__doc__='mode',Path=Path,math=math,json=json,require_episode_mode=require_episode_mode)
+            scope=dict(argparse=argparse,__doc__='mode',Path=Path,math=math,json=json,require_episode_mode=require_episode_mode,
+                configure_triplet_args=configure_triplet_args,configure_scene_bank_args=configure_scene_bank_args)
             with patch('sys.argv',argv),patch('sys.stderr',io.StringIO()),self.assertRaises(SystemExit) as error:
                 exec(compile(ast.Module(body=main.body[:cut],type_ignores=[]),'actual replay mode entrance','exec'),scope)
             self.assertEqual(error.exception.code,2)
@@ -26,7 +30,8 @@ class ReplayModeTests(unittest.TestCase):
             root=Path(directory);(root/'run.json').write_text(json.dumps(dict(normal_only=True,regrasp_only=False,recovery_mode='normal_only',instance=0)))
             (root/'summary.json').write_text(json.dumps(dict(complete=True,end_marker='COLLECTION_FINISHED')))
             attempt=root/'attempt-0000';attempt.mkdir();(attempt/'receipt.json').write_text(json.dumps(dict(accepted=True,params=parameters(1,'red',regrasp=True))))
-            scope=dict(argparse=argparse,__doc__='export',Path=Path,json=json,confined=lambda p:p,require_finalized=lambda p:None,require_recovery_mode=require_recovery_mode,require_episode_mode=require_episode_mode)
+            scope=dict(argparse=argparse,__doc__='export',Path=Path,json=json,time=time,atomic_json=lambda p,v:p.write_text(json.dumps(v)),validate_triplet_run=validate_triplet_run,
+                confined=lambda p:p,require_finalized=lambda p:None,require_recovery_mode=require_recovery_mode,require_episode_mode=require_episode_mode)
             with patch('sys.argv',['export.py',str(root),'--report-dir',str(root/'report')]),self.assertRaisesRegex(ValueError,'declared collection mode'):
                 exec(compile(ast.Module(body=main.body[:cut],type_ignores=[]),'actual export mode entrance','exec'),scope)
             self.assertFalse((root/'dataset').exists())

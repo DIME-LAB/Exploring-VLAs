@@ -109,7 +109,7 @@ class PrimitiveCupTests(unittest.TestCase):
         exec(compile(ast.Module(body=[constant,fn],type_ignores=[]),str(source),'exec'),env);env['collision'](object())
         self.assertEqual(authored,dict(contact=.0001,rest=0.))
         collector=Path(__file__).with_name('collect.py');parsed=ast.parse(collector.read_text())
-        run=next(n for n in ast.walk(parsed) if isinstance(n,ast.FunctionDef) and n.name=='run')
+        run=next(n for n in ast.walk(parsed) if isinstance(n,ast.FunctionDef) and n.name=='_initialize_scene_session')
         loop=next(n for n in run.body if isinstance(n,ast.For) and isinstance(n.target,ast.Tuple) and [v.id for v in n.target.elts]==['name','values'])
         offsets={'red_2x3_0':dict(contact_m=[authored['contact']],rest_m=[authored['rest']]),
                  'cup_red':dict(contact_m=[authored['contact']]*13,rest_m=[authored['rest']]*13)}

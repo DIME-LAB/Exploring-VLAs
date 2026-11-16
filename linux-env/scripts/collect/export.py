@@ -28,16 +28,16 @@ def main():
     args = p.parse_args()
     run, report = args.run, args.report_dir
     run, report = confined(run), confined(report)
+    report.mkdir(parents=True, exist_ok=True)
+    atomic_json(report/'validation.json',dict(passed=False,loaded=False,status='VALIDATION_IN_PROGRESS',started_wall_ns=time.time_ns()))
     if (run / 'superseded.json').exists():
         raise ValueError('Superseded diagnostic run cannot be exported as a dataset')
     require_finalized(run)
     summary = json.loads((run / 'summary.json').read_text())
     if not summary.get('complete') or summary.get('end_marker') != 'COLLECTION_FINISHED':
         raise ValueError('Collection is incomplete; refusing to export a partial run')
-    report.mkdir(parents=True, exist_ok=True)
     config = json.loads((run / 'run.json').read_text())
     triplet=validate_triplet_run(run)
-    atomic_json(report/'validation.json',dict(passed=False,loaded=False,status='VALIDATION_IN_PROGRESS',started_wall_ns=time.time_ns()))
     require_recovery_mode(config,config.get('regrasp_only',False),config.get('normal_only',False))
     for path in sorted(run.glob('attempt-*/receipt.json')):
         receipt=json.loads(path.read_text())

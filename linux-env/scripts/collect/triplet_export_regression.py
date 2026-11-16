@@ -63,6 +63,17 @@ def main():
             assert v['export_content']['video']['decoded_frame_pairs']==600
             assert 'collection_phase' not in v['features']
             result['validate_existing' if existing else 'fresh_export']=v
+        receipt=run/'attempt-0001/receipt.json';original=receipt.read_text();changed=json.loads(original)
+        changed['params']['task']='Wrong task';atomic_json(receipt,changed)
+        try:
+            with patch.object(sys,'argv',argv):exporter.main()
+        except ValueError:
+            stale=json.loads((out/'report/validation.json').read_text())
+            assert stale['passed'] is False and stale['loaded'] is False
+            result['invalid_triplet_clears_previous_pass']=True
+        else:raise AssertionError('Changed triplet was accepted')
+        finally:receipt.write_text(original)
+        with patch.object(sys,'argv',argv):exporter.main()
     atomic_json(out/'CPU_FIXTURE_ONLY.json',dict(passed=True,real_simulation=False,fixture_training_forbidden=True,certificates=result))
     print(json.dumps(dict(passed=True,real_simulation=False,episodes=3,frames=300,decoded_frame_pairs=600)))
 

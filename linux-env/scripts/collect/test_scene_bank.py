@@ -2,10 +2,12 @@
 import argparse,ast,copy,hashlib,json,os,tempfile,unittest
 from pathlib import Path
 from scene_bank import SceneBankSession,NAMES,body_poses,pose_errors,configure_args
+from storage import CANONICAL_ROOT
 
 class BankTests(unittest.TestCase):
  def setUp(self):
-  self.tmp=tempfile.TemporaryDirectory(dir=os.environ['TMPDIR']);self.root=Path(self.tmp.name);(self.root/'gen').mkdir();self.reference=self.root/'reference.json';self.reference.write_text(json.dumps(dict(baseline={'red':[0,0,0]},baseline_cup_layout={'mode':'line'})))
+  (CANONICAL_ROOT/'eval').mkdir(exist_ok=True)
+  self.tmp=tempfile.TemporaryDirectory(dir=CANONICAL_ROOT/'eval');self.root=Path(self.tmp.name);(self.root/'gen').mkdir();self.reference=self.root/'reference.json';self.reference.write_text(json.dumps(dict(baseline={'red':[0,0,0]},baseline_cup_layout={'mode':'line'})))
   self.args=argparse.Namespace(output=self.root/'gen',scene_bank_output=self.root/'bank',scene_bank_reference_run=self.reference,scene_bank='eval',scene_bank_receipts=None,resume=False,replay_receipt=None,regrasp_only=False,normal_only=False)
  def tearDown(self):self.tmp.cleanup()
  def test_exact_heldout_plan(self):
@@ -36,7 +38,24 @@ class BankTests(unittest.TestCase):
     if isinstance(node.value,ast.Call) and isinstance(node.value.func,ast.Attribute) and node.value.func.attr=='_initialize_scene_session':return copy.deepcopy(new['_initialize_scene_session'].body[1:-1])
     return self.generic_visit(node)
    def visit_Expr(self,node):
-    if isinstance(node.value,ast.Call) and isinstance(node.value.func,ast.Attribute) and node.value.func.attr=='_prepare_scene_attempt':return copy.deepcopy(new['_prepare_scene_attempt'].body[1:])
+    if isinstance(node.value,ast.Call) and isinstance(node.value.func,ast.Attribute) and node.value.func.attr=='_prepare_scene_attempt':return copy.deepcopy([new['_prepare_scene_attempt'].body[0],*new['_prepare_normal_scene_attempt'].body[1:]])
+    return self.generic_visit(node)
+  class DefaultPath(ast.NodeTransformer):
+   """Project only the explicit opt-in triplet additions out of the normal path."""
+   def visit_Assign(self,node):
+    if any(isinstance(t,ast.Name) and t.id=='triplet_config' or isinstance(t,ast.Attribute) and t.attr=='triplet_session' for t in node.targets):return None
+    return self.generic_visit(node)
+   def visit_If(self,node):
+    if any(isinstance(v,ast.Name) and v.id=='triplet_config' or isinstance(v,ast.Constant) and v.value=='counterfactual_triplet' for v in ast.walk(node.test)):return None
+    return self.generic_visit(node)
+   def visit_IfExp(self,node):
+    if isinstance(node.body,ast.Call) and isinstance(node.body.func,ast.Name) and node.body.func.id=='triplet_member':return self.visit(node.orelse)
+    return self.generic_visit(node)
+   def visit_keyword(self,node):
+    if node.arg is None and isinstance(node.value,ast.IfExp) and any(isinstance(v,ast.Constant) and v.value=='counterfactual_triplet' for v in ast.walk(node.value.body)):return None
+    return self.generic_visit(node)
+   def visit_Expr(self,node):
+    if isinstance(node.value,ast.Call) and isinstance(node.value.func,ast.Attribute) and node.value.func.attr=='extend' and ast.dump(node.value.args[0])==ast.dump(ast.parse("['linux-env/scripts/collect/scene_identity.py','linux-env/scripts/collect/target_triplets.py']",mode='eval').body):return None
     return self.generic_visit(node)
   def digest(tree):
    tree=copy.deepcopy(tree)
@@ -45,5 +64,5 @@ class BankTests(unittest.TestCase):
     if hasattr(node,'type_params'):
      self.assertEqual(node.type_params,[]);node._fields=tuple(f for f in node._fields if f!='type_params')
    return hashlib.sha256(ast.dump(tree,include_attributes=False).encode()).hexdigest()
-  expanded=Expand().visit(copy.deepcopy(new['run']));self.assertEqual(digest(expanded),reference['methods']['run']);self.assertEqual(digest(new['randomize_scene']),reference['methods']['randomize_scene'])
+  expanded=DefaultPath().visit(Expand().visit(copy.deepcopy(new['run'])));self.assertEqual(digest(expanded),reference['methods']['run']);self.assertEqual(digest(new['randomize_scene']),reference['methods']['randomize_scene'])
 if __name__=='__main__':unittest.main()
