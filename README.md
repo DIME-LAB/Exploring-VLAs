@@ -325,15 +325,28 @@ stay in a separate dataset and never enter training. These ranges are disjoint
 from the normal, recovery and evaluation-bank seeds.
 
 The collector samples and settles the scene once. It uses the existing native
-restore entrance shared with the evaluation scene bank, with an opt-in exact
-read-back check. Every member restores all nine bodies' positions, quaternions
+restore entrance shared with the evaluation scene bank, with an opt-in triplet
+read-back policy. Every member restores all nine bodies' positions, quaternions
 and velocities, the six measured arm joints/velocities and drive targets.
-The fixed robot base must also match. SHA256 identities preserve the native
-float32 bits (USD base transforms use float64), including signed zero and
-quaternion sign. Clocks and epochs remain monotonic under their existing
-contracts and are excluded from the physical hash. The held restore, the first
-post-restore observation, and the first recorded observation each have separate
-hashes that must match across RGB. All three selected blocks must be visible;
+The fixed robot base must also match. SHA256 diagnostics preserve the actual
+native float32 bits (USD base transforms use float64), including signed zero and
+quaternion sign. Body positions admit at most **1e-6 m Euclidean error**, and
+orientations admit at most **1e-3 degrees normalized quaternion geodesic error**.
+Arm joints, drives, joint/body velocities and both base poses remain bit-exact.
+This policy handles numerical pose setter/readback differences without altering
+default normal/evaluation restore behavior. The retained native round-trip
+fixture has maximum 33.54 nm position error and 5.084e-6 degrees angular error.
+
+Every restore performs two consecutive native snapshots without an intervening
+write or physics step. Both readbacks must meet the anchor policy; their exact
+bit agreement and per-body deviations are recorded. All pairwise comparisons
+across the three members are checked at priming restore, final restore,
+bootstrap and first recording (including both restore readbacks). Merely
+matching each member to one reference is insufficient. Per-member hashes stay
+actual; they are not relabelled identical. Per-body deviations, exact-bit
+diagnostics and reread evidence are retained in receipts and exported triplet
+metadata. Clocks/epochs stay under their existing contracts and are excluded
+from the physical hash. All three selected blocks must be visible;
 the collector refuses a hidden target instead of changing the selection rule.
 Image pixels are not included in physical identity because repeated RTX renders
 can differ. Live PhysX repeatability still requires qualification.

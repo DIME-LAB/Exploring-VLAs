@@ -19,8 +19,13 @@ class Harness:
         self.root=root;self.config=config;self.runtime,self.data=test_scene_identity.SceneIdentityTests().runtime()
         for color in ('red','green','blue'):self.data['bodies'][color+'_2x3_1']['position'][0]+=.125
         self.runtime.stamp=lambda:self.data['sim_ns'];self.normal_calls=0;self.visible=True;self.bad=None;self.advances=[]
+        self.member_offset={};self.member_index=0;self.before_first_record=None
         native=self.runtime.snapshot
-        self.runtime.snapshot=lambda:dict(native(),state_source='isaac_articulation',robot_base_pose_source='physx_rigid_body')
+        def native_read():
+            value=dict(native(),state_source='isaac_articulation',robot_base_pose_source='physx_rigid_body')
+            value['bodies']['cup_red']['position'][0]=float(np.float32(value['bodies']['cup_red']['position'][0]+self.member_offset.get(self.member_index,0.)))
+            return value
+        self.runtime.snapshot=native_read
         self.audit=TickContract();self.after_bootstrap=None
         Collector,_=load_class('collect.py','Collector');c=object.__new__(Collector);self.collector=c
         @contextmanager
@@ -80,6 +85,7 @@ class Harness:
         self.audit.observe(row);s['tick_contract']=self.audit.finish(row)
         return s
     def prepare(self,index):
+        self.member_index=index
         c=self.collector;p=member(self.config,index);receipt=dict(params=p,episode_id='episode-'+str(index))
         c._prepare_scene_attempt(p,{},receipt,set(),self.root,self.root/f'attempt-{index:04d}')
         return receipt
@@ -91,10 +97,13 @@ class Harness:
             for tick in range(recorded_ticks):
                 if tick or first_offset_ticks:
                     self.data['sim_ns']+=STEP_NS;self.data['physics_time_s']+=1/30
+                    if tick==0 and self.before_first_record:self.before_first_record(self.data,index)
                     if tick:self.data['state'][0]=float(np.float32(.125+.001*tick));self.data['velocity'][0]=.03
                     s=self.checked_snapshot()
                 else:s=r['episode_start_physical']
                 row=copy.deepcopy(s['tick_contract']['row']);self.collector.triplet_session.record_start(s,row,directory);rows.append(row)
+            r['counterfactual']['first_recorded_prior']=copy.deepcopy(self.collector.triplet_session.first_deviations[r['episode_id']])
+            r['counterfactual']['first_recorded_deviation']=copy.deepcopy(self.collector.triplet_session.first_reference_deviations[r['episode_id']])
             (directory/'receipt.json').write_text(json.dumps(r))
             (directory/'frames.jsonl').write_text(''.join(json.dumps(row)+'\n' for row in rows))
             for b in self.data['bodies'].values():b['position'][0]+=.5

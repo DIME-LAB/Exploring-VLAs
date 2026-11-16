@@ -1904,6 +1904,9 @@ class Collector:
                                 receipt['error'] = 'Object did not lift at least 25 mm before placement'
                                 receipt['quality_reject'] = dict(kind='insufficient_lift',evidence=dict(lift_m=maximum_z-initial_z),contract=require_snapshots(snapshots))
                     receipt['capture_failures'] = list(self.capture_failures[failure_log_start:])
+                    if triplet_config is not None and receipt['episode_id'] in self.triplet_session.first_deviations:
+                        receipt['counterfactual']['first_recorded_prior']=copy.deepcopy(self.triplet_session.first_deviations[receipt['episode_id']])
+                        receipt['counterfactual']['first_recorded_deviation']=copy.deepcopy(self.triplet_session.first_reference_deviations[receipt['episode_id']])
                     receipt['base_drift']=base_drift_summary(receipt.get('initial_physical'),writer.rows if writer else [])
                     receipt['measured_support_contacts']=[dict(epoch=r['epoch'],sim_ns=r['sim_ns'],proof=p['measured_start_contact'])
                         for r in (writer.rows if writer else []) for p in r.get('execution_geometry',{}).get('paths',[]) if 'measured_start_contact' in p]

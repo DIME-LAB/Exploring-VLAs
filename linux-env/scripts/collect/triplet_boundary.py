@@ -1,7 +1,7 @@
 """Native observation evidence for triplet preparation and recording boundaries."""
 import copy,math
 from contract import COLORS,visible_target
-from scene_identity import identity,require_identical
+from scene_identity import identity,require_identical,require_pose_agreement,compare
 from comparisons import matches
 from tick_contract import TickContract,STEP_NS,CLOCK_POLICY,digest,require_snapshots
 
@@ -39,6 +39,22 @@ def bootstrap(restored,check,observed):
     if audit.finish(row)!=observed['tick_contract']:raise ValueError('Bootstrap proof differs from its restore boundary')
     if restored['epoch']!=observed['epoch'] or not matches(observed['sim_ns']-restored['sim_ns'],STEP_NS,'native_ns'):
         raise ValueError('Bootstrap did not advance one native frame from restore')
+
+
+def restore_admission(restored,check,anchor):
+    proof=check['triplet_physical_state'];reread=proof['reread_snapshot']
+    if clocks(restored)!=clocks(reread):raise ValueError('Held restore reread changed native clocks')
+    expected=dict(against_target=require_pose_agreement(restored,anchor),reread_snapshot=reread,
+        reread_exact_bits=compare(reread,restored),reread_agreement=require_pose_agreement(reread,restored),
+        reread_against_target=require_pose_agreement(reread,anchor),native_clocks_unchanged=True)
+    if proof!=expected:raise ValueError('Restore pose/reread evidence differs')
+    return expected
+
+
+def restore_prior(current,previous):
+    def reads(r):return [r['snapshot'],r['triplet_physical_state']['reread_snapshot']]
+    return [dict(previous_member=i,current_read=j,previous_read=k,proof=require_pose_agreement(a,b))
+        for i,old in enumerate(previous) for j,a in enumerate(reads(current)) for k,b in enumerate(reads(old))]
 
 
 def later(current,previous,prime_ticks=20):

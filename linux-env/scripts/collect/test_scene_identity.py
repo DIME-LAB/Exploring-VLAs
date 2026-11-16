@@ -2,7 +2,7 @@
 import copy,unittest
 from types import SimpleNamespace as NS
 import numpy as np
-from scene_identity import BODY_NAMES,physical_state,identity,require_identical
+from scene_identity import BODY_NAMES,physical_state,identity,require_identical,require_pose_agreement,compare
 from test_review_regressions import load_class
 
 
@@ -16,7 +16,7 @@ def snapshot():
 class SceneIdentityTests(unittest.TestCase):
     def runtime(self):
         Runtime,scope=load_class('collection_runtime.py','Runtime')
-        scope.update(physical_state=physical_state,require_identical=require_identical)
+        scope.update(physical_state=physical_state,require_identical=require_identical,require_pose_agreement=require_pose_agreement,compare=compare)
         r=object.__new__(Runtime);data=snapshot();r.busy=False;r.epoch=1;r.indices=list(range(6))
         r.invalid_through_ns=0;r.timeline=NS(is_playing=lambda:False);r.require_scene=lambda:None
         def cancel():r.epoch+=1

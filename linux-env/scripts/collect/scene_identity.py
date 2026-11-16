@@ -1,9 +1,14 @@
-"""Exact native physical-state identity, independent of clocks and episode labels."""
-import hashlib,json,math,numbers,struct
+"""Native bit identity and bounded triplet pose agreement, independent of clocks/labels."""
+import copy,hashlib,json,math,numbers,struct
 
 BODY_NAMES=tuple(sorted([f'{c}_2x3_{i}' for c in ('red','green','blue') for i in range(2)]+
                         ['cup_red','cup_green','cup_blue']))
 SCHEMA='soarm101-native-physical-state-v1'
+TRIPLET_POSE_POLICY=dict(version=1,position_m=1e-6,orientation_geodesic_deg=1e-3,
+    arm_joint_rad=0.,drive_target_rad=0.,joint_velocity_rad_s=0.,body_velocity=0.,base_pose_bits_exact=True,
+    strict='arm positions/velocities/drives, body velocities and both base poses retain exact native bits',
+    scope='only body position/orientation comparisons across independent restores or member observations',
+    quaternion='normalized shortest geodesic via atan2; exact bits retained diagnostically')
 
 
 def vector(value,length,precision='f'):
@@ -55,3 +60,38 @@ def require_identical(actual,expected):
     proof=compare(actual,expected)
     if not proof['passed']:raise ValueError('Exact physical restore differs: '+json.dumps(proof,sort_keys=True))
     return proof
+
+
+def orientation_geodesic_deg(a,b):
+    na=math.sqrt(sum(v*v for v in a));nb=math.sqrt(sum(v*v for v in b))
+    if min(na,nb)<1e-10:raise ValueError('Invalid physical quaternion')
+    if a==b:return 0.
+    w,x,y,z=[v/na for v in a];v,i,j,k=[t/nb for t in b]
+    real=w*v+x*i+y*j+z*k
+    imaginary=(-w*i+x*v-y*k+z*j,-w*j+y*v+x*k-z*i,-w*k+z*v-x*j+y*i)
+    return math.degrees(2*math.atan2(math.sqrt(sum(t*t for t in imaginary)),abs(real)))
+
+
+def pose_agreement(actual,expected):
+    """Lead-approved independent-readback policy; copied observation fields stay exact."""
+    left,right=physical_state(actual),physical_state(expected);bits=compare(actual,expected)
+    strict=[d for d in bits['differences'] if not any(d['field'].startswith('scene.bodies.'+n+'.'+k+'[')
+        for n in BODY_NAMES for k in ('position','orientation'))]
+    bodies={}
+    for name in BODY_NAMES:
+        a,b=left['bodies'][name],right['bodies'][name];delta=[x-y for x,y in zip(a['position'],b['position'])]
+        position=math.sqrt(sum(v*v for v in delta));angle=orientation_geodesic_deg(a['orientation'],b['orientation'])
+        bodies[name]=dict(position_delta_m=delta,position_error_m=position,orientation_geodesic_deg=angle,
+            position_passed=position<=TRIPLET_POSE_POLICY['position_m'],orientation_passed=angle<=TRIPLET_POSE_POLICY['orientation_geodesic_deg'])
+    return dict(passed=not strict and all(b['position_passed'] and b['orientation_passed'] for b in bodies.values()),
+        policy=copy.deepcopy(TRIPLET_POSE_POLICY),per_body=bodies,strict_differences=strict,exact_bits=bits)
+
+
+def require_pose_agreement(actual,expected):
+    proof=pose_agreement(actual,expected)
+    if not proof['passed']:raise ValueError('Triplet physical agreement failed: '+json.dumps(proof,sort_keys=True))
+    return proof
+
+
+def prior_agreements(actual,previous):
+    return [dict(previous_member=i,proof=require_pose_agreement(actual,old)) for i,old in enumerate(previous)]

@@ -30,7 +30,7 @@ from comparisons import matches
 from tick_contract import world_step_errors
 from contract import JOINTS
 from protocol import CommandLedger
-from scene_identity import physical_state,require_identical
+from scene_identity import physical_state,require_identical,require_pose_agreement,compare
 
 _RUNTIME = None
 _LOADED_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
@@ -279,10 +279,11 @@ class Runtime:
             view.set_velocities(np.zeros((1, 6), dtype=np.float32))
         return True
 
-    def restore(self, snapshot, arm=False, restore_drives=False, exact_state=False):
+    def restore(self, snapshot, arm=False, restore_drives=False, exact_state=False,triplet_state=False):
         if self.busy or self.timeline.is_playing():
             raise RuntimeError('Restore requires a held simulation')
-        if exact_state:
+        if exact_state and triplet_state:raise ValueError('Choose exact or triplet restore admission')
+        if exact_state or triplet_state:
             if not arm or not restore_drives:raise ValueError('Exact restore requires arm and recorded drive targets')
             physical_state(snapshot)
         self.cancel()
@@ -291,10 +292,10 @@ class Runtime:
             view = self.bodies[name]
             view.set_world_poses(np.asarray([body['position']], dtype=np.float32),
                                  np.asarray([body['orientation']], dtype=np.float32))
-            view.set_velocities(np.asarray([body['velocity']],dtype=np.float32) if exact_state else np.zeros((1,6),dtype=np.float32))
+            view.set_velocities(np.asarray([body['velocity']],dtype=np.float32) if exact_state or triplet_state else np.zeros((1,6),dtype=np.float32))
         if arm:
             self.art.set_joint_positions(np.asarray([snapshot['state']], dtype=np.float32), joint_indices=self.indices)
-            self.art.set_joint_velocities(np.asarray([snapshot['velocity']],dtype=np.float32) if exact_state else np.zeros((1,6),dtype=np.float32), joint_indices=self.indices)
+            self.art.set_joint_velocities(np.asarray([snapshot['velocity']],dtype=np.float32) if exact_state or triplet_state else np.zeros((1,6),dtype=np.float32), joint_indices=self.indices)
             self.apply(snapshot['drive_targets'] if restore_drives else snapshot['state'], self.stamp())
         actual = self.snapshot()
         error = max(abs(x-y) for name in snapshot['bodies']
@@ -302,9 +303,9 @@ class Runtime:
         orientation_error = max(min(max(abs(x-y) for x,y in zip(snapshot['bodies'][name]['orientation'], actual['bodies'][name]['orientation'])),
                                     max(abs(x+y) for x,y in zip(snapshot['bodies'][name]['orientation'], actual['bodies'][name]['orientation'])))
                                 for name in snapshot['bodies'])
-        if not matches(error,0.,'float32_readback'):
+        if not triplet_state and not matches(error,0.,'float32_readback'):
             raise RuntimeError(f'Initial pose restore differs by {error} m')
-        if not matches(orientation_error,0.,'float32_readback') or any(not matches(body['velocity'],snapshot['bodies'][name]['velocity'] if exact_state else [0.]*6,'float32_readback') for name,body in actual['bodies'].items()):
+        if not triplet_state and (not matches(orientation_error,0.,'float32_readback') or any(not matches(body['velocity'],snapshot['bodies'][name]['velocity'] if exact_state else [0.]*6,'float32_readback') for name,body in actual['bodies'].items())):
             raise RuntimeError('Initial orientation/zero velocity restore failed')
         arm_error = velocity_error = 0.
         if arm:
@@ -314,15 +315,24 @@ class Runtime:
             if not matches(actual['drive_targets'],requested_drives,'target_rad'):
                 raise RuntimeError('Initial arm drive-target restore failed')
             arm_error = max(abs(x-y) for x,y in zip(snapshot['state'], actual['state']))
-            wanted_velocity=snapshot['velocity'] if exact_state else [0.]*6
+            wanted_velocity=snapshot['velocity'] if exact_state or triplet_state else [0.]*6
             velocity_error = max(abs(a-b) for a,b in zip(actual['velocity'],wanted_velocity))
             # This read-back is immediate while held, before any constraint
             # impulses from a subsequent physics tick can affect velocity.
             if not np.isfinite(arm_error + velocity_error) or not matches(arm_error,0.,'target_rad') or not matches(velocity_error,0.,'float32_readback'):
                 raise RuntimeError(f'Initial arm position/zero velocity restore failed: {arm_error} rad, {velocity_error} rad/s')
         exact_proof=require_identical(actual,snapshot) if exact_state else None
+        triplet_proof=None
+        if triplet_state:
+            triplet_proof=require_pose_agreement(actual,snapshot)
+            reread=self.snapshot()
+            if any(not matches(reread[k],actual[k],'copy') for k in ('epoch','sim_ns','physics_time_s')):raise RuntimeError('Held restore reread advanced its native clocks')
+            triplet_proof=dict(against_target=triplet_proof,reread_snapshot=reread,
+                reread_exact_bits=compare(reread,actual),reread_agreement=require_pose_agreement(reread,actual),
+                reread_against_target=require_pose_agreement(reread,snapshot),native_clocks_unchanged=True)
         return dict(epoch=self.epoch, invalid_through_ns=self.invalid_through_ns,arm_restored=bool(arm),
                     **({'exact_physical_state':exact_proof} if exact_state else {}),
+                    **({'triplet_physical_state':triplet_proof} if triplet_state else {}),
                     restored_drive_source='snapshot_drive_targets' if restore_drives else 'snapshot_state',
                     command_baseline=dict(epoch=self.epoch,sim_ns=actual['sim_ns'],physics_time_s=actual['physics_time_s'],drive_targets=list(actual['drive_targets'])),
                     max_position_error_m=error, max_orientation_error=orientation_error,
