@@ -55,6 +55,7 @@ class ProfileReceiptTests(unittest.TestCase):
             root=Path(d);path=root/'attempt-0000';receipt=dict(accepted=False,error='wrapper cancellation',params=dict(seed=330000,trial=0),initial_physical=dict(saved='exact reset receipt'))
             streak=FailureStreak([]);streak.observe=Mock(wraps=streak.observe)
             scope=dict(c.failed_finalization.__globals__,timing_audit=timing_audit,self=c,receipt=receipt,writer=writer,receipt_cycle=None,args=NS(diagnostic=False),path=path,root=root,params=dict(object='red'),snapshots=[],motion_epochs={8},failure_log_start=0,cycle_result={},duplicate_start={},rerender_start={},stale_camera_start={},root_growth=NS(finish=lambda:{}),wall_profile_start=0,wait_log_start=0,streak=streak)
+            scope['triplet_config']=None  # This probe executes the normal-mode finally block in isolation.
             exec(compile(ast.Module(body=body,type_ignores=[]),'actual attempt finalization','exec'),scope)
             saved=json.loads((path/'receipt.json').read_text());ledger=json.loads((root/'episodes.jsonl').read_text())
             self.assertEqual(saved,ledger);self.assertFalse(saved['accepted']);self.assertEqual(saved['sensor_join_failure'],original.evidence)
