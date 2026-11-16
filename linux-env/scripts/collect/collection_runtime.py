@@ -30,11 +30,12 @@ from comparisons import matches
 from tick_contract import world_step_errors
 from contract import JOINTS
 from protocol import CommandLedger
+from scene_identity import physical_state,require_identical
 
 _RUNTIME = None
 _LOADED_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 _LOADED_DEPENDENCIES = {name:hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-                        for name in ('contract.py', 'protocol.py','comparisons.py','tick_contract.py')}
+                        for name in ('contract.py', 'protocol.py','comparisons.py','tick_contract.py','scene_identity.py')}
 
 
 class Runtime:
@@ -278,19 +279,22 @@ class Runtime:
             view.set_velocities(np.zeros((1, 6), dtype=np.float32))
         return True
 
-    def restore(self, snapshot, arm=False, restore_drives=False):
+    def restore(self, snapshot, arm=False, restore_drives=False, exact_state=False):
         if self.busy or self.timeline.is_playing():
             raise RuntimeError('Restore requires a held simulation')
+        if exact_state:
+            if not arm or not restore_drives:raise ValueError('Exact restore requires arm and recorded drive targets')
+            physical_state(snapshot)
         self.cancel()
         self.require_scene()
         for name, body in snapshot['bodies'].items():
             view = self.bodies[name]
             view.set_world_poses(np.asarray([body['position']], dtype=np.float32),
                                  np.asarray([body['orientation']], dtype=np.float32))
-            view.set_velocities(np.zeros((1, 6), dtype=np.float32))
+            view.set_velocities(np.asarray([body['velocity']],dtype=np.float32) if exact_state else np.zeros((1,6),dtype=np.float32))
         if arm:
             self.art.set_joint_positions(np.asarray([snapshot['state']], dtype=np.float32), joint_indices=self.indices)
-            self.art.set_joint_velocities(np.zeros((1, 6), dtype=np.float32), joint_indices=self.indices)
+            self.art.set_joint_velocities(np.asarray([snapshot['velocity']],dtype=np.float32) if exact_state else np.zeros((1,6),dtype=np.float32), joint_indices=self.indices)
             self.apply(snapshot['drive_targets'] if restore_drives else snapshot['state'], self.stamp())
         actual = self.snapshot()
         error = max(abs(x-y) for name in snapshot['bodies']
@@ -300,7 +304,7 @@ class Runtime:
                                 for name in snapshot['bodies'])
         if not matches(error,0.,'float32_readback'):
             raise RuntimeError(f'Initial pose restore differs by {error} m')
-        if not matches(orientation_error,0.,'float32_readback') or any(not matches(body['velocity'],[0.]*6,'float32_readback') for body in actual['bodies'].values()):
+        if not matches(orientation_error,0.,'float32_readback') or any(not matches(body['velocity'],snapshot['bodies'][name]['velocity'] if exact_state else [0.]*6,'float32_readback') for name,body in actual['bodies'].items()):
             raise RuntimeError('Initial orientation/zero velocity restore failed')
         arm_error = velocity_error = 0.
         if arm:
@@ -310,12 +314,15 @@ class Runtime:
             if not matches(actual['drive_targets'],requested_drives,'target_rad'):
                 raise RuntimeError('Initial arm drive-target restore failed')
             arm_error = max(abs(x-y) for x,y in zip(snapshot['state'], actual['state']))
-            velocity_error = max(abs(v) for v in actual['velocity'])
+            wanted_velocity=snapshot['velocity'] if exact_state else [0.]*6
+            velocity_error = max(abs(a-b) for a,b in zip(actual['velocity'],wanted_velocity))
             # This read-back is immediate while held, before any constraint
             # impulses from a subsequent physics tick can affect velocity.
             if not np.isfinite(arm_error + velocity_error) or not matches(arm_error,0.,'target_rad') or not matches(velocity_error,0.,'float32_readback'):
                 raise RuntimeError(f'Initial arm position/zero velocity restore failed: {arm_error} rad, {velocity_error} rad/s')
+        exact_proof=require_identical(actual,snapshot) if exact_state else None
         return dict(epoch=self.epoch, invalid_through_ns=self.invalid_through_ns,arm_restored=bool(arm),
+                    **({'exact_physical_state':exact_proof} if exact_state else {}),
                     restored_drive_source='snapshot_drive_targets' if restore_drives else 'snapshot_state',
                     command_baseline=dict(epoch=self.epoch,sim_ns=actual['sim_ns'],physics_time_s=actual['physics_time_s'],drive_targets=list(actual['drive_targets'])),
                     max_position_error_m=error, max_orientation_error=orientation_error,

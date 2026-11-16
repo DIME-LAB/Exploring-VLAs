@@ -10,16 +10,24 @@ COLORS = ('red', 'green', 'blue')
 JOINTS = ('shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll', 'gripper_joint')
 # Training never uses these fixed seeds; evaluate each colour with each seed.
 EVAL_SEEDS = tuple(range(900000, 900030))
+COUNTERFACTUAL_TRAIN_SEEDS = tuple(range(720000,720120))
+COUNTERFACTUAL_HELDOUT_SEEDS = tuple(range(730000,730020))
 
 
 
 def parameters(seed, color, split='train', regrasp=False):
-    if split not in ('train', 'eval'):
-        raise ValueError('Split must be train or eval')
+    if split not in ('train', 'eval', 'heldout'):
+        raise ValueError('Split must be train, eval or counterfactual heldout')
     if split == 'eval' and seed not in EVAL_SEEDS:
         raise ValueError('Evaluation must use the fixed held-out seed set')
     if split == 'train' and seed in EVAL_SEEDS:
         raise ValueError('Reserved evaluation seed')
+    if split=='heldout' and seed not in COUNTERFACTUAL_HELDOUT_SEEDS:
+        raise ValueError('Heldout split requires a reserved counterfactual layout seed')
+    if split=='train' and seed in COUNTERFACTUAL_HELDOUT_SEEDS:
+        raise ValueError('Reserved counterfactual heldout seed')
+    if regrasp and seed in COUNTERFACTUAL_TRAIN_SEEDS+COUNTERFACTUAL_HELDOUT_SEEDS:
+        raise ValueError('Counterfactual layout seeds are normal-only')
     if color not in COLORS:
         raise ValueError('Unknown task colour')
     rng = random.Random(seed)

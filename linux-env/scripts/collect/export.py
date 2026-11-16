@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Export audited successful attempts through the installed LeRobotDataset writer and validate."""
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import shutil
 import subprocess
+import time
 
 from contract import JOINTS, timing_audit
 from tick_contract import camera_tick_errors
@@ -12,6 +14,9 @@ from collection_status import require_finalized
 from checkpoint import require_recovery_mode,require_episode_mode
 from recovery import receipt_error, recovery_summary
 from storage import atomic_json,confined, prepare_environment
+from target_triplets import validate_run as validate_triplet_run
+from export_content import validate_metadata
+from export_video import validate_videos
 
 
 def main():
@@ -19,6 +24,7 @@ def main():
     p.add_argument('run', type=Path)
     p.add_argument('--repo-id', default='local/soarm101_headless_pilot')
     p.add_argument('--report-dir', type=Path, required=True)
+    p.add_argument('--validate-existing',action='store_true',help='Check a finalized dataset against raw without rewriting it')
     args = p.parse_args()
     run, report = args.run, args.report_dir
     run, report = confined(run), confined(report)
@@ -30,6 +36,8 @@ def main():
         raise ValueError('Collection is incomplete; refusing to export a partial run')
     report.mkdir(parents=True, exist_ok=True)
     config = json.loads((run / 'run.json').read_text())
+    triplet=validate_triplet_run(run)
+    atomic_json(report/'validation.json',dict(passed=False,loaded=False,status='VALIDATION_IN_PROGRESS',started_wall_ns=time.time_ns()))
     require_recovery_mode(config,config.get('regrasp_only',False),config.get('normal_only',False))
     for path in sorted(run.glob('attempt-*/receipt.json')):
         receipt=json.loads(path.read_text())
@@ -50,7 +58,7 @@ def main():
     features.update({f'observation.images.{key}': dict(dtype='video', shape=(480, 640, 3),
                     names=['height', 'width', 'channels']) for key in ('wrist', 'top')})
     dataset_root = run / 'dataset'
-    dataset = LeRobotDataset.create(args.repo_id, fps=fps, root=dataset_root,
+    dataset = None if args.validate_existing else LeRobotDataset.create(args.repo_id, fps=fps, root=dataset_root,
         features=features, robot_type='so_follower', vcodec='h264', encoder_threads=1,
         image_writer_threads=2, tolerance_s=.001)
     audits, manifest, thumbs = [], [], []
@@ -83,21 +91,27 @@ def main():
                     thumb = Image.fromarray(frame[f'observation.images.{key}']).resize((256, 192))
                     ImageDraw.Draw(thumb).text((4, 4), f'{len(manifest):02d} {receipt["params"]["color"]} seed {receipt["params"]["seed"]}', fill='white', stroke_fill='black', stroke_width=1)
                     thumbs.append(thumb)
-            dataset.add_frame(frame)
+            if dataset is not None:dataset.add_frame(frame)
             # This pinned LeRobot writer generates index/fps internally. Replace that entry with
             # the measured sim-stamp delta; the source JSONL remains the independent clock authority.
-            dataset.writer.episode_buffer['timestamp'][-1] = (row['sim_ns'] - first_stamp) / 1e9
+            if dataset is not None:dataset.writer.episode_buffer['timestamp'][-1] = (row['sim_ns'] - first_stamp) / 1e9
         for capture in captures.values():
             if capture.read()[0]:
                 raise ValueError(f'{path}: excess video frames')
             capture.release()
-        dataset.save_episode(parallel_encoding=False)
+        if dataset is not None:dataset.save_episode(parallel_encoding=False)
         audits.append(audit)
         manifest.append(dict(episode_index=len(manifest), **receipt))
         accepted_paths.append(path)
-    dataset.finalize()
+    if dataset is not None:dataset.finalize()
     recovery=recovery_summary(manifest)
-    atomic_json(dataset_root/'meta/collection_episodes.json',manifest)
+    if not args.validate_existing:
+        atomic_json(dataset_root/'meta/collection_episodes.json',manifest)
+        if triplet is not None:atomic_json(dataset_root/'meta/counterfactual_triplets.json',triplet)
+    elif triplet is not None:
+        if json.loads((dataset_root/'meta/counterfactual_triplets.json').read_text())!=triplet:
+            raise ValueError('Stored counterfactual triplet metadata differs from raw')
+    elif (dataset_root/'meta/counterfactual_triplets.json').exists():raise ValueError('Unbound counterfactual dataset metadata')
     loaded = LeRobotDataset(args.repo_id, root=dataset_root, video_backend='pyav', tolerance_s=.001)
     assert loaded.fps == 30 and loaded.num_episodes == len(manifest)
     assert loaded.features['action']['names'] == names
@@ -106,6 +120,8 @@ def main():
     assert tuple(first['observation.state'].shape) == (6,)
     assert tuple(first['observation.images.wrist'].shape) == (3, 480, 640)
     assert tuple(last['observation.images.top'].shape) == (3, 480, 640)
+    content=validate_metadata(run)
+    videos=validate_videos(run,content,sample_count=None)
     sheet = Image.new('RGB', (256 * 5, 192 * ((len(thumbs) + 4) // 5)))
     for index, thumb in enumerate(thumbs):
         sheet.paste(thumb, ((index % 5) * 256, (index // 5) * 192))
@@ -119,7 +135,10 @@ def main():
         subprocess.run(['ffmpeg', '-v', 'error', '-y', '-i', str(path / 'top.mp4'), '-i', str(path / 'wrist.mp4'),
             '-filter_complex', '[0:v][1:v]hstack=inputs=2', '-c:v', 'libx264', '-threads', '2', '-crf', '20',
             str(report / f'sample-{color}.mp4')], check=True)
-    validation = dict(recovery=recovery,loaded=True, fps=loaded.fps, episodes=loaded.num_episodes,
+    validation = dict(passed=True,status='VALIDATION_FINISHED',completed_wall_ns=time.time_ns(),
+                     validator_source_sha256={n:hashlib.sha256(Path(__file__).with_name(n).read_bytes()).hexdigest() for n in ('export.py','export_content.py','export_video.py','target_triplets.py','scene_identity.py')},
+                     counterfactual_triplet=triplet,export_content=dict(metadata=content,video=videos),
+                     recovery=recovery,loaded=True, fps=loaded.fps, episodes=loaded.num_episodes,
                      frames=len(loaded), features=loaded.features, timing_passed=all(a['passed'] for a in audits),
                      color_counts={color: sum(e['params']['color'] == color for e in manifest) for color in ('red', 'green', 'blue')})
     atomic_json(report / 'validation.json',validation)

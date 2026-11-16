@@ -62,6 +62,7 @@ import support_contact
 from base_drift import summary as base_drift_summary
 from tick_contract import TickContract, TickContractError, require_snapshots, digest, verify_proof, CLOCK_POLICY, STEP_NS
 from scene_bank import SceneBankSession, configure_args as configure_scene_bank_args
+from target_triplets import TripletSession,member as triplet_member,configure_args as configure_triplet_args,validate_run as validate_triplet_run
 from episode_policy import (POLICY, QualityReject, ConvergenceFailure, WorkerRegistry,
                             PLANNER_REJECTIONS, FailureStreak, disposition)
 
@@ -1030,6 +1031,10 @@ class Collector:
                         camera_layout={k:dict(encoding=entry[k][0].encoding,width=entry[k][0].width,height=entry[k][0].height,step=entry[k][0].step,bytes=len(entry[k][0].data)) for k in ('wrist','top')})
                     if 'robot_base_world_pose' in snapshot:
                         row.update(robot_base_world_pose=copy.deepcopy(snapshot['robot_base_world_pose']),robot_base_pose_source=snapshot['robot_base_pose_source'])
+                    triplet=getattr(self,'triplet_session',None)
+                    if triplet is not None and triplet.anchor is not None:
+                        row.update(layout_id=triplet.config['layout_id'],triplet_id=triplet.triplet_id,
+                            base_world_pose=copy.deepcopy(snapshot['base_world_pose']))
                     if not hasattr(self,'tick_audit'):self.tick_audit=TickContract()
                     contract_start=time.monotonic_ns()
                     self.tick_audit.observe(row)
@@ -1547,6 +1552,7 @@ class Collector:
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/compute_workspace.py',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/ik_calibration.yaml',
                            'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/workspace_bounds.yaml']
+        tracked_sources.extend(['linux-env/scripts/collect/scene_identity.py','linux-env/scripts/collect/target_triplets.py'])
         tracked_sources.append(PROFILE['source'])
         source_hashes = {name: hashlib.sha256((REPO / name).read_bytes()).hexdigest() for name in tracked_sources}
         image_source=self.executor.image_take.metadata
@@ -1572,13 +1578,19 @@ class Collector:
         return clock_config, transport_config, baseline, source_hashes, initial_gpu_footprint, provenance
 
     def _prepare_scene_attempt(self, params, baseline, receipt, motion_epochs, root, path):
-        args = self.args
         with self.generation.own('attempt start'):
             self.current_episode_id=receipt['episode_id']
             self.current_attempt_path=path
             self.episode_snapshots=[]
             self.node._qs_abort_evt.clear()
             motion_epochs.add(self.generation.epoch)
+        session=getattr(self,'triplet_session',None)
+        if session is not None:
+            return session.prepare(self,params,baseline,receipt,motion_epochs,root,path)
+        return self._prepare_normal_scene_attempt(params,baseline,receipt,motion_epochs,root,path)
+
+    def _prepare_normal_scene_attempt(self, params, baseline, receipt, motion_epochs, root, path):
+        args = self.args
         if self.needs_home_restore:
             receipt['failed_episode_home_reset']=self.restore_failed_episode_home()
             self.needs_home_restore=False
@@ -1689,6 +1701,9 @@ class Collector:
             raise ValueError('Superseded diagnostic run requires a fresh output directory')
         if args.resume:collection_status.require_finalized(root)
         previous = json.loads((root / 'run.json').read_text()) if args.resume else None
+        if previous and previous.get('counterfactual_triplet') is not None:
+            raise ValueError('A partial or stopped counterfactual triplet cannot be resumed')
+        triplet_config=getattr(args,'counterfactual_config',None)
         mode = require_recovery_mode(previous,args.regrasp_only,args.normal_only)
         root.mkdir(parents=True, exist_ok=args.resume)
         with self.status_lock:self.finalization_certificate=collection_status.begin(root)
@@ -1746,7 +1761,9 @@ class Collector:
             application_contract='Held at observation tick; read-back verified PhysX targets before one-frame advance; maximum one sim tick latency',
             clock_config=clock_config, domain=90 + args.instance,
             bridge_port=8777 + 2 * args.instance, fps=30, baseline=baseline, baseline_cup_layout=self.baseline_cup_layout, eval_seeds=EVAL_SEEDS,
+            **({'counterfactual_triplet':triplet_config} if triplet_config is not None else {}),
             **{k: v for k, v in provenance.items() if k != 'start_trial'}))
+        self.triplet_session=TripletSession(root,triplet_config) if triplet_config is not None else None
         start = time.monotonic()
         for trial in range(attempted, args.max_attempts):
             if accepted >= args.episodes:
@@ -1759,6 +1776,7 @@ class Collector:
             attempted += 1
             color = COLORS[accepted % 3]
             params = (json.loads(args.replay_receipt.read_text())['params'] if args.replay_receipt
+                      else triplet_member(triplet_config,trial) if triplet_config is not None
                       else parameters(args.seed+trial,color,regrasp=episode_regrasp(accepted,args.regrasp_only,args.normal_only)))
             require_episode_mode(params,args.regrasp_only,args.normal_only)
             params['trial'] = trial
@@ -1938,6 +1956,11 @@ class Collector:
             print(json.dumps(dict(trial=trial, accepted=accepted, target=args.episodes,
                 yield_fraction=accepted / (trial + 1), error=receipt.get('error'), timing=receipt.get('timing'))), flush=True)
             elapsed = previous_wall + time.monotonic() - start
+            if triplet_config is not None and not receipt['accepted']:
+                atomic_json(root/'summary.json',dict(producer_invocation=self.finalization_certificate['invocation'],complete=False,
+                    episodes=accepted,attempts=attempted,end_marker='COLLECTION_STOPPED',triplet_rejected=True,
+                    error=receipt.get('error'),wall_seconds=elapsed))
+                raise RuntimeError('Counterfactual triplet rejected; partial members remain diagnostic')
             if receipt['failure_streak']['stop']:
                 stopped=dict(producer_invocation=self.finalization_certificate['invocation'],complete=False,episodes=accepted,attempts=attempted,wall_seconds=elapsed,
                     stop=receipt['disposition'],failure_streak=receipt['failure_streak'],end_marker='COLLECTION_STOPPED')
@@ -1952,6 +1975,8 @@ class Collector:
             yield_fraction=accepted / max(attempted, 1), wall_seconds=previous_wall + time.monotonic() - start,
             disk_wait_seconds=disk_wait,
             episodes_per_wall_hour=accepted * 3600 / max(previous_wall + time.monotonic() - start, 1), end_marker='COLLECTION_FINISHED')
+        if triplet_config is not None and summary['complete']:
+            atomic_json(root/'counterfactual-triplet.json',validate_triplet_run(root))
         atomic_json(root / 'summary.json',summary)
         print(json.dumps(summary), flush=True)
         if not summary['complete']:
@@ -2010,6 +2035,8 @@ def main():
     parser.add_argument('--episodes', type=int, default=5)
     parser.add_argument('--seed', type=int, default=310000)
     parser.add_argument('--replay-receipt', type=Path)
+    parser.add_argument('--counterfactual-layout-seed',type=int)
+    parser.add_argument('--counterfactual-split',choices=('train','heldout'),default='train')
     parser.add_argument('--scene-bank',choices=('eval','receipts'))
     parser.add_argument('--scene-bank-reference-run',type=Path)
     parser.add_argument('--scene-bank-output',type=Path)
@@ -2026,6 +2053,7 @@ def main():
     recovery_group.add_argument('--normal-only',action='store_true',help='Disable recovery sampling for a normal-only run')
     parser.add_argument('--diagnostic', action='store_true', help='Keep failed videos and save final recorded-frame stills')
     args = parser.parse_args()
+    args.counterfactual_config=configure_triplet_args(args,parser)
     configure_scene_bank_args(args,parser)
     if not math.isfinite(args.wait_rtf_floor) or args.wait_rtf_floor <= 0:
         parser.error('--wait-rtf-floor must be finite and positive')

@@ -308,6 +308,65 @@ directly (tailnet or LAN); an ssh tunnel can't carry it. One viewer at a time.
 
 ## Collecting sim data
 
+Counterfactual target triplets use one layout for three normal episodes with the
+unchanged red/green/blue task strings. The layout seed also fixes the chosen
+same-colour block index, approach, speed and DART seed. Colour order cycles over
+all six permutations. The reserved training layouts are `720000–720119` (360
+episodes); held-out layouts are `730000–730019` (60 episodes). Held-out layouts
+stay in a separate dataset and never enter training. These ranges are disjoint
+from the normal, recovery and evaluation-bank seeds.
+
+The collector samples and settles the scene once. It uses the existing native
+restore entrance shared with the evaluation scene bank, with an opt-in exact
+read-back check. Every member restores all nine bodies' positions, quaternions
+and velocities, the six measured arm joints/velocities and drive targets.
+The fixed robot base must also match. SHA256 identities preserve the native
+float32 bits (USD base transforms use float64), including signed zero and
+quaternion sign. Clocks and epochs remain monotonic under their existing
+contracts and are excluded from the physical hash. The held restore, the first
+post-restore observation, and the first recorded observation each have separate
+hashes that must match across RGB. All three selected blocks must be visible;
+the collector refuses a hidden target instead of changing the selection rule.
+Image pixels are not included in physical identity because repeated RTX renders
+can differ. Live PhysX repeatability still requires qualification.
+
+Generate a CPU-only four-instance plan, without starting any simulator:
+
+```bash
+python3 -B linux-env/scripts/collect/target_triplets.py --plan \
+  --target-host rtx6000 --instances 3,4,5,6 \
+  --output /mnt/a4500-backup/exploring-vlas/runtime/counterfactual-plan.json
+```
+
+After the lead grants a live window, each planned command uses the existing
+`collect_sim.sh run` entrance with `--counterfactual-layout-seed` and
+`--counterfactual-split train|heldout`. The output is confined to
+`<host-root>/datasets/counterfactual-targets/<split>/layout-<seed>/`.
+Each invocation is a fresh three-member group: no resume, replay, re-grasp or
+per-member retries. A failed member leaves the entire group diagnostic; only
+three accepted members may export. The 140-layout plan is not production
+authorization. A two-layout smoke plan can be generated with
+`--train-layouts 1 --heldout-layouts 1` after review.
+
+`triplet-anchor.json`, per-episode receipts and raw rows bind `layout_id` and
+`triplet_id`; export preserves these in `meta/collection_episodes.json` and
+`meta/counterfactual_triplets.json`. The LeRobot feature schema stays at the
+normal dataset's 30 fps, six measured joint states/actions in degrees and two
+640×480 RGB videos. Export and `--validate-existing` compare every stored
+timestamp, task, index, state/action and decoded video frame against raw;
+lossy H264 uses the declared PSNR/max-error policy in `export_video.py`.
+The existing timing, clean-label DART, success and owned-cleanup checks remain
+required. CPU checks start no simulator:
+
+```bash
+cd linux-env/scripts/collect
+CUDA_VISIBLE_DEVICES='' python3 -B -m unittest test_scene_identity test_target_triplets
+# Run in the existing LeRobot environment (PyArrow, PyAV and the pinned fork).
+CUDA_VISIBLE_DEVICES='' python3 -B export_content_regression.py
+CUDA_VISIBLE_DEVICES='' python3 -B triplet_export_regression.py \
+  --out /mnt/a4500-backup/exploring-vlas/tmp/collection-codex/triplet-export-fixture
+```
+
 The normal-only pilot passed at frozen `ef42c1b`: **50/50 accepted**, 17 red /
 17 green /16 blue, 30,134 frames at 30 fps. LeRobotDataset load, timing, clean
 expert labels, native scene resets and owned cleanup pass. Collection achieved
