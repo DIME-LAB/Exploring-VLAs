@@ -349,7 +349,12 @@ metadata. Clocks/epochs stay under their existing contracts and are excluded
 from the physical hash. All three selected blocks must be visible;
 the collector refuses a hidden target instead of changing the selection rule.
 Image pixels are not included in physical identity because repeated RTX renders
-can differ. Live PhysX repeatability still requires qualification.
+can differ. The two-layout smoke at frozen `f99f4f7` qualified train layout
+720000 and held-out layout 730000: six accepted episodes, with identical native
+first-observation physical hashes across each RGB group and all 12 held reread
+pairs bit-identical. The maximum cross-member body pose difference was zero;
+maximum common anchor drift was 0.2434 µm / 0.0007329 degrees. Qualification covers
+these two layouts; future runs retain the same admission gates.
 
 The anchor tolerance applies at held restore; bootstrap and first recording
 use the tighter pairwise member bounds to preserve the counterfactual scene.
@@ -376,6 +381,16 @@ evidence before admission checks in run-level triplet-boundaries/attempt-NNNN.js
 and the receipt, preserving EpisodeWriter's exclusive creation of attempt directories.
 This preserves returned restore/reread proofs and observed anchor drifts even
 when a later check rejects the member; an unperformed read has no diagnostic.
+
+Both smoke datasets loaded in LeRobotDataset at 30 fps: 2,010 train frames and
+1,674 held-out frames. Fresh export and independent validate-existing each
+checked all rows and 7,368 raw/stored camera frame pairs across the two datasets.
+Collection throughput was 28.79 accepted episodes per wall-hour; including cold
+startup, exports, independent readbacks and shutdown it was 12.78/hour. The
+instance was verified down with zero surviving owned processes. Reports, per-body
+tables, contact sheets and short clips are in the Mac deliverable folder
+`phase3/3.1-collection/counterfactual-triplets/live-smoke-f99f4f7-v4/`.
+The 420-episode production collection remains scheduled separately by the lead.
 
 Preparation and the capture loop re-evaluate all three visible-target choices
 on the bootstrap and first recorded scene, requiring >5 mm margins and the same

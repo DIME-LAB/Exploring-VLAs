@@ -253,20 +253,20 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       20 um rest contact, and verifies CPU dynamics. Fixed-base normal smoke 5/5 and pilot-3.1-v4 50/50
       pass: fresh native offsets 0.1 mm/0, 13 boxes/cup and 1/lego; fixed_base=true and base drift zero.
 - [ ] Counterfactual target triplets (2026-11-16): 120 training layouts × RGB plus 20 whole-layout
-      held-out layouts × RGB = 420 normal episodes. CPU implementation uses the shared native restore,
-      exact physical-state hashes at restore/initial/first-recorded observation, visible nearest-to-fixed-base
-      XY target selection (refuse <=5 mm pair margins), common DART parameters and counterbalanced target order. Seeds 720000–720119 train,
-      730000–730019 heldout; split datasets and layout/triplet metadata enforced at export. All-row metadata
-      and all-frame video validation use the existing exporter. Independent review and a two-triplet live
-      smoke remain required before production; no live collection authorized by this implementation.
-      Native bootstrap/first-recorded tick proofs, observed-scene target admission and cross-member
-      epoch/clock ordering are checked at capture and export. The finalized summary binds configuration,
-      group/native certificates and raw episode inputs; inconsistent mode markers refuse normal export.
-      Live 6ba20ab smoke stopped before writer on native bit round-trip differences (max33.54 nm,
-      5.084e-6 deg); owned down. Approved triplet-only admission: <=1 um body position /<=0.001 deg
-      geodesic orientation, exact arm/drives/velocities/bases, pairwise member comparisons at restore,
-      bootstrap and first recording. Record actual hashes/deviations and consecutive held rereads;
-      copied tick/row provenance stays exact. Focused review and a fresh two-triplet smoke still required.
+      held-out layouts × RGB = 420 normal episodes. Shared native restore, visible nearest-to-fixed-base
+      XY target rule (refuse <=5 mm margins), common DART parameters and counterbalanced colour order.
+      Seeds 720000–720119 train / 730000–730019 heldout; separate datasets and layout/triplet IDs.
+      Restore and pairwise observation gates: <=1 um position / <=0.001 deg geodesic angle; arm,
+      drives, velocities and bases remain exact. Common post-restore drift is recorded and bounded by
+      0.5 mm / 0.5 deg. Each checker recomputes admission from source bits; derived float diagnostics
+      may differ across interpreters. Raw tick/row provenance, hashes, IDs and policies stay exact.
+    - [x] Implementation/review + two-triplet smoke at frozen f99f4f7: 6/6 accepted, 3,684 frames,
+          both exports/readbacks/LeRobotDataset loads PASS at 30 fps; 7,368 camera frame pairs checked
+          per validation pass. Initial physical hashes identical within each group; all 12 held reread
+          pairs bit-identical, cross-member pose differences zero. Common drift max0.2434 um/0.0007329 deg.
+          28.79 collection episodes/hour (12.78 inclusive of startup/export/readback/down); owned cleanup
+          verified, no survivors. Mac proofs/contact sheets/clips: counterfactual-triplets/live-smoke-f99f4f7-v4/.
+    - [ ] Full 420-episode collection: waits for the lead's production schedule/GO.
 - [ ] 3.2 Fine-tune (more steps/episodes than 10k/100), sim/real mix per the coursework findings.
     - 2026-11-15 01:04Z: primary normal-only run launched on rtx6000 (60k steps, decay 60k, eager eval later),
       merged on dual (8.7 GB), hash-verified pull; ~1.8-2.0 steps/s; loss 0.40 -> 0.022 by 3k. Full-FT ablation defined,
@@ -345,8 +345,8 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       prompt is bimodal (averaging between blocks). Wrist frames in the demos show the target clearly (~45x60 px).
       Next (awaiting operator GO): (a) train from smolvla_base on the 431 existing episodes whose target is the
       unambiguous nearer-to-base block (rule analysis 452/453/431, independently reproduced); (b) counterfactual triplets
-      (same restored layout x red/green/blue, visible nearest-base rule; 120 train + 20 held-out layouts) at ccac030,
-      independent review NOT-READY (4 P1 evidence-binding gaps, fixes in progress).
+      (same restored layout x red/green/blue, visible nearest-base rule; 120 train + 20 held-out layouts)
+      qualified by review and the 6/6 live smoke at f99f4f7; production awaits the lead's GO.
 - [ ] 3.4 (only if 3.3 paraphrases fail) Prompt-variety run: relabel each training sample's task from a set
       of templates per colour at merge time (no new collection), hold some templates out for eval, and compare
       against the fixed-string model on both exact and held-out prompts. Published SmolVLA/LeRobot guidance is
