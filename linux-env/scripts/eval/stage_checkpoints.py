@@ -83,6 +83,17 @@ def source_probe(request):
     files = inventory(model, request.get('hashes', False))
     if any(name not in files or not files[name]['size'] for name in REQUIRED):
         return dict(ready=False, reason='incomplete-model-file-set', files=files, step=step)
+    marker = request.get('completion_marker')
+    marker_proof = None
+    if marker:
+        if Path(marker).name != marker or marker in ('.','..'):
+            raise ValueError('Completion marker must be a plain file name')
+        if marker not in files or not files[marker]['size']:
+            return dict(ready=False, reason='custom-completion-marker-absent', step=step)
+        raw = (model/marker).read_bytes()
+        value = json.loads(raw)
+        if not isinstance(value,dict):raise ValueError('Completion marker must contain a JSON object')
+        marker_proof = dict(name=marker,sha256=hashlib.sha256(raw).hexdigest())
     # Processor state files are referenced by their JSON, not a guessed suffix.
     for name in ('policy_preprocessor.json', 'policy_postprocessor.json'):
         def check_refs(value):
@@ -97,7 +108,7 @@ def source_probe(request):
     return dict(ready=True, step=step, model=str(model), files=files,
                 completion=dict(marker=str(last), target=target,
                     meaning='native trainer updates last only after save_checkpoint returns',
-                    training_step_present=training_step.exists()))
+                    training_step_present=training_step.exists(),artifact_marker=marker_proof))
 
 
 def prepare_target(request):
@@ -173,7 +184,7 @@ def same_files(left, right):
 def transfer(args, snapshot):
     step = snapshot['step']
     expected = remote(args.source_host, 'source_probe', dict(
-        source_checkpoints=args.source_checkpoints, step=step, hashes=True))
+        source_checkpoints=args.source_checkpoints, step=step, hashes=True, completion_marker=args.completion_marker))
     if not expected['ready'] or any(
         {k:v for k,v in expected['files'][name].items() if k!='sha256'} != row
         for name,row in snapshot['files'].items()) or set(expected['files'])!=set(snapshot['files']):
@@ -195,7 +206,7 @@ def transfer(args, snapshot):
     verified = remote(args.target_host, 'verify_target', dict(
         directory=prepared['directory'], files=expected['files']))
     after = remote(args.source_host, 'source_probe', dict(
-        source_checkpoints=args.source_checkpoints, step=step, hashes=True))
+        source_checkpoints=args.source_checkpoints, step=step, hashes=True, completion_marker=args.completion_marker))
     if not after['ready'] or after['files']!=expected['files']:
         raise RuntimeError('Source changed during transfer; target remains unpublished')
     receipt = dict(step=step, published_model=str(Path(args.destination)/f'{step:06d}'/'pretrained_model'), source_host=args.source_host, source=expected['model'],
@@ -222,6 +233,8 @@ def main():
     p.add_argument('--steps',default='10000,20000,40000,60000')
     p.add_argument('--poll-seconds',type=float,default=60);p.add_argument('--stable-seconds',type=float,default=60)
     p.add_argument('--notify-command-json',help='argv that accepts a final --prompt-file argument')
+    p.add_argument('--completion-marker',help='Required JSON marker in pretrained_model, in addition to native last')
+    p.add_argument('--notification-context',default='Waiting for your GPU0 GO before scored main30RTC-on.')
     p.add_argument('--once',action='store_true')
     args=p.parse_args();steps=[int(s) for s in args.steps.split(',')]
     if min(args.poll_seconds,args.stable_seconds)<=0 or any(s<=0 for s in steps):p.error('Positive polling/stability/steps required')
@@ -230,6 +243,7 @@ def main():
     state_path=args.state_dir/'status.json'
     state=json.loads(state_path.read_text()) if state_path.exists() else dict(staged={},observed={})
     configuration=dict(source_host=args.source_host,target_host=args.target_host,source_checkpoints=args.source_checkpoints,destination=args.destination,steps=steps,stable_seconds=args.stable_seconds)
+    if args.completion_marker:configuration['completion_marker']=args.completion_marker
     if state.get('configuration',configuration)!=configuration:raise ValueError('Watcher state belongs to another transfer configuration')
     state.update(configuration=configuration,pid=os.getpid(),source=args.source_checkpoints,destination=args.destination,status='watching')
     print(json.dumps(dict(event='WATCHING',pid=os.getpid(),steps=steps,source=args.source_checkpoints,destination=args.destination)),flush=True)
@@ -239,7 +253,7 @@ def main():
             for step in steps:
                 key=f'{step:06d}'
                 if key not in state['staged']:
-                    snap=remote(args.source_host,'source_probe',dict(source_checkpoints=args.source_checkpoints,step=step))
+                    snap=remote(args.source_host,'source_probe',dict(source_checkpoints=args.source_checkpoints,step=step,completion_marker=args.completion_marker))
                     previous=observed.get(key);now=time.monotonic()
                     if snap['ready']:
                         if previous is None or not same_files(previous[0],snap['files']):
@@ -257,7 +271,7 @@ def main():
                     receipt=json.loads((args.state_dir/entry['receipt_file']).read_text())
                     digest=receipt['source_before']['files']['model.safetensors']['sha256']
                     message=args.state_dir/f'notify-{key}.txt'
-                    message.write_text(f'Checkpoint {key} STAGED and SHA256-VERIFIED CPU-only at dual-a4500:{entry["model"]}. Weights SHA256 {digest}. Native trainer last marker + >={args.stable_seconds:g}s stable sizes/mtimes + source before/after SHA and target hashes checked. Complete processors/config included; optimizer stays on RTX. Receipt: {args.destination}/{key}/handoff.json. No GPU job started. Waiting for your GPU0 GO before scored main30RTC-on.\n')
+                    message.write_text(f'Checkpoint {key} STAGED and SHA256-VERIFIED CPU-only at dual-a4500:{entry["model"]}. Weights SHA256 {digest}. Native trainer last marker + >={args.stable_seconds:g}s stable sizes/mtimes + source before/after SHA and target hashes checked. Complete processors/config included; optimizer stays on RTX. Receipt: {args.destination}/{key}/handoff.json. No GPU job started. {args.notification_context}\n')
                     state['notification_in_progress']=key;write_status(state_path,state)
                     subprocess.run(json.loads(args.notify_command_json)+['--prompt-file',str(message)],check=True,timeout=120)
                     entry['notified']=True;state.pop('notification_in_progress',None);write_status(state_path,state)
