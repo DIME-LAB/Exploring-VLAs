@@ -3,7 +3,7 @@ import argparse,copy,hashlib,itertools,json,subprocess
 from pathlib import Path
 from contract import COLORS,parameters,COUNTERFACTUAL_TRAIN_SEEDS,COUNTERFACTUAL_HELDOUT_SEEDS,VISIBLE_TARGET_RULE,apply_target_rule
 from comparisons import matches,interval
-from scene_identity import physical_state,identity,require_identical,require_pose_agreement,prior_agreements,TRIPLET_POSE_POLICY
+from scene_identity import physical_state,identity,require_identical,require_pose_agreement,prior_agreements,TRIPLET_POSE_POLICY,require_observation_drift,TRIPLET_OBSERVATION_DRIFT_POLICY
 from tick_contract import STEP_NS
 from storage import atomic_json,CANONICAL_ROOT,confined
 import triplet_boundary as boundary
@@ -11,10 +11,11 @@ from tick_contract import digest
 
 TRAIN_SEEDS=COUNTERFACTUAL_TRAIN_SEEDS
 HELDOUT_SEEDS=COUNTERFACTUAL_HELDOUT_SEEDS
-POLICY=dict(version=4,kind='counterfactual-target-triplet',colors=list(COLORS),normal_only=True,
+POLICY=dict(version=5,kind='counterfactual-target-triplet',colors=list(COLORS),normal_only=True,
     order='six counterbalanced permutations by layout ordinal',
     target_rule=dict(name=VISIBLE_TARGET_RULE,frame='/World/base',refuse_margin_le_m=.005),camera_prime_ticks=20,
     initial_observation_ticks=1,state_identity='soarm101-native-physical-state-v1',pose_agreement=copy.deepcopy(TRIPLET_POSE_POLICY),
+    observation_anchor_drift=copy.deepcopy(TRIPLET_OBSERVATION_DRIFT_POLICY),
     splits=dict(train=list(TRAIN_SEEDS),heldout=list(HELDOUT_SEEDS)))
 
 
@@ -66,6 +67,7 @@ class TripletSession:
         self.cup_sampler=None;self.sampled=0
         self.starts={};self.recorded_starts=set()
         self.prime_members=[];self.restore_members=[];self.bootstrap_members=[];self.first_members=[];self.first_deviations={};self.first_reference_deviations={}
+        self.first_anchor_deviations={}
         if (self.root/'triplet-anchor.json').exists():raise ValueError('A triplet anchor cannot be silently adopted')
     def save(self):
         atomic_json(self.root/'triplet-anchor.json',dict(config=self.config,anchor=self.anchor,
@@ -101,6 +103,7 @@ class TripletSession:
         observed=c.advance_ticks(POLICY['initial_observation_ticks'])[-1]
         boundary.bootstrap(restored['snapshot'],{k:v for k,v in restored.items() if k!='snapshot'},observed)
         observed_rule=boundary.selections(observed,self.anchor)
+        bootstrap_anchor_drift=require_observation_drift(observed,self.anchor)
         if self.bootstrap is None:self.bootstrap=copy.deepcopy(observed);self.save()
         bootstrap_proof=require_pose_agreement(observed,self.bootstrap)
         bootstrap_prior=prior_agreements(observed,self.bootstrap_members)
@@ -126,7 +129,7 @@ class TripletSession:
                 anchor_sha256=identity(self.anchor),initial_observation_sha256=identity(observed),restore_proof=proof,
                 initial_observation_proof=bootstrap_proof,visibility=visibility,sampler_invocations=self.sampled,
                 priming_restore=primed,priming_prior=prime_prior,restore_prior=restore_prior,bootstrap_prior=bootstrap_prior,
-                observed_target_rule=observed_rule,
+                observed_target_rule=observed_rule,bootstrap_anchor_drift=bootstrap_anchor_drift,
                 camera_prime_ticks=POLICY['camera_prime_ticks'],scene_clear_before_restore=cleared))
 
     def record_start(self,snapshot,row,path):
@@ -140,6 +143,7 @@ class TripletSession:
         atomic_json(path/'first-recorded-native.json',record);self.recorded_starts.add(episode)
         self.first_deviations[episode]=deviations;self.first_members.append(copy.deepcopy(snapshot))
         self.first_reference_deviations[episode]=reference_deviation
+        self.first_anchor_deviations[episode]=record['anchor_drift']
 
 
 def validate(config,anchor,receipts):
@@ -161,6 +165,8 @@ def validate(config,anchor,receipts):
         proof=require_pose_agreement(r['initial_physical'],anchor['anchor']);bootstrap=require_pose_agreement(r['episode_start_physical'],anchor['bootstrap'])
         if m['restore_proof']!=proof or m['initial_observation_proof']!=bootstrap:raise ValueError('Triplet restore proof differs')
         restored=r['initial_physical'];observed=r['episode_start_physical']
+        if m['bootstrap_anchor_drift']!=require_observation_drift(observed,anchor['anchor']):
+            raise ValueError('Bootstrap anchor drift evidence differs')
         boundary.restore_admission(restored,r['initial_restore_check'],anchor['anchor'])
         prime=m['priming_restore'];boundary.restore_admission(prime['snapshot'],prime,anchor['anchor'])
         if (m['priming_prior']!=boundary.restore_prior(prime,[p['counterfactual']['priming_restore'] for p in receipts[:index]]) or
@@ -234,6 +240,8 @@ def validate_run(run,base=CANONICAL_ROOT,sealed=True):
         previous_last=boundary.from_row(last)
         record=json.loads((run/f'attempt-{index:04d}/first-recorded-native.json').read_text())
         boundary.verify_record(record,row,r['episode_start_physical'],anchor['anchor'],r['episode_id'],result['triplet_id'])
+        if r['counterfactual']['first_recorded_anchor_drift']!=record['anchor_drift']:
+            raise ValueError('First recorded anchor drift evidence differs')
         deviations=prior_agreements(record['native'],first)
         if r['counterfactual']['first_recorded_prior']!=deviations:raise ValueError('First recorded cross-member pose agreement evidence differs')
         reference_deviation=require_pose_agreement(record['native'],first[0] if first else record['native'])
@@ -244,10 +252,11 @@ def validate_run(run,base=CANONICAL_ROOT,sealed=True):
         first.append(dict(state=row['physics_state'],velocity=row['physics_velocity'],drive_targets=row['physics_drive_targets'],
             bodies=row['physical_bodies'],base_world_pose=row['base_world_pose'],robot_base_world_pose=row['robot_base_world_pose']))
     if any(not matches(offsets[0],v,'native_ns') for v in offsets):raise ValueError('Triplet first observation offsets differ')
-    result.update(pose_agreement=copy.deepcopy(TRIPLET_POSE_POLICY),first_recorded_physical_sha256=[identity(v) for v in first],
+    result.update(pose_agreement=copy.deepcopy(TRIPLET_POSE_POLICY),observation_anchor_drift=copy.deepcopy(TRIPLET_OBSERVATION_DRIFT_POLICY),first_recorded_physical_sha256=[identity(v) for v in first],
         member_deviations=[dict(episode_id=r['episode_id'],restore=r['counterfactual']['restore_proof'],
             restore_prior=r['counterfactual']['restore_prior'],priming_prior=r['counterfactual']['priming_prior'],
             bootstrap=r['counterfactual']['initial_observation_proof'],bootstrap_prior=r['counterfactual']['bootstrap_prior'],
+            anchor_drift=dict(bootstrap=r['counterfactual']['bootstrap_anchor_drift'],first_recorded=r['counterfactual']['first_recorded_anchor_drift']),
             first_recorded=r['counterfactual']['first_recorded_deviation'],first_recorded_prior=r['counterfactual']['first_recorded_prior'],reread=r['initial_restore_check']['triplet_physical_state']) for r in receipts],
         first_recorded_offsets_ns=offsets,native_start_proofs=native_proofs)
     if sealed:

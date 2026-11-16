@@ -1,7 +1,7 @@
 """Native observation evidence for triplet preparation and recording boundaries."""
 import copy,math
 from contract import COLORS,visible_target
-from scene_identity import identity,require_identical,require_pose_agreement,compare
+from scene_identity import identity,require_identical,require_pose_agreement,compare,require_observation_drift
 from comparisons import matches
 from tick_contract import TickContract,STEP_NS,CLOCK_POLICY,digest,require_snapshots
 
@@ -85,7 +85,7 @@ def recorded(snapshot,row,initial,anchor,episode_id,triplet_id):
         if snapshot['tick_contract']['previous']!=initial['tick_contract']['row']:raise ValueError('Next-tick start omitted bootstrap predecessor')
     else:raise ValueError('Recorded start is neither bootstrap nor its next native tick')
     return dict(version=1,episode_id=episode_id,triplet_id=triplet_id,bootstrap_sha256=digest(initial),
-        native=copy.deepcopy(snapshot),observed_rule=selections(snapshot,anchor))
+        native=copy.deepcopy(snapshot),observed_rule=selections(snapshot,anchor),anchor_drift=require_observation_drift(snapshot,anchor))
 
 
 def verify_record(record,row,initial,anchor,episode_id,triplet_id):

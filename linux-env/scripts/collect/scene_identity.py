@@ -9,6 +9,8 @@ TRIPLET_POSE_POLICY=dict(version=1,position_m=1e-6,orientation_geodesic_deg=1e-3
     strict='arm positions/velocities/drives, body velocities and both base poses retain exact native bits',
     scope='only body position/orientation comparisons across independent restores or member observations',
     quaternion='normalized shortest geodesic via atan2; exact bits retained diagnostically')
+TRIPLET_OBSERVATION_DRIFT_POLICY=dict(version=1,position_m=.0005,orientation_geodesic_deg=.5,
+    scope='body poses versus the restore anchor at bootstrap and first recording; pairwise member bounds remain separate')
 
 
 def vector(value,length,precision='f'):
@@ -95,3 +97,15 @@ def require_pose_agreement(actual,expected):
 
 def prior_agreements(actual,previous):
     return [dict(previous_member=i,proof=require_pose_agreement(actual,old)) for i,old in enumerate(previous)]
+
+
+def require_observation_drift(actual,anchor):
+    """Triplet-only common post-restore drift bound; not an arm/velocity settling gate."""
+    measured=pose_agreement(actual,anchor);bodies=measured['per_body']
+    for body in bodies.values():
+        body['position_passed']=body['position_error_m']<=TRIPLET_OBSERVATION_DRIFT_POLICY['position_m']
+        body['orientation_passed']=body['orientation_geodesic_deg']<=TRIPLET_OBSERVATION_DRIFT_POLICY['orientation_geodesic_deg']
+    proof=dict(passed=all(b['position_passed'] and b['orientation_passed'] for b in bodies.values()),
+        policy=copy.deepcopy(TRIPLET_OBSERVATION_DRIFT_POLICY),per_body=bodies,exact_bits=measured['exact_bits'])
+    if not proof['passed']:raise ValueError('Triplet observation anchor drift exceeded: '+json.dumps(proof,sort_keys=True))
+    return proof

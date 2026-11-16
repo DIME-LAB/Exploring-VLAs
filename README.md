@@ -351,6 +351,15 @@ the collector refuses a hidden target instead of changing the selection rule.
 Image pixels are not included in physical identity because repeated RTX renders
 can differ. Live PhysX repeatability still requires qualification.
 
+The anchor tolerance applies at held restore; bootstrap and first recording
+use the tighter pairwise member bounds to preserve the counterfactual scene.
+Common post-restore body drift is separately measured against the anchor for
+every body, retained in receipts/group/export, and bounded at **0.5 mm Euclidean
+distance / 0.5 degrees geodesic angle** at both observation entrances. This is
+a triplet-only sanity gate: the normal home-settle gate checks the arm and does
+not bound these body poses. A common 2 µm drift may pass; a common drift beyond
+the sanity bound refuses before first-frame admission and during export.
+
 Preparation and the capture loop re-evaluate all three visible-target choices
 on the bootstrap and first recorded scene, requiring >5 mm margins and the same
 targets as the anchor. Their evidence includes the corresponding physical hash

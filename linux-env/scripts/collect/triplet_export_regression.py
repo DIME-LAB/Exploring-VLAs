@@ -8,7 +8,7 @@ from contract import timing_audit
 from storage import atomic_json,confined
 from collection_status import begin,finish
 from target_triplets import spec,validate_run,seal_run
-from scene_identity import require_pose_agreement,prior_agreements,identity
+from scene_identity import require_pose_agreement,prior_agreements,identity,require_observation_drift
 from triplet_boundary import recorded,restore_prior,selections
 from tick_contract import digest
 from test_target_triplets import Harness
@@ -29,6 +29,7 @@ def main():
     out=confined(a.out);out.mkdir(parents=True,exist_ok=False)
     config=spec(720002,'train');run=out/'datasets/counterfactual-targets/train'/config['layout_id'];run.mkdir(parents=True)
     certificate=begin(run);h=Harness(run,config);h.member_offset={1:.2e-6,2:-.2e-6}
+    h.after_bootstrap=lambda data:data['bodies']['cup_blue']['position'].__setitem__(0,float(np.float32(.125+2e-6)))
     receipts=h.complete(recorded_ticks=100,first_offset_ticks=1)
     for index,r in enumerate(receipts):
         rows=[json.loads(line) for line in (run/f'attempt-{index:04d}/frames.jsonl').read_text().splitlines()]
@@ -54,6 +55,7 @@ def main():
             assert v['episodes']==3 and v['frames']==300 and v['counterfactual_triplet']['complete']
             assert len(set(v['counterfactual_triplet']['first_recorded_physical_sha256']))==3
             assert v['counterfactual_triplet']['member_deviations'][1]['restore']['exact_bits']['passed'] is False
+            assert v['counterfactual_triplet']['member_deviations'][0]['anchor_drift']['first_recorded']['per_body']['cup_blue']['position_error_m']>1e-6
             assert v['export_content']['video']['decoded_frame_pairs']==600
             assert 'collection_phase' not in v['features']
             result['validate_existing' if existing else 'fresh_export']=v
@@ -82,6 +84,7 @@ def main():
                         rebuilt=recorded(native,rows[0],receipt['episode_start_physical'],anchor,receipt['episode_id'],start['triplet_id'])
                         atomic_json(directory/'first-recorded-native.json',rebuilt)
                         receipt['counterfactual']['first_recorded_deviation']=require_pose_agreement(native,natives[0] if natives else native)
+                        receipt['counterfactual']['first_recorded_anchor_drift']=rebuilt['anchor_drift']
                         if i<2:receipt['counterfactual']['first_recorded_prior']=prior_agreements(native,natives)
                         atomic_json(directory/'receipt.json',receipt)
                         (directory/'frames.jsonl').write_text(''.join(json.dumps(row)+'\n' for row in rows));natives.append(native)
@@ -102,6 +105,7 @@ def main():
                             [dict(old['initial_restore_check'],snapshot=old['initial_physical']) for old in prior])
                         m['bootstrap_prior']=prior_agreements(r['episode_start_physical'],[old['episode_start_physical'] for old in prior])
                         m['observed_target_rule']=selections(r['episode_start_physical'],anchor)
+                        m['bootstrap_anchor_drift']=require_observation_drift(r['episode_start_physical'],anchor)
                         atomic_json(p,r)
                         prior.append(r)
                     expected='reused or overlapped'

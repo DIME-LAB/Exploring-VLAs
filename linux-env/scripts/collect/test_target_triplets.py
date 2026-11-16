@@ -104,6 +104,7 @@ class Harness:
                 row=copy.deepcopy(s['tick_contract']['row']);self.collector.triplet_session.record_start(s,row,directory);rows.append(row)
             r['counterfactual']['first_recorded_prior']=copy.deepcopy(self.collector.triplet_session.first_deviations[r['episode_id']])
             r['counterfactual']['first_recorded_deviation']=copy.deepcopy(self.collector.triplet_session.first_reference_deviations[r['episode_id']])
+            r['counterfactual']['first_recorded_anchor_drift']=copy.deepcopy(self.collector.triplet_session.first_anchor_deviations[r['episode_id']])
             (directory/'receipt.json').write_text(json.dumps(r))
             (directory/'frames.jsonl').write_text(''.join(json.dumps(row)+'\n' for row in rows))
             for b in self.data['bodies'].values():b['position'][0]+=.5

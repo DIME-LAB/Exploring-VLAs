@@ -101,5 +101,44 @@ class TripletPosePolicyTests(unittest.TestCase):
             p.write_text(json.dumps(row)+'\n')
             with self.assertRaisesRegex(ValueError,'native tick proof'):validate_run(h.root,base=Path(d),sealed=False)
 
+    def test_common_anchor_drift_is_measured_and_bounded_at_both_observation_entrances(self):
+        for phase in ('bootstrap','first'):
+            for kind in ('position','orientation'):
+                for value,admitted in ((2e-6,True),(.000499,True),(.000501,False)) if kind=='position' else ((.002,True),(.499,True),(.501,False)):
+                    with self.subTest(phase=phase,kind=kind,value=value),tempfile.TemporaryDirectory() as d:
+                        h=test_target_triplets.TripletTests().fixture(d)
+                        def drift(data,index=None):
+                            body=data['bodies']['cup_red']
+                            if kind=='position':body['position'][0]=float(np.float32(.125+value))
+                            else:
+                                half=math.radians(value)/2;body['orientation']=[math.cos(half),math.sin(half),0.,0.]
+                        if phase=='bootstrap':h.after_bootstrap=drift
+                        else:h.before_first_record=drift
+                        if not admitted:
+                            with self.assertRaisesRegex(ValueError,'observation anchor drift exceeded'):h.complete(first_offset_ticks=1)
+                            self.assertIsNone(h.collector.writer)
+                            self.assertFalse((h.root/'attempt-0000/first-recorded-native.json').exists())
+                        else:
+                            receipts=h.complete(first_offset_ticks=1);group=validate_run(h.root,base=Path(d))
+                            key='bootstrap' if phase=='bootstrap' else 'first_recorded'
+                            for member in group['member_deviations']:
+                                body=member['anchor_drift'][key]['per_body']['cup_red']
+                                measured=body['position_error_m'] if kind=='position' else body['orientation_geodesic_deg']
+                                expected=(float(np.float32(.125+value))-.125 if kind=='position' else
+                                    math.degrees(2*math.atan2(float(np.float32(math.sin(math.radians(value)/2))),
+                                                            float(np.float32(math.cos(math.radians(value)/2))))))
+                                self.assertAlmostEqual(measured,expected,delta=1e-12)
+                                self.assertTrue(member['anchor_drift'][key]['passed'])
+                            self.assertTrue(group['complete']);self.assertEqual(len(receipts),3)
+
+    def test_persisted_anchor_drift_evidence_is_reconstructed_before_seal(self):
+        for phase in ('bootstrap','first_recorded'):
+            with self.subTest(phase=phase),tempfile.TemporaryDirectory() as d:
+                h=test_target_triplets.TripletTests().fixture(d);h.complete(first_offset_ticks=1)
+                path=h.root/'attempt-0000/receipt.json';receipt=json.loads(path.read_text())
+                receipt['counterfactual'][phase+'_anchor_drift']['per_body']['cup_red']['position_error_m']=.0001
+                path.write_text(json.dumps(receipt))
+                with self.assertRaisesRegex(ValueError,'anchor drift evidence differs'):validate_run(h.root,base=Path(d),sealed=False)
+
 
 if __name__=='__main__':unittest.main()
