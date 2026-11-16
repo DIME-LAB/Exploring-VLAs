@@ -44,14 +44,14 @@ def main():
     p=argparse.ArgumentParser();p.add_argument('--collector-root',type=Path,required=True);p.add_argument('--bank',type=Path,required=True);p.add_argument('--bank-sha256',required=True);p.add_argument('--seed',type=int,required=True);p.add_argument('--out',type=Path,required=True);a=p.parse_args()
     root=a.collector_root.resolve();folder=root/'linux-env/scripts/collect'
     source_validation=validate_collector_root(root)
-    from native_bank import load_bank
+    from native_bank import load_bank,SEEN_SUITES,SEEN15_SEEDS
     rows,suite=load_bank(a.bank,a.bank_sha256);row=next(r for r in rows if r['seed']==a.seed)
-    reset_protocol='collector-matched-reset-v1' if suite=='seen-training-home' else 'collector-sealed-postsample-v1'
+    reset_protocol='collector-matched-reset-v1' if suite in SEEN_SUITES else 'collector-sealed-postsample-v1'
     receipt_path=Path(row['source_receipt']);receipt_sha=row['source_receipt_sha256'];reference_path=Path(row['reference_run'])
     raw=receipt_path.read_bytes();assert hashlib.sha256(raw).hexdigest()==receipt_sha;source=json.loads(raw);reference=json.loads(reference_path.read_text())
     assert hashlib.sha256(reference_path.read_bytes()).hexdigest()==row['reference_run_sha256']
     assert source['accepted'] and source['params']['recovery']=='none'
-    assert (suite=='seen-training-home' and source['params']['seed'] in range(530000,530005)) or (suite=='heldout-bank-v2' and source['scene_bank_only'] and source['params']['split']=='eval' and source['params']['seed'] in range(900000,900030))
+    assert (suite in SEEN_SUITES and source['params']['seed'] in SEEN15_SEEDS) or (suite=='heldout-bank-v2' and source['scene_bank_only'] and source['params']['split']=='eval' and source['params']['seed'] in range(900000,900030))
     assert os.environ['ROS_DOMAIN_ID']=='92' and os.environ['SOARM_KIT_MCP_PORT']=='8781' and os.environ['RMW_IMPLEMENTATION']=='rmw_cyclonedds_cpp'
     assert all(k not in os.environ for k in ('ROS_LOCALHOST_ONLY','ROS_AUTOMATIC_DISCOVERY_RANGE','ROS_STATIC_PEERS'))
     assert 'torch' not in sys.modules,'Scene preparation never imports a model or Torch'

@@ -1,6 +1,7 @@
 """Invoke normal collector preparation before a native episode, without a model."""
 from pathlib import Path
 import hashlib,json,os,shlex,signal,subprocess,sys
+from native_bank import SEEN_SUITES,SEEN15_SEEDS
 
 def install_fenced_boundary(transport,native_mutation):
     """Use the collector's generation cancellation/retirement ordering."""
@@ -40,7 +41,7 @@ def prepare_scene(repo,collector_root,row,out):
                 except subprocess.TimeoutExpired:os.killpg(proc.pid,signal.SIGTERM);proc.wait(timeout=15)
     proof=json.loads((out/'matched-reset-proof.json').read_text())
     assert proof['status']=='PASS' and proof['seed']==row['seed'] and proof['source_receipt_sha256']==row['source_receipt_sha256']
-    assert proof['protocol']==('collector-matched-reset-v1' if row['suite']=='seen-training-home' else 'collector-sealed-postsample-v1') and proof['finalization']['passed']
+    assert proof['protocol']==('collector-matched-reset-v1' if row['suite'] in SEEN_SUITES else 'collector-sealed-postsample-v1') and proof['finalization']['passed']
     assert proof['suite']==row['suite'] and proof['bank_sha256']==row['bank_sha256'] and proof['reference_run_sha256']==row['reference_run_sha256']
     receipt_path=out/'attempt-0000/receipt.json';assert hashlib.sha256(receipt_path.read_bytes()).hexdigest()==proof['receipt_sha256'];prepared=json.loads(receipt_path.read_text())
     return dict(proof,path=str(out),prepared_snapshot=prepared['prepared_snapshot'],training_first_frame_offset_ns=prepared['training_first_frame_offset_ns'],proof_sha256=hashlib.sha256((out/'matched-reset-proof.json').read_bytes()).hexdigest(),post_cleanup_native_bootstrap_frames=1,post_cleanup_reteleport=False)
@@ -70,15 +71,21 @@ def reset_scene(transport,repo,collector_root,row,out):
     proof['retired_parent_buffers']=dict(before_worker=pre_retired,after_worker=rejoin_retired)
     return reset,proof
 
-def require_qualification(root,host,collector_root,bank_sha256,source_dir,*,suite='seen-training-home',reference_sha256=None):
+def require_qualification(root,host,collector_root,bank_sha256,source_dir,*,suite='seen-training-home',reference_sha256=None,reference_sha256_by_seed=None):
     root=Path(root);ledger=json.loads((root/'window-ledger.json').read_text());summary=json.loads((root/'qualification/summary.json').read_text())
     assert ledger['status']=='matched-reset-qualified' and ledger['cleanup_exit_code']==0
     assert ledger['host_profile']==host and summary['bank_sha256']==bank_sha256 and Path(summary['reset_collector_root']).resolve()==Path(collector_root).resolve()
-    seeds=list(range(530000,530005)) if suite=='seen-training-home' else list(range(900000,900030))
-    assert suite in ('seen-training-home','heldout-bank-v2')
+    seeds=list(range(530000,530005)) if suite=='seen-training-home' else list(SEEN15_SEEDS) if suite=='seen-training-home-15' else list(range(900000,900030))
+    assert suite in (*SEEN_SUITES,'heldout-bank-v2')
     assert summary['status']=='PASS' and summary['suite']==suite and summary['seeds']==seeds
     assert summary['episodes']==len(seeds) and summary['commands']==10*len(seeds)
-    if reference_sha256 is not None:assert summary['reference_run_sha256']==reference_sha256
+    if suite=='seen-training-home-15':
+        assert reference_sha256 is None and reference_sha256_by_seed is not None,'Seen fifteen requires per-seed reference binding'
+        assert set(reference_sha256_by_seed)==set(map(str,seeds))
+        assert summary['reference_run_sha256'] is None and summary['reference_run_sha256_by_seed']==reference_sha256_by_seed
+    else:
+        assert reference_sha256_by_seed is None
+        if reference_sha256 is not None:assert summary['reference_run_sha256']==reference_sha256
     for name in ('matched_reset.py','matched_reset_client.py','native_bank.py','qualify_matched_reset.py'):
         assert hashlib.sha256((Path(source_dir)/name).read_bytes()).hexdigest()==ledger['source_sha256'][name],'Reset source differs from live qualification'
     if suite=='heldout-bank-v2':

@@ -20,6 +20,8 @@ def exercise(xml,scenario="pass"):
         (repo/'linux-env/cyclonedds.xml').write_bytes(Path(xml).read_bytes())
         instance=host/'eval/runtime/instance92';instance.mkdir(parents=True)
         paths=[];calls=[];registered=[];tick=[0.];external_claim=None
+        seeds=list(native_bank.SEEN15_SEEDS) if scenario=='seen15' else list(range(530000,530005))
+        suite='seen-training-home-15' if scenario=='seen15' else 'seen-training-home'
         cards=[dict(uuid='gpu0',index=0),dict(uuid='gpu1',index=1)]
         external=os.getppid()
         def nvml(_):
@@ -47,7 +49,7 @@ def exercise(xml,scenario="pass"):
                 else:
                     assert 'qualify_matched_reset.py' in cmd[-1]
                     q=out/'qualification';q.mkdir()
-                    (q/'summary.json').write_text(json.dumps(dict(status='PASS',suite='seen-training-home',seeds=[530000+i for i in range(5)],episodes=5,commands=50)))
+                    (q/'summary.json').write_text(json.dumps(dict(status='PASS',suite=suite,seeds=seeds,episodes=len(seeds),commands=10*len(seeds))))
             def poll(self):
                 self.polls+=1
                 if self.polls<=3:return None
@@ -72,7 +74,7 @@ def exercise(xml,scenario="pass"):
             from run_smoke import InstanceClaim
             external_claim=InstanceClaim(instance)
         try:
-            with mock.patch.object(owner,'REPO',repo),mock.patch.object(owner,'preflight_sources',return_value={'run_episodes.py':'fixture'}),mock.patch.object(owner,'qualified_host',return_value=dict(root=str(host))),mock.patch.object(owner,'subprocess',fake_subprocess),mock.patch.object(owner,'time',fake_time),mock.patch.object(native_bank,'load_bank',return_value=([dict(seed=530000+i) for i in range(5)],'seen-training-home')),mock.patch.object(matched_reset,'validate_collector_root'),mock.patch.object(gpu_device,'inventory',return_value=cards),mock.patch.object(nvml_processes,'sample',side_effect=nvml),mock.patch.object(sys,'argv',argv):
+            with mock.patch.object(owner,'REPO',repo),mock.patch.object(owner,'preflight_sources',return_value={'run_episodes.py':'fixture'}),mock.patch.object(owner,'qualified_host',return_value=dict(root=str(host))),mock.patch.object(owner,'subprocess',fake_subprocess),mock.patch.object(owner,'time',fake_time),mock.patch.object(native_bank,'load_bank',return_value=([dict(seed=seed) for seed in seeds],suite)),mock.patch.object(matched_reset,'validate_collector_root'),mock.patch.object(gpu_device,'inventory',return_value=cards),mock.patch.object(nvml_processes,'sample',side_effect=nvml),mock.patch.object(sys,'argv',argv):
                 error=None
                 try:owner.main()
                 except AssertionError:
@@ -81,14 +83,14 @@ def exercise(xml,scenario="pass"):
                     print(json.dumps(dict(status='PASS',scenario=scenario,refused_before_output_and_launch=True)))
                     return
                 except RuntimeError as failure:
-                    if scenario in ('pass','late-benign-graphics'):raise
+                    if scenario in ('pass','late-benign-graphics','seen15'):raise
                     error=str(failure)
             ledger=json.loads((out/'window-ledger.json').read_text())
             assert ledger['cleanup_exit_code']==0 and ledger['stopped_utc']
             assert not paths or scenario=='occupied-instance'
             samplefile=out/'gpu-memory.jsonl'
             samples=[json.loads(l) for l in samplefile.read_text().splitlines()] if samplefile.exists() else []
-            if scenario in ('pass','late-benign-graphics'):
+            if scenario in ('pass','late-benign-graphics','seen15'):
                 assert ledger['status']=='matched-reset-qualified' and error is None
                 assert any(s.get('owned_mib')==3700 for s in samples)
                 assert not any('audit_error' in s for s in samples)
@@ -122,6 +124,7 @@ class OwnerEntrypointTests(unittest.TestCase):
         result=subprocess.run([sys.executable,'-I',str(Path(__file__).resolve()),'--exercise',str(xml),scenario],env=env,text=True,capture_output=True)
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
         self.assertIn('"scenario": "'+scenario+'"',result.stdout)
+    def test_clean_interpreter_seen15_owner_lifecycle(self):self.run_scenario('seen15')
     def test_clean_interpreter_actual_owner_lifecycle(self):self.run_scenario('pass')
     def test_prelaunch_compute_refusal_still_records_stop_and_cleanup(self):self.run_scenario('prelaunch-compute')
     def test_new_graphics_after_launch_refuses_three_times_and_cleans(self):self.run_scenario('late-graphics')

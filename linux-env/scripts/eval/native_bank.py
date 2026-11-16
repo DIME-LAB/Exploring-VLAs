@@ -5,6 +5,8 @@ COLORS=('red','green','blue')
 NAMES={f'{c}_2x3_{i}' for c in COLORS for i in range(2)}|{f'cup_{c}' for c in COLORS}
 COLLECTOR_SHA='09f86817b46e2b1ad4695fce29e059ea387a0bbc97d9568786a70c818308ae90'
 HELPER_SHA='eb41cef2e7bee6a972e646a26963c8a0d01142895223969c880144401e4ee868'
+SEEN15_SEEDS=tuple(range(530000,530006))+tuple(range(530500,530506))+tuple(range(531000,531003))
+SEEN_SUITES=('seen-training-home','seen-training-home-15')
 SEEN_BANK_SHA='dbae9bdc10cc5755d6aeba9a6038de3b778614572c6950afa5d258f61502b2d6'
 
 def fingerprint(path):
@@ -21,6 +23,8 @@ def parse_episode_seeds(text):
 def select_policy_rows(rows,suite,offset=0,count=None,episode_seeds=None):
     if suite=='seen-training-home':
         if offset!=0 or count not in (None,5):raise ValueError('Seen suite must keep all five layouts')
+    elif suite=='seen-training-home-15':
+        if offset!=0 or count not in (None,15):raise ValueError('Seen fifteen suite must keep all fifteen layouts')
     elif suite=='heldout-bank-v2':
         if offset not in (0,15) or count!=15:raise ValueError('Held-out scoring requires a fixed fifteen-seed chunk')
     else:raise ValueError('Unknown policy suite')
@@ -43,18 +47,32 @@ def load_bank(root,expected_sha256):
         if not path.is_relative_to(root) or hashlib.sha256(path.read_bytes()).hexdigest()!=sha:raise ValueError('Bank file SHA/path differs: '+name)
         return path
     for name,sha in bank['files_sha256'].items():checked(name,sha)
+    seen15=bank.get('kind')=='next120-seen-training-home'
     legacy=bank.get('kind')=='seen-training-start-diagnostic'
-    if legacy:
-        if bank.get('mode')!='home' or bank['seeds']!=list(range(530000,530005)):raise ValueError('Unqualified seen home bank')
+    if legacy or seen15:
+        expected=list(SEEN15_SEEDS) if seen15 else list(range(530000,530005))
+        if bank.get('mode')!='home' or bank['seeds']!=expected:raise ValueError('Unqualified seen home bank')
         if not {f'{kind}-{seed}.json' for seed in bank['seeds'] for kind in ('state','seed')}<=bank['files_sha256'].keys():raise ValueError('Missing sealed home file')
+        if seen15:
+            if not (bank.get('complete') is True and bank.get('format_version')==1 and bank.get('global_episode_indices')==list(range(15)) and bank.get('colour_counts')==dict(red=5,green=5,blue=5)):raise ValueError('Seen fifteen cohort contract differs')
+            if fingerprint(Path(bank['source_audit_path']))!=bank['source_audit_sha256']:raise ValueError('Seen fifteen source audit SHA differs')
         rows=[dict(json.loads((root/f'state-{seed}.json').read_text()),bodies=json.loads((root/f'seed-{seed}.json').read_text())) for seed in bank['seeds']]
-        for row in rows:
+        for index,row in enumerate(rows):
             receipt=Path(row['source_receipt']);frames=Path(row['source_frames']);reference=receipt.parent.parent/'run.json'
             if fingerprint(receipt)!=row['source_receipt_sha256'] or fingerprint(frames)!=row['source_frames_sha256']:raise ValueError('Training source file SHA differs')
             source=json.loads(receipt.read_text())
             if not (source['accepted'] and source['params']['seed']==row['seed'] and source['params']['color']==row['color'] and source['params']['task']==row['task'] and source['params']['recovery']=='none'):raise ValueError('Training receipt contract differs')
-            row.update(reference_run=str(reference),reference_run_sha256=fingerprint(reference),first_frame_reference=str(frames))
-        suite='seen-training-home'
+            reference_sha=fingerprint(reference)
+            if seen15:
+                ref=bank['reference_runs'][row['source_batch']]
+                if row['global_episode_index']!=index or row['reference_run']!=str(reference) or row['reference_run_sha256']!=reference_sha or ref!=dict(path=str(reference),sha256=reference_sha):raise ValueError('Seen fifteen per-batch reference differs')
+                prepared=source['episode_start_physical']
+                for key,source_key in (('state','state'),('recorded_drive_targets','drive_targets'),('robot_base_world_pose','robot_base_world_pose')):
+                    if row[key]!=prepared[source_key]:raise ValueError('Seen fifteen recorded home differs')
+                for name,pose in row['bodies'].items():
+                    if pose!={k:prepared['bodies'][name][k] for k in ('position','orientation')}:raise ValueError('Seen fifteen recorded bodies differ')
+            row.update(reference_run=str(reference),reference_run_sha256=reference_sha,first_frame_reference=str(frames))
+        suite='seen-training-home-15' if seen15 else 'seen-training-home'
     else:
         if not (bank.get('format_version')==2 and bank.get('purpose')=='held-out-collector-scenes' and bank.get('complete') is True and bank.get('producer')=='collect.Collector.run_scene_bank' and bank['seeds']==list(range(900000,900030))):raise ValueError('Unqualified collector held-out bank')
         for name,sha in bank['sampler_metadata_sha256'].items():checked(name,sha)
@@ -83,3 +101,12 @@ def load_bank(root,expected_sha256):
         if set(row['bodies'])!=NAMES:raise ValueError('Scene object set differs')
         row.update(bank_root=str(root),bank_sha256=expected_sha256,suite=suite)
     return rows,suite
+
+def reference_binding(rows,suite):
+    mapping={str(row['seed']):row['reference_run_sha256'] for row in rows}
+    if suite=='seen-training-home-15':
+        if [row['seed'] for row in rows]!=list(SEEN15_SEEDS):raise ValueError('Reference binding requires the complete seen fifteen cohort')
+        return dict(reference_sha256_by_seed=mapping)
+    refs=set(mapping.values())
+    if len(refs)!=1:raise ValueError('This suite requires a single reference run')
+    return dict(reference_sha256=next(iter(refs)))
