@@ -8,8 +8,8 @@ from contract import timing_audit
 from storage import atomic_json,confined
 from collection_status import begin,finish
 from target_triplets import spec,validate_run,seal_run
-from scene_identity import require_pose_agreement,prior_agreements
-from triplet_boundary import recorded
+from scene_identity import require_pose_agreement,prior_agreements,identity
+from triplet_boundary import recorded,restore_prior,selections
 from tick_contract import digest
 from test_target_triplets import Harness
 
@@ -91,10 +91,19 @@ def main():
                     expected='Observed visible target rule evidence'
                 elif case=='reused_native_chain':
                     source=json.loads((run/'attempt-0000/receipt.json').read_text())
+                    prior=[source];anchor=json.loads((run/'triplet-anchor.json').read_text())['anchor']
                     for i in (1,2):
                         p=run/f'attempt-{i:04d}/receipt.json';r=json.loads(p.read_text())
                         for key in ('initial_physical','episode_start_physical','initial_restore_check'):r[key]=copy.deepcopy(source[key])
+                        m=r['counterfactual'];m['initial_observation_sha256']=identity(r['episode_start_physical'])
+                        m['restore_proof']=require_pose_agreement(r['initial_physical'],anchor)
+                        m['initial_observation_proof']=require_pose_agreement(r['episode_start_physical'],source['episode_start_physical'])
+                        m['restore_prior']=restore_prior(dict(r['initial_restore_check'],snapshot=r['initial_physical']),
+                            [dict(old['initial_restore_check'],snapshot=old['initial_physical']) for old in prior])
+                        m['bootstrap_prior']=prior_agreements(r['episode_start_physical'],[old['episode_start_physical'] for old in prior])
+                        m['observed_target_rule']=selections(r['episode_start_physical'],anchor)
                         atomic_json(p,r)
+                        prior.append(r)
                     expected='reused or overlapped'
                 else:
                     p=run/'run.json';doc=json.loads(p.read_text())
