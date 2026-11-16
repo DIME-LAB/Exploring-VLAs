@@ -295,6 +295,13 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       collector, so first frames carry denoiser ghosts of the previous layout. Now: main run 'recorder-crf18-crop'
       (single-encode data + top crop (99,128,559,473) + image-robustness augmentation, full fine-tune from 30k, 30k
       steps, started 17:50Z); eval to adopt the collector's own post-reset sequence; bank-v2 sealed (cedd3f3d).
+    - 2026-11-15 ~19Z-16 00Z: eval now uses the collector's own post-reset sequence (first frames crisp; wrist PSNR vs
+      dataset 26.2 -> 33.8 dB). Primary 30k still 0/10 seen. Robustness run (crop + single-encode + heavy augmentation,
+      30k steps, 1.74 epochs) on seen-5, default/whole-chunk: 5k 0/0, 10k 1 success in 6 valid default + 0/5 whole,
+      15k 0/0, 20k 0/0, 25k 0/0; closest-approach means ~38-59 mm. bank-v2 (30 held-out, collector sampler, sealed
+      restore) qualified 30/300. Next (GPT second opinion agrees): 120k-step full fine-tune from the primary 30k with the
+      crop, LIGHT augmentation (50% identity) and 25% sampling from movement onset to first closure; started ~00:30Z
+      2026-11-16 (~26 h); judge at 20k/40k on 15 seen + 15 held-out.
 - [ ] 3.4 (only if 3.3 paraphrases fail) Prompt-variety run: relabel each training sample's task from a set
       of templates per colour at merge time (no new collection), hold some templates out for eval, and compare
       against the fixed-string model on both exact and held-out prompts. Published SmolVLA/LeRobot guidance is
