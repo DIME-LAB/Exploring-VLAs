@@ -327,6 +327,18 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       target identity over closest approach. Eval now: paired flow-noise seeds + contact/pad telemetry (reviewed),
       order 50k -> 20k -> 60k seen15 paired, then a 5x3 variability subset. Gate at 60k: continue only on repeatable
       grasps (>=3/15) or consistently better closure geometry; else stop and target binding + jaw yaw next.
+    - 2026-11-16 ~13-19Z: paired 20k/50k/60k seen-15 all 0/15 target grasps (closest 38.9/42.3/46.8 mm); noise floor
+      (5 layouts x 3 flow-noise repeats) first-close SD ~30 mm >> checkpoint deltas (1-3 mm). 60k GATE FAILED; no further
+      next120 scoring. Diagnosis (closure-diagnostics/): the policy IGNORES THE COLOUR WORD (red/green/blue swap moves the
+      predicted path 2.7-7.7 mm vs ~85 mm block spacing; first-50-step heading to the requested colour 2-4/15 vs expert
+      15/15), with the text pipeline, labels and gradient path verified intact. It also closes far from EVERY block
+      (0/45 within 15 mm and 15 deg of any block; 73/105 >25 mm from all). Root cause candidate found in the data:
+      contract.py picks the target among the TWO same-colour blocks with rng.randrange(2), invisible in the image, so each
+      prompt is bimodal (averaging between blocks). Wrist frames in the demos show the target clearly (~45x60 px).
+      Next (awaiting operator GO): (a) train from smolvla_base on the 431 existing episodes whose target is the
+      unambiguous nearer-to-base block (rule analysis 452/453/431, independently reproduced); (b) counterfactual triplets
+      (same restored layout x red/green/blue, visible nearest-base rule; 120 train + 20 held-out layouts) at ccac030,
+      independent review NOT-READY (4 P1 evidence-binding gaps, fixes in progress).
 - [ ] 3.4 (only if 3.3 paraphrases fail) Prompt-variety run: relabel each training sample's task from a set
       of templates per colour at merge time (no new collection), hold some templates out for eval, and compare
       against the fixed-string model on both exact and held-out prompts. Published SmolVLA/LeRobot guidance is
