@@ -12,6 +12,38 @@ JOINTS = ('shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_ro
 EVAL_SEEDS = tuple(range(900000, 900030))
 COUNTERFACTUAL_TRAIN_SEEDS = tuple(range(720000,720120))
 COUNTERFACTUAL_HELDOUT_SEEDS = tuple(range(730000,730020))
+VISIBLE_TARGET_RULE = 'nearest_base_xy_min_y_5mm_v1'
+TARGET_TIE_M = .005
+
+
+def visible_target(snapshot,color,refuse_ambiguous=False):
+    """Opt-in image-visible choice in the fixed /World/base frame, not the moving arm."""
+    from pose_math import rotate
+    if color not in COLORS:raise ValueError('Unknown task colour')
+    base=snapshot['base_world_pose'];origin=base['position'];q=base['orientation']
+    if len(origin)!=3 or len(q)!=4 or not all(math.isfinite(x) for x in origin+q):raise ValueError('Invalid fixed base pose')
+    inverse=[q[0]]+[-v for v in q[1:]];candidates=[]
+    for index in range(2):
+        name=f'{color}_2x3_{index}';world=snapshot['bodies'][name]['position']
+        if len(world)!=3 or not all(math.isfinite(v) for v in world):raise ValueError('Invalid target centre')
+        position=rotate(inverse,[v-o for v,o in zip(world,origin)])
+        candidates.append(dict(object=name,base_position_m=position,distance_xy_m=math.hypot(*position[:2])))
+    ranked=sorted(candidates,key=lambda c:(c['distance_xy_m'],c['object']))
+    margin=ranked[1]['distance_xy_m']-ranked[0]['distance_xy_m'];ambiguous=margin<=TARGET_TIE_M
+    chosen=min(candidates,key=lambda c:(c['base_position_m'][1],c['object'])) if ambiguous else ranked[0]
+    proof=dict(rule=VISIBLE_TARGET_RULE,frame='/World/base',base_world_pose=dict(position=list(origin),orientation=list(q)),candidates=candidates,
+        nearest_distance_object=ranked[0]['object'],object=chosen['object'],margin_m=margin,tie_threshold_m=TARGET_TIE_M,
+        ambiguous=ambiguous,chosen_by='smaller_base_y_then_object_name' if ambiguous else 'nearest_xy',
+        ambiguous_policy='refuse' if refuse_ambiguous else 'smaller_base_y_then_object_name')
+    if refuse_ambiguous and ambiguous:raise ValueError('Visible target distance margin is <=5 mm: '+str(proof))
+    return proof
+
+
+def apply_target_rule(params,snapshot,rule=VISIBLE_TARGET_RULE,refuse_ambiguous=True):
+    """Explicit selection after the layout exists; legacy parameter RNG is unchanged."""
+    if rule!=VISIBLE_TARGET_RULE:raise ValueError('Unknown visible target rule')
+    proof=visible_target(snapshot,params['color'],refuse_ambiguous)
+    return dict(params,object=proof['object'],target_selection=proof)
 
 
 

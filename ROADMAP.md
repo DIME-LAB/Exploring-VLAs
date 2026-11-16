@@ -254,8 +254,8 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       pass: fresh native offsets 0.1 mm/0, 13 boxes/cup and 1/lego; fixed_base=true and base drift zero.
 - [ ] Counterfactual target triplets (2026-11-16): 120 training layouts × RGB plus 20 whole-layout
       held-out layouts × RGB = 420 normal episodes. CPU implementation uses the shared native restore,
-      exact physical-state hashes at restore/initial/first-recorded observation, deterministic same-colour
-      block selection, common DART parameters and counterbalanced target order. Seeds 720000–720119 train,
+      exact physical-state hashes at restore/initial/first-recorded observation, visible nearest-to-fixed-base
+      XY target selection (refuse <=5 mm pair margins), common DART parameters and counterbalanced target order. Seeds 720000–720119 train,
       730000–730019 heldout; split datasets and layout/triplet metadata enforced at export. All-row metadata
       and all-frame video validation use the existing exporter. Independent review and a two-triplet live
       smoke remain required before production; no live collection authorized by this implementation.

@@ -1,7 +1,7 @@
 """Counterfactual RGB episodes from one sealed, exactly restored physical layout."""
 import argparse,copy,hashlib,itertools,json,subprocess
 from pathlib import Path
-from contract import COLORS,parameters,COUNTERFACTUAL_TRAIN_SEEDS,COUNTERFACTUAL_HELDOUT_SEEDS
+from contract import COLORS,parameters,COUNTERFACTUAL_TRAIN_SEEDS,COUNTERFACTUAL_HELDOUT_SEEDS,VISIBLE_TARGET_RULE,apply_target_rule
 from comparisons import matches,interval
 from scene_identity import physical_state,identity,require_identical
 from tick_contract import STEP_NS
@@ -9,9 +9,9 @@ from storage import atomic_json,CANONICAL_ROOT,confined
 
 TRAIN_SEEDS=COUNTERFACTUAL_TRAIN_SEEDS
 HELDOUT_SEEDS=COUNTERFACTUAL_HELDOUT_SEEDS
-POLICY=dict(version=1,kind='counterfactual-target-triplet',colors=list(COLORS),normal_only=True,
+POLICY=dict(version=2,kind='counterfactual-target-triplet',colors=list(COLORS),normal_only=True,
     order='six counterbalanced permutations by layout ordinal',
-    target_rule='existing parameters(layout_seed,color) seeded block index',camera_prime_ticks=20,
+    target_rule=dict(name=VISIBLE_TARGET_RULE,frame='/World/base',refuse_margin_le_m=.005),camera_prime_ticks=20,
     initial_observation_ticks=1,state_identity='soarm101-native-physical-state-v1',
     splits=dict(train=list(TRAIN_SEEDS),heldout=list(HELDOUT_SEEDS)))
 
@@ -23,11 +23,11 @@ def spec(seed,split):
     return dict(policy=copy.deepcopy(POLICY),layout_id='layout-'+str(seed),layout_seed=seed,split=split,color_order=order)
 
 
-def member(config,index):
+def member(config,index,snapshot=None):
     if index not in range(3):raise ValueError('A target triplet has exactly three members')
     value=parameters(config['layout_seed'],config['color_order'][index],split=config['split'],regrasp=False)
     value.update(trial=index)
-    return value
+    return apply_target_rule(value,snapshot) if snapshot is not None else value
 
 
 def destination(root,config,base=CANONICAL_ROOT):
@@ -64,6 +64,7 @@ class TripletSession:
         atomic_json(self.root/'triplet-anchor.json',dict(config=self.config,anchor=self.anchor,
             anchor_sha256=identity(self.anchor),bootstrap=self.bootstrap,
             bootstrap_sha256=identity(self.bootstrap) if self.bootstrap is not None else None,
+            target_selections={member(self.config,i,self.anchor)['color']:member(self.config,i,self.anchor)['target_selection'] for i in range(3)},
             cup_sampler=self.cup_sampler,sampler_invocations=self.sampled,triplet_id=self.triplet_id))
     def prepare(self,c,params,baseline,receipt,motion_epochs,root,path):
         index=params['trial']
@@ -78,6 +79,7 @@ class TripletSession:
             self.cup_sampler=copy.deepcopy(receipt['cup_randomization']);self.sampled=1
             self.triplet_id=hashlib.sha256(json.dumps(dict(config=self.config,state=identity(self.anchor)),sort_keys=True).encode()).hexdigest()
             self.save()
+        params.update(member(self.config,index,self.anchor))
         c.timeline(False)
         cleared=c.scene_reset.clear()
         receipt['gpu_isolation_before']=c.gpu_footprint();receipt['camera_graph']=c.camera_graph()
@@ -93,7 +95,7 @@ class TripletSession:
         if self.bootstrap is None:self.bootstrap=copy.deepcopy(observed);self.save()
         bootstrap_proof=require_identical(observed,self.bootstrap)
         c.sync_scene(snapshot=observed);c.update_pose_cache(observed)
-        selected=[member(self.config,i)['object'] for i in range(3)]
+        selected=[member(self.config,i,self.anchor)['object'] for i in range(3)]
         visibility=c.mutate_kit('run_python',{'code':'from so_arm101_dt.extension import get_instance\ni=get_instance()\nposes='+repr(observed['bodies'])+'\nresult={name:bool(i._is_in_camera_view(poses[name]["position"],margin_px=30)) for name in '+repr(selected)+'}'})
         if set(visibility)!=set(selected) or not all(v is True for v in visibility.values()):raise RuntimeError('Every deterministically selected triplet target must be visible')
         c.servo.configure(params)
@@ -121,9 +123,11 @@ def validate(config,anchor,receipts):
     if identity(anchor['anchor'])!=anchor['anchor_sha256'] or identity(anchor['bootstrap'])!=anchor['bootstrap_sha256']:raise ValueError('Triplet physical anchor changed')
     triplet_id=hashlib.sha256(json.dumps(dict(config=config,state=anchor['anchor_sha256']),sort_keys=True).encode()).hexdigest()
     if anchor['triplet_id']!=triplet_id:raise ValueError('Triplet identity differs from its anchor')
+    selections={member(config,i,anchor['anchor'])['color']:member(config,i,anchor['anchor'])['target_selection'] for i in range(3)}
+    if anchor['target_selections']!=selections:raise ValueError('Triplet visible target selections differ')
     if len({r['episode_id'] for r in receipts})!=3:raise ValueError('Triplet episode identities must be unique')
     for index,r in enumerate(receipts):
-        if r['params']!=member(config,index):raise ValueError('Triplet task/target/common parameters differ')
+        if r['params']!=member(config,index,anchor['anchor']):raise ValueError('Triplet task/target/common parameters differ')
         m=r['counterfactual']
         for key,value in dict(layout_id=config['layout_id'],layout_seed=config['layout_seed'],split=config['split'],triplet_id=triplet_id,
                 anchor_sha256=anchor['anchor_sha256'],initial_observation_sha256=anchor['bootstrap_sha256'],sampler_invocations=1,camera_prime_ticks=POLICY['camera_prime_ticks']).items():
@@ -133,11 +137,11 @@ def validate(config,anchor,receipts):
         restored=r['initial_physical'];observed=r['episode_start_physical']
         if (restored['epoch']!=r['initial_restore_check']['epoch'] or observed['epoch']!=restored['epoch'] or
                 not matches(observed['sim_ns']-restored['sim_ns'],STEP_NS,'native_ns')):raise ValueError('Triplet clock/epoch boundary differs')
-        visible={member(config,i)['object'] for i in range(3)}
+        visible={member(config,i,anchor['anchor'])['object'] for i in range(3)}
         if r['cup_randomization']!=anchor['cup_sampler'] or set(m['visibility'])!=visible or not all(v is True for v in m['visibility'].values()):raise ValueError('Triplet scene/visibility differs')
     return dict(version=1,complete=True,layout_id=config['layout_id'],triplet_id=triplet_id,layout_seed=config['layout_seed'],split=config['split'],
         anchor_sha256=anchor['anchor_sha256'],initial_observation_sha256=anchor['bootstrap_sha256'],colors=list(config['color_order']),
-        episodes=[dict(episode_index=i,episode_id=r['episode_id'],task=r['params']['task'],target=r['params']['object']) for i,r in enumerate(receipts)])
+        target_selections=selections,episodes=[dict(episode_index=i,episode_id=r['episode_id'],task=r['params']['task'],target=r['params']['object']) for i,r in enumerate(receipts)])
 
 
 def validate_run(run,base=CANONICAL_ROOT):

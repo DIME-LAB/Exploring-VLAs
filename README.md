@@ -309,8 +309,16 @@ directly (tailnet or LAN); an ssh tunnel can't carry it. One viewer at a time.
 ## Collecting sim data
 
 Counterfactual target triplets use one layout for three normal episodes with the
-unchanged red/green/blue task strings. The layout seed also fixes the chosen
-same-colour block index, approach, speed and DART seed. Colour order cycles over
+unchanged red/green/blue task strings. The explicit visible rule
+`nearest_base_xy_min_y_5mm_v1` chooses the requested-colour block whose centre is
+nearest the fixed `/World/base` origin in XY. Triplets refuse a layout if any
+same-colour pair has a distance margin of 5 mm or less. The general rule's
+documented tie-break is smaller base-frame y, then object name; that tie-break
+is reported in the old-data analysis but is not admitted to new triplets.
+Receipts and exported metadata retain the rule, both candidate centres and
+distances, base transform and margin. `contract.apply_target_rule` is opt-in;
+the default normal parameter recipe keeps its existing seeded random target.
+The layout seed fixes approach, speed and DART seed. Colour order cycles over
 all six permutations. The reserved training layouts are `720000–720119` (360
 episodes); held-out layouts are `730000–730019` (60 episodes). Held-out layouts
 stay in a separate dataset and never enter training. These ranges are disjoint
@@ -366,6 +374,21 @@ CUDA_VISIBLE_DEVICES='' python3 -B export_content_regression.py
 CUDA_VISIBLE_DEVICES='' python3 -B triplet_export_regression.py \
   --out /mnt/a4500-backup/exploring-vlas/tmp/collection-codex/triplet-export-fixture
 ```
+
+Analyze the finalized 900 normal episodes from their sealed index and recorded
+initial physical poses, without opening videos or a simulator:
+
+```bash
+CUDA_VISIBLE_DEVICES='' nice -n 10 python3 -B linux-env/scripts/collect/analyze_target_rule.py \
+  --output /mnt/a4500-backup/exploring-vlas/analysis/target-rule/normal-900
+```
+
+The report includes per-colour/per-batch counts, distance-margin distributions,
+source hashes and per-episode candidate evidence. `rule-consistent.json` lists
+episodes matching the documented tie-break rule;
+`unambiguous-rule-consistent.json` additionally excludes every margin <=5 mm.
+Each entry identifies its batch, dataset episode index, episode id and seed.
+Source datasets are read-only, and the lists do not launch training.
 
 The normal-only pilot passed at frozen `ef42c1b`: **50/50 accepted**, 17 red /
 17 green /16 blue, 30,134 frames at 30 fps. LeRobotDataset load, timing, clean

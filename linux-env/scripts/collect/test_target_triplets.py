@@ -17,6 +17,7 @@ from tick_contract import STEP_NS
 class Harness:
     def __init__(self,root,config):
         self.root=root;self.config=config;self.runtime,self.data=test_scene_identity.SceneIdentityTests().runtime()
+        for color in ('red','green','blue'):self.data['bodies'][color+'_2x3_1']['position'][0]+=.125
         self.runtime.stamp=lambda:self.data['sim_ns'];self.normal_calls=0;self.visible=True;self.bad=None;self.advances=[]
         Collector,_=load_class('collect.py','Collector');c=object.__new__(Collector);self.collector=c
         @contextmanager
@@ -55,7 +56,7 @@ class Harness:
             c.node.objects_data={n:copy.deepcopy(b) for n,b in s['bodies'].items() if not n.startswith('cup_')}
             c.node._drop_data={n[4:]:copy.deepcopy(b) for n,b in s['bodies'].items() if n.startswith('cup_')}
         c.update_pose_cache=cache;c.servo=NS(configure=lambda p:None);c.sensors=NS(duplicate_messages={})
-        c.mutate_kit=lambda *a:{member(config,i)['object']:self.visible for i in range(3)}
+        c.mutate_kit=lambda *a:{member(config,i,c.triplet_session.anchor)['object']:self.visible for i in range(3)}
     def prepare(self,index):
         c=self.collector;p=member(self.config,index);receipt=dict(params=p,episode_id='episode-'+str(index))
         c._prepare_scene_attempt(p,{},receipt,set(),self.root,self.root/f'attempt-{index:04d}')
@@ -90,9 +91,23 @@ class TripletTests(unittest.TestCase):
             self.assertEqual(len({identity(r['initial_physical']) for r in receipts}),1)
             self.assertEqual(len({identity(r['episode_start_physical']) for r in receipts}),1)
             self.assertEqual({r['params']['color'] for r in receipts},{'red','green','blue'})
-            common=lambda p:{k:v for k,v in p.items() if k not in ('color','object','task','trial')}
+            common=lambda p:{k:v for k,v in p.items() if k not in ('color','object','task','trial','target_selection')}
             self.assertEqual([common(r['params']) for r in receipts],[common(receipts[0]['params'])]*3)
             self.assertEqual(len({r['params']['object'].rsplit('_',1)[1] for r in receipts}),1)
+            self.assertTrue(all(r['params']['target_selection']['margin_m']>.005 for r in receipts))
+    def test_ambiguous_candidate_pair_refuses_the_whole_layout_before_writer(self):
+        with tempfile.TemporaryDirectory() as d:
+            h=self.fixture(d);h.data['bodies']['blue_2x3_1']['position']=list(h.data['bodies']['blue_2x3_0']['position'])
+            with self.assertRaisesRegex(ValueError,'<=5 mm'):h.prepare(0)
+            self.assertIsNone(h.collector.writer)
+    def test_real_preparation_updates_the_params_used_by_cycle_execution(self):
+        seed=next(s for s in TRAIN_SEEDS if member(spec(s,'train'),0)['object'].endswith('_1'))
+        with tempfile.TemporaryDirectory() as d:
+            h=self.fixture(d,seed);params=member(h.config,0);receipt=dict(params=params,episode_id='chosen')
+            self.assertTrue(params['object'].endswith('_1'))
+            h.collector._prepare_scene_attempt(params,{},receipt,set(),h.root,h.root/'attempt-0000')
+            self.assertIs(params,receipt['params']);self.assertTrue(params['object'].endswith('_0'))
+            self.assertEqual(params['object'],params['target_selection']['object'])
     def test_body_clock_or_epoch_difference_fails_before_a_writer(self):
         for bad in ('body','clock','epoch'):
             with self.subTest(bad=bad),tempfile.TemporaryDirectory() as d:
@@ -115,7 +130,7 @@ class TripletTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'target must be visible'):h.prepare(0)
             self.assertEqual(h.normal_calls,1);self.assertIsNone(h.collector.writer)
     def test_partial_or_edited_members_cannot_export(self):
-        for edit in ('partial','task','noise','layout','visibility','physical','first_row','later_id','duplicate_episode'):
+        for edit in ('partial','task','noise','layout','visibility','physical','first_row','later_id','duplicate_episode','selection'):
             with self.subTest(edit=edit),tempfile.TemporaryDirectory() as d:
                 h=self.fixture(d);h.complete();path=h.root/'attempt-0001/receipt.json';r=json.loads(path.read_text())
                 if edit=='partial':path.unlink()
@@ -130,6 +145,7 @@ class TripletTests(unittest.TestCase):
                     if edit=='visibility':r['counterfactual']['visibility']={}
                     if edit=='physical':r['initial_physical']['bodies']['cup_red']['position'][0]+=.001
                     if edit=='duplicate_episode':r['episode_id']='episode-0'
+                    if edit=='selection':r['params']['target_selection']['candidates'][0]['distance_xy_m']+=.01
                     path.write_text(json.dumps(r))
                 with self.assertRaises((ValueError,KeyError)):validate_run(h.root,base=Path(d))
     def test_plan_has_420_balanced_episodes_and_separate_disjoint_layouts(self):
