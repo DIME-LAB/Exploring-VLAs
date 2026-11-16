@@ -310,6 +310,16 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       foreign GPU0 graphics-only <=16 MiB (Kit restarts on GPU1) and refuses any foreign compute; a DroidStack job on
       GPU0 stopped the 10k window, and plan47 now schedules DroidStack around our START/STOP lines. Next: 30k seen
       trend point, 40k full judgment.
+    - 2026-11-16 ~07-11Z: 30k seen 0/15 (closest 51.6 mm, worse than 20k on 14/15 layouts); 10k backfill complete 0/15;
+      40k seen 0/15 target grasps (37.6 mm) but seed 530501 (green prompt) picked the RED block and placed it in the
+      red cup (first full pick+place by this run, wrong colour). Training loss flat ~0.004-0.005 since ~24k.
+      CPU diagnosis (w_diag, coursework phase3/3.3-eval/closure-diagnostics/): the policy closes misplaced AND
+      misoriented: 20k closure-onset XY 38.1 mm vs expert 11.2 mm, mean |jaw yaw error| 40 deg (11/15 >20 deg);
+      not timing, not servo tracking (2-3 mm), no global offset. GPT second opinion (3.2-next-120k-prep/
+      gpt-second-opinion-40k.md): continue to 60k with a gate; paired inference noise; closure geometry and
+      target identity over closest approach. Eval now: paired flow-noise seeds + contact/pad telemetry (reviewed),
+      order 50k -> 20k -> 60k seen15 paired, then a 5x3 variability subset. Gate at 60k: continue only on repeatable
+      grasps (>=3/15) or consistently better closure geometry; else stop and target binding + jaw yaw next.
 - [ ] 3.4 (only if 3.3 paraphrases fail) Prompt-variety run: relabel each training sample's task from a set
       of templates per colour at merge time (no new collection), hold some templates out for eval, and compare
       against the fixed-string model on both exact and held-out prompts. Published SmolVLA/LeRobot guidance is
