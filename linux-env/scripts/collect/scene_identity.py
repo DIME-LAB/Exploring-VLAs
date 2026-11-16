@@ -99,14 +99,19 @@ def prior_agreements(actual,previous):
     return [dict(previous_member=i,proof=require_pose_agreement(actual,old)) for i,old in enumerate(previous)]
 
 
-def require_observation_drift(actual,anchor):
-    """Triplet-only common post-restore drift bound; not an arm/velocity settling gate."""
+def observation_drift(actual,anchor):
+    """Measure triplet common drift, retaining a failing verdict for diagnostics."""
     measured=pose_agreement(actual,anchor);bodies=measured['per_body']
     for body in bodies.values():
         body['position_passed']=body['position_error_m']<=TRIPLET_OBSERVATION_DRIFT_POLICY['position_m']
         body['orientation_passed']=body['orientation_geodesic_deg']<=TRIPLET_OBSERVATION_DRIFT_POLICY['orientation_geodesic_deg']
     proof=dict(passed=all(b['position_passed'] and b['orientation_passed'] for b in bodies.values()),
         policy=copy.deepcopy(TRIPLET_OBSERVATION_DRIFT_POLICY),per_body=bodies,exact_bits=measured['exact_bits'])
+    return proof
+
+
+def require_observation_drift(actual,anchor):
+    proof=observation_drift(actual,anchor)
     if not proof['passed']:raise ValueError('Triplet observation anchor drift exceeded: '+json.dumps(proof,sort_keys=True))
     return proof
 
@@ -140,7 +145,7 @@ def verify_pose_evidence(stored,recomputed,label):
                 if b['passed'] is not True:mismatch(path+'.passed',a['passed'],True,'locally recomputed admission');return
                 for key in ('policy','exact_bits','strict_differences'):
                     if key in b:walk(a[key],b[key],path+'.'+key)
-                if type(a['passed']) is not bool:mismatch(path+'.passed',a['passed'],'bool','diagnostic type')
+                if a['passed'] is not True:mismatch(path+'.passed',a['passed'],True,'producer admission must be bool True')
                 if not isinstance(a['per_body'],dict) or set(a['per_body'])!=set(b['per_body']):
                     mismatch(path+'.per_body',a['per_body'],b['per_body'],'body diagnostic fields');return
                 diagnostic(a['per_body'],b['per_body'],path+'.per_body')

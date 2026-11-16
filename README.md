@@ -370,6 +370,11 @@ native-start certificates and group/export checks. The visible target, candidate
 IDs, base, policy and ambiguity decision are still checked against the locally
 recomputed rule. Seals still bind the producer's original diagnostic bytes. Source or
 policy mismatches retain structured actual/expected evidence in the failure.
+Both producer and locally recomputed admission verdicts must be bool True.
+Triplet preparation and first capture atomically retain their raw native boundary
+evidence before admission checks in triplet-boundary-evidence.json and the receipt.
+This preserves returned restore/reread proofs and observed anchor drifts even
+when a later check rejects the member; an unperformed read has no diagnostic.
 
 Preparation and the capture loop re-evaluate all three visible-target choices
 on the bootstrap and first recorded scene, requiring >5 mm margins and the same

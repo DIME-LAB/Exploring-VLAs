@@ -3,7 +3,7 @@ import argparse,copy,hashlib,itertools,json,subprocess
 from pathlib import Path
 from contract import COLORS,parameters,COUNTERFACTUAL_TRAIN_SEEDS,COUNTERFACTUAL_HELDOUT_SEEDS,VISIBLE_TARGET_RULE,apply_target_rule
 from comparisons import matches,interval
-from scene_identity import physical_state,identity,require_identical,require_pose_agreement,prior_agreements,TRIPLET_POSE_POLICY,require_observation_drift,TRIPLET_OBSERVATION_DRIFT_POLICY,verify_pose_evidence
+from scene_identity import physical_state,identity,require_identical,require_pose_agreement,prior_agreements,TRIPLET_POSE_POLICY,require_observation_drift,TRIPLET_OBSERVATION_DRIFT_POLICY,verify_pose_evidence,observation_drift
 from tick_contract import STEP_NS
 from storage import atomic_json,CANONICAL_ROOT,confined
 import triplet_boundary as boundary
@@ -68,6 +68,7 @@ class TripletSession:
         self.starts={};self.recorded_starts=set()
         self.prime_members=[];self.restore_members=[];self.bootstrap_members=[];self.first_members=[];self.first_deviations={};self.first_reference_deviations={}
         self.first_anchor_deviations={}
+        self.boundary_evidence={}
         if (self.root/'triplet-anchor.json').exists():raise ValueError('A triplet anchor cannot be silently adopted')
     def save(self):
         atomic_json(self.root/'triplet-anchor.json',dict(config=self.config,anchor=self.anchor,
@@ -75,10 +76,17 @@ class TripletSession:
             bootstrap_sha256=identity(self.bootstrap) if self.bootstrap is not None else None,
             target_selections={member(self.config,i,self.anchor)['color']:member(self.config,i,self.anchor)['target_selection'] for i in range(3)},
             cup_sampler=self.cup_sampler,sampler_invocations=self.sampled,triplet_id=self.triplet_id))
+    def retain_boundary(self,path,episode,phase,**values):
+        path=Path(path);path.mkdir(parents=True,exist_ok=True)
+        evidence=self.boundary_evidence.setdefault(episode,{})
+        evidence[phase]=copy.deepcopy(values)
+        atomic_json(path/'triplet-boundary-evidence.json',dict(episode_id=episode,layout_id=self.config['layout_id'],
+            triplet_id=self.triplet_id,phases=evidence))
     def prepare(self,c,params,baseline,receipt,motion_epochs,root,path):
         index=params['trial']
         if params!=member(self.config,index):raise ValueError('Triplet member parameters differ')
         if c.writer is not None:raise RuntimeError('Triplet preparation requires a closed writer')
+        receipt['triplet_boundary_evidence']=self.boundary_evidence.setdefault(receipt['episode_id'],{})
         if self.anchor is None:
             if index!=0:raise ValueError('Triplet must sample its first member before the others')
             c._prepare_normal_scene_attempt(params,baseline,receipt,motion_epochs,root,path)
@@ -93,14 +101,18 @@ class TripletSession:
         cleared=c.scene_reset.clear()
         receipt['gpu_isolation_before']=c.gpu_footprint();receipt['camera_graph']=c.camera_graph()
         primed=c.restore_physical(restore_code(self.anchor,True))
+        self.retain_boundary(path,receipt['episode_id'],'priming_restore',restore=primed)
         boundary.restore_admission(primed['snapshot'],primed,self.anchor)
         prime_prior=boundary.restore_prior(primed,self.prime_members)
         c.servo.configure(params)
         c.advance_ticks(POLICY['camera_prime_ticks'])
         restored=c.restore_physical(restore_code(self.anchor,True))
+        self.retain_boundary(path,receipt['episode_id'],'final_restore',restore=restored)
         native_proof=boundary.restore_admission(restored['snapshot'],restored,self.anchor)
         proof=native_proof['against_target'];restore_prior=boundary.restore_prior(restored,self.restore_members)
         observed=c.advance_ticks(POLICY['initial_observation_ticks'])[-1]
+        self.retain_boundary(path,receipt['episode_id'],'bootstrap',snapshot=observed)
+        self.retain_boundary(path,receipt['episode_id'],'bootstrap',snapshot=observed,anchor_drift=observation_drift(observed,self.anchor))
         boundary.bootstrap(restored['snapshot'],{k:v for k,v in restored.items() if k!='snapshot'},observed)
         observed_rule=boundary.selections(observed,self.anchor)
         bootstrap_anchor_drift=require_observation_drift(observed,self.anchor)
@@ -135,6 +147,8 @@ class TripletSession:
     def record_start(self,snapshot,row,path):
         episode=row['episode_id']
         if episode in self.recorded_starts:return
+        self.retain_boundary(path,episode,'first_recorded',snapshot=snapshot,row=row)
+        self.retain_boundary(path,episode,'first_recorded',snapshot=snapshot,row=row,anchor_drift=observation_drift(snapshot,self.anchor))
         record=boundary.recorded(snapshot,row,self.starts[episode],self.anchor,episode,self.triplet_id)
         deviations=prior_agreements(snapshot,self.first_members)
         reference_deviation=require_pose_agreement(snapshot,self.first_members[0] if self.first_members else snapshot)

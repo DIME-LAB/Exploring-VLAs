@@ -40,6 +40,12 @@ class InterpreterProofTests(unittest.TestCase):
             else:proof['per_body']['cup_red']['orientation_geodesic_deg']=float('nan')
             with self.subTest(field=field),self.assertRaisesRegex(ValueError,'Restore pose/reread evidence differs'):
                 restore_admission(data['snapshot'],data['check'],data['anchor'])
+    def test_stored_producer_false_or_nonbool_refuses_a_locally_valid_pose(self):
+        for verdict in (False,0,1,None,'true'):
+            data=self.fixture();data['check']['triplet_physical_state']['against_target']['passed']=verdict
+            require_pose_agreement(data['snapshot'],data['anchor'])
+            with self.subTest(verdict=verdict),self.assertRaisesRegex(ValueError,'producer admission must be bool True'):
+                restore_admission(data['snapshot'],data['check'],data['anchor'])
     def test_group_recomputes_nested_pose_diagnostics_and_keeps_byte_seals(self):
         with tempfile.TemporaryDirectory() as d:
             h=test_target_triplets.TripletTests().fixture(d);h.complete(first_offset_ticks=1)
@@ -68,6 +74,31 @@ class InterpreterProofTests(unittest.TestCase):
             receipt['params']['target_selection']['object']='red_2x3_1';p.write_text(json.dumps(receipt))
             with self.assertRaisesRegex(ValueError,'task/target/common parameters differ'):
                 validate_run(h.root,base=Path(d),sealed=False)
+    def test_failed_admission_retains_returned_reread_and_observation_drift(self):
+        for phase in ('priming_restore','bootstrap','first_recorded'):
+            with self.subTest(phase=phase),tempfile.TemporaryDirectory() as d:
+                h=test_target_triplets.TripletTests().fixture(d)
+                if phase=='priming_restore':
+                    restore=h.collector.restore_physical
+                    def refused(code):
+                        result=restore(code)
+                        if 'triplet_state=True' in code:result['triplet_physical_state']['against_target']['passed']=False
+                        return result
+                    h.collector.restore_physical=refused
+                else:
+                    def drift(data,index=None):data['bodies']['cup_red']['position'][0]+=.001
+                    if phase=='bootstrap':h.after_bootstrap=drift
+                    else:h.before_first_record=drift
+                with self.assertRaises(ValueError):h.complete(first_offset_ticks=1)
+                path=h.root/'attempt-0000';evidence=json.loads((path/'triplet-boundary-evidence.json').read_text())
+                self.assertEqual(evidence['episode_id'],'episode-0');proof=evidence['phases'][phase]
+                if phase=='priming_restore':
+                    reread=proof['restore']['triplet_physical_state']
+                    self.assertIn('reread_snapshot',reread);self.assertTrue(reread['reread_exact_bits']['passed'])
+                else:
+                    self.assertFalse(proof['anchor_drift']['passed'])
+                    self.assertGreater(proof['anchor_drift']['per_body']['cup_red']['position_error_m'],.0005)
+                self.assertFalse((path/'first-recorded-native.json').exists());self.assertIsNone(h.collector.writer)
 
 
 if __name__=='__main__':unittest.main()
