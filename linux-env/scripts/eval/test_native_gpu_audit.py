@@ -65,7 +65,7 @@ class RegistrationTests(unittest.TestCase):
         for _ in range(8):
             result,_=self.audit.sample('gpu0',CARDS,sampler);self.assertEqual(result['per_gpu_memory_mib']['gpu0'],3700)
     def test_unknown_assigned_context_and_ours_on_other_card_are_refused(self):
-        with self.assertRaisesRegex(RuntimeError,'Unregistered'):
+        with self.assertRaisesRegex(RuntimeError,'Foreign GPU0'):
             self.audit.sample('gpu0',CARDS,lambda _:observation([context(os.getppid())]))
         proc=self.worker()
         with self.assertRaisesRegex(RuntimeError,'owned device attribution'):
@@ -92,9 +92,9 @@ class RegistrationTests(unittest.TestCase):
         self.assertFalse(baseline['owned'])
         result,metadata=self.audit.sample('gpu0',CARDS,lambda _:observation([external,context(os.getpid())]))
         self.assertEqual(result['per_gpu_memory_mib']['gpu0'],3700)
-        self.assertEqual(len(metadata['external_graphics_rows']),1)
+        self.assertEqual(len(metadata['benign_foreign_graphics_rows']),1)
         self.assertNotIn(os.getppid(),[r['pid'] for r in result['processes']])
-        with self.assertRaisesRegex(RuntimeError,'Unregistered'):
+        with self.assertRaisesRegex(RuntimeError,'Foreign GPU0'):
             self.audit.sample('gpu0',CARDS,lambda _:observation([dict(external,api='compute'),context(os.getpid())]))
         with self.assertRaisesRegex(RuntimeError,'already frozen'):
             self.audit.freeze_external('gpu0',CARDS,lambda _:observation([]))
@@ -103,8 +103,8 @@ class RegistrationTests(unittest.TestCase):
         self.audit.freeze_external('gpu0',CARDS,lambda _:observation([external]))
         certificate=self.audit.external_graphics[(os.getppid(),'gpu0','graphics')]
         certificate['start_ticks']='wrong'
-        with self.assertRaisesRegex(RuntimeError,'External graphics identity changed'):
-            self.audit.sample('gpu0',CARDS,lambda _:observation([external,context(os.getpid())]))
+        result,meta=self.audit.sample('gpu0',CARDS,lambda _:observation([external,context(os.getpid())]))
+        self.assertEqual(meta['benign_foreign_graphics_rows'][0]['identity']['start_ticks'],identity(os.getppid())['start_ticks'])
         with self.assertRaisesRegex(RuntimeError,'owned device attribution'):
             self.audit.sample('gpu0',CARDS,lambda _:observation([context(os.getpid(),'gpu1')]))
     def test_external_baseline_refuses_compute_unreadable_memory_and_incomplete_coverage(self):
@@ -114,6 +114,37 @@ class RegistrationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'coverage unverified'):
             self.audit.freeze_external('gpu0',CARDS,lambda _:dict(observation([]),errors=['unavailable']))
 
+    def test_benign_foreign_restart_and_cap_growth_and_compute_pair(self):
+        own=os.getpid();registered={own:identity(own)}
+        def identities(pid):
+            if pid in (900001,900002):
+                return dict(pid=pid,ppid=1,pgid=pid,start_ticks=str(pid),state='S',command='/env/bin/python3 Kit RoboSort')
+            return identity(pid)
+        for pid in (900001,900002):
+            result,meta=attribute('gpu0',registered,CARDS,observation([context(own),context(pid,memory=3*1024**2,api='graphics')]),identities)
+            self.assertEqual(result['per_gpu_memory_mib']['gpu0'],3700)
+            row=meta['benign_foreign_graphics_rows'][0]
+            self.assertEqual(row['classification'],'benign-foreign-graphics');self.assertEqual(row['pid'],pid);self.assertEqual(row['identity']['start_ticks'],str(pid))
+        for rows in ([context(900002,memory=17*1024**2,api='graphics')],[context(900002,memory=3*1024**2,api='graphics'),context(900002,memory=0,api='compute')],[context(900002,memory=None,api='graphics')]):
+            with self.assertRaisesRegex(RuntimeError,'Foreign GPU0.*900002|Foreign GPU0'):
+                attribute('gpu0',registered,CARDS,observation([context(own),*rows]),identities)
+        attribute('gpu0',registered,CARDS,observation([context(own),context(900002,memory=16*1024**2,api='graphics')]),identities)
+    def test_benign_contexts_are_written_in_each_sample_and_receipt(self):
+        external=context(os.getppid(),memory=3*1024**2,api='graphics')
+        result,meta=self.audit.sample('gpu0',CARDS,lambda _:observation([context(os.getpid()),external]))
+        row=meta['benign_foreign_graphics_rows'][0];self.assertEqual(row['memory_mib'],3);self.assertTrue(row['identity']['command'])
+        receipts=[json.loads(line) for line in (self.root/'gpu-context-observations.jsonl').read_text().splitlines()]
+        self.assertEqual(receipts[-1]['rows'][-1]['pid'],os.getppid())
+        with self.assertRaisesRegex(RuntimeError,'Foreign GPU0'):
+            self.audit.sample('gpu0',CARDS,lambda _:observation([context(os.getpid()),dict(external,memory_bytes=17*1024**2)]))
+        self.assertEqual(len((self.root/'gpu-context-observations.jsonl').read_text().splitlines()),2)
+
+    def test_small_unregistered_owned_graphics_never_bypasses_ownership(self):
+        def sampler(cards):
+            proc=self.worker()
+            return observation([context(os.getpid()),context(proc.pid,memory=3*1024**2,api='graphics')])
+        with self.assertRaisesRegex(RuntimeError,'Unregistered GPU context'):
+            self.audit.sample('gpu0',CARDS,sampler)
     def test_pruning_closes_only_exited_pidfds(self):
         proc=self.worker();self.audit.registry();oldfd=self.audit.children.handles[proc.pid]
         proc.terminate();proc.wait(timeout=5);self.audit.prune()

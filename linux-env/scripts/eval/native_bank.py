@@ -13,7 +13,12 @@ def fingerprint(path):
         for block in iter(lambda:stream.read(4*1024*1024),b''):digest.update(block)
     return digest.hexdigest()
 
-def select_policy_rows(rows,suite,offset=0,count=None):
+def parse_episode_seeds(text):
+    seeds=[int(part) for part in text.split(',')]
+    if not seeds or len(seeds)!=len(set(seeds)):raise ValueError('Episode seeds must be a non-empty unique ordered list')
+    return seeds
+
+def select_policy_rows(rows,suite,offset=0,count=None,episode_seeds=None):
     if suite=='seen-training-home':
         if offset!=0 or count not in (None,5):raise ValueError('Seen suite must keep all five layouts')
     elif suite=='heldout-bank-v2':
@@ -21,6 +26,12 @@ def select_policy_rows(rows,suite,offset=0,count=None):
     else:raise ValueError('Unknown policy suite')
     selected=rows[offset:offset+count] if count is not None else rows[offset:]
     if len(selected)!=(5 if suite=='seen-training-home' else 15):raise ValueError('Incomplete policy chunk')
+    if episode_seeds is not None:
+        requested=list(episode_seeds)
+        if not requested or len(requested)!=len(set(requested)):raise ValueError('Resume seeds must be non-empty and unique')
+        filtered=[row for row in selected if row['seed'] in requested]
+        if [row['seed'] for row in filtered]!=requested:raise ValueError('Resume seeds must be an ordered subset of the fixed chunk')
+        selected=filtered
     return selected
 
 def load_bank(root,expected_sha256):

@@ -21,30 +21,56 @@ def owned_ancestor(pid,registered,identity):
         pid=row['ppid']
     return False
 
+BENIGN_GRAPHICS_LIMIT=16*1024**2
+
+def context_info(row,identity):
+    process=identity(row['pid'])
+    value=dict(row,memory_mib=None if row['memory_bytes'] is None else row['memory_bytes']/1024**2)
+    value['identity']=process
+    value['birth_time_unix_approx']=None
+    if process is not None:
+        try:
+            boot=next(int(line.split()[1]) for line in Path('/proc/stat').read_text().splitlines() if line.startswith('btime '))
+            value['birth_time_unix_approx']=boot+int(process['start_ticks'])/os.sysconf('SC_CLK_TCK')
+        except (OSError,ValueError,KeyError):pass
+    value['process_name']=None if process is None else Path(process.get('command','').split(' ',1)[0]).name
+    return value
+
+def refuse_context(reason,row,identity):
+    return RuntimeError(reason+': '+json.dumps(context_info(row,identity),sort_keys=True))
+
 def attribute(expected,registered,cards,observed,identity,external_graphics=None):
-    """CPU tree churn is irrelevant; every admitted GPU holder needs a certificate."""
+    """Owned identities take priority; only small foreign graphics may be benign."""
     from gpu_device import audit_sample
-    admitted={};ignored=0;external_graphics=external_graphics or {};external_seen=[]
+    admitted={};ignored=0;benign=[]
+    compute={r['pid'] for r in observed['rows'] if r['gpu_uuid']==expected and r['api']=='compute'}
+    maximum={}
+    for row in observed['rows']:
+        if row['gpu_uuid']==expected:
+            memory=row['memory_bytes']
+            maximum[row['pid']]=None if memory is None or maximum.get(row['pid'],0) is None else max(maximum.get(row['pid'],0),memory)
     for row in observed['rows']:
         pid=row['pid'];old=registered.get(pid)
         if old is not None:
-            if not still_same(old,identity):raise RuntimeError('Registered GPU holder exited, reused PID or changed PGID')
+            if not still_same(old,identity):raise refuse_context('Registered GPU holder exited, reused PID or changed PGID',row,identity)
             admitted[pid]=old
         elif owned_ancestor(pid,registered,identity):
-            raise RuntimeError('Unregistered GPU context; a fresh registered sample is required')
-        elif (pid,row['gpu_uuid'],row['api']) in external_graphics:
-            certificate=external_graphics[(pid,row['gpu_uuid'],row['api'])]
-            if not still_same(certificate,identity):raise RuntimeError('External graphics identity changed')
-            external_seen.append(dict(row,identity=certificate))
+            raise refuse_context('Unregistered GPU context; owned descendant requires a fresh registered sample',row,identity)
         elif row['gpu_uuid']==expected:
-            raise RuntimeError('Unregistered GPU context; a fresh registered sample is required')
+            memory=maximum[pid]
+            if row['api']!='graphics' or pid in compute or memory is None or not 0<=memory<=BENIGN_GRAPHICS_LIMIT:
+                raise refuse_context('Foreign GPU0 context is not benign graphics (graphics-only <=16MiB required)',row,identity)
+            current=context_info(row,identity)
+            if current['identity'] is None or current['identity']['state']=='Z':
+                raise refuse_context('Foreign graphics process identity unavailable',row,identity)
+            current.update(classification='benign-foreign-graphics',gpu0_process_max_mib=memory/1024**2,owned=False)
+            benign.append(current)
         else:
-            # Other users' contexts on other cards are never claimed as ours.
             ignored+=1
     result=audit_sample(expected,admitted,cards,observed)
     if result['outcome']!='verified' or result['foreign_gpu_contexts']:
         raise RuntimeError('GPU coverage, memory or owned device attribution failed: '+repr(result))
-    return result,dict(admitted_births=[list(birth(v)) for v in admitted.values()],ignored_other_card_rows=ignored,external_graphics_rows=external_seen)
+    return result,dict(admitted_births=[list(birth(v)) for v in admitted.values()],ignored_other_card_rows=ignored,benign_foreign_graphics_rows=benign)
 
 class RegisteredGPUAudit:
     """Reuse launcher receipts and the collector's pidfd ownership ledger."""
@@ -73,7 +99,7 @@ class RegisteredGPUAudit:
             if row['api']!='graphics' or owned_ancestor(row['pid'],owner,identity):
                 raise RuntimeError('Assigned GPU has non-external-graphics context before launch')
             certificate=identity(row['pid'])
-            if certificate is None or certificate['state']=='Z' or row['memory_bytes'] is None:
+            if certificate is None or certificate['state']=='Z' or row['memory_bytes'] is None or not 0<=row['memory_bytes']<=BENIGN_GRAPHICS_LIMIT:
                 raise RuntimeError('External graphics baseline identity or memory unavailable')
             key=(row['pid'],row['gpu_uuid'],row['api'])
             certificates[key]=certificate
@@ -125,8 +151,20 @@ class RegisteredGPUAudit:
         from run_smoke import identity
         registered,metadata=self.registry()
         observed=sampler(cards)
-        result,checked=attribute(expected,registered,cards,observed,identity,self.external_graphics)
-        return result,dict(metadata,**checked)
+        # The owner samples at 1Hz, outside the dispatch thread. Preserve every
+        # assigned-card context even when classification refuses the sample.
+        receipt=self.receipt.with_name('gpu-context-observations.jsonl')
+        value=dict(sample_wall_ns=time.time_ns(),assigned_gpu_uuid=expected,rows=[context_info(r,identity) for r in observed['rows'] if r['gpu_uuid']==expected])
+        try:
+            result,checked=attribute(expected,registered,cards,observed,identity,self.external_graphics)
+        except RuntimeError as error:
+            value.update(status='refused',error=str(error))
+            with receipt.open('a') as stream:stream.write(json.dumps(value)+'\n')
+            raise RuntimeError(str(error)+'; observed_gpu0='+json.dumps(value['rows'],sort_keys=True)) from error
+        value.update(status='verified',benign_foreign_graphics_rows=checked['benign_foreign_graphics_rows'])
+        with receipt.open('a') as stream:stream.write(json.dumps(value)+'\n')
+        owned_pids={r['pid'] for r in result['processes']}
+        return result,dict(metadata,gpu_context_receipt=str(receipt),owned_gpu_contexts=[r for r in value['rows'] if r['pid'] in owned_pids],**checked)
 
     def close(self):
         for fd in self.children.handles.values():os.close(fd)

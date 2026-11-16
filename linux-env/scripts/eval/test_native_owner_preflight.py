@@ -26,7 +26,7 @@ def exercise(xml,scenario="pass"):
             rows=[dict(pid=external,gpu_uuid='gpu0',api='compute' if scenario=='prelaunch-compute' else 'graphics',memory_bytes=4096)]
             if paths:
                 rows.append(dict(pid=os.getpid(),gpu_uuid='gpu0',api='compute',memory_bytes=3700*1024**2))
-                if scenario=='late-graphics':rows.append(dict(pid=1,gpu_uuid='gpu0',api='graphics',memory_bytes=1024))
+                if scenario in ('late-graphics','late-benign-graphics'):rows.append(dict(pid=1,gpu_uuid='gpu0',api='graphics',memory_bytes=(17 if scenario=='late-graphics' else 3)*1024**2))
             return dict(rows=rows,coverage={c['uuid']:dict(compute='verified',graphics='verified') for c in cards},errors=[])
         class FakeKit:
             def __init__(self,cmd,**kw):
@@ -64,6 +64,7 @@ def exercise(xml,scenario="pass"):
         fake_time=SimpleNamespace(time=time.time,time_ns=time.time_ns,strftime=time.strftime,gmtime=time.gmtime,monotonic=monotonic,sleep=lambda _:None)
         deadline=(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(minutes=20)).strftime('%Y-%m-%dT%H:%M:%SZ')
         argv=[str(folder/'run_native_replay_window.py'),'--out',str(out),'--stop-by-utc',deadline,'--matched-reset-qualification','--bank',str(base/'bank'),'--bank-sha256','fixture','--reset-collector-root',str(repo)]
+        if scenario=='qualification-subset-refusal':argv+=['--episode-seeds','530000']
         if scenario=='occupied-instance':
             path=instance/'control.pid'
             start(path,instance/'prior-control.log',[sys.executable,'-c','import time;time.sleep(120)']);paths.append(path)
@@ -74,20 +75,27 @@ def exercise(xml,scenario="pass"):
             with mock.patch.object(owner,'REPO',repo),mock.patch.object(owner,'preflight_sources',return_value={'run_episodes.py':'fixture'}),mock.patch.object(owner,'qualified_host',return_value=dict(root=str(host))),mock.patch.object(owner,'subprocess',fake_subprocess),mock.patch.object(owner,'time',fake_time),mock.patch.object(native_bank,'load_bank',return_value=([dict(seed=530000+i) for i in range(5)],'seen-training-home')),mock.patch.object(matched_reset,'validate_collector_root'),mock.patch.object(gpu_device,'inventory',return_value=cards),mock.patch.object(nvml_processes,'sample',side_effect=nvml),mock.patch.object(sys,'argv',argv):
                 error=None
                 try:owner.main()
+                except AssertionError:
+                    if scenario!='qualification-subset-refusal':raise
+                    assert not out.exists() and not calls
+                    print(json.dumps(dict(status='PASS',scenario=scenario,refused_before_output_and_launch=True)))
+                    return
                 except RuntimeError as failure:
-                    if scenario=='pass':raise
+                    if scenario in ('pass','late-benign-graphics'):raise
                     error=str(failure)
             ledger=json.loads((out/'window-ledger.json').read_text())
             assert ledger['cleanup_exit_code']==0 and ledger['stopped_utc']
             assert not paths or scenario=='occupied-instance'
             samplefile=out/'gpu-memory.jsonl'
             samples=[json.loads(l) for l in samplefile.read_text().splitlines()] if samplefile.exists() else []
-            if scenario=='pass':
+            if scenario in ('pass','late-benign-graphics'):
                 assert ledger['status']=='matched-reset-qualified' and error is None
                 assert any(s.get('owned_mib')==3700 for s in samples)
                 assert not any('audit_error' in s for s in samples)
                 assert ledger['external_graphics_baseline']['owned'] is False
                 assert len(calls)==2
+                if scenario=='late-benign-graphics':
+                    assert any(any(r['pid']==1 and r['memory_mib']==3 for r in sample.get('benign_foreign_graphics_rows',[])) for sample in samples)
             elif scenario=='prelaunch-compute':
                 assert ledger['status']=='stopped-with-error' and 'before launch' in error and not calls
             elif scenario in ('occupied-instance','claimed-instance'):
@@ -117,6 +125,8 @@ class OwnerEntrypointTests(unittest.TestCase):
     def test_clean_interpreter_actual_owner_lifecycle(self):self.run_scenario('pass')
     def test_prelaunch_compute_refusal_still_records_stop_and_cleanup(self):self.run_scenario('prelaunch-compute')
     def test_new_graphics_after_launch_refuses_three_times_and_cleans(self):self.run_scenario('late-graphics')
+    def test_benign_graphics_birth_after_launch_passes(self):self.run_scenario('late-benign-graphics')
+    def test_qualification_rejects_resume_subset_before_launch(self):self.run_scenario('qualification-subset-refusal')
     def test_preexisting_managed_process_survives_refused_window(self):self.run_scenario('occupied-instance')
     def test_preexisting_instance_claim_survives_refused_window(self):self.run_scenario('claimed-instance')
 

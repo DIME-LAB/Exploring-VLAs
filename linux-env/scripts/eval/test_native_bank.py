@@ -64,6 +64,15 @@ class BankTests(unittest.TestCase):
         self.assertEqual(select_policy_rows(list(range(5)),'seen-training-home'),list(range(5)))
         with self.assertRaises(ValueError):select_policy_rows(list(range(5)),'seen-training-home',0,4)
         with self.assertRaises(ValueError):select_policy_rows(list(range(29)),'heldout-bank-v2',15,15)
+    def test_ordered_resume_subset_never_changes_base_chunk_or_defaults(self):
+        rows=[dict(seed=900000+i) for i in range(30)]
+        selected=select_policy_rows(rows,'heldout-bank-v2',0,15,list(range(900002,900015)))
+        self.assertEqual([r['seed'] for r in selected],list(range(900002,900015)))
+        self.assertEqual(select_policy_rows(rows,'heldout-bank-v2',0,15),rows[:15])
+        for requested in ([],[900002,900002],[900003,900002],[900015],[899999]):
+            with self.assertRaises(ValueError):select_policy_rows(rows,'heldout-bank-v2',0,15,requested)
+        seen=[dict(seed=530000+i) for i in range(5)]
+        self.assertEqual(select_policy_rows(seen,'seen-training-home',episode_seeds=[530002,530004]),[seen[2],seen[4]])
     def test_seen_bank_keeps_recorded_state_and_binds_actual_training_sources(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d);files={};normal=root/'training/normal';normal.mkdir(parents=True);(normal/'run.json').write_text('{}')
