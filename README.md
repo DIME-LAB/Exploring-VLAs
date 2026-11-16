@@ -400,7 +400,7 @@ required. CPU checks start no simulator:
 
 ```bash
 cd linux-env/scripts/collect
-CUDA_VISIBLE_DEVICES='' python3 -B -m unittest test_scene_identity test_target_triplets
+CUDA_VISIBLE_DEVICES='' python3 -B -m unittest test_scene_identity test_target_triplets test_triplet_pose_policy
 # Run in the existing LeRobot environment (PyArrow, PyAV and the pinned fork).
 CUDA_VISIBLE_DEVICES='' python3 -B export_content_regression.py
 CUDA_VISIBLE_DEVICES='' python3 -B triplet_export_regression.py \
