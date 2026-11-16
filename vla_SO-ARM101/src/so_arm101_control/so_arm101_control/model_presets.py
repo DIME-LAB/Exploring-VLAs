@@ -23,6 +23,7 @@ MODEL_PRESETS = {
     "next120-primary-30k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/next120-primary-init/030000/pretrained_model", "", "{}"),
     "next120-primary-40k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/next120-primary-init/040000/pretrained_model", "", "{}"),
     "next120-primary-50k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/next120-primary-init/050000/pretrained_model", "", "{}"),
+    "next120-primary-60k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/next120-primary-init/060000/pretrained_model", "", "{}"),
     "robust-crop-5k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/recorder-crf18-crop/005000/pretrained_model", "", "{}"),
     "robust-crop-10k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/recorder-crf18-crop/010000/pretrained_model", "", "{}"),
     "robust-crop-15k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/recorder-crf18-crop/015000/pretrained_model", "", "{}"),
