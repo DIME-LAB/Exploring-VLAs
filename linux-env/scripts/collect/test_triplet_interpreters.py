@@ -1,10 +1,13 @@
 """Native source bits govern across Python versions; diagnostics are not commands."""
-import json,math,tempfile,unittest
+import io,json,math,queue,subprocess,tempfile,unittest
 from pathlib import Path
+from types import SimpleNamespace as NS
 from scene_identity import identity,require_pose_agreement
 from triplet_boundary import restore_admission
 from target_triplets import validate_run
 import test_target_triplets
+from test_review_regressions import load_class
+from tick_contract import STEP_NS
 
 
 class InterpreterProofTests(unittest.TestCase):
@@ -90,7 +93,7 @@ class InterpreterProofTests(unittest.TestCase):
                     if phase=='bootstrap':h.after_bootstrap=drift
                     else:h.before_first_record=drift
                 with self.assertRaises(ValueError):h.complete(first_offset_ticks=1)
-                path=h.root/'attempt-0000';evidence=json.loads((path/'triplet-boundary-evidence.json').read_text())
+                path=h.root/'attempt-0000';evidence=json.loads((h.root/'triplet-boundaries/attempt-0000.json').read_text())
                 self.assertEqual(evidence['episode_id'],'episode-0');proof=evidence['phases'][phase]
                 if phase=='priming_restore':
                     reread=proof['restore']['triplet_physical_state']
@@ -99,6 +102,29 @@ class InterpreterProofTests(unittest.TestCase):
                     self.assertFalse(proof['anchor_drift']['passed'])
                     self.assertGreater(proof['anchor_drift']['per_body']['cup_red']['position_error_m'],.0005)
                 self.assertFalse((path/'first-recorded-native.json').exists());self.assertIsNone(h.collector.writer)
+    def test_real_writer_creation_and_first_row_after_triplet_preparation(self):
+        with tempfile.TemporaryDirectory() as d:
+            h=test_target_triplets.TripletTests().fixture(d);receipt=h.prepare(0);path=h.root/'attempt-0000'
+            self.assertFalse(path.exists())
+            self.assertTrue((h.root/'triplet-boundaries/attempt-0000.json').exists())
+            Writer,scope=load_class('collect.py','EpisodeWriter')
+            def encoder(*args,**kwargs):
+                def wait(timeout):kwargs['stderr'].close();return 0
+                return NS(stdin=io.BytesIO(),wait=wait)
+            scope.update(queue=queue,subprocess=NS(Popen=encoder,PIPE=subprocess.PIPE))
+            writer=Writer(path,30);h.collector.writer=writer
+            try:
+                with self.assertRaises(FileExistsError):Writer(path,30)
+                h.data['sim_ns']+=STEP_NS;h.data['physics_time_s']+=1/30
+                native=h.checked_snapshot();row=dict(native['tick_contract']['row'])
+                row['wall_profile']=dict(profile_id='cpu-writer-test',epoch=row['epoch'],sim_ns=row['sim_ns'])
+                h.collector.triplet_session.record_start(native,row,path)
+                writer.add(row,{})
+            finally:writer.close();h.collector.writer=None
+            self.assertIsNone(writer.failure);self.assertEqual(len(writer.rows),1)
+            self.assertEqual(json.loads((path/'frames.jsonl').read_text())['episode_id'],receipt['episode_id'])
+            evidence=json.loads((h.root/'triplet-boundaries/attempt-0000.json').read_text())
+            self.assertIn('first_recorded',evidence['phases'])
 
 
 if __name__=='__main__':unittest.main()

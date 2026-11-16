@@ -372,7 +372,8 @@ recomputed rule. Seals still bind the producer's original diagnostic bytes. Sour
 policy mismatches retain structured actual/expected evidence in the failure.
 Both producer and locally recomputed admission verdicts must be bool True.
 Triplet preparation and first capture atomically retain their raw native boundary
-evidence before admission checks in triplet-boundary-evidence.json and the receipt.
+evidence before admission checks in run-level triplet-boundaries/attempt-NNNN.json
+and the receipt, preserving EpisodeWriter's exclusive creation of attempt directories.
 This preserves returned restore/reread proofs and observed anchor drifts even
 when a later check rejects the member; an unperformed read has no diagnostic.
 

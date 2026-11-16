@@ -77,10 +77,12 @@ class TripletSession:
             target_selections={member(self.config,i,self.anchor)['color']:member(self.config,i,self.anchor)['target_selection'] for i in range(3)},
             cup_sampler=self.cup_sampler,sampler_invocations=self.sampled,triplet_id=self.triplet_id))
     def retain_boundary(self,path,episode,phase,**values):
-        path=Path(path);path.mkdir(parents=True,exist_ok=True)
+        # EpisodeWriter owns creation of the attempt directory exclusively.
+        target=self.root/'triplet-boundaries'/(Path(path).name+'.json')
+        target.parent.mkdir(parents=True,exist_ok=True)
         evidence=self.boundary_evidence.setdefault(episode,{})
         evidence[phase]=copy.deepcopy(values)
-        atomic_json(path/'triplet-boundary-evidence.json',dict(episode_id=episode,layout_id=self.config['layout_id'],
+        atomic_json(target,dict(episode_id=episode,layout_id=self.config['layout_id'],
             triplet_id=self.triplet_id,phases=evidence))
     def prepare(self,c,params,baseline,receipt,motion_epochs,root,path):
         index=params['trial']
