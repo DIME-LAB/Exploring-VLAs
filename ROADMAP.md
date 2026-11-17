@@ -362,6 +362,13 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       check of a Nov 14 bootstrap log that grew after its pin (device table identical); fix = immutable prefix capsule,
       pending review. rtx6000 old runs archived to dual (SHA-verified) and removed: next-120k, memorize, jobs,
       image-robustness (125 GB free).
+    - 2026-11-17 ~08-14Z: triplet production hardened through live stops, each caught by a guard before bad data: whole-log
+      SHA pin (ee81ad0 capsule), select() FD_SETSIZE in supervision (2030e41/b0a1b70/90e1d99: poll, failure reporting,
+      finalization re-read), pidfd_open on a thread id (888d1cc: TGID mapping, races retained) and a notifier tied to a
+      foreground tool session (detached observer), plus a bounded backup-space gate (503e39a: sealed payload, pinned
+      O_NOFOLLOW destination). Each cut independently reviewed PRODUCTION-READY. The 90e1d99 run (25 sealed groups) was
+      archived by exact-path rename, not counted. Fresh production at 503e39a started 14:19Z on rtx6000 (operator approval;
+      announced to plan29, PlanAnything card hold); first triplet 720000 sealed ~14:3xZ. ETA ~6-8 h.
 - [x] 3.5 (new, operator 2026-11-17) Visual re-rendering of recorded episodes without re-simulation: bridge our per-tick
       poses (all 900 episodes carry 6-D state + 9 bodies per tick) into DroidStack take+tape+manifest on DroidStack branch
       vla-render-bands (separate clone, base dev 47bfbaac), add look bands (lights, materials, camera poses), an ego wrist
