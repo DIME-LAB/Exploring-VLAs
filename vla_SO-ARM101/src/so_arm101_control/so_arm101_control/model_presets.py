@@ -7,6 +7,7 @@ import os
 import sys
 
 MODEL_PRESETS = {
+    "rule431-25k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/rule431-base25k/025000/pretrained_model", "", "{}"),
     "rule431-20k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/rule431-base25k/020000/pretrained_model", "", "{}"),
     "rule431-15k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/rule431-base25k/015000/pretrained_model", "", "{}"),
     "rule431-10k": ("/mnt/a4500-backup/exploring-vlas/eval/checkpoints/rule431-base25k/010000/pretrained_model", "", "{}"),
