@@ -4,7 +4,7 @@
 Print the immutable plan with --plan. --go additionally requires the explicit
 training-release certificate and starts the four workers with a 60 s stagger.
 """
-import argparse,ctypes,hashlib,json,os,shlex,signal,socket,stat,subprocess,sys,time,threading
+import argparse,ctypes,hashlib,json,os,shlex,signal,socket,stat,subprocess,sys,time,threading,tempfile
 from pathlib import Path
 sys.dont_write_bytecode=True
 REPO=Path(__file__).resolve().parents[3]
@@ -17,7 +17,7 @@ from gpu_device import gpu_uuid
 from triplet_production_plan import initial_wave,reduce_waves,guards,POLICY
 from triplet_artifacts import read,sha,manifest,classify,selected_entry,checked_tree
 from bootstrap_capsule import ASSIGNED_UUID,load as load_bootstrap_capsule
-from backup_space import probe_code as backup_probe_code,serialized_copy,BASE as BACKUP_BASE,require_capacity
+from backup_space import probe_code as backup_probe_code,serialized_copy,sealed_payload,receiver_code,validate_admission
 from gpu_device import inventory
 import clock_status
 
@@ -169,28 +169,25 @@ def verify_sources(run,cut):
 def backup(source,files,destination,log):
     """Copy immutable files only and verify every byte remotely before selection."""
     if not Path(destination).is_relative_to(DUAL):raise ValueError('Backup outside the assigned projection root')
-    for name,value in files.items():
-        if Path(name).is_absolute() or '..' in Path(name).parts or '\n' in name or not name or sha(source/name)!=value:
-            raise ValueError('Backup source changed: '+name)
-    incoming=sum((source/name).stat().st_size for name in files)
+    if manifest(source)!=files:raise ValueError('Source changed before SHA backup')
+    specs={name:dict(size=(source/name).stat(follow_symlinks=False).st_size,sha256=value) for name,value in files.items()}
+    incoming=sum(row['size'] for row in specs.values())
     with serialized_copy(ROOT/'runtime/counterfactual-backup-space.lock'):
-        # Admission happens on the destination filesystem before mkdir/rsync.
-        # Holding the local lock prevents our own concurrent copies from each
-        # spending the same free-space measurement.
         code=backup_probe_code(destination,incoming,len(files))
         reply=subprocess.check_output([*SSH,'python3 -c '+shlex.quote(code)],text=True,stderr=log)
-        admission=json.loads(reply)
-        expected=require_capacity(admission['free_bytes'],incoming,len(files))
-        if (any(admission.get(k)!=v for k,v in expected.items()) or admission.get('destination')!=str(destination) or
-            admission.get('filesystem_root')!=str(BACKUP_BASE)):
-            raise RuntimeError('Dual backup capacity admission was not bound to this copy')
+        admission=json.loads(reply);validate_admission(admission,destination,specs)
         print(json.dumps(dict(event='dual_backup_admission',**admission)),file=log,flush=True)
-        subprocess.run([*SSH,'mkdir -p '+shlex.quote(str(destination))],check=True,stdout=log,stderr=subprocess.STDOUT)
-        subprocess.run(['rsync','-a','--partial','-e',shlex.join(SSH[:-1]),str(source)+'/',SSH[-1]+':'+str(destination)+'/'],check=True,stdout=log,stderr=subprocess.STDOUT)
-        text=''.join(value+'  '+name+'\n' for name,value in sorted(files.items()))
-        subprocess.run([*SSH,'cd '+shlex.quote(str(destination))+' && sha256sum -c -'],input=text,text=True,check=True,stdout=log,stderr=subprocess.STDOUT)
+        with sealed_payload(source,specs,admission,ROOT/'runtime') as wire:
+            if manifest(source)!=files:raise ValueError('Source changed before bounded backup transfer')
+            reply=subprocess.run([*SSH,'python3 -c '+shlex.quote(receiver_code(destination))],stdin=wire,text=True,
+                check=True,stdout=subprocess.PIPE,stderr=log)
+        receipt=json.loads(reply.stdout)
+        if (receipt.get('passed') is not True or receipt.get('destination')!=str(destination) or
+            receipt.get('files_sha256')!=files or receipt.get('transferred_bytes')!=incoming or
+            receipt.get('capacity_admission')!=admission):raise ValueError('Backup receiver did not certify the admitted bytes')
         if manifest(source)!=files:raise ValueError('Source changed during SHA backup')
-        return dict(passed=True,source=str(source),destination=str(destination),files_sha256=files,capacity_admission=admission,completed_wall_ns=time.time_ns())
+        return dict(receipt,source=str(source),completed_wall_ns=time.time_ns())
+
 
 
 def diagnostic_copy(source,target,namespace):
@@ -535,22 +532,15 @@ def backup_registries(recipe):
     # Project only the explicit path fields in a separate file. The original
     # registry bytes in the backup keep their RTX paths and published SHA.
     projections={s:backup_projection(read(root/(s+'-registry.json')),sha(root/(s+'-registry.json'))) for s in ('train','heldout')}
-    code="""import os,json,hashlib,sys
-from pathlib import Path
-root=Path(sys.argv[1]);values=json.load(sys.stdin);result={}
-assert root.is_relative_to(Path('/mnt/a4500-backup/exploring-vlas/datasets/counterfactual-production-v1'))
-for split,value in values.items():
- assert split in ('train','heldout')
- path=root/(split+'-registry.backup-projection.json')
- data=json.dumps(value,indent=2).encode()
- fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
- with os.fdopen(fd,'wb') as f:f.write(data);f.flush();os.fsync(f.fileno())
- result[split]={'path':str(path),'sha256':hashlib.sha256(data).hexdigest(),'authoritative_registry_sha256':value['authoritative_registry_sha256']}
-fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
-print(json.dumps(result))
-"""
-    reply=subprocess.check_output([*SSH,'python3 -c '+shlex.quote(code)+' '+shlex.quote(str(destination))],input=json.dumps(projections),text=True)
-    receipt['projections']=json.loads(reply);atomic_json(Path(recipe['runtime_root'])/'registry-backup.json',receipt)
+    with tempfile.TemporaryDirectory(prefix='registry-projection-',dir=ROOT/'runtime') as temp:
+        projected=Path(temp);receipt['projections']={}
+        for split,value in projections.items():
+            if split not in ('train','heldout'):raise ValueError('Unknown backup projection split')
+            path=projected/(split+'-registry.backup-projection.json');atomic_json(path,value)
+            receipt['projections'][split]=dict(path=str(destination/path.name),sha256=sha(path),
+                authoritative_registry_sha256=value['authoritative_registry_sha256'])
+        with logpath.open('a') as log:receipt['projection_backup']=backup(projected,manifest(projected),destination,log)
+    atomic_json(Path(recipe['runtime_root'])/'registry-backup.json',receipt)
     return receipt
 
 

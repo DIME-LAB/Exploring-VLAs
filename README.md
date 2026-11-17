@@ -1176,9 +1176,15 @@ owner's terminal receipt is checked externally after its coordinator exits;
 its latest durable state during local finalization is recorded as a snapshot.
 Dual backups admit each immutable copy only when the destination filesystem has
 at least 100 GiB remaining after its full incoming size and metadata allowance.
-The check runs before destination mkdir/rsync, and our own copies serialize
-through admission, transfer and SHA verification. Destination ancestors must be
-real directories within exploring-vlas; archive paths and links are refused.
+Our own copies serialize through admission, transfer and SHA verification.
+The sender seals only manifested names, exact sizes and hashes in a private
+unlinked payload on the bulk filesystem; later source additions or growth cannot
+increase transferred bytes. A single destination process admits capacity again,
+opens every directory component without following links, and retains/checks its
+device/inode chain through writes and hash verification. File writes use those
+pinned directory descriptors. Registry projections use the same copy entrance.
+Changed directory identities, source bytes or capacity refuse certification;
+archive paths and links are never followed.
 
 Notification observers must also outlive the launching tool session. Use
 `python3 linux-env/scripts/collect/detached_observer.py start --script
