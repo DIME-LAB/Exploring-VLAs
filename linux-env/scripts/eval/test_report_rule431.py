@@ -47,4 +47,18 @@ class Tests(unittest.TestCase):
     self.assertFalse((root/'report').exists())
  def test_missing_rule_fields_refused(self):
   with self.assertRaises(ValueError):summarize([dict(valid=True)])
+ def test_episode_outcomes_and_evidence_columns(self):
+  import csv
+  with tempfile.TemporaryDirectory() as d:
+   root=Path(d);(root/'window-ledger.json').write_text(json.dumps(dict(scored=True,status='policy-finished',stopped_utc='now',cleanup_exit_code=0,suite='rule-seen-training-home-15',readiness_budget_s=180)))
+   cases=[(True,True,False,True,'success','grasped-not-placed'),(False,True,False,False,'grasped-not-placed','no-grasp'),(False,False,False,False,'no-grasp','no-grasp')]
+   for i,(s,g,rs,rg,_,__) in enumerate(cases):
+    ep=root/'default'/f'ep{i:02d}';ep.mkdir(parents=True)
+    row=dict(seed=530002+i,color='blue',valid=True,reset_protocol='collector-recorded-postsample-v1',readiness_budget_s=180,requested_colour_success=s,requested_colour_grasp=g,rule_target_success=rs,rule_target_grasp=rg,wrong_color_lift=False,wrong_same_colour_target_grasp=False,time_to_grasp_s=1.25,rtc_enabled=True,host_load_start=[1,2,3],video=dict(output_path='viewport.mp4'),wrist_preclosure=dict(manifest='wrist.json'),client=dict(flow_noise=dict(episode_seed=42),requests=[dict(wall_s=.1),dict(wall_s=.3)],observe_every_actions=10,actions_per_chunk=50,chunk_size_threshold=.8,queue_aggregation='weighted'))
+    (ep/'result.json').write_text(json.dumps(row))
+   ep=root/'default/ep03';ep.mkdir();(ep/'result.json').write_text(json.dumps(dict(seed=530005,color='red',valid=False,error='interrupted')))
+   audit(root,root/'report')
+   with (root/'report/episodes.csv').open() as f:records=list(csv.DictReader(f))
+   self.assertEqual([(x['outcome'],x['rule_outcome']) for x in records],[x[-2:] for x in cases]+[('invalid','invalid')])
+   r=records[0];self.assertEqual(r['time_to_grasp_s'],'1.25');self.assertEqual(r['rtc_enabled'],'True');self.assertEqual(r['video_path'],'viewport.mp4');self.assertEqual(r['wrist_manifest'],'wrist.json');self.assertEqual(json.loads(r['flow_noise'])['episode_seed'],42);self.assertEqual(float(r['inference_wall_mean_ms']),200);self.assertEqual(r['observe_every_actions'],'10')
 if __name__=='__main__':unittest.main()

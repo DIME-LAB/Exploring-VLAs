@@ -51,6 +51,13 @@ def audit(root,out):
             if not budgets or any(v!=ledger.get('readiness_budget_s',60) for v in budgets):raise ValueError('Missing or conflicting readiness budget in '+str(path))
         g=r.get('rule_closure_confirmed_geometry') or {}
         row={k:r.get(k) for k in ('seed','color','valid','outcome','requested_colour_success','requested_colour_grasp','rule_target_success','rule_target_grasp','wrong_color_lift','wrong_same_colour_target_grasp','rule_target_name','paired_flow_repeat','effective_action_fps','wall_time_s','error')}
+        for prefix,success,grasp in (('outcome','requested_colour_success','requested_colour_grasp'),('rule_outcome','rule_target_success','rule_target_grasp')):
+            row[prefix]='invalid' if not r.get('valid') else 'success' if r.get(success) else 'grasped-not-placed' if r.get(grasp) else 'no-grasp'
+        row.update({k:r.get(k) for k in ('time_to_grasp_s','time_to_place_s','time_to_rule_grasp_s','time_to_rule_place_s','rtc_enabled','sim_time_s','missed_sim_slots','empty_sim_ticks','sim_dispatch_jitter_p95_ms','host_load_start','host_load_end')})
+        client=r.get('client') or {};wrist=r.get('wrist_preclosure') or {};video=r.get('video') or {}
+        row.update({k:client.get(k) for k in ('observe_every_actions','actions_per_chunk','chunk_size_threshold','queue_aggregation')})
+        waits=[q['wall_s']*1000 for q in client.get('requests',[]) if 'wall_s' in q]
+        row.update(flow_noise=json.dumps(client.get('flow_noise'),sort_keys=True),inference_wall_mean_ms=statistics.mean(waits) if waits else None,video_path=video.get('output_path'),wrist_manifest=wrist.get('manifest'))
         proof=r.get('rule_target_selection') or {}
         diagnostic=dict(live_choice=proof.get('object'),live_candidates=proof.get('candidates'),live_margin_m=proof.get('margin_m'),ambiguous=proof.get('ambiguous'))
         if r.get('valid') and bank_rows:
