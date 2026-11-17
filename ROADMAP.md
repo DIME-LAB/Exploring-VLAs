@@ -347,6 +347,13 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       unambiguous nearer-to-base block (rule analysis 452/453/431, independently reproduced); (b) counterfactual triplets
       (same restored layout x red/green/blue, visible nearest-base rule; 120 train + 20 held-out layouts)
       qualified by review and the 6/6 live smoke at f99f4f7; production awaits the lead's GO.
+    - 2026-11-17 ~02-05Z: next120 finished 120k (no further scoring). rule431-base25k launched 02:42Z on rtx6000 (fresh
+      smolvla_base, 431 unambiguous episodes): CPU colour probe at 5k/10k still ignores the colour word (shift 3-4 mm,
+      2-3/15 heading to the prompted colour vs expert 15/15), so removing same-colour ambiguity alone does not create
+      language use; one target per layout remains the shortcut. Operator GO (05:35Z): triplet production (420 episodes) on
+      rtx6000 after rule431 ends, then train from smolvla_base on triplets. Recolouring/green-block swap noted as a later
+      add-on (fixed trajectory, cannot force language use). rule15 eval homes now use sealed restore of the recorded
+      initial bodies (cup sampler is batch-history dependent). dual GPU0 windows announce START/STOP to plan47 and robosort.
 - [ ] 3.4 (only if 3.3 paraphrases fail) Prompt-variety run: relabel each training sample's task from a set
       of templates per colour at merge time (no new collection), hold some templates out for eval, and compare
       against the fixed-string model on both exact and held-out prompts. Published SmolVLA/LeRobot guidance is
