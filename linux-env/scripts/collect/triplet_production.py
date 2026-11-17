@@ -17,6 +17,7 @@ from gpu_device import gpu_uuid
 from triplet_production_plan import initial_wave,reduce_waves,guards,POLICY
 from triplet_artifacts import read,sha,manifest,classify,selected_entry,checked_tree
 from bootstrap_capsule import ASSIGNED_UUID,load as load_bootstrap_capsule
+from backup_space import probe_code as backup_probe_code,serialized_copy,BASE as BACKUP_BASE,require_capacity
 from gpu_device import inventory
 import clock_status
 
@@ -171,12 +172,25 @@ def backup(source,files,destination,log):
     for name,value in files.items():
         if Path(name).is_absolute() or '..' in Path(name).parts or '\n' in name or not name or sha(source/name)!=value:
             raise ValueError('Backup source changed: '+name)
-    subprocess.run([*SSH,'mkdir -p '+shlex.quote(str(destination))],check=True,stdout=log,stderr=subprocess.STDOUT)
-    subprocess.run(['rsync','-a','--partial','-e',shlex.join(SSH[:-1]),str(source)+'/',SSH[-1]+':'+str(destination)+'/'],check=True,stdout=log,stderr=subprocess.STDOUT)
-    text=''.join(value+'  '+name+'\n' for name,value in sorted(files.items()))
-    subprocess.run([*SSH,'cd '+shlex.quote(str(destination))+' && sha256sum -c -'],input=text,text=True,check=True,stdout=log,stderr=subprocess.STDOUT)
-    if manifest(source)!=files:raise ValueError('Source changed during SHA backup')
-    return dict(passed=True,source=str(source),destination=str(destination),files_sha256=files,completed_wall_ns=time.time_ns())
+    incoming=sum((source/name).stat().st_size for name in files)
+    with serialized_copy(ROOT/'runtime/counterfactual-backup-space.lock'):
+        # Admission happens on the destination filesystem before mkdir/rsync.
+        # Holding the local lock prevents our own concurrent copies from each
+        # spending the same free-space measurement.
+        code=backup_probe_code(destination,incoming,len(files))
+        reply=subprocess.check_output([*SSH,'python3 -c '+shlex.quote(code)],text=True,stderr=log)
+        admission=json.loads(reply)
+        expected=require_capacity(admission['free_bytes'],incoming,len(files))
+        if (any(admission.get(k)!=v for k,v in expected.items()) or admission.get('destination')!=str(destination) or
+            admission.get('filesystem_root')!=str(BACKUP_BASE)):
+            raise RuntimeError('Dual backup capacity admission was not bound to this copy')
+        print(json.dumps(dict(event='dual_backup_admission',**admission)),file=log,flush=True)
+        subprocess.run([*SSH,'mkdir -p '+shlex.quote(str(destination))],check=True,stdout=log,stderr=subprocess.STDOUT)
+        subprocess.run(['rsync','-a','--partial','-e',shlex.join(SSH[:-1]),str(source)+'/',SSH[-1]+':'+str(destination)+'/'],check=True,stdout=log,stderr=subprocess.STDOUT)
+        text=''.join(value+'  '+name+'\n' for name,value in sorted(files.items()))
+        subprocess.run([*SSH,'cd '+shlex.quote(str(destination))+' && sha256sum -c -'],input=text,text=True,check=True,stdout=log,stderr=subprocess.STDOUT)
+        if manifest(source)!=files:raise ValueError('Source changed during SHA backup')
+        return dict(passed=True,source=str(source),destination=str(destination),files_sha256=files,capacity_admission=admission,completed_wall_ns=time.time_ns())
 
 
 def diagnostic_copy(source,target,namespace):

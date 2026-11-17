@@ -1169,6 +1169,11 @@ monitor, control and backup retirement. Earlier workload and cleanup causes stay
 separate; unreadable or inconsistent final evidence refuses publication. The
 owner's terminal receipt is checked externally after its coordinator exits;
 its latest durable state during local finalization is recorded as a snapshot.
+Dual backups admit each immutable copy only when the destination filesystem has
+at least 100 GiB remaining after its full incoming size and metadata allowance.
+The check runs before destination mkdir/rsync, and our own copies serialize
+through admission, transfer and SHA verification. Destination ancestors must be
+real directories within exploring-vlas; archive paths and links are refused.
 
 Offline validation: `python3 -m unittest discover -s linux-env/scripts/collect -p
  'test_*.py'`. This includes 1,000 randomized comparisons with frozen verified-GUI
