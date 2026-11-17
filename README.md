@@ -1154,7 +1154,12 @@ Managed launchers start the supervisor and workload in separate sessions with
 stdin disconnected. Identity receipts include PID, birth time, process group and
 session; only verified pidfds authorize cleanup signals. Readiness uses `poll()`
 so descriptor numbers above 1023 remain valid. Exited-child handles close during
-scanning while their identity receipts remain available. Supervisor errors and
+scanning while their identity receipts remain available. Task IDs normalize to
+verified thread-group leaders before registration. ESRCH/EINVAL registration
+races defer to the next scan; any live birth without a pidfd remains recorded,
+cannot receive a numeric-PID signal, and prevents cleanup certification until it
+exits or registration succeeds. The receipt retains the error and retry count.
+Supervisor errors and
 cleanup errors are persisted separately, and a durable signal journal records
 the sender and target before each supervisor cleanup signal. Public status and
 stop distinguish process exit from successful supervision; failed or incomplete
@@ -1174,6 +1179,15 @@ at least 100 GiB remaining after its full incoming size and metadata allowance.
 The check runs before destination mkdir/rsync, and our own copies serialize
 through admission, transfer and SHA verification. Destination ancestors must be
 real directories within exploring-vlas; archive paths and links are refused.
+
+Notification observers must also outlive the launching tool session. Use
+`python3 linux-env/scripts/collect/detached_observer.py start --script
+/path/to/read_only_observer.py --runtime /fresh/private/observer-runtime --
+<observer arguments>`. The launcher disconnects stdin, redirects output to its
+private log, creates an independent POSIX session and waits for a source/nonce-
+bound startup receipt. Running/final receipts describe the observer lifetime;
+per-recipient delivery receipts and production finalization remain separate.
+A missing or failed observer final receipt never proves successful delivery.
 
 Offline validation: `python3 -m unittest discover -s linux-env/scripts/collect -p
  'test_*.py'`. This includes 1,000 randomized comparisons with frozen verified-GUI

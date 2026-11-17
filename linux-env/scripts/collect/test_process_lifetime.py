@@ -1,5 +1,5 @@
 """Real Linux pidfds, long-run child churn and detached-launch signal isolation."""
-import fcntl,json,os,select,signal,subprocess,sys,tempfile,time,unittest
+import errno,fcntl,json,os,select,signal,subprocess,sys,tempfile,time,unittest
 from pathlib import Path
 from unittest.mock import patch
 import managed_process
@@ -179,5 +179,89 @@ managed_process.supervise(root/'job.pid','test-failure',[sys.executable,'-c',wor
             release.set()
             if sender.ident:sender.join(5)
             if scanner.ident:scanner.join(5)
+            if child.poll() is None:child.kill();child.wait()
+            for fd in ledger.handles.values():os.close(fd)
+
+
+    def thread_child(self):
+        return subprocess.Popen([sys.executable,'-u','-c',
+            'import threading,time;t=threading.Thread(target=lambda:time.sleep(120));'
+            't.start();print(t.native_id,flush=True);time.sleep(120)'],
+            stdout=subprocess.PIPE,text=True,start_new_session=True)
+
+    def test_real_thread_pidfd_einval_maps_to_owned_leader_through_scan(self):
+        child=self.thread_child();ledger=OwnedProcesses(Path('/unused'),0)
+        try:
+            tid=int(child.stdout.readline())
+            with self.assertRaises(OSError) as failure:os.pidfd_open(tid)
+            self.assertEqual(failure.exception.errno,errno.EINVAL)
+            self.assertEqual(identity(tid)['tgid'],child.pid)
+            # Exercise scan's actual child-registration entrance with the native
+            # non-leader ID exposed by a task's children list.
+            original=Path.read_text
+            def read(path,*args,**kwargs):
+                if path.name=='children' and str(path).startswith('/proc/'+str(os.getpid())+'/task/'):
+                    return str(tid)
+                return original(path,*args,**kwargs)
+            with patch.object(Path,'read_text',read):ledger.scan()
+            self.assertNotIn(tid,ledger.known);self.assertIn(child.pid,ledger.handles)
+            self.assertEqual(ledger.known[child.pid]['ownership_parent']['pid'],os.getpid())
+            ledger.send(child.pid,signal.SIGTERM);child.wait(timeout=5)
+            self.assertEqual(ledger.stop()['remaining'],[])
+        finally:
+            if child.poll() is None:child.kill();child.wait()
+            child.stdout.close()
+            for fd in ledger.handles.values():os.close(fd)
+
+    def test_real_einval_registration_race_is_retained_then_retried(self):
+        child=self.thread_child();ledger=OwnedProcesses(Path('/unused'),0);native=os.pidfd_open
+        try:
+            tid=int(child.stdout.readline())
+            # A real failing kernel call, followed by a healthy leader call.
+            with patch('run_smoke.os.pidfd_open',side_effect=lambda pid:native(tid)):
+                ledger.add(child.pid)
+            self.assertEqual(ledger.known[child.pid]['pidfd_registration']['errno'],errno.EINVAL)
+            self.assertEqual(ledger.remaining()[0]['pid'],child.pid)
+            self.assertNotIn(child.pid,ledger.handles)
+            ledger.scan()
+            self.assertIn(child.pid,ledger.handles)
+            self.assertEqual(ledger.known[child.pid]['pidfd_registration']['state'],'registered')
+            ledger.send(child.pid,signal.SIGTERM);child.wait(timeout=5)
+            self.assertEqual(ledger.stop()['remaining'],[])
+        finally:
+            if child.poll() is None:child.kill();child.wait()
+            child.stdout.close()
+            for fd in ledger.handles.values():os.close(fd)
+
+    def test_persistent_live_einval_never_certifies_cleanup_or_signals_numeric_pid(self):
+        from types import SimpleNamespace
+        child=self.thread_child();ledger=OwnedProcesses(Path('/unused'),0);native=os.pidfd_open
+        clock=[0.]
+        def now():clock[0]+=1.;return clock[0]
+        try:
+            tid=int(child.stdout.readline())
+            with patch('run_smoke.os.pidfd_open',side_effect=lambda pid:native(tid)),\
+                 patch('run_smoke.time',SimpleNamespace(monotonic=now,sleep=lambda _:None,time_ns=time.time_ns)),\
+                 patch('run_smoke.signal.pidfd_send_signal') as send,patch('run_smoke.os.kill') as numeric:
+                ledger.add(child.pid);result=ledger.stop()
+            self.assertEqual(result['remaining'][0]['pid'],child.pid)
+            self.assertEqual(result['tracked'][0]['pidfd_registration']['state'],'pending')
+            self.assertGreater(result['tracked'][0]['pidfd_registration']['attempts'],1)
+            send.assert_not_called();numeric.assert_not_called()
+        finally:
+            if child.poll() is None:child.kill();child.wait()
+            child.stdout.close()
+            for fd in ledger.handles.values():os.close(fd)
+
+    def test_real_exit_between_identity_and_pidfd_open_does_not_end_scan(self):
+        child=subprocess.Popen(['/bin/sleep','120']);ledger=OwnedProcesses(Path('/unused'),0);native=os.pidfd_open
+        def open_after_exit(pid):
+            child.terminate();child.wait(timeout=5)
+            return native(pid)
+        try:
+            with patch('run_smoke.os.pidfd_open',side_effect=open_after_exit):ledger.add(child.pid)
+            self.assertEqual(ledger.known[child.pid]['pid'],child.pid)
+            ledger.scan();self.assertEqual(ledger.stop()['remaining'],[])
+        finally:
             if child.poll() is None:child.kill();child.wait()
             for fd in ledger.handles.values():os.close(fd)

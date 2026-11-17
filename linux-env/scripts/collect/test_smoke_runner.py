@@ -68,7 +68,7 @@ class SmokeRunnerTests(unittest.TestCase):
         foreign=dict(pid=123,start_ticks='foreign',ppid=1)
         with patch('run_smoke.os.pidfd_open',return_value=77,create=True),\
              patch('run_smoke.identity',side_effect=[foreign,owned.root]),patch('run_smoke.os.close') as close:
-            owned.add(123);self.assertEqual(owned.known,{});close.assert_called_once_with(77)
+            owned.add(123);self.assertEqual(owned.known,{});close.assert_not_called()
 
     def test_overlapping_claim_refuses_and_closes_its_descriptor(self):
         with patch('run_smoke.os.open',return_value=77),\
