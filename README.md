@@ -1265,3 +1265,31 @@ receipts and preparation evidence are SHA-backed up at their corresponding dual 
 paths before final publication. Configure the notifier and training registry argument for the
 new child publication root, not the historical root's STOP. Training still requires the final
 caller-published registry SHA and its own new GO. Automatic startup retries are deferred.
+
+### Bounded startup retries for a continued production run
+
+A continuation admission binds a startup budget to the original progress SHA.
+The budget lives under `runtime/counterfactual-startup-retries/ORIGINAL_PROGRESS_SHA`,
+so new invocation and continuation directories share the same counters. Its immutable
+failure/decision/ready events, captured up logs and certified retirement receipts are
+fsynced under a file lock. Each admission pins the existing event prefix; missing,
+partial, edited or rewound history refuses continuation. The limits are three retry
+reservations per slot and ten for the run. A reservation is consumed before starting
+another instance and remains pending until that operation reports ready. A crash or
+continuation cannot turn a pending retry into a free initial attempt. Ready events
+must carry their own reservation, so an older completion cannot clear a newer failure.
+
+Only identified failures during instance startup are retryable: controller activation,
+Kit bridge/startup, configure RPC timeout, the existing up-stage wall deadline, initial
+native transport and stage readiness. The classifier reads the owned up-stage receipt
+and log; missing dependencies, ownership errors and unclassified exits stop the run.
+Clock qualification failures remain terminal. There is no exception handler around
+collection or export that converts their failures into startup retries.
+
+Before a retry, the failed instance must certify all owned descendants gone and both
+private ports closed. The requested raw path must not exist, including an empty directory
+or a dangling link. The next instance uses the same job and seed. Original errors are
+recorded before cleanup; cleanup failures preserve both causes and stop the run. Existing
+budgets and predicates, including the explicit 300-second configure RPC and 60-second
+controller readiness check, are unchanged. Retry evidence and counts appear in worker
+and production finalization and are SHA-backed up with the continuation evidence.

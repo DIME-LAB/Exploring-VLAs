@@ -76,10 +76,16 @@ class ContinuationTests(unittest.TestCase):
         with original_fixture() as f:
             state=c.origin_state(f.origin,f.root,f.checkpoint)
             admission=f.root/'manual-admission/admission.json';admission.parent.mkdir();value=dict(kind='same-run-continuation',collector_cut='a'*40,runner_cut='b'*40,collector_repo=str(f.root),origin_root=str(f.origin),origin_bindings=state['bindings'],inherited_outcomes=[f.outcome],next_production_root=str(f.origin/'continuations/one'),next_runtime_root=str(f.root/'runtime/continuations/one'))
+            import startup_retries
+            value['origin_checkpoint_sha256']=f.checkpoint
+            value['startup_retry_budget']=startup_retries.initialize(f.root/'runtime/counterfactual-startup-retries'/f.checkpoint,f.checkpoint)
             value['preparation_files_sha256']={}
             atomic_json(admission,value)
             recipe=c.load_plan(admission,a.sha(admission),'b'*40)
             self.assertEqual(recipe['cut'],'a'*40);self.assertEqual(recipe['runner_cut'],'b'*40);self.assertEqual(recipe['startup_configure_timeout_s'],300)
+            missing=copy.deepcopy(value);missing.pop('startup_retry_budget');atomic_json(admission,missing)
+            with self.assertRaisesRegex(ValueError,'retry budget is missing'):c.load_plan(admission,a.sha(admission),'b'*40)
+            atomic_json(admission,value)
             for digest in (None,'0'*64):
                 with self.assertRaisesRegex(ValueError,'Caller-published'):c.load_plan(admission,digest,'b'*40)
             digest=a.sha(admission);atomic_json(f.origin/'STOP.json',dict(error='changed'))

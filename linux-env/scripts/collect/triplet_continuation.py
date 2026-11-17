@@ -206,7 +206,13 @@ def backup_evidence(recipe,log):
     bound=p.backup(Path(admission['bound_evidence_path']),admission['bound_evidence_files_sha256'],p.DUAL,log)
     source=Path(recipe['continuation_admission_path']).parent
     preparation=p.backup(source,manifest(source),p.DUAL/source.relative_to(p.ROOT),log)
-    return dict(original_evidence=original,bound_evidence=bound,preparation=preparation)
+    retry_budget=None
+    if recipe.get('startup_retry_budget'):
+        import startup_retries
+        startup_retries.summary(recipe['startup_retry_budget'])
+        source=Path(recipe['startup_retry_budget']['root'])
+        retry_budget=p.backup(source,manifest(source),p.DUAL/source.relative_to(p.ROOT),log)
+    return dict(original_evidence=original,bound_evidence=bound,preparation=preparation,startup_retry_budget=retry_budget)
 
 
 def prepare(origin,collector_repo,runner_cut,output,checkpoint_sha):
@@ -216,6 +222,8 @@ def prepare(origin,collector_repo,runner_cut,output,checkpoint_sha):
         p.require_host();p.frozen(runner_cut);p.disk()
         output=confined(output);output.mkdir(parents=True,exist_ok=False)
         state=origin_state(origin,collector_repo,checkpoint_sha)
+        import startup_retries
+        retry_budget=startup_retries.initialize(p.ROOT/'runtime/counterfactual-startup-retries'/checkpoint_sha,checkpoint_sha)
         snapshot=output/'origin-evidence';snapshot_files=snapshot_origin(origin,snapshot)
         bound=output/'bound-evidence';bound.mkdir();bound_files={}
         for name,digest in state['bindings'].items():
@@ -275,7 +283,7 @@ def prepare(origin,collector_repo,runner_cut,output,checkpoint_sha):
             atomic_json(output/'preparation-cleanup.json',dict(passed=not cleanup['remaining'] and watch.fault is None,cleanup=cleanup))
             if watch.fault is not None:raise RuntimeError('CPU preparation disk monitor failed')
             if cleanup['remaining']:raise RuntimeError('CPU preparation cleanup unresolved')
-        value=dict(version=1,kind='same-run-continuation',collector_cut=COLLECTOR_CUT,collector_repo=str(collector_repo),runner_cut=runner_cut,
+        value=dict(version=1,kind='same-run-continuation',collector_cut=COLLECTOR_CUT,collector_repo=str(collector_repo),runner_cut=runner_cut,startup_retry_budget=retry_budget,
             origin_root=str(origin),origin_checkpoint_sha256=checkpoint_sha,origin_bindings=state['bindings'],origin_owner_nonce=state['owner_nonce'],
             origin_snapshot_path=str(snapshot),origin_snapshot_files_sha256=snapshot_files,bound_evidence_path=str(bound),bound_evidence_files_sha256=bound_files,
             preparation_disk_path=str(output/'preparation-disk-monitor.json'),preparation_disk_sha256=sha(output/'preparation-disk-monitor.json'),
@@ -297,13 +305,18 @@ def load_plan(path,digest,runner_cut):
     a=json.loads(raw)
     if 'preparation_files_sha256' not in a or manifest(path.parent)!={**a['preparation_files_sha256'],path.name:digest}:raise ValueError('Prepared evidence tree changed')
     if a.get('kind')!='same-run-continuation' or a.get('collector_cut')!=COLLECTOR_CUT or a.get('runner_cut')!=runner_cut:raise ValueError('Continuation source/runner identity differs')
+    import startup_retries
+    if not isinstance(a.get('startup_retry_budget'),dict):raise ValueError('Continuation startup retry budget is missing')
+    retry_budget=a['startup_retry_budget']
+    if Path(retry_budget['root'])!=p.ROOT/'runtime/counterfactual-startup-retries'/a['origin_checkpoint_sha256'] or retry_budget['origin_checkpoint_sha256']!=a['origin_checkpoint_sha256']:raise ValueError('Startup retry budget belongs to another original run')
+    startup_retries.summary(retry_budget)
     for name,value in a['origin_bindings'].items():
         if sha(regular(name))!=value:raise ValueError('Original history changed')
     origin=Path(a['origin_root']);original=read(origin/'plan.json')
     recipe=copy.deepcopy(original)
     recipe.update(collector_repo=a['collector_repo'],runner_cut=runner_cut,source_sha256=sha(p.SELF),
         production_root=a['next_production_root'],runtime_root=a['next_runtime_root'],startup_configure_timeout_s=300,
-        continuation_admission_path=str(path),continuation_admission_sha256=digest,inherited_outcomes=a['inherited_outcomes'])
+        continuation_admission_path=str(path),continuation_admission_sha256=digest,inherited_outcomes=a['inherited_outcomes'],startup_retry_budget=retry_budget)
     root=Path(recipe['production_root'])
     if root.parent!=origin/'continuations' or Path(recipe['runtime_root']).parent!=Path(original['runtime_root'])/'continuations':raise ValueError('Continuation namespace differs')
     recipe['authoritative_registries']={s:str(root/(s+'-registry.json')) for s in ('train','heldout')}

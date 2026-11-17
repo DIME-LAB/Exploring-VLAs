@@ -21,6 +21,7 @@ from bootstrap_capsule import ASSIGNED_UUID,load as load_bootstrap_capsule
 from backup_space import probe_code as backup_probe_code,serialized_copy,sealed_payload,receiver_code,validate_admission
 from gpu_device import inventory
 import clock_status
+import startup_retries
 
 ROOT=Path('/mnt/storage3/aaugus11/exploring-vlas')
 DUAL=Path('/mnt/a4500-backup/exploring-vlas/datasets/counterfactual-production-v1')
@@ -296,6 +297,7 @@ class Worker:
         self.collector_repo=Path(recipe.get('collector_repo',REPO))
         self.supervision=capture_supervision()
         self.retirement_certified=True
+        self.startup_retries=[]
     def check(self):
         qualified_recipe(getattr(self,'plan',dict(cut=self.cut)))
         try:disk()
@@ -377,18 +379,66 @@ class Worker:
         for name,relative in dict(TMPDIR='tmp',TEMP='tmp',TMP='tmp',XDG_CACHE_HOME='cache',HF_HOME='cache/huggingface',ROS_LOG_DIR='ros-logs').items():
             path=self.runtime/relative;path.mkdir(parents=True,exist_ok=True);self.env[name]=str(path)
         for key in ('ISAACSIM_EXTRA_ARGS','ROS_LOCALHOST_ONLY','DISPLAY','XAUTHORITY'):self.env.pop(key,None)
-        disk();event=self.stage('up-'+str(self.session),['bash',str(self.wrapper),'up',str(self.instance)],timeout=1500)
-        if event['returncode']:raise RuntimeError('Startup failed; see '+event['name']+'.log')
+        name='up-'+str(self.session);log=self.root/(name+'.log')
+        try:
+            disk();event=self.stage(name,['bash',str(self.wrapper),'up',str(self.instance)],timeout=1500)
+        except TimeoutError as exc:
+            self.check()
+            if str(exc)=='Stage deadline: '+name and self.stages[-1]['name']==name:
+                raise startup_retries.StartupFailure('up_deadline',repr(exc),self.stages[-1],log) from exc
+            raise
+        if event['returncode']:
+            self.check()
+            known=startup_retries.failed_exit(event,log)
+            if known is not None:raise known
+            raise RuntimeError('Startup failed; see '+event['name']+'.log')
         # The first challenge establishes ownership; the second binds before and
         # after the RPC. Clock qualification installs this checkout's runtime.
-        self.rpc('result=True')
-        self.rpc('result=True')
+        up_event=event
+        try:
+            self.rpc('result=True')
+            self.rpc('result=True')
+        except (TimeoutError,ConnectionError) as exc:
+            self.check()
+            raise startup_retries.StartupFailure('bootstrap_rpc',repr(exc),event,log) from exc
         cert=self.root/f'clock-{self.session}.json'
         event=self.stage('clock-'+str(self.session),['bash',str(self.wrapper),'clock-sanity',str(self.instance),'--output',str(cert)],timeout=1200)
         clock_status.require(cert,event['pid'],event['started_wall_ns'],event['returncode'])
         import stage_readiness
-        stage_readiness.wait(lambda:dict(stage_readiness=self.rpc(stage_readiness.probe_code())),
-            lambda p:atomic_json(self.root/f'readiness-{self.session}.json',p))
+        try:
+            stage_readiness.wait(lambda:dict(stage_readiness=self.rpc(stage_readiness.probe_code())),
+                lambda p:atomic_json(self.root/f'readiness-{self.session}.json',p))
+        except (TimeoutError,ConnectionError) as exc:
+            self.check()
+            raise startup_retries.StartupFailure('scene_readiness',repr(exc),up_event,log) from exc
+
+    def ensure_ready(self,job):
+        if self.claim is not None:return
+        budget=self.plan.get('startup_retry_budget')
+        if budget is None:self.up();return
+        while True:
+            self.check()
+            run=ROOT/f'datasets/counterfactual-targets/{job["split"]}/layout-{job["layout_seed"]}'
+            if os.path.lexists(run):raise RuntimeError('Startup retry refuses existing episode artefacts: '+str(run))
+            reservation=startup_retries.before_start(budget,self.instance,job)
+            if reservation is not None:
+                atomic_json(self.root/f'startup-retry-before-{self.session+1}.json',reservation)
+                self.startup_retries.append(reservation)
+            try:self.up()
+            except startup_retries.StartupFailure as exc:
+                atomic_json(self.root/f'startup-up-error-{self.session}.json',dict(kind=exc.kind,error=exc.cause,stage=exc.stage,up_log=str(exc.log),phase='before_retirement',wall_ns=time.time_ns()))
+                try:self.down()
+                except BaseException as cleanup:
+                    raise RuntimeError('Startup cleanup failed; original '+repr(exc)+'; cleanup '+repr(cleanup)) from cleanup
+                if not self.retirement_certified:raise RuntimeError('Startup retry lacks certified retirement')
+                if os.path.lexists(run):raise RuntimeError('Startup retry refuses episode artefacts: '+str(run))
+                record=startup_retries.failed(budget,self.instance,job,exc,self.root/f'owned-down-{self.session}.json',self.supervision)
+                atomic_json(self.root/f'startup-failure-{self.session}.json',record)
+                self.startup_retries.append(record)
+                continue
+            completed=startup_retries.ready(budget,self.instance,job,reservation)
+            if completed is not None:self.startup_retries.append(completed)
+            return
     def down(self):
         if self.claim is None:
             if not self.retirement_certified:raise RuntimeError('Previous owned cleanup remains unresolved')
@@ -460,12 +510,13 @@ class Worker:
         atomic_json(self.root/('outcome-'+str(seed)+'.json'),outcome)
         return outcome
     def run(self,jobs):
+        self.startup_retries=[]
         error=None;failure=None;backup_result=None;backup_error=None;retired=False;retirement_errors=[]
         try:
             for job in jobs:
                 self.active_job=job
                 self.check()
-                if self.claim is None:self.up()
+                self.ensure_ready(job)
                 self.attempt(job)
                 self.active_job=None
         except BaseException as exc:
@@ -485,6 +536,7 @@ class Worker:
             if failure is not None:
                 error=failure['error'];publish_stop(self.global_root,dict(failure,source='worker retirement supervision',slot=self.instance,wall_ns=time.time_ns()))
             result=dict(passed=error is None,error=error,retirement_errors=retirement_errors,supervision_after_retirement=latest,instance=self.instance,wave=self.wave,cut=self.cut,sessions=self.session+1,
+                startup_retries=self.startup_retries,
                 terminal_backup=backup_result,terminal_backup_error=backup_error,
                 supervision_failure=failure if error is not None else None,completed_wall_ns=time.time_ns())
             atomic_json(self.root/'worker-finalization.json',result)
@@ -611,7 +663,7 @@ def coordinate(recipe,release):
         atomic_json(root/'coordinator.json',identity(os.getpid()))
         runtime=Path(recipe['runtime_root']);runtime.mkdir(parents=True,exist_ok=False)
         if ctypes.CDLL(None,use_errno=True).prctl(36,1,0,0,0)!=0:raise OSError('Coordinator subreaper unavailable')
-        ledger=OwnedProcesses(runtime,time.time_ns());waves=[];error=None;children=[];verified={};cleanup=None;watch=None;jobs=[];terminal_backups=None;failure=None;retirement_errors=[]
+        ledger=OwnedProcesses(runtime,time.time_ns());waves=[];error=None;children=[];verified={};cleanup=None;watch=None;jobs=[];terminal_backups=None;failure=None;retirement_errors=[];retry_report=None
         try:
             def retire_workers():
                 for process,_,_ in list(children):
@@ -678,7 +730,8 @@ def coordinate(recipe,release):
             if cleanup['remaining']:raise RuntimeError('Coordinator descendants remain alive')
             finals={str(p.relative_to(root)):sha(p) for p in sorted(root.glob('wave-*/slot-*/worker-finalization.json'))}
             if any(read(root/p).get('passed') is not True for p in finals):raise RuntimeError('Worker finalization failed')
-            atomic_json(root/'production-finalization.json',dict(passed=True,error=None,cleanup=cleanup,worker_finalizations_sha256=finals,wall_ns=time.time_ns()))
+            retry_report=startup_retries.summary(recipe['startup_retry_budget']) if recipe.get('startup_retry_budget') else None
+            atomic_json(root/'production-finalization.json',dict(passed=True,error=None,cleanup=cleanup,worker_finalizations_sha256=finals,startup_retries=retry_report,wall_ns=time.time_ns()))
             for split,registry in registries(recipe,state).items():
                 publication_gate(root,watch);atomic_json(root/(split+'-registry.json'),registry)
             # Publish the independent caller seals only after finalization and both
@@ -729,7 +782,10 @@ def coordinate(recipe,release):
                 failure,latest=retirement_supervision(supervision,failure)
                 if failure is not None:
                     error=failure['error'];publish_stop(root,dict(failure,source='final retirement supervision',wall_ns=time.time_ns()))
-                atomic_json(root/'production-finalization.json',dict(passed=False,error=error,supervision_failure=failure,retirement_errors=retirement_errors,supervision_after_retirement=latest,cleanup=cleanup,terminal_backups=terminal_backups,
+                if recipe.get('startup_retry_budget'):
+                    try:retry_report=startup_retries.summary(recipe['startup_retry_budget'])
+                    except BaseException as exc:retirement_errors.append(failure_report(supervision,exc))
+                atomic_json(root/'production-finalization.json',dict(passed=False,error=error,supervision_failure=failure,retirement_errors=retirement_errors,supervision_after_retirement=latest,cleanup=cleanup,terminal_backups=terminal_backups,startup_retries=retry_report,
                     backup_children_cleanup=tail_cleanup,wall_ns=time.time_ns()))
         if error:raise RuntimeError(error)
 
