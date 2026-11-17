@@ -1,7 +1,7 @@
 """Invoke normal collector preparation before a native episode, without a model."""
 from pathlib import Path
 import hashlib,json,os,shlex,signal,subprocess,sys
-from native_bank import SEEN_SUITES,SEEN15_SEEDS
+from native_bank import SEEN_SUITES,SEEN15_SEEDS,reset_protocol
 
 def install_fenced_boundary(transport,native_mutation):
     """Use the collector's generation cancellation/retirement ordering."""
@@ -17,7 +17,7 @@ def install_fenced_boundary(transport,native_mutation):
     transport.sensors.prune_durable_camera_history()
     return result,retired
 
-def prepare_scene(repo,collector_root,row,out):
+def prepare_scene(repo,collector_root,row,out,readiness_budget_s=60):
     repo=Path(repo);collector_root=Path(collector_root);out=Path(out)
     receipt=Path(row['source_receipt']);reference=Path(row['reference_run'])
     assert hashlib.sha256(receipt.read_bytes()).hexdigest()==row['source_receipt_sha256']
@@ -27,7 +27,7 @@ def prepare_scene(repo,collector_root,row,out):
     for line in text.splitlines():
         parts=shlex.split(line);assert len(parts)==2 and parts[0]=='export';key,value=parts[1].split('=',1);env[key]=value
     assert env['CUDA_VISIBLE_DEVICES'].startswith('GPU-') and env['SOARM_RENDERER_GPU_INDEX']=='0'
-    argv=['python3','-u',str(repo/'linux-env/scripts/eval/matched_reset.py'),'--collector-root',str(collector_root),'--bank',row['bank_root'],'--bank-sha256',row['bank_sha256'],'--seed',str(row['seed']),'--out',str(out)]
+    argv=['python3','-u',str(repo/'linux-env/scripts/eval/matched_reset.py'),'--collector-root',str(collector_root),'--bank',row['bank_root'],'--bank-sha256',row['bank_sha256'],'--seed',str(row['seed']),'--out',str(out),'--readiness-budget-s',str(readiness_budget_s)]
     with out.with_suffix('.log').open('w') as log:
         proc=subprocess.Popen(argv,env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
         try:
@@ -40,19 +40,20 @@ def prepare_scene(repo,collector_root,row,out):
                 try:proc.wait(timeout=35)
                 except subprocess.TimeoutExpired:os.killpg(proc.pid,signal.SIGTERM);proc.wait(timeout=15)
     proof=json.loads((out/'matched-reset-proof.json').read_text())
+    assert proof.get('readiness_budget_s',60)==readiness_budget_s,'Reset worker readiness budget differs'
     assert proof['status']=='PASS' and proof['seed']==row['seed'] and proof['source_receipt_sha256']==row['source_receipt_sha256']
-    assert proof['protocol']==('collector-matched-reset-v1' if row['suite'] in SEEN_SUITES else 'collector-sealed-postsample-v1') and proof['finalization']['passed']
+    assert proof['protocol']==reset_protocol(row['suite']) and proof['finalization']['passed']
     assert proof['suite']==row['suite'] and proof['bank_sha256']==row['bank_sha256'] and proof['reference_run_sha256']==row['reference_run_sha256']
     receipt_path=out/'attempt-0000/receipt.json';assert hashlib.sha256(receipt_path.read_bytes()).hexdigest()==proof['receipt_sha256'];prepared=json.loads(receipt_path.read_text())
     return dict(proof,path=str(out),prepared_snapshot=prepared['prepared_snapshot'],training_first_frame_offset_ns=prepared['training_first_frame_offset_ns'],proof_sha256=hashlib.sha256((out/'matched-reset-proof.json').read_bytes()).hexdigest(),post_cleanup_native_bootstrap_frames=1,post_cleanup_reteleport=False)
 
-def reset_scene(transport,repo,collector_root,row,out):
+def reset_scene(transport,repo,collector_root,row,out,readiness_budget_s=60):
     """One entrance for qualification and policy evaluation's matched reset."""
     import numpy as np
     from collect import mcp
     repo=Path(repo)
     pre,pre_retired=install_fenced_boundary(transport,lambda:mcp('run_python',{'code':'import collection_runtime as c\nresult=c.runtime().restore('+repr(dict(state=row['state'],drive_targets=row['recorded_drive_targets'],bodies=row['bodies']))+',arm=True,restore_drives=True)'}))
-    proof=prepare_scene(repo,collector_root,row,out)
+    proof=prepare_scene(repo,collector_root,row,out,readiness_budget_s=readiness_budget_s)
     # Cleanup changes only the epoch and idle cap. No teleport is permitted
     # after normal collector preparation; retain its rendered scene history.
     mcp('run_python',{'code':(repo/'linux-env/scripts/collect/configure_clock.py').read_text()+'\nresult=configure(30)'})

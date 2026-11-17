@@ -1,4 +1,5 @@
 import json
+import ast
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -6,10 +7,36 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
-from readiness_diagnostics import trace_wait_ready
+from readiness_diagnostics import trace_wait_ready, budgeted_wait_ready
 
 
 class Tests(unittest.TestCase):
+    def test_budget_opt_in_preserves_default_and_original_wait_bytecode(self):
+        class Clock:
+            now = 0
+            def monotonic(self):return self.now
+            def wait(self, delay):self.now += delay
+        clock = Clock()
+        namespace = dict(time=clock)
+        source=Path(__file__).resolve().parents[1]/'collect/collect.py'
+        tree=ast.parse(source.read_text())
+        cls=next(node for node in tree.body if isinstance(node,ast.ClassDef) and node.name=='Collector')
+        method=next(node for node in cls.body if isinstance(node,ast.FunctionDef) and node.name=='wait_ready')
+        exec(compile(ast.Module(body=[method],type_ignores=[]),str(source),'exec'),namespace)
+        import types
+        collector = SimpleNamespace(stop=clock,failure=None,node=SimpleNamespace(objects_data={},_drop_data={}),servo=SimpleNamespace(last_sim_ns=0),sensors=SimpleNamespace(reference={}))
+        original = types.MethodType(namespace['wait_ready'], collector)
+        self.assertIs(budgeted_wait_ready(original), original)
+        changed = budgeted_wait_ready(original, 180)
+        self.assertEqual(changed.__func__.__code__.co_code, original.__func__.__code__.co_code)
+        self.assertEqual(sum(a != b for a,b in zip(changed.__func__.__code__.co_consts,original.__func__.__code__.co_consts)),1)
+        for method, expected in ((original,60),(changed,180)):
+            clock.now = 0
+            with self.assertRaises(TimeoutError):method()
+            self.assertGreaterEqual(clock.now,expected)
+            self.assertLess(clock.now,expected+.2)
+        self.assertIn(60,original.__func__.__code__.co_consts)
+        with self.assertRaises(ValueError):budgeted_wait_ready(original,181)
     def collector(self):
         return SimpleNamespace(node=SimpleNamespace(objects_data={}, _drop_data={}),
                                servo=SimpleNamespace(last_sim_ns=None),

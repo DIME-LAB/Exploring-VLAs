@@ -9,6 +9,27 @@ SEEN15_SEEDS=tuple(range(530000,530006))+tuple(range(530500,530506))+tuple(range
 SEEN_SUITES=('seen-training-home','seen-training-home-15','rule-seen-training-home-15')
 SEEN_BANK_SHA='dbae9bdc10cc5755d6aeba9a6038de3b778614572c6950afa5d258f61502b2d6'
 
+def reset_protocol(suite):
+    if suite=='rule-seen-training-home-15':return 'collector-recorded-postsample-v1'
+    if suite in SEEN_SUITES:return 'collector-matched-reset-v1'
+    if suite=='heldout-bank-v2':return 'collector-sealed-postsample-v1'
+    raise ValueError('Unknown reset suite')
+
+def recorded_initial(source):
+    initial=source.get('initial_physical')
+    if not initial or set(initial.get('bodies',{}))!=NAMES:raise ValueError('Rule home requires complete recorded initial physical state')
+    fields={key:(initial.get(key),6) for key in ('state','drive_targets')}
+    for name,body in initial['bodies'].items():
+        if not isinstance(body,dict):raise ValueError('Invalid recorded initial body: '+name)
+        fields[name+'.position']=(body.get('position'),3)
+        fields[name+'.orientation']=(body.get('orientation'),4)
+    for key,(values,size) in fields.items():
+        try:valid=isinstance(values,(list,tuple)) and len(values)==size and all(math.isfinite(v) for v in values)
+        except TypeError:valid=False
+        if not valid:raise ValueError('Invalid recorded initial '+key)
+        if key.endswith('.orientation') and sum(v*v for v in values)==0:raise ValueError('Zero recorded initial quaternion: '+key)
+    return initial
+
 def fingerprint(path):
     digest=hashlib.sha256()
     with Path(path).open('rb') as stream:
@@ -82,6 +103,7 @@ def load_bank(root,expected_sha256):
                 for name,pose in row['bodies'].items():
                     if pose!={k:prepared['bodies'][name][k] for k in ('position','orientation')}:raise ValueError('Seen fifteen recorded bodies differ')
                 if rule15:
+                    recorded_initial(source)
                     import sys
                     sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'collect'))
                     from rule_target import select_target

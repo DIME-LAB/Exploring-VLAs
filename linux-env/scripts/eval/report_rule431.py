@@ -50,11 +50,11 @@ def audit(root,out):
             b=bank_rows[r['seed']]
             sealed=select_target(json.loads(Path(b['source_receipt']).read_text())['initial_physical'],r['color'])
             diagnostic.update(bank_choice=sealed['object'],bank_candidates=sealed['candidates'],bank_margin_m=sealed['margin_m'],live_matches_bank=proof['object']==sealed['object'],cross_check_semantics='diagnostic only; live fixed target retained, not a gate')
-        row.update(rule_target_selection=json.dumps(diagnostic,sort_keys=True),ambiguous=proof.get('ambiguous'),path=str(path),xy_mm=g.get('xy_mm'),yaw_deg=g.get('yaw_deg'),dz_mm=g.get('dz_mm'),closure_phase=g.get('phase'))
+        row.update(readiness_budget_s=ledger.get('readiness_budget_s',60),reset_protocol=((r.get('matched_reset') or {}).get('proof') or {}).get('protocol'),rule_target_selection=json.dumps(diagnostic,sort_keys=True),ambiguous=proof.get('ambiguous'),path=str(path),xy_mm=g.get('xy_mm'),yaw_deg=g.get('yaw_deg'),dz_mm=g.get('dz_mm'),closure_phase=g.get('phase'))
         rows.append(row)
     if len({r['seed'] for r in rows})!=len(rows):raise ValueError('Do not silently combine repeated attempts in one window')
     out.mkdir(parents=True,exist_ok=False)
-    summary=summarize(episodes);summary.update(window=str(root),status=ledger['status'],all_attempts_included=True)
+    summary=summarize(episodes);summary.update(window=str(root),status=ledger['status'],all_attempts_included=True,readiness_budget_s=ledger.get('readiness_budget_s',60),reset_protocol_by_suite=(__import__('native_bank').reset_protocol(ledger['suite']) if ledger.get('suite') else None))
     (out/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
     if rows:
         with (out/'episodes.csv').open('w',newline='') as f:

@@ -10,7 +10,7 @@ from collect import mcp
 from native_environment import qualified_host
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--bank',type=Path,required=True);p.add_argument('--bank-sha256',required=True);p.add_argument('--collector-root',type=Path,required=True);p.add_argument('--out',type=Path,required=True);p.add_argument('--bootstrap-control',type=Path);a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--readiness-budget-s',type=float,choices=(60.,180.),default=60.);p.add_argument('--bank',type=Path,required=True);p.add_argument('--bank-sha256',required=True);p.add_argument('--collector-root',type=Path,required=True);p.add_argument('--out',type=Path,required=True);p.add_argument('--bootstrap-control',type=Path);a=p.parse_args()
     require_environment();sources=validate_collector_cut();rows,suite=load_bank(a.bank,a.bank_sha256)
     host=qualified_host(REPO);binding=reference_binding(rows,suite);reference_sha=binding.get('reference_sha256');reference_map=binding.get('reference_sha256_by_seed')
     bootstrap_control=None
@@ -36,7 +36,7 @@ def main():
             old,_=install_fenced_boundary(transport,lambda:mcp('run_python',{'code':'import collection_runtime as c\nresult=c.runtime().restore('+repr(dict(state=row['state'],drive_targets=row['recorded_drive_targets'],bodies=row['bodies']))+',arm=True,restore_drives=True)'}))
             mcp('run_python',{'code':'import collection_runtime as c\nresult=c.runtime().advance()'});transport.session.read()
             np.savez_compressed(out/'one-bootstrap-cameras.npz',**{cam:transport.sensors.image(transport.session.entry[cam][0]).copy() for cam in ('top','wrist')})
-            reset,proof=reset_scene(transport,REPO,a.collector_root,row,out/'matched-reset');snapshot=transport.session.current
+            reset,proof=reset_scene(transport,REPO,a.collector_root,row,out/'matched-reset',readiness_budget_s=a.readiness_budget_s);snapshot=transport.session.current
             images={cam:transport.sensors.image(transport.session.entry[cam][0]).copy() for cam in ('top','wrist')};assert all(im.shape==(480,640,3) and im.dtype==np.uint8 for im in images.values())
             np.savez_compressed(out/'matched-cameras.npz',**images)
             body_error=max(abs(x-y) for name in row['bodies'] for x,y in zip(snapshot['bodies'][name]['position'],row['bodies'][name]['position']))
@@ -46,6 +46,6 @@ def main():
                 command,current=transport.session.step(hold);commands.append(command);snaps.append(current)
             result=dict(status='PASS',seed=row['seed'],suite=suite,scored=False,reset_protocol=proof['protocol'],matched_reset=proof,joint_max_error_deg=joint_error,body_max_error_m=body_error,verified_hold_commands=len(commands),wall_s=time.monotonic()-started,first_snapshot=snapshot,cameras={k:dict(shape=list(v.shape),sha256=hashlib.sha256(v.tobytes()).hexdigest()) for k,v in images.items()})
             (out/'result.json').write_text(json.dumps(result,indent=2)+'\n');(out/'commands.jsonl').write_text(''.join(json.dumps(v)+'\n' for v in commands));(out/'physical.jsonl').write_text(''.join(json.dumps(v)+'\n' for v in snaps));results.append(result);print(json.dumps(dict(seed=row['seed'],status='PASS',native_commands=len(commands))),flush=True)
-        (a.out/'summary.json').write_text(json.dumps(dict(status='PASS',scored=False,suite=suite,seeds=[r['seed'] for r in rows],reference_run_sha256=reference_sha,reference_run_sha256_by_seed=reference_map,bootstrap_control=bootstrap_control,episodes=len(results),commands=sum(r['verified_hold_commands'] for r in results),reset_collector_root=str(a.collector_root.resolve()),rows=results,collector_source_sha256=sources,bank_sha256=a.bank_sha256),indent=2)+'\n')
+        (a.out/'summary.json').write_text(json.dumps(dict(status='PASS',readiness_budget_s=a.readiness_budget_s,scored=False,suite=suite,seeds=[r['seed'] for r in rows],reference_run_sha256=reference_sha,reference_run_sha256_by_seed=reference_map,bootstrap_control=bootstrap_control,episodes=len(results),commands=sum(r['verified_hold_commands'] for r in results),reset_collector_root=str(a.collector_root.resolve()),rows=results,collector_source_sha256=sources,bank_sha256=a.bank_sha256),indent=2)+'\n')
     finally:transport.close()
 if __name__=='__main__':main()

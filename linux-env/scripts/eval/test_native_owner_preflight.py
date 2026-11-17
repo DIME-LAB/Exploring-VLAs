@@ -20,8 +20,8 @@ def exercise(xml,scenario="pass"):
         (repo/'linux-env/cyclonedds.xml').write_bytes(Path(xml).read_bytes())
         instance=host/'eval/runtime/instance92';instance.mkdir(parents=True)
         paths=[];calls=[];registered=[];tick=[0.];external_claim=None
-        seeds=[530002,530003,530004,530005,530500,530503,530505,531001,531002,531005,531009,531010,531013,531015,531016] if scenario=='rule15' else list(native_bank.SEEN15_SEEDS) if scenario=='seen15' else list(range(530000,530005))
-        suite='rule-seen-training-home-15' if scenario=='rule15' else 'seen-training-home-15' if scenario=='seen15' else 'seen-training-home'
+        seeds=[530002,530003,530004,530005,530500,530503,530505,531001,531002,531005,531009,531010,531013,531015,531016] if scenario in ('rule15','rule15-180') else list(native_bank.SEEN15_SEEDS) if scenario=='seen15' else list(range(530000,530005))
+        suite='rule-seen-training-home-15' if scenario in ('rule15','rule15-180') else 'seen-training-home-15' if scenario=='seen15' else 'seen-training-home'
         cards=[dict(uuid='gpu0',index=0),dict(uuid='gpu1',index=1)]
         external=os.getppid()
         def nvml(_):
@@ -57,6 +57,9 @@ def exercise(xml,scenario="pass"):
                         ep=q/f'ep{i:02d}';ep.mkdir();(ep/'grasp-telemetry-summary.json').write_text(json.dumps(dict(contact_ticks=3,physics_substeps=900)))
                 else:
                     assert 'qualify_matched_reset.py' in cmd[-1]
+                    if scenario=='rule15-180':
+                        import shlex
+                        tokens=shlex.split(cmd[-1]);assert float(tokens[tokens.index('--readiness-budget-s')+1])==180
                     q=out/'qualification';q.mkdir()
                     (q/'summary.json').write_text(json.dumps(dict(status='PASS',suite=suite,seeds=seeds,episodes=len(seeds),commands=10*len(seeds))))
             def poll(self):
@@ -78,6 +81,7 @@ def exercise(xml,scenario="pass"):
         if scenario=='grasp-replay':
             (base/'fixture.json').write_text(json.dumps(dict(kind='native-held-replay-v1',episodes=[dict(seed=530000+i,color=('red','green','blue')[i]) for i in range(3)])))
         if scenario=='grasp-replay':argv=[str(folder/'run_native_replay_window.py'),'--out',str(out),'--stop-by-utc',deadline,'--grasp-telemetry','--fixture',str(base/'fixture.json'),'--fixture-sha256',hashlib.sha256((base/'fixture.json').read_bytes()).hexdigest(),'--replay-commands','executed']
+        if scenario=='rule15-180':argv+=['--readiness-budget-s','180']
         if scenario=='qualification-subset-refusal':argv+=['--episode-seeds','530000']
         if scenario=='rule-requires-checkpoint':argv+=['--rule-target']
         if scenario=='wrist-requires-checkpoint':argv+=['--retain-wrist-before-closure']
@@ -98,15 +102,16 @@ def exercise(xml,scenario="pass"):
                     print(json.dumps(dict(status='PASS',scenario=scenario,refused_before_output_and_launch=True)))
                     return
                 except RuntimeError as failure:
-                    if scenario in ('pass','late-benign-graphics','seen15','rule15'):raise
+                    if scenario in ('pass','late-benign-graphics','seen15','rule15','rule15-180'):raise
                     error=str(failure)
             ledger=json.loads((out/'window-ledger.json').read_text())
             assert ledger['cleanup_exit_code']==0 and ledger['stopped_utc']
             assert not paths or scenario=='occupied-instance'
             samplefile=out/'gpu-memory.jsonl'
             samples=[json.loads(l) for l in samplefile.read_text().splitlines()] if samplefile.exists() else []
-            if scenario in ('pass','late-benign-graphics','seen15','rule15'):
+            if scenario in ('pass','late-benign-graphics','seen15','rule15','rule15-180'):
                 assert ledger['status']=='matched-reset-qualified' and error is None
+                assert ledger['readiness_budget_s']==(180 if scenario=='rule15-180' else 60)
                 assert any(s.get('owned_mib')==3700 for s in samples)
                 assert not any('audit_error' in s for s in samples)
                 assert ledger['external_graphics_baseline']['owned'] is False
@@ -143,6 +148,7 @@ class OwnerEntrypointTests(unittest.TestCase):
         result=subprocess.run([sys.executable,'-I','-B',str(Path(__file__).resolve()),'--exercise',str(xml),scenario],env=env,text=True,capture_output=True)
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
         self.assertIn('"scenario": "'+scenario+'"',result.stdout)
+    def test_rule15_owner_honours_explicit_budget(self):self.run_scenario('rule15-180')
     def test_rule15_owner_lifecycle(self):self.run_scenario('rule15')
     def test_rule_target_requires_checkpoint(self):self.run_scenario('rule-requires-checkpoint')
     def test_wrist_requires_checkpoint(self):self.run_scenario('wrist-requires-checkpoint')
