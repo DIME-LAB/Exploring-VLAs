@@ -7,7 +7,7 @@ QUALIFICATION_FILES=('run_native_replay_window.py','native_replay.py','held_tick
     'flow_noise.py','grasp_telemetry.py','codec_stream.py','checkpoint_contract.py','select_replacement.py',
     'native_environment.py','native_gpu_audit.py','native_home_capture.py','matched_reset.py',
     'matched_reset_client.py','native_bank.py','qualify_matched_reset.py','rule_target.py',
-    'prepare_seen15_bank.py','wrist_retention.py','native_policy_bridge.py','closure_geometry.py')
+    'prepare_seen15_bank.py','wrist_retention.py','native_policy_bridge.py','closure_geometry.py','readiness_diagnostics.py')
 
 def qualification_sources(folder):
     import hashlib
@@ -37,7 +37,7 @@ def preflight_sources(repo):
     client=folder/'run_episodes.py'
     original=subprocess.check_output(['git','-C',str(repo),'show','bf7336d:linux-env/scripts/eval/run_episodes.py'])
     if client.read_bytes()!=original:raise ValueError('Native collector-side Client differs from bf7336d')
-    names=('native_policy.py','flow_noise.py','grasp_telemetry.py','native_environment.py','native_bank.py','native_replay.py','held_tick.py','checkpoint_contract.py','run_episodes.py','rule_target.py','prepare_seen15_bank.py','wrist_retention.py','native_policy_bridge.py','closure_geometry.py')
+    names=('native_policy.py','flow_noise.py','grasp_telemetry.py','native_environment.py','native_bank.py','native_replay.py','held_tick.py','checkpoint_contract.py','run_episodes.py','rule_target.py','prepare_seen15_bank.py','wrist_retention.py','native_policy_bridge.py','closure_geometry.py','readiness_diagnostics.py')
     return {name:hashlib.sha256((folder/name).read_bytes()).hexdigest() for name in names}
 
 def require_preflight_sources(proof,repo):

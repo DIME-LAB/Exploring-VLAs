@@ -49,6 +49,8 @@ class NativeBridgeTests(unittest.TestCase):
             else:self.assertEqual(reference,commands)
             with tempfile.TemporaryDirectory() as t:
                 proof=h.finish(Path(t)/'wrist');self.assertEqual(proof['closures_recorded'],1);self.assertEqual(proof['frames_saved'],31)
+                self.assertEqual(proof['verified_native_ticks'],46);self.assertEqual(proof['executed_actions'],45)
+                self.assertEqual(proof['last_sim_ns']-proof['first_sim_ns'],1_500_000_000)
     def test_warm_hold_and_nonfinite_refusal(self):
         t=HeldCollector(1.);scorer=SimpleNamespace(update=lambda state:None);commands=[];snaps=[]
         action=dict.fromkeys(FEATURES,100.);hold=[0.]*5+[1.]

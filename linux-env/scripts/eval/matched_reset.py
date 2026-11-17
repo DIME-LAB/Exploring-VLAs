@@ -78,7 +78,9 @@ def main():
     try:
         with collector.status_lock:collector.finalization_certificate=c.collection_status.begin(a.out)
         collector.safe_home_baseline=None;collector.needs_home_restore=False
-        clock,transport,live_baseline,sources,gpu,provenance=collector._initialize_scene_session(a.out,None,0)
+        from readiness_diagnostics import trace_wait_ready
+        with trace_wait_ready(collector,a.out/'readiness-diagnostics.json'):
+            clock,transport,live_baseline,sources,gpu,provenance=collector._initialize_scene_session(a.out,None,0)
         # Select the recorded training run's reset baseline. randomize_scene
         # itself restores CUP_LAYOUT before sampling, exactly as in one normal
         # multi-episode collector run; a prior policy episode is not a baseline.

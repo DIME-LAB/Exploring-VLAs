@@ -93,6 +93,9 @@ class WristHistory:
                                raw_rgb_sha256=raw_sha, png_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
                                camera_identity=frame['identity']))
         result = dict(enabled=True, complete=True, format='lossless PNG RGB', window_ns=self.window_ns,
+                      verified_native_ticks=self.last_actions+1, executed_actions=self.last_actions,
+                      epoch=self.epoch, first_sim_ns=self.first_ns, last_sim_ns=self.last_ns,
+                      camera_join_tolerance_ns=1000,
                       capture='existing camera readback after each native ACK, no extra app/physics update',
                       cadence_sim_hz=30, frames=frames, closures=self.events,
                       frames_saved=len(frames), closures_recorded=len(self.events),
@@ -103,6 +106,9 @@ class WristHistory:
                       encoding_phase='after all episode actions; no encoding or I/O in observe')
         manifest = directory/'manifest.json';manifest.write_text(json.dumps(result,indent=2)+'\n')
         summary = dict(enabled=True, complete=True, manifest=str(manifest),
+                       verified_native_ticks=result['verified_native_ticks'],
+                       executed_actions=result['executed_actions'],
+                       epoch=self.epoch, first_sim_ns=self.first_ns, last_sim_ns=self.last_ns,
                        manifest_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest(),
                        frames_saved=len(frames), closures_recorded=len(self.events),
                        peak_raw_rgb_bytes=result['peak_raw_rgb_bytes'], encoding_wall_s=result['encoding_wall_s'])
