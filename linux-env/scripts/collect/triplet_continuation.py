@@ -126,9 +126,8 @@ def verify_interruption(outcome,proof,recipe):
     expected=next((j for j in initial_wave() if j['layout_seed']==seed),None)
     if job!=expected:raise ValueError('Interruption job changed')
     peer=kind=='acknowledged_peer_interruption' and seed==PEER_INTERRUPTION
-    export=kind=='interrupted_export_rejected' and seed in INTERRUPTED_EXPORTS
-    if not (peer or export):raise ValueError('Unknown interruption disposition')
-    reason='operator_acknowledged_peer_stop' if peer else 'interrupted_export_validation_failed'
+    if not peer:raise ValueError('Only the explicit post-STOP peer interruption is replaceable here')
+    reason='operator_acknowledged_peer_stop'
     if (outcome not in admission['inherited_outcomes'] or outcome['status']!='refused' or outcome['reason']!=reason or
         proof['original_terminal'] is not True or proof['cut']!=COLLECTOR_CUT or proof['origin_bindings']!=admission['origin_bindings']):
         raise ValueError('Interruption is not bound to the explicit continuation admission')
@@ -139,40 +138,48 @@ def verify_interruption(outcome,proof,recipe):
     run=Path(proof['raw_root'])
     if run!=p.ROOT/f'datasets/counterfactual-targets/train/layout-{seed}':raise ValueError('Interrupted raw root differs')
     if manifest(run)!=proof['files_sha256']:raise ValueError('Interrupted raw bytes changed')
-    p.verify_sources(run,COLLECTOR_CUT,recipe['collector_repo']);retirement(run,proof['stage'],terminal=peer)
-    if peer:
-        events=read(run/'terminal-fault.json').get('events',[])
-        if not events or any(e.get('wall_ns',0)<=proof['stop_wall_ns'] or 'MoveIt state validity query did not complete' not in e.get('error','') for e in events):
-            raise ValueError('Unknown or pre-STOP terminal fault')
-    else:
-        if read(run/'summary.json').get('complete') is not True or not proof.get('qualification_failure'):raise ValueError('Export failure evidence missing')
-        try:
-            value=p.classify(run,job,proof['stage'],proof.get('media'),proof.get('export_stages'))
-        except (ValueError,RuntimeError,FileNotFoundError):pass
-        else:
-            if value[0]=='selected' and all(e.get('returncode')==0 for e in proof.get('export_stages',{}).values()):raise ValueError('Healthy export cannot be disposed as terminal')
+    p.verify_sources(run,COLLECTOR_CUT,recipe['collector_repo']);retirement(run,proof['stage'],terminal=True)
+    events=read(run/'terminal-fault.json').get('events',[])
+    if not events or any(e.get('wall_ns',0)<=proof['stop_wall_ns'] or 'MoveIt state validity query did not complete' not in e.get('error','') for e in events):
+        raise ValueError('Unknown or pre-STOP terminal fault')
     backup=proof['backup']
     expected=p.DUAL/'datasets/counterfactual-targets/train'/run.name
     if backup.get('passed') is not True or backup['files_sha256']!=proof['files_sha256'] or backup['destination']!=str(expected):raise ValueError('Interrupted bytes are not backed up')
     return proof
 
 
-def acknowledged_outcome(worker,job,stage,state,output,kind,error=None):
+def require_completed_checks(proof):
+    """An interrupted complete collector needs a fresh completed media check.
+
+    The frozen exporter publishes a finished certificate only on success.
+    Its exceptions/in-progress marker cannot authorize a permanent refusal.
+    """
+    stage=proof.get('media_stage');receipt=proof.get('media_receipt');media=proof.get('media')
+    seed=proof['job']['layout_seed'];run=Path(proof['raw_root'])
+    if not isinstance(stage,dict) or stage.get('name')!='media-'+str(seed) or not isinstance(receipt,dict) or not isinstance(media,dict):raise ValueError('Completed interrupted media evidence missing')
+    expected=0 if media.get('passed') is True else 2 if media.get('passed') is False else None
+    if expected is None or stage.get('returncode')!=expected or stage.get('wall_s',-1)<0 or stage.get('pid',0)<=0:raise ValueError('Media exit/verdict evidence differs')
+    if (receipt.get('path')!='production-media.json' or receipt.get('sha256')!=proof['files_sha256'].get('production-media.json') or
+        receipt.get('written_wall_ns',0)<stage.get('started_wall_ns',1) or
+        receipt['written_wall_ns']!=(run/'production-media.json').stat().st_mtime_ns):raise ValueError('Fresh media receipt evidence missing')
+    if expected==2:
+        if proof['status']!='refused' or proof['reason'] not in ('exact_identity','image_psnr','departure_labels') or proof.get('export_stages')!={}:raise ValueError('Failed media verdict differs from disposition')
+    elif (proof['status']!='selected' or set(proof.get('export_stages',{}))!={'report','report-validation'} or
+          any(row.get('returncode')!=0 for row in proof['export_stages'].values())):raise ValueError('Completed export evidence missing')
+    return 'media' if expected==2 else 'media+export+validate-existing'
+
+
+def acknowledged_outcome(job,stage,state,output):
     import triplet_production as p
     seed=job['layout_seed'];run=p.ROOT/f'datasets/counterfactual-targets/train/layout-{seed}'
     files=manifest(run)
     with (output/f'interruption-{seed}-backup.log').open('x') as log:
         backup=p.backup(run,files,p.DUAL/'datasets/counterfactual-targets/train'/run.name,log)
-    exports={}
-    for row in worker.stages:
-        if row['name']=='report-'+str(seed):exports['report']=row
-        elif row['name']=='report-validation-'+str(seed):exports['report-validation']=row
-    proof=dict(kind=kind,original_terminal=True,cut=COLLECTOR_CUT,job=job,stage=stage,raw_root=str(run),files_sha256=files,
-        backup=backup,group=None,origin_bindings=state['bindings'],stop_wall_ns=state['stop_wall_ns'],qualification_failure=error,
-        media=read(run/'production-media.json') if (run/'production-media.json').exists() else None,export_stages=exports)
+    proof=dict(kind='acknowledged_peer_interruption',original_terminal=True,cut=COLLECTOR_CUT,job=job,stage=stage,raw_root=str(run),files_sha256=files,
+        backup=backup,group=None,origin_bindings=state['bindings'],stop_wall_ns=state['stop_wall_ns'])
     path=output/f'acknowledged-interruption-{seed}.json';atomic_json(path,proof)
     return dict(split=job['split'],requested_layout_seed=job['requested_layout_seed'],layout_seed=seed,status='refused',
-        reason='operator_acknowledged_peer_stop' if kind=='acknowledged_peer_interruption' else 'interrupted_export_validation_failed',proof_path=str(path),proof_sha256=sha(path))
+        reason='operator_acknowledged_peer_stop',proof_path=str(path),proof_sha256=sha(path))
 
 
 def snapshot_origin(origin,target):
@@ -243,24 +250,22 @@ def prepare(origin,collector_repo,runner_cut,output,checkpoint_sha):
                 retirement(run,stage);p.verify_sources(run,COLLECTOR_CUT,collector_repo)
                 if read(run/'summary.json').get('complete') is not True:raise ValueError('Interrupted export lacks a complete collector')
                 saved=run/'continuation-export-history'/token;saved.mkdir(parents=True,exist_ok=False)
-                for name in ('dataset','report','report-validation'):
+                for name in ('dataset','report','report-validation','production-media.json'):
                     source=run/name
-                    if source.exists():checked_tree(source);source.rename(saved/name)
+                    if source.exists() or source.is_symlink():
+                        if source.is_dir():checked_tree(source)
+                        else:regular(source)
+                        source.rename(saved/name)
                 worker.instance=job['instance']
-                try:outcome=worker.qualify(job,stage)
-                except (ValueError,RuntimeError) as exc:
-                    # Only these explicitly approved, already-retired interrupted exports
-                    # have this disposition. Fresh groups keep the normal terminal policy.
-                    p.disk()
-                    if worker.stop_file.exists():raise
-                    retirement(run,stage);p.verify_sources(run,COLLECTOR_CUT,collector_repo)
-                    outcome=acknowledged_outcome(worker,job,stage,state,output,'interrupted_export_rejected',repr(exc))
+                # Tool, dependency, I/O and incomplete-export failures abort. Only
+                # the real classifier's completed media verdict can refuse a group.
+                outcome=worker.qualify(job,stage)
                 inherited.append(outcome);completed.append(seed)
             job=next(j for j in initial_wave() if j['layout_seed']==PEER_INTERRUPTION)
             stage=next(x for x in read(original/f'wave-00/slot-{job["instance"]}/stages.json') if x['name']=='collect-'+str(PEER_INTERRUPTION))
             run=p.ROOT/f'datasets/counterfactual-targets/train/layout-{PEER_INTERRUPTION}'
             retirement(run,stage,terminal=True);p.verify_sources(run,COLLECTOR_CUT,collector_repo)
-            inherited.append(acknowledged_outcome(worker,job,stage,state,output,'acknowledged_peer_interruption'))
+            inherited.append(acknowledged_outcome(job,stage,state,output))
         finally:
             try:
                 watch.close()

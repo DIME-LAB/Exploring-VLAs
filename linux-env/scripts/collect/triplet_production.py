@@ -430,12 +430,14 @@ class Worker:
     def qualify(self,job,event):
         """Finish the same media/export/backup admission for fresh or interrupted collection."""
         seed=job['layout_seed'];run=ROOT/f'datasets/counterfactual-targets/{job["split"]}/layout-{seed}'
-        verify_sources(run,self.cut,getattr(self,'collector_repo',REPO));media=None;exports={}
+        verify_sources(run,self.cut,getattr(self,'collector_repo',REPO));media=None;exports={};media_stage=None;media_receipt=None
         if read(run/'summary.json').get('complete') is True:
             python=profile()['export_python']
             media_stage=self.stage('media-'+str(seed),[python,'-B',str(SELF.with_name('triplet_media.py')),str(run),'--output',str(run/'production-media.json')],export=True)
             if media_stage['returncode'] not in (0,2):raise RuntimeError('Media checker did not finish')
             media=read(run/'production-media.json')
+            media_receipt=dict(path='production-media.json',sha256=sha(run/'production-media.json'),written_wall_ns=(run/'production-media.json').stat().st_mtime_ns)
+            if (media_stage['returncode']==0)!=(media.get('passed') is True):raise RuntimeError('Media checker exit/verdict differs')
             if media['passed']:
                 for existing in (False,True):
                     name='report-validation' if existing else 'report'
@@ -445,7 +447,7 @@ class Worker:
                     if exports[name]['returncode']:raise RuntimeError('Export checker failed')
         status,reason,group=classify(run,job,event,media,exports)
         files=manifest(run);proof=dict(version=1,cut=self.cut,job=job,stage=event,status=status,reason=reason,
-            raw_root=str(run),files_sha256=files,media=media,export_stages=exports,group=group)
+            raw_root=str(run),files_sha256=files,media=media,media_stage=media_stage,media_receipt=media_receipt,export_stages=exports,group=group)
         destination=DUAL/'datasets/counterfactual-targets'/job['split']/run.name
         with (self.root/('backup-'+str(seed)+'.log')).open('x') as log:proof['backup']=backup(run,files,destination,log)
         path=self.global_root/'proofs'/job['split']/(str(seed)+'.json');path.parent.mkdir(parents=True,exist_ok=True)
@@ -492,7 +494,8 @@ def verify_outcome(outcome,recipe):
     if confined(path)!=path:raise ValueError('Disposition proof path is not canonical')
     if sha(path)!=outcome['proof_sha256']:raise ValueError('Disposition proof changed')
     proof=read(path)
-    if proof.get('kind') in ('acknowledged_peer_interruption','interrupted_export_rejected'):
+    if str(proof.get('kind','')).startswith('interrupted_export_'):raise ValueError('Interrupted export errors are not completed gate verdicts')
+    if proof.get('kind')=='acknowledged_peer_interruption':
         from triplet_continuation import verify_interruption
         return verify_interruption(outcome,proof,recipe)
     job=proof['job'];run=Path(proof['raw_root'])
@@ -501,6 +504,9 @@ def verify_outcome(outcome,recipe):
     actual=classify(run,job,proof['stage'],proof['media'],proof['export_stages'])
     if (actual[0],actual[1])!=(outcome['status'],outcome['reason']):raise ValueError('Outcome differs from verified raw disposition')
     if any(outcome[k]!=job[k] for k in ('split','layout_seed','requested_layout_seed')):raise ValueError('Disposition changed membership')
+    if recipe.get('continuation_admission_path') and job['layout_seed'] in (720087,720092):
+        from triplet_continuation import require_completed_checks
+        require_completed_checks(proof)
     backup_proof=proof['backup']
     expected=DUAL/'datasets/counterfactual-targets'/job['split']/run.name
     if backup_proof.get('passed') is not True or backup_proof['files_sha256']!=proof['files_sha256'] or backup_proof['destination']!=str(expected):

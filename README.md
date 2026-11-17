@@ -1236,9 +1236,14 @@ backup tree. It binds the stopped supervisor nonce, independently certified reti
 original jobs, admitted outcomes, failures and all supporting receipts. Original STOP and failed
 finalization bytes remain intact. A separate evidence snapshot preserves those paths for the
 backup projection. The existing Worker media/export/backup entrance completes 720087/720092;
-partial dataset/reports are renamed into their raw group's `continuation-export-history/`.
-A failed qualification never selects an episode; these two explicitly approved interrupted jobs
-can instead carry a source-bound terminal replacement disposition. Layout 720097 retains its
+The existing dataset, reports and media receipt are renamed into each raw group's
+`continuation-export-history/` before the fresh qualification entrance runs.
+Only a completed failed media check (exit2 with a fresh failed receipt) can refuse either
+interrupted group through the original classifier. Its stage and receipt are source-bound.
+Tool, dependency, I/O and incomplete-export errors stop preparation without a disposition.
+The frozen exporter emits a finished certificate only on success, so its exception or
+VALIDATION_IN_PROGRESS marker never authorizes a replacement. Legacy interrupted_export_*
+proofs are refused. Layout 720097 retains its
 post-writer terminal fault and gets the explicit `operator_acknowledged_peer_stop` replacement
 reason, with all native events required to follow the original STOP. This exception applies only
 to the identified stopped invocation, not to fresh runtime faults. Layout 720094 has no raw tree

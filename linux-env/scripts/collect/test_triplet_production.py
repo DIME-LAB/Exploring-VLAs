@@ -180,7 +180,7 @@ class ProductionRunnerTests(unittest.TestCase):
             for i in range(3):
                 states.append(json.loads((run/f'attempt-{i:04d}/frames.jsonl').read_text().splitlines()[0])['state'])
             actions=np.zeros((3,50,6));actions[:,0,0]=[0,.01,.02]
-            images={c:[np.full((480,640,3),100,np.uint8)]*3 for c in ('top','wrist')}
+            images={c:[np.full((480,640,3),100 if (run/f'attempt-{i:04d}/{c}.mp4').read_bytes()==b'fake video transport' else 200,np.uint8) for i in range(3)] for c in ('top','wrist')}
             result=measure(group['first_recorded_physical_sha256'],states,actions,images)
             files={n:h for n,h in artifacts.manifest(run).items() if n.startswith('attempt-') and n.rsplit('/',1)[1] in ('receipt.json','frames.jsonl','top.mp4','wrist.mp4','first-recorded-native.json')}
             result.update(layout_seed=job['layout_seed'],split=job['split'],triplet_id=group['triplet_id'],
@@ -209,9 +209,21 @@ class ProductionRunnerTests(unittest.TestCase):
                 finish(run,cert,[]);native_groups.append(validate_run(run,base=root))
                 if bad=='source':(run/'unexpected').symlink_to(source)
             elif name.startswith('media-'):
-                media=decode(run)
-                if bad=='media':media['physical_hashes'][1]='b'*64
-                atomic_json(run/'production-media.json',media)
+                # Execute the real CLI body. Only camera/expert decoding and the
+                # fixture's filesystem root are transports supplied by this test.
+                import triplet_media,storage,io
+                from contextlib import redirect_stdout
+                def media_input(run):
+                    media=decode(run)
+                    if bad=='media':media['physical_hashes'][1]='b'*64
+                    return media
+                code=0
+                with patch.object(sys,'argv',['triplet_media.py',str(run),'--output',str(run/'production-media.json')]), \
+                        patch.object(storage,'confined',lambda value:Path(value)),patch.object(triplet_media,'inspect_run',media_input),redirect_stdout(io.StringIO()):
+                    try:triplet_media.main()
+                    except SystemExit as exc:code=exc.code
+                    except Exception:code=1
+                if code:return dict(name=name,pid=os.getpid(),started_wall_ns=start,returncode=code,wall_s=.1)
             elif name.startswith(('report-','report-validation-')):
                 report=run/('report-validation' if name.startswith('report-validation-') else 'report');report.mkdir()
                 atomic_json(report/'validation.json',dict(passed=bad!='export',loaded=True,timing_passed=True,fps=30,episodes=3,frames=150,

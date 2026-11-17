@@ -168,7 +168,7 @@ class ContinuationTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):p.coordinate(recipe,release)
             self.assertEqual(spawned,[3])
 
-    def test_full_fake_preparation_finishes_two_exports_and_binds_terminal_replacement(self):
+    def test_full_fake_preparation_finishes_two_exports_and_binds_terminal_replacement(self,failure=None):
         from collection_status import begin,terminal,finish
         with original_fixture() as f,ExitStack() as stack:
             transports={}
@@ -187,9 +187,14 @@ class ContinuationTests(unittest.TestCase):
             finish(run,certificate,[])
             directory=f.origin/f'wave-00/slot-{job["instance"]}';directory.mkdir(parents=True,exist_ok=True)
             atomic_json(directory/'stages.json',[dict(name='collect-'+str(seed),pid=os.getpid(),started_wall_ns=started,returncode=None)])
+            if failure=='media_verdict':
+                (f.root/f'datasets/counterfactual-targets/train/layout-{c.INTERRUPTED_EXPORTS[0]}/attempt-0001/top.mp4').write_bytes(b'contrast frame transport')
             def stage(worker,name,argv,**kwargs):
+                if failure=='media_tool' and name=='media-720087' or failure=='export_tool' and name=='report-720087':
+                    result=dict(name=name,pid=os.getpid(),started_wall_ns=time.time_ns(),returncode=1,wall_s=.1);worker.stages.append(result);return result
                 seed=int(name.rsplit('-',1)[1]);result=transports[seed]['stage'](worker,name,argv,**kwargs);worker.stages.append(result);return result
             def backup(source,files,destination,log):
+                if failure=='backup_io':raise OSError('receiver unavailable')
                 self.assertEqual(a.manifest(source),files)
                 shutil.copytree(source,destination,dirs_exist_ok=True)
                 return dict(passed=True,destination=str(destination),files_sha256=files)
@@ -198,14 +203,33 @@ class ContinuationTests(unittest.TestCase):
                 (p,'load_bootstrap_capsule',lambda *a:dict(pin=dict(source=dict(path=str(table))))),
                 (p,'OwnedProcesses',lambda *a:NS(stop=lambda:dict(remaining=[]))),
                 (p,'backup',backup),(p.Worker,'stage',stage)]:stack.enter_context(patch.object(obj,name,value))
+            if failure in ('media_tool','export_tool','backup_io'):
+                with self.assertRaises((RuntimeError,OSError)):c.prepare(f.origin,f.root,'b'*40,f.root/'prepare-one',f.checkpoint)
+                self.assertFalse((f.root/'prepare-one/admission.json').exists())
+                self.assertFalse((f.root/'prepare-one/acknowledged-interruption-720087.json').exists())
+                self.assertFalse((f.root/'prepare-one/qualified/outcome-720087.json').exists())
+                return
             result=c.prepare(f.origin,f.root,'b'*40,f.root/'prepare-one',f.checkpoint)
-            self.assertTrue(result['passed']);self.assertEqual(result['inherited'],4);self.assertEqual(result['selected'],3)
+            self.assertTrue(result['passed']);self.assertEqual(result['inherited'],4);self.assertEqual(result['selected'],2 if failure=='media_verdict' else 3)
             admission=a.read(result['admission_path']);self.assertEqual(admission['completed_exports'],list(c.INTERRUPTED_EXPORTS))
             self.assertTrue((f.origin/'STOP.json').exists());self.assertFalse(a.read(f.origin/'production-finalization.json')['passed'])
             recipe=c.load_plan(result['admission_path'],result['admission_sha256'],'b'*40)
             peer=next(r for r in recipe['inherited_outcomes'] if r['layout_seed']==seed)
             self.assertEqual(peer['reason'],'operator_acknowledged_peer_stop')
             self.assertTrue(p.verify_outcome(peer,recipe)['original_terminal'])
+            if failure=='media_verdict':
+                refused=next(r for r in recipe['inherited_outcomes'] if r['layout_seed']==720087)
+                checked=p.verify_outcome(refused,recipe)
+                self.assertEqual(refused['reason'],'image_psnr');self.assertEqual(checked['media_stage']['returncode'],2)
+                self.assertEqual(c.require_completed_checks(checked),'media')
+                forged=copy.deepcopy(checked);forged['media_stage']['returncode']=1
+                with self.assertRaises(ValueError):c.require_completed_checks(forged)
+                forged=copy.deepcopy(checked);forged['media_receipt']['written_wall_ns']=0
+                with self.assertRaises(ValueError):c.require_completed_checks(forged)
+                return
+            obsolete=f.root/'obsolete-interruption.json';badproof=dict(kind='interrupted_export_rejected',qualification_failure='tool error',export_stages={})
+            atomic_json(obsolete,badproof);oldrow=dict(peer,proof_path=str(obsolete),proof_sha256=a.sha(obsolete))
+            with self.assertRaisesRegex(ValueError,'not completed gate verdicts'):p.verify_outcome(oldrow,recipe)
             with (f.root/'evidence-backup.log').open('w') as log:c.backup_evidence(recipe,log)
             self.assertTrue((p.DUAL/f.origin.relative_to(f.root)/'proofs/train/720000.json').exists())
             self.assertTrue((p.DUAL/Path(peer['proof_path']).relative_to(f.root)).exists())
@@ -233,6 +257,21 @@ class ContinuationTests(unittest.TestCase):
             (root/'README.md').write_text('second');git('add','README.md');git('-c','user.name=CPU test','-c','user.email=cpu@example.invalid','commit','-qm','second')
             p.frozen(cut,repo=root)
             with self.assertRaisesRegex(ValueError,'HEAD differs'):p.data_checkout(root,cut)
+
+    def test_real_media_entry_refuses_existing_receipt_without_overwriting(self):
+        import subprocess,sys
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);receipt=root/'production-media.json';receipt.write_text('{"original":true}');before=receipt.read_bytes()
+            script=Path(p.__file__).with_name('triplet_media.py')
+            result=subprocess.run([sys.executable,'-B',str(script),str(root/'raw'),'--output',str(receipt)],capture_output=True,text=True)
+            self.assertNotEqual(result.returncode,0);self.assertIn('Fresh production-media receipt required',result.stderr)
+            self.assertEqual(receipt.read_bytes(),before)
+
+    def test_preparation_tool_and_backup_errors_never_publish_permanent_refusals(self):
+        for failure in ('media_tool','export_tool','backup_io'):
+            with self.subTest(failure=failure):self.test_full_fake_preparation_finishes_two_exports_and_binds_terminal_replacement(failure)
+    def test_completed_failed_media_verdict_has_fresh_stage_evidence(self):
+        self.test_full_fake_preparation_finishes_two_exports_and_binds_terminal_replacement('media_verdict')
 
 
 if __name__=='__main__':unittest.main()
