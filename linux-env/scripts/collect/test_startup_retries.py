@@ -188,4 +188,53 @@ class StartupRetryTests(unittest.TestCase):
             self.assertEqual(result['summary']['counts']['total'],3)
             self.assertFalse(result['calls'])
 
+    def test_pending_later_job_resumes_first_at_the_real_worker_entrance(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);spec,first,error,down=self.fixture(d)
+            later=copy.deepcopy(first);later['layout_seed']+=4;later['requested_layout_seed']+=4;later['replacement_chain']=[later['layout_seed']]
+            s.failed(spec,3,later,error,down,None);calls=[]
+            recipe=dict(cut='a'*40,production_root=str(root/'production'),runtime_root=str(root/'runtime'),startup_retry_budget=spec)
+            def up(worker):worker.session+=1;worker.claim=object();worker.retirement_certified=False
+            def retire(worker):worker.claim=None;worker.retirement_certified=True
+            with patch.object(p,'ROOT',root),patch.object(p,'confined',lambda x:Path(x)),patch.object(p,'capture_supervision',lambda:None),patch.object(p.Worker,'check',lambda *_:None),patch.object(p.Worker,'up',up),patch.object(p.Worker,'down',retire),patch.object(p.Worker,'attempt',lambda _,job:calls.append(job['layout_seed'])):
+                p.Worker(recipe,3,0).run([first,later])
+            self.assertEqual(calls,[later['layout_seed'],first['layout_seed']]);self.assertFalse(s.summary(spec)['pending'])
+            self.assertEqual(s.summary(spec)['counts']['total'],1)
+
+    def test_missing_moved_or_recreated_ledger_cannot_reset_the_budget(self):
+        for kind in ('moved','deleted','recreated','both_deleted'):
+            with self.subTest(kind=kind),tempfile.TemporaryDirectory() as d:
+                spec,job,error,down=self.fixture(d);s.failed(spec,3,job,error,down,None);s.before_start(spec,3,job)
+                previous=s.initialize(Path(d)/'budget','c'*64);root=Path(spec['root'])
+                if kind=='moved':root.rename(Path(d)/'old-budget')
+                else:shutil.rmtree(root)
+                if kind=='both_deleted':Path(previous['identity_receipt_path']).unlink()
+                if kind=='recreated':
+                    # Even a fresh, structurally valid empty ledger has a different inode.
+                    root.mkdir();(root/'lock').touch();(root/'journal.jsonl').touch()
+                    atomic_json(root/'state.json',dict(events=[]));atomic_json(root/'policy.json',dict(s.POLICY,origin_checkpoint_sha256='c'*64))
+                with self.assertRaises((ValueError,FileNotFoundError)):s.initialize(root,'c'*64,[previous])
+                if kind!='both_deleted':
+                    with self.assertRaises((ValueError,FileNotFoundError)):s.initialize(root,'c'*64)
+
+    def test_terminal_backup_carries_the_ledger_and_external_identity_pin(self):
+        for failed in (False,True):
+            with self.subTest(backup_failure=failed),tempfile.TemporaryDirectory() as d:
+                root=Path(d);spec,job,error,down=self.fixture(d);s.failed(spec,3,job,error,down,None);s.before_start(spec,3,job)
+                production=root/'production';production.mkdir();recipe=dict(production_root=str(production),startup_retry_budget=spec);calls=[]
+                (root/'runtime').mkdir()
+                def backup(source,files,destination,log):
+                    calls.append((Path(source),files,Path(destination)))
+                    if failed:raise OSError('destination full')
+                    return dict(passed=True,files_sha256=files,destination=str(destination))
+                with patch.object(p,'ROOT',root),patch.object(p,'DUAL',root/'dual'),patch.object(p,'backup',backup):
+                    report=p.backup_remaining_terminal(recipe,[],'original startup stop')
+                if failed:
+                    self.assertIn('destination full',report['errors'][0]['error']);self.assertIsNone(report['startup_retry_budget'])
+                else:
+                    self.assertEqual(len(calls),2);self.assertEqual(calls[0][0],Path(spec['root']))
+                    self.assertEqual(calls[1][1],{Path(spec['identity_receipt_path']).name:spec['identity_receipt_sha256']})
+                    self.assertEqual(report['startup_retry_budget']['snapshot']['counts']['total'],1)
+                    self.assertEqual(report['startup_retry_budget']['snapshot']['root_identity'],spec['root_identity'])
+
 if __name__=='__main__':unittest.main()

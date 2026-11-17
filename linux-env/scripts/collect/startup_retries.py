@@ -1,5 +1,5 @@
 """Typed pre-writer startup retries, with one persistent budget per original run."""
-import copy,fcntl,json,os,stat,time
+import copy,fcntl,json,os,stat,time,uuid
 from contextlib import contextmanager
 from pathlib import Path
 from storage import atomic_json
@@ -49,12 +49,16 @@ def locked(root):
     finally:os.close(fd)
 
 
-def initialize(root,checkpoint):
+def initialize(root,checkpoint,previous=()):
     root=Path(root)
+    pin=root.with_name(root.name+'.identity.json')
     if not isinstance(checkpoint,str) or len(checkpoint)!=64 or any(c not in '0123456789abcdef' for c in checkpoint):raise ValueError('Original checkpoint SHA required')
     for parent in root.parents:
         if os.path.lexists(parent) and not stat.S_ISDIR(parent.lstat().st_mode):raise ValueError('Non-directory startup retry ancestor')
+    for spec in previous:
+        if spec['root']!=str(root) or spec['origin_checkpoint_sha256']!=checkpoint:raise ValueError('Prior startup budget belongs to another run')
     if not root.exists():
+        if previous or os.path.lexists(pin):raise ValueError('Previously bound startup retry ledger is missing')
         root.mkdir(parents=True,exist_ok=False)
         for name in ('lock','journal.jsonl'):
             fd=os.open(root/name,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600);os.close(fd)
@@ -62,6 +66,16 @@ def initialize(root,checkpoint):
         atomic_json(root/'state.json',dict(events=[]))
     spec=dict(root=str(root),root_identity=[root.stat().st_dev,root.stat().st_ino],policy_sha256=sha(root/'policy.json'),origin_checkpoint_sha256=checkpoint,prefix=[])
     with locked(root):
+        for old in previous:validated(old)
+        identity={key:spec[key] for key in ('root','root_identity','policy_sha256','origin_checkpoint_sha256')}
+        if os.path.lexists(pin):
+            inside=read(root/'identity.json')
+            if read(pin)!=inside or {k:inside.get(k) for k in identity}!=identity:raise ValueError('Startup retry identity receipt differs')
+        else:
+            if os.path.lexists(root/'identity.json'):raise ValueError('Startup retry external identity receipt is missing')
+            identity['nonce']=uuid.uuid4().hex
+            atomic_json(root/'identity.json',identity);atomic_json(pin,identity)
+        spec.update(identity_receipt_path=str(pin),identity_receipt_sha256=sha(pin))
         state,_,_=validated(spec)
         spec['prefix']=[item['sha256'] for item in state['events']]
     return spec
@@ -69,6 +83,11 @@ def initialize(root,checkpoint):
 
 def validated(spec):
     root=Path(spec['root']);checked_tree(root)
+    if 'identity_receipt_path' in spec:
+        pin=root.with_name(root.name+'.identity.json')
+        identity={key:spec[key] for key in ('root','root_identity','policy_sha256','origin_checkpoint_sha256')}
+        saved=read(pin)
+        if str(pin)!=spec['identity_receipt_path'] or sha(pin)!=spec['identity_receipt_sha256'] or read(root/'identity.json')!=saved or {k:saved.get(k) for k in identity}!=identity or not isinstance(saved.get('nonce'),str) or len(saved['nonce'])!=32:raise ValueError('Startup retry identity receipt changed')
     if [root.stat().st_dev,root.stat().st_ino]!=spec['root_identity']:raise ValueError('Startup retry directory identity changed')
     if sha(root/'policy.json')!=spec['policy_sha256'] or read(root/'policy.json')!=dict(POLICY,origin_checkpoint_sha256=spec['origin_checkpoint_sha256']):raise ValueError('Startup retry policy changed')
     state=read(root/'state.json')
@@ -77,6 +96,7 @@ def validated(spec):
     if journal and not journal.endswith(b'\n'):raise ValueError('Partial startup retry journal')
     if [json.loads(line) for line in journal.splitlines()]!=state['events']:raise ValueError('Startup retry ledger and journal differ')
     expected={'lock','journal.jsonl','policy.json','state.json'};counts={str(i):0 for i in range(3,7)};pending={};last_retry={};total=0
+    if os.path.lexists(root/'identity.json'):expected.add('identity.json')
     for number,item in enumerate(state['events'],1):
         name=f'event-{number:04d}';expected.add(name)
         if type(item.get('id')) is not int or item['id']!=number or sha(root/name/'event.json')!=item.get('sha256'):raise ValueError('Startup retry history changed')
@@ -168,4 +188,14 @@ def ready(spec,slot,job,reservation):
 def summary(spec):
     with locked(spec['root']):
         state,counts,pending=validated(spec)
-        return dict(policy=dict(POLICY),root=spec['root'],events=state['events'],counts=counts,pending={str(k):list(v) for k,v in pending.items()},state_sha256=sha(Path(spec['root'])/'state.json'))
+        return dict(policy=dict(POLICY),root=spec['root'],root_identity=spec['root_identity'],policy_sha256=spec['policy_sha256'],origin_checkpoint_sha256=spec['origin_checkpoint_sha256'],identity_receipt_path=spec.get('identity_receipt_path'),identity_receipt_sha256=spec.get('identity_receipt_sha256'),events=state['events'],counts=counts,pending={str(k):list(v) for k,v in pending.items()},state_sha256=sha(Path(spec['root'])/'state.json'))
+
+
+def resume_jobs(spec,slot,jobs):
+    """Resume the owned pending start first; preserve every other assigned job."""
+    jobs=list(jobs);pending=summary(spec)['pending'].get(str(slot))
+    if pending is None:return jobs
+    matches=[job for job in jobs if [job['split'],job['layout_seed']]==pending and job['instance']==slot]
+    if len(matches)!=1:raise ValueError('Pending startup job is absent or duplicated in the assigned continuation')
+    job=matches[0]
+    return [job]+[other for other in jobs if other is not job]

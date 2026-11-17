@@ -208,11 +208,22 @@ def backup_evidence(recipe,log):
     preparation=p.backup(source,manifest(source),p.DUAL/source.relative_to(p.ROOT),log)
     retry_budget=None
     if recipe.get('startup_retry_budget'):
-        import startup_retries
-        startup_retries.summary(recipe['startup_retry_budget'])
-        source=Path(recipe['startup_retry_budget']['root'])
-        retry_budget=p.backup(source,manifest(source),p.DUAL/source.relative_to(p.ROOT),log)
+        retry_budget=p.backup_startup_budget(recipe,log)
     return dict(original_evidence=original,bound_evidence=bound,preparation=preparation,startup_retry_budget=retry_budget)
+
+
+def prior_retry_specs(checkpoint):
+    """A new preparation must reconcile every surviving admission's ledger pin."""
+    import triplet_production as p
+    specs=[]
+    for path in sorted((p.ROOT/'setup').glob('continuation-admission-*/admission.json')):
+        admission=read(regular(path))
+        if admission.get('origin_checkpoint_sha256')!=checkpoint:continue
+        if 'startup_retry_budget' in admission:
+            spec=admission['startup_retry_budget']
+            if not isinstance(spec,dict):raise ValueError('Prior admission has an invalid startup retry binding')
+            specs.append(spec)
+    return specs
 
 
 def prepare(origin,collector_repo,runner_cut,output,checkpoint_sha):
@@ -223,7 +234,7 @@ def prepare(origin,collector_repo,runner_cut,output,checkpoint_sha):
         output=confined(output);output.mkdir(parents=True,exist_ok=False)
         state=origin_state(origin,collector_repo,checkpoint_sha)
         import startup_retries
-        retry_budget=startup_retries.initialize(p.ROOT/'runtime/counterfactual-startup-retries'/checkpoint_sha,checkpoint_sha)
+        retry_budget=startup_retries.initialize(p.ROOT/'runtime/counterfactual-startup-retries'/checkpoint_sha,checkpoint_sha,prior_retry_specs(checkpoint_sha))
         snapshot=output/'origin-evidence';snapshot_files=snapshot_origin(origin,snapshot)
         bound=output/'bound-evidence';bound.mkdir();bound_files={}
         for name,digest in state['bindings'].items():

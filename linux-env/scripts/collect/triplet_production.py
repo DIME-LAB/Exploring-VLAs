@@ -251,6 +251,19 @@ def backup_terminal(recipe,job,error,worker_root=None):
     return dict(path=str(output),sha256=sha(output))
 
 
+def backup_startup_budget(recipe,log):
+    spec=recipe.get('startup_retry_budget')
+    if not spec:return None
+    report=startup_retries.summary(spec)
+    source=Path(spec['root']);files=manifest(source)
+    receipt=backup(source,files,DUAL/source.relative_to(ROOT),log)
+    pin=Path(spec['identity_receipt_path'])
+    with tempfile.TemporaryDirectory(prefix='retry-identity-backup-',dir=ROOT/'runtime') as temp:
+        payload=Path(temp);(payload/pin.name).write_bytes(read(pin,True))
+        identity=backup(payload,{pin.name:spec['identity_receipt_sha256']},DUAL/pin.parent.relative_to(ROOT),log)
+    return dict(snapshot=report,files_sha256=files,ledger=receipt,identity_receipt=identity)
+
+
 def backup_remaining_terminal(recipe,jobs,error):
     """Coordinator fallback after every descendant has been proven gone."""
     root=Path(recipe['production_root']);records=[];errors=[]
@@ -269,7 +282,15 @@ def backup_remaining_terminal(recipe,jobs,error):
         except (OSError,ValueError):pass  # Preserve invalid entries as a diagnostic catalog.
         try:records.append(backup_terminal(recipe,job,error))
         except BaseException as exc:errors.append(dict(layout_seed=job['layout_seed'],error=repr(exc)))
-    return dict(records=records,errors=errors)
+    retry_backup=None
+    if recipe.get('startup_retry_budget'):
+        try:
+            path=Path(recipe['production_root'])/'startup-retry-stop-backup.log'
+            with path.open('x') as log:retry_backup=backup_startup_budget(recipe,log)
+        except BaseException as exc:errors.append(dict(source='startup retry ledger',error=repr(exc)))
+    result=dict(records=records,errors=errors)
+    if recipe.get('startup_retry_budget'):result['startup_retry_budget']=retry_backup
+    return result
 
 
 def data_checkout(repo,cut):
@@ -513,6 +534,7 @@ class Worker:
         self.startup_retries=[]
         error=None;failure=None;backup_result=None;backup_error=None;retired=False;retirement_errors=[]
         try:
+            if self.plan.get('startup_retry_budget'):jobs=startup_retries.resume_jobs(self.plan['startup_retry_budget'],self.instance,jobs)
             for job in jobs:
                 self.active_job=job
                 self.check()
@@ -594,6 +616,10 @@ def registries(recipe,state):
             wave_ledger_path=str(root/'wave-ledger.json'),wave_ledger_sha256=sha(root/'wave-ledger.json'),
             layouts=sorted(layouts,key=lambda x:x['requested_layout_seed']),failed_groups=failed,
             replacement_allocations=[a for a in state['replacement_allocations'] if (a['requested_layout_seed']<730000)==(split=='train')])
+        if recipe.get('startup_retry_budget'):
+            current=startup_retries.summary(recipe['startup_retry_budget'])
+            if final.get('startup_retries')!=current:raise ValueError('Final startup retry evidence differs from its ledger')
+            result[split]['startup_retry_budget']=dict(admission_binding=recipe['startup_retry_budget'],final=current)
     return result
 
 

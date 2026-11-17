@@ -264,6 +264,22 @@ class ContinuationTests(unittest.TestCase):
             p.frozen(cut,repo=root)
             with self.assertRaisesRegex(ValueError,'HEAD differs'):p.data_checkout(root,cut)
 
+    def test_new_preparation_reconciles_prior_admission_before_ledger_creation(self):
+        import startup_retries
+        with tempfile.TemporaryDirectory() as d,patch.object(p,'ROOT',Path(d)):
+            root=Path(d);checkpoint='a'*64;budget=root/'runtime/counterfactual-startup-retries'/checkpoint
+            spec=startup_retries.initialize(budget,checkpoint)
+            path=root/'setup/continuation-admission-previous-v1/admission.json'
+            path.parent.mkdir(parents=True)
+            atomic_json(path,dict(origin_checkpoint_sha256=checkpoint,startup_retry_budget=spec))
+            prior=c.prior_retry_specs(checkpoint)
+            current=startup_retries.initialize(budget,checkpoint,prior)
+            self.assertEqual(current,spec)
+            budget.rename(root/'removed-ledger');Path(spec['identity_receipt_path']).unlink()
+            with self.assertRaisesRegex(ValueError,'Previously bound'):
+                startup_retries.initialize(budget,checkpoint,c.prior_retry_specs(checkpoint))
+            self.assertFalse(budget.exists())
+
     def test_real_media_entry_refuses_existing_receipt_without_overwriting(self):
         import subprocess,sys
         with tempfile.TemporaryDirectory() as d:

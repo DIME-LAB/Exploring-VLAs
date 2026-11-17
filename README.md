@@ -1293,3 +1293,11 @@ recorded before cleanup; cleanup failures preserve both causes and stop the run.
 budgets and predicates, including the explicit 300-second configure RPC and 60-second
 controller readiness check, are unchanged. Retry evidence and counts appear in worker
 and production finalization and are SHA-backed up with the continuation evidence.
+
+### Startup retry evidence across continuations
+
+A continuation resumes a slot's pending startup job first, preserving every other assigned job. An absent or duplicated pending job refuses; no raw episode is adopted and no completed group is imported by this ordering rule. Previously completed jobs still need the continuation's verified admission. The per-slot and run-wide reservation counts remain unchanged.
+
+The ledger has matching internal and external nonce-bearing identity receipts. New preparation reconciles prior admissions for the original checkpoint before initializing a budget, so a missing, moved or recreated ledger cannot silently create a fresh allowance. Existing ledger history is checked before its identity receipt is installed. Admission and final registry bind the ledger identity and history; missing or altered receipts refuse.
+
+After a stop and certified retirement, the coordinator SHA-backs up the retry ledger and its external identity receipt to the same dual projection as the run. The final failure report records the snapshot, file hashes and transfer certificates. A backup failure stays visible as a retirement error; it never certifies the ledger as backed up. The successful publication path retains the same evidence.
