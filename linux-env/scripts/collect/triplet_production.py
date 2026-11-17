@@ -4,14 +4,14 @@
 Print the immutable plan with --plan. --go additionally requires the explicit
 training-release certificate and starts the four workers with a 60 s stagger.
 """
-import argparse,ctypes,hashlib,json,os,select,shlex,signal,socket,stat,subprocess,sys,time,threading
+import argparse,ctypes,hashlib,json,os,shlex,signal,socket,stat,subprocess,sys,time,threading
 from pathlib import Path
 sys.dont_write_bytecode=True
 REPO=Path(__file__).resolve().parents[3]
 sys.path.insert(0,str(REPO/'vla_SO-ARM101/src/so_arm101_control'))
 from storage import CANONICAL_ROOT,atomic_json,confined
 from host_config import profile
-from run_smoke import InstanceClaim,OwnedProcesses,frozen,identity
+from run_smoke import InstanceClaim,OwnedProcesses,frozen,identity,pidfd_ready
 from gpu_device import gpu_uuid
 from triplet_production_plan import initial_wave,reduce_waves,guards,POLICY
 from triplet_artifacts import read,sha,manifest,classify,selected_entry,checked_tree
@@ -277,7 +277,7 @@ class Worker:
         self.ledger.scan();result=call('run_python',dict(code=query),port=self.port,timeout=30)
         if isinstance(result,dict) and 'result' in result:result=result['result']
         self.ledger.scan();pid=result['pid'];owned=self.ledger.known.get(pid);now=identity(pid);fd=self.ledger.handles.get(pid)
-        if (result['nonce']!=nonce or owned is None or now is None or fd is None or select.select([fd],[],[],0)[0] or
+        if (result['nonce']!=nonce or owned is None or now is None or fd is None or pidfd_ready(fd) or
             result['start_ticks']!=owned['start_ticks'] or result['start_ticks']!=now['start_ticks'] or result['pgid']!=now['pgid'] or
             before is not None and any(result[k]!=before[k] for k in ('pid','start_ticks','pgid'))):raise RuntimeError('Native RPC is not bound to an owned live responder')
         self.native={k:result[k] for k in ('pid','start_ticks','pgid')}

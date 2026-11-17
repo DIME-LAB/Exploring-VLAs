@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Launcher-owned process trees, with identity receipts and pidfd-only shutdown."""
-import argparse,ctypes,fcntl,json,os,select,signal,socket,struct,subprocess,sys,time,uuid
+import argparse,ctypes,fcntl,json,os,signal,socket,struct,subprocess,sys,time,uuid
 from contextlib import contextmanager
 from pathlib import Path
-from run_smoke import OwnedProcesses,identity
+from run_smoke import OwnedProcesses,identity,pidfd_ready
 
 
 @contextmanager
@@ -39,6 +39,8 @@ def save(path,value):
 def recorded_remaining(row):
     recorded={}
     for old in [*row.get('children',[]),*row.get('cleanup',{}).get('tracked',[]),*row.get('cleanup',{}).get('remaining',[])]:
+        if not isinstance(old,dict) or not isinstance(old.get('pid'),int) or not isinstance(old.get('start_ticks'),str):
+            raise RuntimeError('Unresolved cleanup: unverified descendant evidence; see '+str(row.get('pidfile')))
         recorded[(old['pid'],old['start_ticks'])]=old
     remaining=[]
     for old in recorded.values():
@@ -112,8 +114,14 @@ def supervise(path,nonce,command):
     for sig in (signal.SIGINT,signal.SIGTERM):signal.signal(sig,lambda signum,frame:stopping.append(signum))
     address='\0soarm-'+str(os.getuid())+'-'+nonce
     listener=socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET);listener.bind(address);listener.listen(4);listener.settimeout(.1)
-    worker=None
+    worker=None;failure=None
     row=dict(instance_root=os.environ.get('SOARM_INSTANCE_ROOT'),supervisor=identity(os.getpid()),nonce=nonce,address=address,pidfile=str(path),state='starting',command=command)
+    signals=Path(str(path)+'.signals.jsonl');row['signal_journal']=str(signals)
+    def record_signal(event):
+        fd=os.open(signals,os.O_WRONLY|os.O_APPEND|os.O_CREAT|os.O_NOFOLLOW,0o600)
+        with os.fdopen(fd,'a') as stream:
+            stream.write(json.dumps(dict(event,nonce=nonce,pidfile=str(path)))+'\n');stream.flush();os.fsync(stream.fileno())
+    ledger.before_signal=record_signal
     try:
         worker=subprocess.Popen(command,start_new_session=True,close_fds=True)
         ledger.add(worker.pid)
@@ -121,8 +129,8 @@ def supervise(path,nonce,command):
         save(path,os.getpid());save(record_path(path),row);last_count=-1
         while not stopping:
             ledger.scan()
-            if len(ledger.known)!=last_count:
-                row['children']=list(ledger.known.values());save(record_path(path),row);last_count=len(ledger.known)
+            if len(ledger.tracked())!=last_count:
+                row['children']=ledger.tracked();save(record_path(path),row);last_count=len(ledger.tracked())
             if worker.poll() is not None:break
             try:
                 connection,_=listener.accept()
@@ -133,14 +141,22 @@ def supervise(path,nonce,command):
                     if peer[1]!=os.getuid() or request!={'stop':nonce}:raise RuntimeError('Unrecognized process control request')
                     stopping.append('requested');connection.sendall(b'{"accepted":true}\n')
             except socket.timeout:pass
+    except BaseException as exc:
+        failure=exc;row['supervision_error']=repr(exc)
+        raise
     finally:
         row['workload_returncode']=worker.poll() if worker is not None else None
         row['state']='stopping'
         try:save(record_path(path),row)
         except OSError as exc:print('Cannot save stopping receipt: '+repr(exc),flush=True)
-        row['cleanup']=ledger.stop();row['state']='stopped' if not row['cleanup']['remaining'] else 'cleanup_failed'
+        row['stop_signals']=stopping
+        try:row['cleanup']=ledger.stop()
+        except BaseException as exc:
+            row['cleanup_error']=repr(exc)
+            row['cleanup']=dict(tracked=ledger.tracked(),remaining=[dict(unverified=repr(exc))])
+        row['state']='cleanup_failed' if row['cleanup']['remaining'] else ('failed' if failure else 'stopped')
         save(record_path(path),row);listener.close()
-        if row['cleanup']['remaining']:raise RuntimeError('Managed children did not retire; see '+str(record_path(path)))
+        if row['cleanup']['remaining'] and failure is None:raise RuntimeError('Managed children did not retire; see '+str(record_path(path)))
 
 
 
@@ -169,14 +185,14 @@ def stop_owned(path,expected):
             again=verified(path)
             if again is None:return verified_exit(path,expected)
             if again['nonce']!=row['nonce']:raise RuntimeError('Launcher ownership changed before control request')
-            if select.select([fd],[],[],0)[0]:return verified_exit(path,expected)
+            if pidfd_ready(fd):return verified_exit(path,expected)
             with socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET) as client:
                 client.settimeout(5);client.connect(row['address'])
                 peer=struct.unpack('3i',client.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))
                 if peer[:2]!=(pid,os.getuid()) or not verified(path):raise RuntimeError('Process control peer identity differs')
                 client.sendall(json.dumps(dict(stop=row['nonce'])).encode())
                 if json.loads(client.recv(1024))!={'accepted':True}:raise RuntimeError('Process stop was not accepted')
-            if not select.select([fd],[],[],35)[0]:raise TimeoutError('Owned supervisor did not retire; no numeric signal fallback')
+            if not pidfd_ready(fd,35):raise TimeoutError('Owned supervisor did not retire; no numeric signal fallback')
             return verified_exit(path,expected)
         finally:os.close(fd)
 

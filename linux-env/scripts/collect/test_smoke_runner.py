@@ -59,7 +59,7 @@ class SmokeRunnerTests(unittest.TestCase):
         owned=run_smoke.OwnedProcesses(Path('/unused'),0)
         owned.known[123]=dict(pid=123,start_ticks='old');owned.handles[123]=77
         with patch('run_smoke.identity',return_value=dict(pid=123,start_ticks='old')),\
-             patch('run_smoke.select.select',return_value=([],[],[])),\
+             patch('run_smoke.pidfd_ready',return_value=False),\
              patch('run_smoke.signal.pidfd_send_signal',create=True) as send,patch('run_smoke.os.kill') as numeric:
             owned.send(123,2);send.assert_called_once_with(77,2);numeric.assert_not_called()
 
@@ -109,7 +109,7 @@ class SmokeRunnerTests(unittest.TestCase):
         def now():clock[0]+=.01;return clock[0]
         with patch('run_smoke.identity',side_effect=lambda pid:({11:parent,12:child}[pid] if live.get(pid) else None)),\
              patch('run_smoke.signal.pidfd_send_signal',side_effect=send,create=True),\
-             patch('run_smoke.select.select',return_value=([],[],[])),patch('run_smoke.os.close'),\
+             patch('run_smoke.pidfd_ready',return_value=False),patch('run_smoke.os.close'),\
              patch('run_smoke.time',NS(monotonic=now,sleep=lambda dt:clock.__setitem__(0,clock[0]+dt))):
             result=owned.stop()
         self.assertEqual(result['remaining'],[])

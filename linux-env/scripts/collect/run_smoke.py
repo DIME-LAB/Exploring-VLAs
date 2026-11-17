@@ -4,7 +4,7 @@
 --plan prints commands without starting processes. --go is for an explicit lead
 smoke window; independent review may run concurrently and can supersede the data.
 """
-import argparse,ctypes,fcntl,json,os,re,select,shutil,signal,socket,subprocess,sys,time
+import argparse,ctypes,errno,fcntl,json,math,os,re,select,shutil,signal,socket,subprocess,sys,time,threading
 from pathlib import Path
 sys.dont_write_bytecode=True
 from gpu_device import gpu_uuid
@@ -21,9 +21,17 @@ SCOPES=('linux-env/scripts/collect','linux-env/scripts/collect_sim.sh','linux-en
 def identity(pid):
     try:
         base=Path('/proc')/str(pid);fields=(base/'stat').read_text().rsplit(')',1)[1].split()
-        return dict(pid=pid,start_ticks=fields[19],ppid=int(fields[1]),pgid=int(fields[2]),state=fields[0],
+        return dict(pid=pid,start_ticks=fields[19],ppid=int(fields[1]),pgid=int(fields[2]),sid=int(fields[3]),state=fields[0],
                     command=(base/'cmdline').read_bytes().replace(b'\0',b' ').decode(errors='replace'))
     except (OSError,ValueError,IndexError):return None
+
+
+def pidfd_ready(fd,timeout=0):
+    """poll has no FD_SETSIZE ceiling; invalid descriptors are never live proof."""
+    poller=select.poll();poller.register(fd,select.POLLIN)
+    events=poller.poll(math.ceil(timeout*1000))
+    if any(mask & select.POLLNVAL for _,mask in events):raise OSError(errno.EBADF,'Invalid owned pidfd')
+    return bool(events)
 
 
 class InstanceClaim:
@@ -37,35 +45,49 @@ class InstanceClaim:
 class OwnedProcesses:
     """Kernel ancestry establishes ownership; pidfds bind every signal to that identity."""
     def __init__(self,runtime,started_ns):
-        self.runtime=runtime;self.started_ns=started_ns;self.known={};self.handles={}
-        self.root=identity(os.getpid())
+        self.runtime=runtime;self.started_ns=started_ns;self.known={};self.handles={};self.retired=[];self.before_signal=None
+        self.root=identity(os.getpid());self.lock=threading.RLock()
     def add(self,pid,parent=None):
-        if pid in self.known:return
-        parent=self.root if parent is None else parent
-        try:fd=os.pidfd_open(pid)
-        except ProcessLookupError:return
-        current=identity(pid);owner=identity(parent['pid'])
-        if (current is None or owner is None or owner['start_ticks']!=parent['start_ticks'] or
-                current['ppid']!=parent['pid'] or select.select([fd],[],[],0)[0]):
-            os.close(fd);return
-        current['ownership_parent']=dict(pid=parent['pid'],start_ticks=parent['start_ticks'])
-        self.known[pid]=current;self.handles[pid]=fd
+        with self.lock:
+            if pid in self.known:
+                current=identity(pid)
+                if current is None or current['start_ticks']==self.known[pid]['start_ticks']:return
+                # A new child may reuse an exited child's PID. Preserve its old
+                # receipt, but acquire a fresh kernel handle and ancestry proof.
+                oldfd=self.handles.pop(pid,None)
+                if oldfd is not None:os.close(oldfd)
+                self.retired.append(self.known.pop(pid))
+            parent=self.root if parent is None else parent
+            try:fd=os.pidfd_open(pid)
+            except ProcessLookupError:return
+            current=identity(pid);owner=identity(parent['pid'])
+            if (current is None or owner is None or owner['start_ticks']!=parent['start_ticks'] or
+                    current['ppid']!=parent['pid'] or pidfd_ready(fd)):
+                os.close(fd);return
+            current['ownership_parent']=dict(pid=parent['pid'],start_ticks=parent['start_ticks'])
+            self.known[pid]=current;self.handles[pid]=fd
     def scan(self):
-        pending=[self.root,*self.known.values()];seen=set()
-        while pending:
-            parent=pending.pop();pid=parent['pid']
-            if pid in seen:continue
-            seen.add(pid);current=identity(pid)
-            if current is None or current['start_ticks']!=parent['start_ticks']:continue
-            children=[]
-            try:
-                for task in Path('/proc',str(pid),'task').iterdir():
-                    try:children.extend(int(n) for n in (task/'children').read_text().split())
-                    except OSError:pass
-            except OSError:pass
-            for child in children:
-                self.add(child,parent)
-                if child in self.known:pending.append(self.known[child])
+        with self.lock:
+            # Keep historical identities for receipts, not an open descriptor for
+            # every short-lived git/ffmpeg child over a multi-hour collection.
+            for pid,fd in list(self.handles.items()):
+                if pidfd_ready(fd):os.close(fd);del self.handles[pid]
+            pending=[self.root,*(self.known[pid] for pid in self.handles)];seen=set()
+            while pending:
+                parent=pending.pop();pid=parent['pid']
+                if pid in seen:continue
+                seen.add(pid);current=identity(pid)
+                if current is None or current['start_ticks']!=parent['start_ticks']:continue
+                children=[]
+                try:
+                    for task in Path('/proc',str(pid),'task').iterdir():
+                        try:children.extend(int(n) for n in (task/'children').read_text().split())
+                        except OSError:pass
+                except OSError:pass
+                for child in children:
+                    self.add(child,parent)
+                    if child in self.known:pending.append(self.known[child])
+    def tracked(self):return [*self.retired,*self.known.values()]
     def remaining(self):
         remaining=[]
         for pid,old in self.known.items():
@@ -78,11 +100,16 @@ class OwnedProcesses:
             if now and now['start_ticks']==old['start_ticks']:remaining.append(now)
         return remaining
     def send(self,pid,sig):
-        old=self.known.get(pid);fd=self.handles.get(pid);now=identity(pid)
-        if old is None or fd is None:raise RuntimeError('No proven child identity for cleanup')
-        if now is None or now['start_ticks']!=old['start_ticks'] or select.select([fd],[],[],0)[0]:return
-        try:signal.pidfd_send_signal(fd,sig)
-        except ProcessLookupError:pass
+        with self.lock:
+            old=self.known.get(pid);fd=self.handles.get(pid);now=identity(pid)
+            if old is None:raise RuntimeError('No proven child identity for cleanup')
+            if now is None or now['start_ticks']!=old['start_ticks'] or now.get('state')=='Z':return
+            if fd is None:raise RuntimeError('Live owned process has no kernel handle')
+            if pidfd_ready(fd):return
+            if self.before_signal is not None:
+                self.before_signal(dict(sender=identity(os.getpid()),target=old,signal=int(sig),wall_ns=time.time_ns(),phase='before_pidfd_send'))
+            try:signal.pidfd_send_signal(fd,sig)
+            except ProcessLookupError:pass
     def stop(self):
         for sig,seconds in ((signal.SIGINT,12.),(signal.SIGTERM,8.),(signal.SIGKILL,3.)):
             self.scan()
@@ -97,9 +124,10 @@ class OwnedProcesses:
                         if row['state']!='Z':self.send(row['pid'],sig)
                 time.sleep(.1)
         self.scan()  # Include children reparented while their last owner exited.
-        result=dict(tracked=list(self.known.values()),remaining=self.remaining())
-        for fd in self.handles.values():os.close(fd)
-        self.handles.clear()
+        result=dict(tracked=self.tracked(),remaining=self.remaining())
+        with self.lock:
+            for fd in self.handles.values():os.close(fd)
+            self.handles.clear()
         return result
 
 

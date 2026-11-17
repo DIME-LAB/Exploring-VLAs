@@ -1150,6 +1150,15 @@ three colour sample videos and parameter/timing reports. Report accepted yield,
 RTF, idle/stationary fractions, storage growth and episodes per wall-hour. The
 collector refuses requests above 50; the lead schedules the larger run.
 
+Managed launchers start the supervisor and workload in separate sessions with
+stdin disconnected. Identity receipts include PID, birth time, process group and
+session; only verified pidfds authorize cleanup signals. Readiness uses `poll()`
+so descriptor numbers above 1023 remain valid. Exited-child handles close during
+scanning while their identity receipts remain available. Supervisor errors and
+cleanup errors are persisted separately, and a durable signal journal records
+the sender and target before each supervisor cleanup signal. A failed supervisor
+cannot certify successful retirement.
+
 Offline validation: `python3 -m unittest discover -s linux-env/scripts/collect -p
  'test_*.py'`. This includes 1,000 randomized comparisons with frozen verified-GUI
 geometry, the successful fallback-warning probe, late-application and above-rim

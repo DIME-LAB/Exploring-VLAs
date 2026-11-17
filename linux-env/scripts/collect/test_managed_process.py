@@ -63,7 +63,7 @@ class ManagedProcessTests(unittest.TestCase):
         final=dict(row,state='cleanup_failed',cleanup=dict(tracked=[child],remaining=[child]))
         with patch('managed_process.verified',return_value=row),patch('managed_process.claim',return_value=nullcontext()),\
              patch('managed_process.os.pidfd_open',return_value=77,create=True),patch('managed_process.os.close'),\
-             patch('managed_process.select.select',return_value=([77],[],[])),\
+             patch('managed_process.pidfd_ready',return_value=True),\
              patch('managed_process.read_leaf',return_value=json.dumps(final)),\
              patch('managed_process.identity',side_effect=lambda pid:child if pid==51234 else None),\
              patch('managed_process.socket.socket') as channel:
