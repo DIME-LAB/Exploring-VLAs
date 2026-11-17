@@ -1,5 +1,5 @@
 """Production runner entrances with real native/group/finalization code, fake transports."""
-import copy,hashlib,json,os,subprocess,sys,tempfile,time,unittest
+import copy,hashlib,json,os,subprocess,sys,tempfile,time,unittest,threading
 from pathlib import Path
 from unittest.mock import patch
 import numpy as np
@@ -81,6 +81,55 @@ class ProductionRunnerTests(unittest.TestCase):
                 with self.subTest(kind=kind),self.assertRaises(RuntimeError):
                     production.wait_workers([(NS(poll=lambda:-9 if kind=='exit' else 0),None,3),(NS(poll=lambda:None),None,4)],
                         lambda:[],lambda:None,retired,Path(d)/'STOP',pause=lambda _:self.fail('Should stop immediately'))
+    def test_disk_drop_after_admission_publishes_stop_and_requests_owned_retirement(self):
+        for filesystem in ('root','bulk'):
+            with self.subTest(filesystem=filesystem),tempfile.TemporaryDirectory() as d:
+                called=threading.Event();samples=[0]
+                def probe():
+                    samples[0]+=1
+                    if samples[0]>1:raise RuntimeError(filesystem+' below floor after admission')
+                    return dict(root_free_bytes=30*2**30,bulk_free_bytes=60*2**30)
+                watch=production.DiskWatch(Path(d),called.set,probe=probe,interval=.01)
+                watch.start();self.assertTrue(called.wait(2));watch.close()
+                self.assertIn(filesystem,artifacts.read(Path(d)/'STOP.json')['error'])
+                with self.assertRaisesRegex(RuntimeError,'disk monitor'):watch.require()
+                with patch.object(production,'disk',return_value={}):
+                    with self.assertRaises(RuntimeError):production.publication_gate(Path(d),watch)
+                    with self.assertRaisesRegex(RuntimeError,'STOP'):
+                        production.registries(dict(production_root=d),dict(complete=True))
+                self.assertFalse((Path(d)/'REGISTRY-SHA256.json').exists())
+    def test_real_stage_polling_checks_disk_after_its_initial_admission(self):
+        with tempfile.TemporaryDirectory() as d:
+            worker=object.__new__(production.Worker);worker.root=Path(d);worker.global_root=Path(d);worker.stop_file=Path(d)/'STOP.json'
+            worker.cut='a'*40;worker.instance=3;worker.env={};worker.claim=NS(fd=0);worker.stages=[]
+            worker.ledger=NS(add=lambda _:None,scan=lambda:None)
+            process=NS(pid=123,poll=lambda:None,returncode=None)
+            with patch.object(production,'frozen'),patch.object(production.subprocess,'Popen',return_value=process),\
+                    patch.object(production,'disk',side_effect=[{},RuntimeError('bulk below floor after admission')]) as gate:
+                with self.assertRaisesRegex(RuntimeError,'below floor'):worker.stage('fake-recording',['fake'])
+            self.assertEqual(gate.call_count,2);self.assertTrue(worker.stop_file.exists())
+    def test_disk_numeric_floors_are_checked_for_both_filesystems(self):
+        for root,bulk,passes in ((20,50,True),(19.99,70,False),(30,49.99,False)):
+            with patch('shutil.disk_usage',side_effect=[NS(free=int(root*2**30)),NS(free=int(bulk*2**30))]):
+                if passes:production.disk()
+                else:
+                    with self.assertRaisesRegex(RuntimeError,'disk gate'):production.disk()
+    def test_unresolved_down_cannot_become_an_immutable_retirement_on_a_second_call(self):
+        worker=object.__new__(production.Worker);worker.claim=None;worker.retirement_certified=False
+        with self.assertRaisesRegex(RuntimeError,'remains unresolved'):worker.down()
+    def test_coordinator_backs_up_a_partial_group_when_the_worker_could_not(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);job=initial_wave()[0];recipe=dict(cut='a'*40,production_root=str(root/'production'))
+            Path(recipe['production_root']).mkdir();run=root/'datasets/counterfactual-targets/train/layout-720000';run.mkdir(parents=True)
+            (run/'partial-evidence.json').write_text('{"partial":1}')
+            def backup(source,files,destination,log):return dict(passed=True,files_sha256=files,destination=str(destination))
+            with patch.object(production,'ROOT',root),patch.object(production,'backup',backup):
+                first=production.backup_remaining_terminal(recipe,[job],'original collector fault')
+                self.assertEqual(len(first['records']),1);self.assertEqual(first['errors'],[])
+                self.assertEqual(production.backup_remaining_terminal(recipe,[job],'same fault')['records'],[])
+                (run/'partial-evidence.json').write_text('{"partial":2}')
+                self.assertEqual(len(production.backup_remaining_terminal(recipe,[job],'late byte change')['records']),1)
+            self.assertFalse((Path(recipe['production_root'])/'REGISTRY-SHA256.json').exists())
     def test_standalone_help_bootstraps_own_sources_with_empty_pythonpath(self):
         env=dict(os.environ,PYTHONPATH='',CUDA_VISIBLE_DEVICES='',PYTHONDONTWRITEBYTECODE='1')
         result=subprocess.run([sys.executable,'-B',str(Path(production.__file__)),'--help'],env=env,capture_output=True,text=True)
@@ -141,6 +190,9 @@ class ProductionRunnerTests(unittest.TestCase):
             events.append(name);start=time.time_ns();run=root/f'datasets/counterfactual-targets/train/layout-{job["layout_seed"]}'
             if name.startswith('collect-'):
                 self.assertIn('--normal-only',argv);self.assertNotIn('--resume',argv)
+                if bad=='collect_timeout':
+                    run.mkdir(parents=True);(run/'partial-evidence.json').write_text('{"original":"collector timeout"}')
+                    raise TimeoutError('Stage deadline: collect-720000')
                 run.mkdir(parents=True);cert=begin(run);h=test_target_triplets.Harness(run,spec(job['layout_seed'],'train'))
                 prepare=h.collector._prepare_scene_attempt
                 def identified(params,baseline,receipt,*args):
@@ -171,8 +223,9 @@ class ProductionRunnerTests(unittest.TestCase):
         def down(worker):
             if worker.claim is not None:events.append('down');worker.claim=None
         def backup(source,files,destination,log):
-            events.append('sha-backup')
-            if bad=='backup':raise RuntimeError('SHA backup failed')
+            diagnostic='terminal-diagnostics' in source.parts
+            events.append('diagnostic-backup' if diagnostic else 'sha-backup')
+            if bad=='backup_persistent' or bad=='backup' and not diagnostic:raise RuntimeError('SHA backup failed')
             self.assertEqual(files,artifacts.manifest(source))
             return dict(passed=True,destination=str(destination),files_sha256=files)
         def rpc(worker,code):events.append('held-restore');return dict(arm_restored=bad!='restore',command_baseline=dict(epoch=10))
@@ -185,22 +238,30 @@ class ProductionRunnerTests(unittest.TestCase):
                 patch('triplet_media.inspect_run',decode):
             worker=production.Worker(recipe,3,0)
             if bad:
-                with self.assertRaises(RuntimeError):worker.run([job])
+                with self.assertRaises(RuntimeError):worker.run([job,initial_wave()[4]])
                 self.assertTrue((recipe_root/'STOP.json').exists());self.assertFalse(artifacts.read(worker.root/'worker-finalization.json')['passed'])
+                final=artifacts.read(worker.root/'worker-finalization.json')
+                if bad=='backup_persistent':self.assertIsNotNone(final['terminal_backup_error'])
+                else:
+                    self.assertIsNotNone(final['terminal_backup']);self.assertIsNone(final['terminal_backup_error'])
+                    diagnostic=artifacts.read(Path(artifacts.read(final['terminal_backup']['path'])['snapshot'])/'terminal-disposition.json')
+                    self.assertTrue(diagnostic['training_forbidden']);self.assertEqual(diagnostic['job'],job)
+                    if bad=='collect_timeout':self.assertIn('partial-evidence.json',diagnostic['catalog']['group']['regular_files_sha256'])
+                    if bad=='source':self.assertTrue(any(e['kind']=='symlink' for e in diagnostic['catalog']['group']['entries']))
             else:
                 worker.run([job]);outcome=artifacts.read(worker.root/f'outcome-{job["layout_seed"]}.json')
                 proof=production.verify_outcome(outcome,recipe)
                 entry=artifacts.selected_entry(job,Path(proof['raw_root']),proof['files_sha256'])
                 self.assertEqual(len(entry['raw_files_sha256']),15);self.assertEqual(outcome['status'],'selected')
                 self.assertTrue(artifacts.read(worker.root/'worker-finalization.json')['passed'])
-        self.assertEqual(events[-1],'down')
+        self.assertEqual(events[-1],'diagnostic-backup' if bad else 'down')
         return events
     def test_full_fake_group_driver_reaches_seal_backup_restore_and_owned_retirement(self):
         with tempfile.TemporaryDirectory() as d:
             events=self.fake_attempt(d)
             self.assertEqual(events,['up','collect-720000','media-720000','report-720000','report-validation-720000','sha-backup','coordinator-admission','held-restore','down'])
     def test_fake_driver_refuses_source_media_export_backup_and_restore_failures(self):
-        for kind in ('source','media','export','backup','restore'):
+        for kind in ('collect_timeout','source','media','export','backup','backup_persistent','restore'):
             with self.subTest(kind=kind),tempfile.TemporaryDirectory() as d:self.fake_attempt(d,kind)
 
 

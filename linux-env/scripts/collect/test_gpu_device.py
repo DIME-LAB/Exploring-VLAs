@@ -3,13 +3,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 import gpu_device
+from storage import CANONICAL_ROOT
 
 
 class GpuDeviceTests(unittest.TestCase):
     def test_caches_are_persistent_per_box_and_card(self):
         first=gpu_device.cache_paths('GPU-aaaa','box-a');second=gpu_device.cache_paths('GPU-bbbb','box-a')
         self.assertNotEqual(first['root'],second['root'])
-        self.assertTrue(first['shaders'].startswith('/mnt/a4500-backup/exploring-vlas/cache/isaac/'))
+        self.assertTrue(first['shaders'].startswith(str(CANONICAL_ROOT/'cache/isaac')+'/'))
         with self.assertRaises(ValueError):gpu_device.cache_paths('GPU-aaaa','../other')
 
     def test_indexed_launcher_pins_cuda_by_uuid_instead_of_unsetting_it(self):

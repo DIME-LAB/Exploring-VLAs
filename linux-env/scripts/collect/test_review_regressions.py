@@ -261,11 +261,13 @@ class ReviewRegressions(unittest.TestCase):
             with self.assertRaisesRegex(TimeoutError,'Full planning scene reset verification'):c.sync_scene()
 
     def test_indexed_launcher_replaces_output_outside_instance_root(self):
+        from storage import CANONICAL_ROOT
         source=(ROOT/'linux-env/scripts/isaac/isaacsim_launch.sh').read_text()
         segment=source[source.index('        default_output=/tmp/soarm101-resources'):source.index('        mkdir -p "$MCP_CLIENT_OUTPUT_DIR"')]
-        probe='SCRIPT_DIR='+str(ROOT/'linux-env/scripts/isaac')+'\nINSTANCE_ROOT=/mnt/a4500-backup/exploring-vlas/runtime/instance-0\nMCP_CLIENT_OUTPUT_DIR=/tmp/elsewhere\n'+segment+'\nprintf "%s" "$MCP_CLIENT_OUTPUT_DIR"\n'
+        runtime=CANONICAL_ROOT/'runtime/instance-0'
+        probe='SCRIPT_DIR='+str(ROOT/'linux-env/scripts/isaac')+'\nINSTANCE_ROOT='+str(runtime)+'\nMCP_CLIENT_OUTPUT_DIR=/tmp/elsewhere\n'+segment+'\nprintf "%s" "$MCP_CLIENT_OUTPUT_DIR"\n'
         result=subprocess.run(['bash','-c',probe],text=True,capture_output=True,check=True)
-        self.assertEqual(result.stdout,'/mnt/a4500-backup/exploring-vlas/runtime/instance-0/resources')
+        self.assertEqual(result.stdout,str(runtime/'resources'))
 
 
 if __name__=='__main__':unittest.main()

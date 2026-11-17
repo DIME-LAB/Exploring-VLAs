@@ -53,8 +53,26 @@ class TripletProductionPlanTests(unittest.TestCase):
         guards([dict(reason='accepted')]*9+[dict(reason='exact_identity')],[])
         with self.assertRaisesRegex(ValueError,'exceed 10%'):guards([dict(reason='accepted')]*8+[dict(reason='exact_identity')]*2,[])
         for split,limit in (('train',40),('heldout',15)):
-            guards([], [dict(requested_layout_seed=BASE[split][0])]*limit)
-            with self.assertRaisesRegex(ValueError,'half'):guards([], [dict(requested_layout_seed=BASE[split][0])]*(limit+1))
+            guards([], [dict(requested_layout_seed=BASE[split][0])]*(limit-1))
+            with self.assertRaisesRegex(ValueError,'half'):guards([], [dict(requested_layout_seed=BASE[split][0])]*limit)
+    def test_actual_planner_refuses_at_half_before_emitting_the_replacement_wave(self):
+        jobs=initial_wave()
+        for split,limit in (('train',40),('heldout',15)):
+            for n in (limit-1,limit):
+                refused=set(BASE[split][:n])
+                # Distinct physical reasons avoid triggering a separate streak guard.
+                rows=[outcome(j,('quality:reason-'+str(j['layout_seed'])) if j['layout_seed'] in refused else 'accepted') for j in jobs]
+                with self.subTest(split=split,n=n):
+                    if n==limit:
+                        with self.assertRaisesRegex(ValueError,'half'):reduce_waves([dict(jobs=jobs,outcomes=rows)])
+                    else:self.assertEqual(len(reduce_waves([dict(jobs=jobs,outcomes=rows)])['next_wave']),n)
+    def test_instance_refusal_streak_survives_worker_replacement_between_waves(self):
+        jobs=initial_wave();failed={730012,730016}
+        first=[outcome(j,'quality:home_unstable' if j['layout_seed'] in failed else 'accepted') for j in jobs]
+        state=reduce_waves([dict(jobs=jobs,outcomes=first)])
+        next_rows=[outcome(j,'quality:home_unstable' if j['requested_layout_seed']==730012 else 'accepted') for j in state['next_wave']]
+        with self.assertRaisesRegex(ValueError,'three consecutive'):
+            reduce_waves([dict(jobs=jobs,outcomes=first),dict(jobs=state['next_wave'],outcomes=next_rows)])
     def test_canonical_native_snapshot_survives_visible_rule_refusal(self):
         import json
         with tempfile.TemporaryDirectory() as d:

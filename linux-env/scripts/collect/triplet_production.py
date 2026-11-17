@@ -4,7 +4,7 @@
 Print the immutable plan with --plan. --go additionally requires the explicit
 training-release certificate and starts the four workers with a 60 s stagger.
 """
-import argparse,ctypes,hashlib,json,os,select,shlex,signal,socket,subprocess,sys,time
+import argparse,ctypes,hashlib,json,os,select,shlex,signal,socket,stat,subprocess,sys,time,threading
 from pathlib import Path
 sys.dont_write_bytecode=True
 REPO=Path(__file__).resolve().parents[3]
@@ -22,6 +22,7 @@ DUAL=Path('/mnt/a4500-backup/exploring-vlas/datasets/counterfactual-production-v
 ASSIGNED_UUID='GPU-c2772797-ad71-f07e-0101-db0f188f3504'
 SELF=Path(__file__).resolve()
 SSH=['ssh','-oBatchMode=yes','-oConnectTimeout=15','-oStrictHostKeyChecking=yes','-oHostKeyAlias=dual-a4500',
+    '-oControlMaster=no','-oControlPath=none','-oControlPersist=no',
     '-oUserKnownHostsFile='+str(ROOT/'setup/dual-known_hosts'),'aaugus11@10.179.23.212']
 
 
@@ -45,6 +46,54 @@ def disk():
     measured=dict(root_free_bytes=disk_usage('/').free,bulk_free_bytes=disk_usage(ROOT).free)
     if measured['root_free_bytes']<20*1024**3 or measured['bulk_free_bytes']<50*1024**3:raise RuntimeError('Production disk gate: '+repr(measured))
     return measured
+
+
+class DiskWatch:
+    """Keep checking while the main thread is inside a blocking RPC or backup."""
+    def __init__(self,root,on_fault,probe=None,interval=.5,report=None):
+        self.root=Path(root);self.on_fault=on_fault;self.probe=probe or disk;self.interval=interval
+        self.report=Path(report) if report is not None else self.root/'disk-monitor.json'
+        self.stop=threading.Event();self.thread=None;self.fault=None;self.samples=0;self.last=None;self.minima={};self.closed=False
+        self.last_write=0.
+    def record(self):
+        atomic_json(self.report,dict(healthy=self.fault is None,closed=self.closed,interval_s=self.interval,
+            samples=self.samples,last=self.last,minima_bytes=self.minima,fault=self.fault,wall_ns=time.time_ns()))
+    def sample(self):
+        if self.fault:return False
+        try:
+            self.last=self.probe();self.samples+=1
+            for key,value in self.last.items():self.minima[key]=min(self.minima.get(key,value),value)
+            if time.monotonic()-self.last_write>=5:self.record();self.last_write=time.monotonic()
+            return True
+        except BaseException as exc:
+            self.fault=dict(error=repr(exc),source='active disk monitor',wall_ns=time.time_ns(),last_healthy=self.last)
+            try:publish_stop(self.root,self.fault);self.record()
+            except BaseException as write_error:self.fault['publication_error']=repr(write_error)
+            # This callback signals only the coordinator's proven worker pidfds.
+            # It also runs if the filesystem cannot publish a STOP file.
+            try:self.on_fault()
+            except BaseException as callback_error:self.fault['retirement_request_error']=repr(callback_error)
+            return False
+    def start(self):
+        self.sample();self.require()
+        def loop():
+            while not self.stop.wait(self.interval):
+                if not self.sample():return
+        self.thread=threading.Thread(target=loop,name='production-disk-monitor',daemon=True);self.thread.start()
+    def require(self):
+        if self.fault:raise RuntimeError('Production disk monitor stopped admission: '+repr(self.fault))
+    def close(self):
+        self.stop.set()
+        if self.thread:
+            self.thread.join(timeout=3)
+            if self.thread.is_alive():raise RuntimeError('Disk monitor did not retire')
+        self.closed=True;self.record()
+
+
+def publication_gate(root,watch):
+    if watch is not None:watch.require()
+    disk()
+    if (Path(root)/'STOP.json').exists():raise RuntimeError('STOP forbids production publication')
 
 
 def publish_stop(root,event):
@@ -96,6 +145,81 @@ def backup(source,files,destination,log):
     return dict(passed=True,source=str(source),destination=str(destination),files_sha256=files,completed_wall_ns=time.time_ns())
 
 
+def diagnostic_copy(source,target,namespace):
+    """Copy regular bytes; catalog links/devices without following or reading them."""
+    source=Path(source);entries=[];regular={};pending=[source]
+    for parent in source.parents:
+        try:mode=parent.lstat().st_mode
+        except FileNotFoundError:return dict(source=str(source),entries=[dict(path='.',kind='absent')],regular_files_sha256={})
+        if not stat.S_ISDIR(mode):
+            return dict(source=str(source),blocked_ancestor=str(parent),entries=[],regular_files_sha256={})
+    while pending:
+        path=pending.pop()
+        try:info=path.lstat()
+        except FileNotFoundError:
+            entries.append(dict(path=str(path),kind='absent'));continue
+        relative='.' if path==source else str(path.relative_to(source))
+        row=dict(path=relative,mode=info.st_mode,size=info.st_size,mtime_ns=info.st_mtime_ns)
+        if stat.S_ISLNK(info.st_mode):row.update(kind='symlink',link_target=os.readlink(path))
+        elif stat.S_ISDIR(info.st_mode):row['kind']='directory';pending.extend(sorted(path.iterdir(),reverse=True))
+        elif stat.S_ISREG(info.st_mode):
+            name=namespace+'-%06d'%len(regular);output=target/name
+            fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+            with os.fdopen(fd,'rb') as stream,output.open('xb') as saved:
+                before=os.fstat(stream.fileno())
+                if not stat.S_ISREG(before.st_mode):raise ValueError('Diagnostic source changed type')
+                for chunk in iter(lambda:stream.read(8*1024**2),b''):saved.write(chunk)
+                saved.flush();os.fsync(saved.fileno());after=os.fstat(stream.fileno())
+            value=sha(output);regular[relative]=value
+            row.update(kind='regular',snapshot_file=name,sha256=value,changed_during_copy=(before.st_size,before.st_mtime_ns)!=(after.st_size,after.st_mtime_ns))
+        else:row['kind']='nonregular-no-content-read'
+        entries.append(row)
+    return dict(source=str(source),entries=entries,regular_files_sha256=regular)
+
+
+def backup_terminal(recipe,job,error,worker_root=None):
+    """Called only after owned retirement; diagnostic copies never enter selection."""
+    import uuid
+    root=Path(recipe['production_root']);run=ROOT/f'datasets/counterfactual-targets/{job["split"]}/layout-{job["layout_seed"]}'
+    token=job['split']+'-'+str(job['layout_seed'])+'-'+uuid.uuid4().hex
+    snapshot=root/'terminal-diagnostics'/token;snapshot.mkdir(parents=True,exist_ok=False)
+    catalog=dict(group=diagnostic_copy(run,snapshot,'group'))
+    if worker_root is not None:
+        # Stage logs are closed after down; caches and previous group snapshots
+        # are intentionally outside this diagnostic set.
+        for i,path in enumerate(sorted(Path(worker_root).glob('*.log'))+sorted(Path(worker_root).glob('stages.json'))):
+            catalog['worker-'+str(i)]=diagnostic_copy(path,snapshot,'worker-'+str(i))
+    atomic_json(snapshot/'terminal-disposition.json',dict(version=1,diagnostic_only=True,training_forbidden=True,
+        cut=recipe['cut'],job=job,original_error=error,raw_root=str(run),catalog=catalog,wall_ns=time.time_ns()))
+    files=manifest(snapshot);destination=DUAL/snapshot.relative_to(ROOT)
+    logpath=root/(token+'-backup.log')
+    with logpath.open('x') as log:receipt=backup(snapshot,files,destination,log)
+    value=dict(passed=True,diagnostic_only=True,training_forbidden=True,raw_root=str(run),job=job,
+        original_error=error,catalog_sha256=sha(snapshot/'terminal-disposition.json'),snapshot=str(snapshot),backup=receipt,
+        source_regular_files_sha256=catalog['group']['regular_files_sha256'])
+    output=root/'terminal-backups'/(token+'.json');output.parent.mkdir(exist_ok=True);atomic_json(output,value)
+    return dict(path=str(output),sha256=sha(output))
+
+
+def backup_remaining_terminal(recipe,jobs,error):
+    """Coordinator fallback after every descendant has been proven gone."""
+    root=Path(recipe['production_root']);records=[];errors=[]
+    for job in jobs:
+        run=ROOT/f'datasets/counterfactual-targets/{job["split"]}/layout-{job["layout_seed"]}'
+        if not os.path.lexists(run):continue
+        try:
+            files=manifest(run);proof=root/'proofs'/job['split']/(str(job['layout_seed'])+'.json')
+            if proof.exists():
+                known=read(proof)
+                if known.get('backup',{}).get('passed') is True and known.get('files_sha256')==files:continue
+            if any((row:=read(p)).get('raw_root')==str(run) and row.get('passed') is True and row.get('source_regular_files_sha256')==files
+                for p in (root/'terminal-backups').glob('*.json')):continue
+        except (OSError,ValueError):pass  # Preserve invalid entries as a diagnostic catalog.
+        try:records.append(backup_terminal(recipe,job,error))
+        except BaseException as exc:errors.append(dict(layout_seed=job['layout_seed'],error=repr(exc)))
+    return dict(records=records,errors=errors)
+
+
 class Worker:
     def __init__(self,recipe,instance,wave):
         self.plan=recipe;self.instance=instance;self.wave=wave;self.cut=recipe['cut'];self.port=8777+2*instance
@@ -103,8 +227,14 @@ class Worker:
         self.root.mkdir(parents=True,exist_ok=False);self.runtime=None;self.ledger=None;self.claim=None;self.stages=[];self.native=None
         self.global_root=Path(recipe['production_root']);self.wrapper=REPO/'linux-env/scripts/collect_sim.sh'
         self.session=-1;self.stop_file=self.global_root/'STOP.json';self.reason=None;self.streak=0
+        self.active_job=None
+        self.retirement_certified=True
     def check(self):
         frozen(self.cut)
+        try:disk()
+        except BaseException as exc:
+            publish_stop(self.global_root,dict(error=repr(exc),source='worker disk gate',slot=self.instance,wall_ns=time.time_ns()))
+            raise
         if self.stop_file.exists():raise RuntimeError('Production peer stop requested: '+str(self.stop_file))
     def await_admission(self,seed,outcome):
         path=self.root/('admitted-'+str(seed)+'.json');end=time.monotonic()+180
@@ -132,6 +262,7 @@ class Worker:
                 self.stages.append(row);atomic_json(self.root/'stages.json',self.stages);print(json.dumps(row),flush=True)
         return row
     def rpc(self,code):
+        self.check()
         sys.path.insert(0,str(REPO/'omni-kit-mcp'))
         from kit_mcp.client import call
         import uuid
@@ -153,6 +284,7 @@ class Worker:
         self.session+=1;self.native=None
         self.runtime=confined(Path(self.plan['runtime_root'])/f'wave-{self.wave:02d}/slot-{self.instance}/session-{self.session:03d}')
         self.runtime.mkdir(parents=True,exist_ok=False);self.claim=InstanceClaim(self.runtime)
+        self.retirement_certified=False
         if ctypes.CDLL(None,use_errno=True).prctl(36,1,0,0,0)!=0:raise OSError('Subreaper unavailable')
         self.ledger=OwnedProcesses(self.runtime,time.time_ns())
         for port in (self.port,self.port+1):
@@ -184,7 +316,9 @@ class Worker:
         stage_readiness.wait(lambda:dict(stage_readiness=self.rpc(stage_readiness.probe_code())),
             lambda p:atomic_json(self.root/f'readiness-{self.session}.json',p))
     def down(self):
-        if self.claim is None:return
+        if self.claim is None:
+            if not self.retirement_certified:raise RuntimeError('Previous owned cleanup remains unresolved')
+            return
         failures=[];cleanup=None;ports={}
         try:
             if self.ledger is not None and hasattr(self,'env'):
@@ -199,6 +333,7 @@ class Worker:
                 with socket.socket() as sock:
                     sock.settimeout(.3);ports[str(port)]=sock.connect_ex(('127.0.0.1',port))==0
             passed=cleanup is not None and not cleanup['remaining'] and not any(ports.values()) and not failures
+            self.retirement_certified=passed
             atomic_json(self.root/f'owned-down-{self.session}.json',dict(passed=passed,cleanup=cleanup,ports_listening=ports,errors=failures))
             if not passed:raise RuntimeError('Owned cleanup was not certified')
         finally:self.claim.close();self.claim=None
@@ -243,21 +378,28 @@ class Worker:
             atomic_json(self.root/('between-group-'+str(seed)+'.json'),restored)
         return outcome
     def run(self,jobs):
-        error=None
+        error=None;backup_result=None;backup_error=None;retired=False
         try:
             for job in jobs:
+                self.active_job=job
                 self.check()
                 if self.claim is None:self.up()
                 self.attempt(job)
+                self.active_job=None
         except BaseException as exc:
             error=repr(exc)
             publish_stop(self.global_root,dict(error=error,slot=self.instance,wall_ns=time.time_ns()))
         finally:
-            try:self.down()
+            try:self.down();retired=True
             except BaseException as exc:
                 error=error or repr(exc)
                 publish_stop(self.global_root,dict(error=repr(exc),slot=self.instance,source='owned-down',wall_ns=time.time_ns()))
-            result=dict(passed=error is None,error=error,instance=self.instance,wave=self.wave,cut=self.cut,sessions=self.session+1,completed_wall_ns=time.time_ns())
+            if error is not None and retired and self.active_job is not None:
+                try:backup_result=backup_terminal(self.plan,self.active_job,error,self.root)
+                except BaseException as exc:
+                    backup_error=repr(exc);publish_stop(self.global_root,dict(error=backup_error,source='terminal backup',slot=self.instance,wall_ns=time.time_ns()))
+            result=dict(passed=error is None,error=error,instance=self.instance,wave=self.wave,cut=self.cut,sessions=self.session+1,
+                terminal_backup=backup_result,terminal_backup_error=backup_error,completed_wall_ns=time.time_ns())
             atomic_json(self.root/'worker-finalization.json',result)
         if error:raise RuntimeError(error)
 
@@ -282,6 +424,7 @@ def verify_outcome(outcome,recipe):
 def registries(recipe,state):
     if not state['complete']:raise ValueError('Incomplete production cannot publish a registry')
     root=Path(recipe['production_root']);result={}
+    publication_gate(root,None)
     rebuilt=reduce_waves(read(root/'wave-ledger.json'))
     if state!=rebuilt:raise ValueError('Registry state differs from the deterministic source-bound wave ledger')
     for split in ('train','heldout'):
@@ -331,6 +474,7 @@ def backup_projection(registry,authoritative_sha):
 
 def backup_registries(recipe):
     root=Path(recipe['production_root']);destination=DUAL/root.relative_to(ROOT)
+    publication_gate(root,None)
     logpath=Path(recipe['runtime_root'])/'registry-backup.log'
     with logpath.open('x') as log:receipt=backup(root,manifest(root),destination,log)
     # Project only the explicit path fields in a separate file. The original
@@ -362,6 +506,7 @@ def coordinate(recipe,release):
     if gpu_uuid(0)!=ASSIGNED_UUID:raise ValueError('Assigned physical GPU differs')
     start=time.monotonic()
     while time.monotonic()-start<60:
+        disk()
         if subprocess.check_output(['nvidia-smi','--query-compute-apps=pid','--format=csv,noheader'],text=True).strip():raise RuntimeError('GPU compute is not empty before START')
         time.sleep(1)
     root=confined(recipe['production_root']);root.mkdir(parents=True,exist_ok=False)
@@ -369,14 +514,19 @@ def coordinate(recipe,release):
     atomic_json(root/'coordinator.json',identity(os.getpid()))
     runtime=Path(recipe['runtime_root']);runtime.mkdir(parents=True,exist_ok=False)
     if ctypes.CDLL(None,use_errno=True).prctl(36,1,0,0,0)!=0:raise OSError('Coordinator subreaper unavailable')
-    ledger=OwnedProcesses(runtime,time.time_ns());waves=[];error=None;children=[];verified={};cleanup=None
+    ledger=OwnedProcesses(runtime,time.time_ns());waves=[];error=None;children=[];verified={};cleanup=None;watch=None;jobs=[];terminal_backups=None
     try:
+        def retire_workers():
+            for process,_,_ in list(children):
+                if process.poll() is None and process.pid in ledger.known:ledger.send(process.pid,signal.SIGTERM)
+        watch=DiskWatch(root,retire_workers,report=runtime/'disk-monitor.json');watch.start()
         while True:
             state=reduce_waves(waves)
             if state['complete']:break
             jobs=state['next_wave'];number=len(waves);path=root/f'wave-{number:02d}.json'
             atomic_json(path,dict(jobs=jobs,outcomes=[]));begun=time.monotonic();children=[]
             def observe():
+                publication_gate(root,watch)
                 outcomes=[read(p) for p in sorted((root/f'wave-{number:02d}').glob('slot-*/outcome-*.json'))]
                 seen=set()
                 for outcome in outcomes:
@@ -405,6 +555,7 @@ def coordinate(recipe,release):
                     if (root/'STOP.json').exists():raise RuntimeError('Worker stopped during stagger')
                     time.sleep(.2)
                 log=(root/f'wave-{number:02d}-slot-{slot}.log').open('x')
+                publication_gate(root,watch)
                 process=subprocess.Popen([sys.executable,'-B',str(SELF),'--worker',str(slot),'--wave',str(number),'--recipe',str(root/'plan.json')],
                     cwd=REPO,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
                 ledger.add(process.pid);children.append((process,log,slot))
@@ -425,13 +576,21 @@ def coordinate(recipe,release):
         finals={str(p.relative_to(root)):sha(p) for p in sorted(root.glob('wave-*/slot-*/worker-finalization.json'))}
         if any(read(root/p).get('passed') is not True for p in finals):raise RuntimeError('Worker finalization failed')
         atomic_json(root/'production-finalization.json',dict(passed=True,error=None,cleanup=cleanup,worker_finalizations_sha256=finals,wall_ns=time.time_ns()))
-        for split,registry in registries(recipe,state).items():atomic_json(root/(split+'-registry.json'),registry)
+        for split,registry in registries(recipe,state).items():
+            publication_gate(root,watch);atomic_json(root/(split+'-registry.json'),registry)
         # Publish the independent caller seals only after finalization and both
         # complete registries exist. No checkpoint can substitute for this file.
-        atomic_json(root/'REGISTRY-SHA256.json',{s:sha(root/(s+'-registry.json')) for s in ('train','heldout')})
+        publication_gate(root,watch);atomic_json(root/'REGISTRY-SHA256.json',{s:sha(root/(s+'-registry.json')) for s in ('train','heldout')})
         backup_registries(recipe)
+        publication_gate(root,watch);watch.close();publication_gate(root,watch)
+        publication_ledger=OwnedProcesses(runtime,time.time_ns());publication_ledger.scan();publication_cleanup=publication_ledger.stop()
+        if publication_cleanup['remaining']:raise RuntimeError('Publication/backup children remain alive')
+        atomic_json(runtime/'publication-cleanup.json',dict(passed=True,cleanup=publication_cleanup))
+        publication_gate(root,watch)
         atomic_json(root/'PUBLICATION-COMPLETE.json',dict(passed=True,registries=read(root/'REGISTRY-SHA256.json'),
-            finalization_sha256=sha(root/'production-finalization.json'),backup_receipt_sha256=sha(Path(recipe['runtime_root'])/'registry-backup.json'),wall_ns=time.time_ns()))
+            finalization_sha256=sha(root/'production-finalization.json'),backup_receipt_sha256=sha(Path(recipe['runtime_root'])/'registry-backup.json'),
+            disk_monitor_path=str(runtime/'disk-monitor.json'),disk_monitor_sha256=sha(runtime/'disk-monitor.json'),
+            publication_cleanup_path=str(runtime/'publication-cleanup.json'),publication_cleanup_sha256=sha(runtime/'publication-cleanup.json'),wall_ns=time.time_ns()))
     except BaseException as exc:
         error=repr(exc)
         publish_stop(root,dict(error=error,wall_ns=time.time_ns()))
@@ -440,12 +599,22 @@ def coordinate(recipe,release):
         end=time.monotonic()+150
         while any(p.poll() is None for p,_,_ in children) and time.monotonic()<end:ledger.scan();time.sleep(.2)
     finally:
+        if watch is not None and not watch.closed:
+            try:watch.close()
+            except BaseException as exc:error=error or repr(exc);publish_stop(root,dict(error=repr(exc),source='disk monitor retirement',wall_ns=time.time_ns()))
         if cleanup is None:
             try:cleanup=ledger.stop()
             except BaseException as exc:
                 error=error or repr(exc);cleanup=dict(remaining=[dict(unverified=repr(exc))])
                 publish_stop(root,dict(error=repr(exc),source='coordinator cleanup',wall_ns=time.time_ns()))
-        if error is not None:atomic_json(root/'production-finalization.json',dict(passed=False,error=error,cleanup=cleanup,wall_ns=time.time_ns()))
+        if error is not None:
+            if not cleanup['remaining']:terminal_backups=backup_remaining_terminal(recipe,jobs,error)
+            else:terminal_backups=dict(errors=[dict(error='Owned writers remain; immutable diagnostic copy is not yet possible')])
+            try:
+                tail=OwnedProcesses(runtime,time.time_ns());tail.scan();tail_cleanup=tail.stop()
+            except BaseException as exc:tail_cleanup=dict(remaining=[dict(unverified=repr(exc))])
+            atomic_json(root/'production-finalization.json',dict(passed=False,error=error,cleanup=cleanup,terminal_backups=terminal_backups,
+                backup_children_cleanup=tail_cleanup,wall_ns=time.time_ns()))
     if error:raise RuntimeError(error)
 
 

@@ -7,7 +7,7 @@ import run_smoke
 
 class SmokeRunnerTests(unittest.TestCase):
     def test_recipe_has_normal_and_dedicated_regrasp_with_diagnostic_retention(self):
-        recipe=run_smoke.plan('/mnt/a4500-backup/exploring-vlas/datasets/unit-future-smoke-not-created','a'*40)
+        recipe=run_smoke.plan(run_smoke.CANONICAL_ROOT/'datasets/unit-future-smoke-not-created','a'*40)
         self.assertEqual(recipe['domain'],90);self.assertEqual(recipe['bridge_port'],8777)
         commands=[s['argv'] for s in recipe['stages'] if '-first' in s['name'] or '-resume' in s['name']]
         self.assertEqual(len(commands),4)
@@ -17,7 +17,7 @@ class SmokeRunnerTests(unittest.TestCase):
 
     def test_foreign_output_or_nonassigned_instance_refuses(self):
         with self.assertRaises(ValueError):run_smoke.plan('/tmp/not-authorized','a'*40)
-        with self.assertRaises(ValueError):run_smoke.plan('/mnt/a4500-backup/exploring-vlas/datasets/unit-unused-smoke','a'*40,1)
+        with self.assertRaises(ValueError):run_smoke.plan(run_smoke.CANONICAL_ROOT/'datasets/unit-unused-smoke','a'*40,1)
 
     def test_source_change_refuses_before_any_stage(self):
         with patch('run_smoke.subprocess.check_output',side_effect=['collect.py\n','']):

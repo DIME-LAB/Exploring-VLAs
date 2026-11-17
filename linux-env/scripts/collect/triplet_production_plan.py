@@ -9,10 +9,10 @@ from contract import (COUNTERFACTUAL_TRAIN_BASE_SEEDS,COUNTERFACTUAL_HELDOUT_BAS
 
 BASE=dict(train=COUNTERFACTUAL_TRAIN_BASE_SEEDS,heldout=COUNTERFACTUAL_HELDOUT_BASE_SEEDS)
 RESERVE=dict(train=COUNTERFACTUAL_TRAIN_RESERVE_SEEDS,heldout=COUNTERFACTUAL_HELDOUT_RESERVE_SEEDS)
-POLICY=dict(version=1,instances=[3,4,5,6],targets=dict(train=120,heldout=20),
+POLICY=dict(version=2,instances=[3,4,5,6],targets=dict(train=120,heldout=20),
     reserve=dict(train=list(RESERVE['train']),heldout=list(RESERVE['heldout'])),
     replacement_order='complete wave, then sort original requested slots within train/heldout; ascending unused reserve seeds',
-    exact_refusal_fraction_max=.10,reserve_fraction_max=.50,
+    exact_refusal_fraction_max=.10,reserve_fraction_max=.50,reserve_stop_at_half=True,
     media=dict(exact_first_physical_hash=True,exact_first_state=True,min_each_camera_psnr_db=40.,different_first50_labels=True))
 
 
@@ -39,8 +39,19 @@ def guards(outcomes,allocations):
         raise ValueError('Production stop: exact-identity refusals exceed 10%: '+str(dict(exact=exact,attempted=len(outcomes))))
     for split in BASE:
         used=sum(r['requested_layout_seed'] in BASE[split] for r in allocations)
-        if used>len(RESERVE[split])*POLICY['reserve_fraction_max']:
-            raise ValueError('Production stop: more than half '+split+' reserve would be consumed')
+        if used>=len(RESERVE[split])*POLICY['reserve_fraction_max']:
+            raise ValueError('Production stop: half '+split+' reserve would be consumed')
+    # Derive per-instance streaks from verified, ordered outcomes, including
+    # earlier waves. Starting a replacement worker never resets this history.
+    streak={}
+    for row in outcomes:
+        if 'requested_layout_seed' not in row:continue
+        split=row['split'];ordinal=BASE[split].index(row['requested_layout_seed'])+(0 if split=='train' else len(BASE['train']))
+        slot=POLICY['instances'][ordinal%len(POLICY['instances'])]
+        previous,count=streak.get(slot,(None,0));reason=row['reason']
+        if reason=='accepted':streak[slot]=(None,0);continue
+        count=count+1 if previous==reason else 1;streak[slot]=(reason,count)
+        if count>=3:raise ValueError('Production stop: three consecutive same-reason refusals on instance '+str(slot)+': '+reason)
 
 
 def initial_wave():

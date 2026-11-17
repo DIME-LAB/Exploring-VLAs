@@ -401,8 +401,15 @@ is retained with its source artifacts and SHA-bound disposition. Partial groups
 never count. Clock, transport, epoch, scene, reset, disk or cleanup faults stop
 the run. Only a replayed physical-quality rejection, a native-proven visible-rule
 refusal, or a completed group's production media refusal may receive a replacement.
-Three consecutive same-reason refusals on a slot stop it. Exact-identity refusals
-above 10% of attempted groups, or allocation of more than half either reserve,
+Terminal and exception groups are also backed up after all owned writers retire.
+Their immutable diagnostic snapshots retain regular-file bytes and a path/hash
+catalog; links and devices are catalogued without following or reading them.
+They are marked training-forbidden and never become replacement admissions.
+The coordinator backs up any remaining partial group after its own final cleanup;
+an unresolved cleanup or backup remains an explicit stopped-run fault.
+Three consecutive same-reason refusals on an instance stop it, including history
+from earlier replacement waves. Exact-identity refusals above 10% of attempted
+groups, or allocation of half either reserve (40 train / 15 held-out),
 stop production before another group is admitted.
 
 The generic collector retains its reviewed pose tolerances. Production additionally
@@ -431,6 +438,11 @@ clock/startup, and runs the existing collector/export entrances. The coordinator
 rechecks every disposition before allowing that slot's next group. STOP causes
 all workers to retire their own instances; PID-file or port-based adoption is
 never used.
+Both filesystems are monitored every 0.5 s while production is active, including
+blocking RPC/export/backup calls. A breach publishes durable STOP and requests
+retirement through only the owned worker pidfds. Stage polling and every heavy
+publication transition also check the floors. No subsequent group or successful
+publication is admitted after a breach; diagnostic backups remain required.
 
 Authoritative registries are RTX-native:
 `<host-root>/datasets/counterfactual-targets/production-v1/{train,heldout}-registry.json`.
