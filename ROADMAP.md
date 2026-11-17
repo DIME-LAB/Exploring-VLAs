@@ -354,6 +354,20 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       rtx6000 after rule431 ends, then train from smolvla_base on triplets. Recolouring/green-block swap noted as a later
       add-on (fixed trajectory, cannot force language use). rule15 eval homes now use sealed restore of the recorded
       initial bodies (cup sampler is batch-history dependent). dual GPU0 windows announce START/STOP to plan47 and robosort.
+    - 2026-11-17 ~05-08Z: rule431-base25k complete (25k, loss 0.0023); CPU colour probe flat at 5k/10k/15k/20k/25k (shift
+      3-4.4 mm, 1-4/15 heading to the prompted colour) -> confirms the one-target-per-layout shortcut. 5k scored
+      rule-seen15: 0/15 grasps, closure 54.6 mm / 47.6 deg; wrist_roll requests below the -157.2 deg limit in 6/15 episodes
+      (open hypothesis: expert grasp roll is multimodal under the lego 180 deg symmetry; w_diag checking). Triplet
+      production (b0f90fb, reviewed PRODUCTION-READY) started on rtx6000 ~08:1xZ and stopped with 0 groups on a whole-log SHA
+      check of a Nov 14 bootstrap log that grew after its pin (device table identical); fix = immutable prefix capsule,
+      pending review. rtx6000 old runs archived to dual (SHA-verified) and removed: next-120k, memorize, jobs,
+      image-robustness (125 GB free).
+- [ ] 3.5 (new, operator 2026-11-17) Visual re-rendering of recorded episodes without re-simulation: bridge our per-tick
+      poses (all 900 episodes carry 6-D state + 9 bodies per tick) into DroidStack take+tape+manifest on DroidStack branch
+      vla-render-bands (separate clone, base dev 47bfbaac), add look bands (lights, materials, camera poses), an ego wrist
+      camera and multi-camera output in droidstack.render; write datasets through our own exporter (not EmbodiedSWE).
+      Task-object colours never randomised. CPU bridge + stock fake-renderer replay proof PASS; GPU probe pending.
+      Lands upstream via plan47 after the DroidStack release.
 - [ ] 3.4 (only if 3.3 paraphrases fail) Prompt-variety run: relabel each training sample's task from a set
       of templates per colour at merge time (no new collection), hold some templates out for eval, and compare
       against the fixed-string model on both exact and held-out prompts. Published SmolVLA/LeRobot guidance is
