@@ -1202,3 +1202,61 @@ rejections, storage thresholds, output confinement and deployment feedback flags
 Always validate the completed five-episode smoke before starting the pilot;
 check physical feedback, application acknowledgements, containment and dataset
 read-back, rather than relying on a scripted completion message.
+
+
+### Continuing a stopped counterfactual production invocation
+
+The continuation coordinator has its own reviewed commit and uses a separate, immutable
+`503e39a692d47056ea325b7a20baa2f1d6900c91` checkout for the collector, native runtime,
+scene assets, clock certification and exporter. The collector checkout HEAD must equal that
+cut; matching scoped files at a different HEAD is insufficient because receipts record HEAD.
+The outer `collect_sim.sh` routes those tools and assets through `SOARM_COLLECTOR_REPO`.
+Only the production continuation sets `SOARM_COLLECTION_CONFIGURE_TIMEOUT=300` for the
+post-quick-start configure RPC. The default remains 30 seconds; quick-start remains 900 seconds,
+and other RPC/watchdog budgets and collection predicates are unchanged. Each startup writes
+`startup-budget-N.json` with the budget, both cuts and the configure-source hash. This covers
+RTX PSO compilation that can still be pending after quick-start returns.
+
+Preparation is CPU-only and exclusive for the original run. Supply the independently recorded
+original progress SHA (not a newly trusted empty checkpoint). For the stopped 503e39a invocation
+that SHA is `733608a31668ee4428e91d5b9fcceb80cb8f2643f0521d05b31e1ad4f2e73f0b`.
+The new outer checkout runs:
+
+```bash
+nice -n10 /mnt/storage3/aaugus11/exploring-vlas/export-venv/bin/python -B \
+  linux-env/scripts/collect/triplet_production.py --cut FULL_REVIEWED_OUTER_COMMIT \
+  --prepare-continuation /mnt/storage3/aaugus11/exploring-vlas/datasets/counterfactual-targets/production-v1 \
+  --collector-repo /mnt/storage3/aaugus11/exploring-vlas/repo/counterfactual-production \
+  --checkpoint-sha256 733608a31668ee4428e91d5b9fcceb80cb8f2643f0521d05b31e1ad4f2e73f0b \
+  --output /mnt/storage3/aaugus11/exploring-vlas/setup/continuation-admission-UNIQUE
+```
+
+Preparation replays the real source/proof/disposition checks and remotely re-hashes every
+backup tree. It binds the stopped supervisor nonce, independently certified retired PID births,
+original jobs, admitted outcomes, failures and all supporting receipts. Original STOP and failed
+finalization bytes remain intact. A separate evidence snapshot preserves those paths for the
+backup projection. The existing Worker media/export/backup entrance completes 720087/720092;
+partial dataset/reports are renamed into their raw group's `continuation-export-history/`.
+A failed qualification never selects an episode; these two explicitly approved interrupted jobs
+can instead carry a source-bound terminal replacement disposition. Layout 720097 retains its
+post-writer terminal fault and gets the explicit `operator_acknowledged_peer_stop` replacement
+reason, with all native events required to follow the original STOP. This exception applies only
+to the identified stopped invocation, not to fresh runtime faults. Layout 720094 has no raw tree
+and remains an ordinary pending job at its original seed. No archived 90e1d99 data is admitted.
+
+The returned `admission.json` and its independently published SHA are mandatory inputs to
+`--plan --continuation PATH --continuation-sha256 SHA --cut FULL_REVIEWED_OUTER_COMMIT`.
+The whole preparation tree is sealed: do not put launch logs, notifier output or coordinator
+PID files beside admission.json; use a separate launch setup directory. A new production
+`--go --continuation ... --continuation-sha256 ... --cut ... --release-file ...` requires a new
+lead GO, fresh managed supervisor/nonce/PIDs, hostlock and detached notifier. This is not an
+automatic restart. A pre-existing continuation namespace or a concurrent owner refuses.
+
+The continuation publishes in `production-v1/continuations/ADMISSION_DIRECTORY_NAME/`;
+raw train/held-out layout roots stay canonical. Its registry binds the new plan/finalization
+and full wave ledger, including the inherited original dispositions exactly once. Original
+failure streaks and deterministic reserve allocation are retained. Proofs, original bound
+receipts and preparation evidence are SHA-backed up at their corresponding dual projection
+paths before final publication. Configure the notifier and training registry argument for the
+new child publication root, not the historical root's STOP. Training still requires the final
+caller-published registry SHA and its own new GO. Automatic startup retries are deferred.

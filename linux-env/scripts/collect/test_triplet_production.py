@@ -168,9 +168,9 @@ class ProductionRunnerTests(unittest.TestCase):
                     else:
                         with self.assertRaises((ValueError,RuntimeError)):artifacts.classify(run,job,dict(pid=os.getpid(),started_wall_ns=start))
 
-    def fake_attempt(self,root,bad=None):
+    def fake_attempt(self,root,bad=None,production_root=None,layout_seed=720000,return_transports=False):
         """Real Worker.run -> attempt -> classify -> seal; only I/O transports fake."""
-        root=Path(root);job=initial_wave()[0];recipe=dict(cut='a'*40,production_root=str(root/'production'),runtime_root=str(root/'runtime'))
+        root=Path(root);job=next(j for j in initial_wave() if j['layout_seed']==layout_seed);recipe=dict(cut='a'*40,production_root=str(production_root or root/'production'),runtime_root=str(root/'runtime'))
         recipe_root=Path(recipe['production_root']);recipe_root.mkdir()
         source=root/'fixture_source.py';source.write_text('pass')
         rows_written=[];events=[];native_groups=[]
@@ -200,7 +200,7 @@ class ProductionRunnerTests(unittest.TestCase):
                     return prepare(params,baseline,receipt,*args)
                 h.collector._prepare_scene_attempt=identified
                 h.complete(recorded_ticks=50)
-                config=artifacts.read(run/'run.json');config.update(normal_only=True,instance=3,git_commit='a'*40,source_sha256={'fixture_source.py':artifacts.sha(source)})
+                config=artifacts.read(run/'run.json');config.update(normal_only=True,instance=job['instance'],git_commit='a'*40,source_sha256={'fixture_source.py':artifacts.sha(source)})
                 atomic_json(run/'run.json',config)
                 for i in range(3):
                     for camera in ('top','wrist'):(run/f'attempt-{i:04d}/{camera}.mp4').write_bytes(b'fake video transport')
@@ -236,7 +236,7 @@ class ProductionRunnerTests(unittest.TestCase):
                 patch.object(production.Worker,'rpc',rpc),patch.object(production,'backup',backup),\
                 patch.object(artifacts,'destination',lambda run,config:None),patch.object(artifacts,'validate_run',lambda run:validate_run(run,base=root)),\
                 patch('triplet_media.inspect_run',decode):
-            worker=production.Worker(recipe,3,0)
+            worker=production.Worker(recipe,job['instance'],0)
             if bad:
                 with self.assertRaises(RuntimeError):worker.run([job,initial_wave()[4]])
                 self.assertTrue((recipe_root/'STOP.json').exists());self.assertFalse(artifacts.read(worker.root/'worker-finalization.json')['passed'])
@@ -255,6 +255,7 @@ class ProductionRunnerTests(unittest.TestCase):
                 self.assertEqual(len(entry['raw_files_sha256']),15);self.assertEqual(outcome['status'],'selected')
                 self.assertTrue(artifacts.read(worker.root/'worker-finalization.json')['passed'])
         self.assertEqual(events[-1],'diagnostic-backup' if bad else 'down')
+        if return_transports:return dict(stage=stage,backup=backup,decode=decode,job=job)
         return events
     def test_full_fake_group_driver_reaches_seal_backup_restore_and_owned_retirement(self):
         with tempfile.TemporaryDirectory() as d:
