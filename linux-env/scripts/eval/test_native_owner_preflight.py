@@ -20,8 +20,8 @@ def exercise(xml,scenario="pass"):
         (repo/'linux-env/cyclonedds.xml').write_bytes(Path(xml).read_bytes())
         instance=host/'eval/runtime/instance92';instance.mkdir(parents=True)
         paths=[];calls=[];registered=[];tick=[0.];external_claim=None
-        seeds=list(native_bank.SEEN15_SEEDS) if scenario=='seen15' else list(range(530000,530005))
-        suite='seen-training-home-15' if scenario=='seen15' else 'seen-training-home'
+        seeds=[530002,530003,530004,530005,530500,530503,530505,531001,531002,531005,531009,531010,531013,531015,531016] if scenario=='rule15' else list(native_bank.SEEN15_SEEDS) if scenario=='seen15' else list(range(530000,530005))
+        suite='rule-seen-training-home-15' if scenario=='rule15' else 'seen-training-home-15' if scenario=='seen15' else 'seen-training-home'
         cards=[dict(uuid='gpu0',index=0),dict(uuid='gpu1',index=1)]
         external=os.getppid()
         def nvml(_):
@@ -79,6 +79,9 @@ def exercise(xml,scenario="pass"):
             (base/'fixture.json').write_text(json.dumps(dict(kind='native-held-replay-v1',episodes=[dict(seed=530000+i,color=('red','green','blue')[i]) for i in range(3)])))
         if scenario=='grasp-replay':argv=[str(folder/'run_native_replay_window.py'),'--out',str(out),'--stop-by-utc',deadline,'--grasp-telemetry','--fixture',str(base/'fixture.json'),'--fixture-sha256',hashlib.sha256((base/'fixture.json').read_bytes()).hexdigest(),'--replay-commands','executed']
         if scenario=='qualification-subset-refusal':argv+=['--episode-seeds','530000']
+        if scenario=='rule-requires-checkpoint':argv+=['--rule-target']
+        if scenario=='wrist-requires-checkpoint':argv+=['--retain-wrist-before-closure']
+        if scenario=='smoke-requires-one-seed':argv+=['--unscored-policy-smoke']
         if scenario=='occupied-instance':
             path=instance/'control.pid'
             start(path,instance/'prior-control.log',[sys.executable,'-c','import time;time.sleep(120)']);paths.append(path)
@@ -90,19 +93,19 @@ def exercise(xml,scenario="pass"):
                 error=None
                 try:owner.main()
                 except AssertionError:
-                    if scenario!='qualification-subset-refusal':raise
+                    if scenario not in ('qualification-subset-refusal','rule-requires-checkpoint','wrist-requires-checkpoint','smoke-requires-one-seed'):raise
                     assert not out.exists() and not calls
                     print(json.dumps(dict(status='PASS',scenario=scenario,refused_before_output_and_launch=True)))
                     return
                 except RuntimeError as failure:
-                    if scenario in ('pass','late-benign-graphics','seen15'):raise
+                    if scenario in ('pass','late-benign-graphics','seen15','rule15'):raise
                     error=str(failure)
             ledger=json.loads((out/'window-ledger.json').read_text())
             assert ledger['cleanup_exit_code']==0 and ledger['stopped_utc']
             assert not paths or scenario=='occupied-instance'
             samplefile=out/'gpu-memory.jsonl'
             samples=[json.loads(l) for l in samplefile.read_text().splitlines()] if samplefile.exists() else []
-            if scenario in ('pass','late-benign-graphics','seen15'):
+            if scenario in ('pass','late-benign-graphics','seen15','rule15'):
                 assert ledger['status']=='matched-reset-qualified' and error is None
                 assert any(s.get('owned_mib')==3700 for s in samples)
                 assert not any('audit_error' in s for s in samples)
@@ -137,9 +140,13 @@ class OwnerEntrypointTests(unittest.TestCase):
     def run_scenario(self,scenario):
         xml=Path(__file__).with_name('cyclonedds-loopback-qualified.xml')
         env=dict(os.environ,CUDA_VISIBLE_DEVICES='',PYTHONDONTWRITEBYTECODE='1')
-        result=subprocess.run([sys.executable,'-I',str(Path(__file__).resolve()),'--exercise',str(xml),scenario],env=env,text=True,capture_output=True)
+        result=subprocess.run([sys.executable,'-I','-B',str(Path(__file__).resolve()),'--exercise',str(xml),scenario],env=env,text=True,capture_output=True)
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
         self.assertIn('"scenario": "'+scenario+'"',result.stdout)
+    def test_rule15_owner_lifecycle(self):self.run_scenario('rule15')
+    def test_rule_target_requires_checkpoint(self):self.run_scenario('rule-requires-checkpoint')
+    def test_wrist_requires_checkpoint(self):self.run_scenario('wrist-requires-checkpoint')
+    def test_smoke_requires_explicit_one_seed(self):self.run_scenario('smoke-requires-one-seed')
     def test_clean_interpreter_seen15_owner_lifecycle(self):self.run_scenario('seen15')
     def test_grasp_replay_shell_keeps_flag_and_guard(self):self.run_scenario('grasp-replay')
     def test_clean_interpreter_actual_owner_lifecycle(self):self.run_scenario('pass')

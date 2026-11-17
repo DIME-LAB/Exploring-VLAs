@@ -82,6 +82,8 @@ def load_bank(root,expected_sha256):
                 for name,pose in row['bodies'].items():
                     if pose!={k:prepared['bodies'][name][k] for k in ('position','orientation')}:raise ValueError('Seen fifteen recorded bodies differ')
                 if rule15:
+                    import sys
+                    sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'collect'))
                     from rule_target import select_target
                     proof=select_target(prepared,row['color'],True)
                     if row['base_world_pose']!=prepared['base_world_pose'] or row['rule_target']!=proof or row['recorded_target']!=source['params']['object'] or proof['object']!=row['recorded_target']:raise ValueError('Rule target differs from recorded home')

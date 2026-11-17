@@ -40,18 +40,19 @@ def source_preflight_args(step,suite,out,revision='v1',smoke=False):
     if smoke:args+=['--episode-seeds','530002']
     return args
 
-def window_plan(mode,suite,stop,step=None,revision='v1',attempt=1,weights_sha256=None):
-    if suite not in BANKS or attempt<1:raise ValueError('Unknown suite/attempt')
+def window_plan(mode,suite,stop,step=None,revision='v1',attempt=1,weights_sha256=None,qualification_attempt=1):
+    if suite not in BANKS or attempt<1 or qualification_attempt<1:raise ValueError('Unknown suite/attempt')
     datetime.datetime.strptime(stop,'%Y-%m-%dT%H:%M:%SZ')
     bank,sha,offset=BANKS[suite]
     owner=REPO+'/linux-env/scripts/eval/run_native_replay_window.py'
     args=['python3','-B','-u',owner,'--bank',ROOT+'/'+bank,'--bank-sha256',sha,
           '--reset-collector-root',ROOT+'/../eval-bank-bf7336d','--stop-by-utc',stop]
     if mode=='qualify':
+        if attempt!=qualification_attempt:raise ValueError('Qualification attempt must match its bootstrap qualification version')
         if suite not in ('seen5','rule15','held0'):raise ValueError('Qualification uses full seen5/rule15/held30 bank')
         root=ROOT+f'/runs/r431-q-{suite}-v{attempt}'
         args+=['--matched-reset-qualification','--out',root]
-        if suite=='held0':args+=['--bootstrap-control',ROOT+'/runs/r431-q-seen5-v1']
+        if suite=='held0':args+=['--bootstrap-control',ROOT+f'/runs/r431-q-seen5-v{qualification_attempt}']
     elif mode in ('score','smoke'):
         if suite not in ('rule15','held0','held1') or step not in STEPS:raise ValueError('Scoring needs one rule431 checkpoint and a fixed suite')
         if mode=='smoke' and suite!='rule15':raise ValueError('Smoke uses the first rule-seen layout only')
@@ -59,7 +60,7 @@ def window_plan(mode,suite,stop,step=None,revision='v1',attempt=1,weights_sha256
         if not isinstance(weights_sha256,str) or re.fullmatch(r'[0-9a-f]{64}',weights_sha256) is None:raise ValueError('A verified staged weights SHA is required')
         p=paths(step,revision);suffix='smoke' if mode=='smoke' else suite
         root=ROOT+f"/runs/r431-{p['tag']}-{suffix}-r0-v{attempt}"
-        q=ROOT+('/runs/r431-q-held0-v1' if offset is not None else '/runs/r431-q-rule15-v1')
+        q=ROOT+(f'/runs/r431-q-held0-v{qualification_attempt}' if offset is not None else f'/runs/r431-q-rule15-v{qualification_attempt}')
         args+=['--out',root,'--matched-reset-diagnostic','--matched-reset-arms','default',
                '--checkpoint',p['model'],'--weights-sha256',weights_sha256,'--checkpoint-handoff',p['handoff'],
                '--processor-proof',ROOT+f"/rule431/proofs/{p['tag']}/processor-proof.json",
@@ -115,7 +116,7 @@ print(json.dumps(dict(status='PASS',schema=proof['schema'],weights_sha256=WEIGHT
 def main():
     p=argparse.ArgumentParser(description=__doc__);sub=p.add_subparsers(dest='command',required=True)
     a=sub.add_parser('prepare');a.add_argument('--step',type=int,choices=STEPS,required=True);a.add_argument('--processor-proof',type=Path,required=True);a.add_argument('--local-state',type=Path,required=True);a.add_argument('--revision',default='v1')
-    a=sub.add_parser('plan');a.add_argument('--mode',choices=('qualify','score','smoke'),required=True);a.add_argument('--suite',choices=tuple(BANKS),required=True);a.add_argument('--step',type=int,choices=STEPS);a.add_argument('--stop-by-utc',required=True);a.add_argument('--revision',default='v1');a.add_argument('--attempt',type=int,default=1)
+    a=sub.add_parser('plan');a.add_argument('--mode',choices=('qualify','score','smoke'),required=True);a.add_argument('--suite',choices=tuple(BANKS),required=True);a.add_argument('--step',type=int,choices=STEPS);a.add_argument('--stop-by-utc',required=True);a.add_argument('--revision',default='v1');a.add_argument('--attempt',type=int,default=1);a.add_argument('--qualification-attempt',type=int,default=1)
     args=p.parse_args()
     if args.command=='prepare':prepare(args.step,args.processor_proof,args.local_state,args.revision)
     else:
@@ -125,6 +126,6 @@ def main():
             from checkpoint_identity import validate_handoff_identity
             validate_handoff_identity(receipt,p['model'],args.step,SOURCE)
             weights=receipt['source_before']['files']['model.safetensors']['sha256']
-        print(json.dumps(window_plan(args.mode,args.suite,args.stop_by_utc,args.step,args.revision,args.attempt,weights),indent=2))
+        print(json.dumps(window_plan(args.mode,args.suite,args.stop_by_utc,args.step,args.revision,args.attempt,weights,args.qualification_attempt),indent=2))
 
 if __name__=='__main__':main()

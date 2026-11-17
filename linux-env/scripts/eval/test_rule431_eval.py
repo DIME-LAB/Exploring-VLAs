@@ -21,6 +21,10 @@ class RulePlanTests(unittest.TestCase):
         self.assertEqual(smoke['argv'][smoke['argv'].index('--episode-seeds')+1],'530002')
         pre=source_preflight_args(5000,'rule15','/example/out',smoke=True)
         self.assertIn('--check-only',pre);self.assertIn('--rule-target',pre);self.assertIn('--retain-wrist-before-closure',pre)
+    def test_explicit_qualification_version_binds_bootstrap_and_score(self):
+        with self.assertRaises(ValueError):window_plan('qualify','held0',STOP,attempt=2)
+        p=window_plan('qualify','held0',STOP,attempt=2,qualification_attempt=2);self.assertIn('/runs/r431-q-seen5-v2',p['argv'][p['argv'].index('--bootstrap-control')+1])
+        p=window_plan('score','rule15',STOP,5000,weights_sha256='3'*64,qualification_attempt=2);self.assertTrue(p['argv'][p['argv'].index('--reset-qualification')+1].endswith('r431-q-rule15-v2'))
     def test_wrong_job_step_missing_weights_and_cohort_refuse(self):
         with self.assertRaises(ValueError):paths(60000)
         with self.assertRaises(ValueError):window_plan('score','rule15',STOP,10000)
