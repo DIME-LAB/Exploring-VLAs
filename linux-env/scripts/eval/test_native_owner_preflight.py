@@ -81,6 +81,7 @@ def exercise(xml,scenario="pass"):
         if scenario=='grasp-replay':
             (base/'fixture.json').write_text(json.dumps(dict(kind='native-held-replay-v1',episodes=[dict(seed=530000+i,color=('red','green','blue')[i]) for i in range(3)])))
         if scenario=='grasp-replay':argv=[str(folder/'run_native_replay_window.py'),'--out',str(out),'--stop-by-utc',deadline,'--grasp-telemetry','--fixture',str(base/'fixture.json'),'--fixture-sha256',hashlib.sha256((base/'fixture.json').read_bytes()).hexdigest(),'--replay-commands','executed']
+        if scenario=='check-only':argv+=['--check-only']
         if scenario=='rule15-180':argv+=['--readiness-budget-s','180']
         if scenario=='qualification-subset-refusal':argv+=['--episode-seeds','530000']
         if scenario=='rule-requires-checkpoint':argv+=['--rule-target']
@@ -104,6 +105,10 @@ def exercise(xml,scenario="pass"):
                 except RuntimeError as failure:
                     if scenario in ('pass','late-benign-graphics','seen15','rule15','rule15-180'):raise
                     error=str(failure)
+            if scenario=='check-only':
+                assert not out.exists() and not calls and not paths
+                print(json.dumps(dict(status='PASS',scenario=scenario,refused_before_output_and_launch=True,torch_imported='torch' in sys.modules)))
+                return
             ledger=json.loads((out/'window-ledger.json').read_text())
             assert ledger['cleanup_exit_code']==0 and ledger['stopped_utc']
             assert not paths or scenario=='occupied-instance'
@@ -148,6 +153,7 @@ class OwnerEntrypointTests(unittest.TestCase):
         result=subprocess.run([sys.executable,'-I','-B',str(Path(__file__).resolve()),'--exercise',str(xml),scenario],env=env,text=True,capture_output=True)
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
         self.assertIn('"scenario": "'+scenario+'"',result.stdout)
+    def test_check_only_returns_before_any_output_or_runtime_launch(self):self.run_scenario('check-only')
     def test_rule15_owner_honours_explicit_budget(self):self.run_scenario('rule15-180')
     def test_rule15_owner_lifecycle(self):self.run_scenario('rule15')
     def test_rule_target_requires_checkpoint(self):self.run_scenario('rule-requires-checkpoint')

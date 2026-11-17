@@ -1,9 +1,32 @@
-import copy,unittest
+import copy,unittest,tempfile,json,hashlib
+from pathlib import Path
 from native_bank import reference_binding,select_policy_rows,reset_protocol,recorded_initial,NAMES
 from matched_reset import require_scene_source
+from matched_reset_client import require_qualification
+from native_environment import QUALIFICATION_FILES
 
 SEEDS=[530002,530003,530004,530005,530500,530503,530505,531001,531002,531005,531009,531010,531013,531015,531016]
 class RuleSeenTests(unittest.TestCase):
+    def test_rule_qualification_reader_uses_its_sealed_cohort_not_legacy_seeds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);src=root/'source';src.mkdir();out=root/'qual';(out/'qualification').mkdir(parents=True)
+            hashes={}
+            for name in QUALIFICATION_FILES:
+                (src/name).write_text(name);hashes[name]=hashlib.sha256(name.encode()).hexdigest()
+            host=dict(root=directory);collector=root/'collector';collector.mkdir()
+            ledger=dict(status='matched-reset-qualified',cleanup_exit_code=0,host_profile=host,source_sha256=hashes)
+            (out/'window-ledger.json').write_text(json.dumps(ledger))
+            mapping={str(seed):str(i//6)*64 for i,seed in enumerate(SEEDS)}
+            summary=dict(status='PASS',suite='rule-seen-training-home-15',seeds=SEEDS,episodes=15,commands=150,reference_run_sha256=None,reference_run_sha256_by_seed=mapping,bootstrap_control=None,bank_sha256='rule-bank',reset_collector_root=str(collector))
+            path=out/'qualification/summary.json';path.write_text(json.dumps(summary))
+            def check(refs=mapping):return require_qualification(out,host,collector,'rule-bank',src,suite='rule-seen-training-home-15',reference_sha256_by_seed=refs)
+            check()
+            wrong=copy.deepcopy(summary);wrong['seeds']=list(reversed(SEEDS));path.write_text(json.dumps(wrong))
+            with self.assertRaises(AssertionError):check()
+            path.write_text(json.dumps(summary))
+            with self.assertRaises(AssertionError):check(dict(list(mapping.items())[:-1]))
+            (src/'native_policy.py').write_text('changed')
+            with self.assertRaisesRegex(AssertionError,'differs from live'):check()
     def test_recorded_initial_refuses_bad_body_shapes_and_nonfinite_values(self):
         source=dict(initial_physical=dict(state=[0]*6,drive_targets=[0]*6,bodies={n:dict(position=[0]*3,orientation=[1,0,0,0]) for n in NAMES}))
         self.assertIs(recorded_initial(source),source['initial_physical'])

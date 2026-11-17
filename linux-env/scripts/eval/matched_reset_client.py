@@ -77,6 +77,10 @@ def require_qualification(root,host,collector_root,bank_sha256,source_dir,*,suit
     assert ledger['status']=='matched-reset-qualified' and ledger['cleanup_exit_code']==0
     assert ledger['host_profile']==host and summary['bank_sha256']==bank_sha256 and Path(summary['reset_collector_root']).resolve()==Path(collector_root).resolve()
     seeds=list(range(530000,530005)) if suite=='seen-training-home' else list(SEEN15_SEEDS) if suite=='seen-training-home-15' else list(range(900000,900030))
+    if suite=='rule-seen-training-home-15':
+        assert reference_sha256_by_seed is not None and len(reference_sha256_by_seed)==15,'Rule fifteen requires its full validated per-seed reference map'
+        seeds=[int(seed) for seed in reference_sha256_by_seed]
+        assert len(set(seeds))==15
     assert suite in (*SEEN_SUITES,'heldout-bank-v2')
     assert summary['status']=='PASS' and summary['suite']==suite and summary['seeds']==seeds
     assert summary['episodes']==len(seeds) and summary['commands']==10*len(seeds)
