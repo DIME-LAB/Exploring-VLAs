@@ -15,11 +15,12 @@ from run_smoke import InstanceClaim,OwnedProcesses,frozen,identity
 from gpu_device import gpu_uuid
 from triplet_production_plan import initial_wave,reduce_waves,guards,POLICY
 from triplet_artifacts import read,sha,manifest,classify,selected_entry,checked_tree
+from bootstrap_capsule import ASSIGNED_UUID,load as load_bootstrap_capsule
+from gpu_device import inventory
 import clock_status
 
 ROOT=Path('/mnt/storage3/aaugus11/exploring-vlas')
 DUAL=Path('/mnt/a4500-backup/exploring-vlas/datasets/counterfactual-production-v1')
-ASSIGNED_UUID='GPU-c2772797-ad71-f07e-0101-db0f188f3504'
 SELF=Path(__file__).resolve()
 SSH=['ssh','-oBatchMode=yes','-oConnectTimeout=15','-oStrictHostKeyChecking=yes','-oHostKeyAlias=dual-a4500',
     '-oControlMaster=no','-oControlPath=none','-oControlPersist=no',
@@ -32,7 +33,9 @@ def require_host():
 
 def plan(cut):
     require_host();frozen(cut)
+    capsule=load_bootstrap_capsule(ROOT/'setup/counterfactual-kit-bootstrap-v1/capsule.json')
     return dict(version=1,cut=cut,source_sha256=sha(SELF),policy=POLICY,jobs=initial_wave(),
+        bootstrap_capsule_path=capsule['capsule_path'],bootstrap_capsule_sha256=capsule['capsule_sha256'],
         production_root=str(ROOT/'datasets/counterfactual-targets/production-v1'),
         runtime_root=str(ROOT/'runtime/counterfactual-production-v1'),assigned_gpu_uuid=ASSIGNED_UUID,
         bulk_floor_gib=50,root_floor_gib=20,start_stagger_s=60,nice=10,
@@ -291,7 +294,8 @@ class Worker:
             with socket.socket() as sock:
                 sock.settimeout(.3)
                 if sock.connect_ex(('127.0.0.1',port))==0:raise RuntimeError('Private port occupied; never adopt it: '+str(port))
-        pin=read(ROOT/'setup/bootstrap-gpu-table.json');table=Path(pin['source']['path'])
+        capsule=load_bootstrap_capsule(self.plan['bootstrap_capsule_path'],self.plan['bootstrap_capsule_sha256'],cards=inventory())
+        pin=capsule['pin'];table=Path(pin['source']['path'])
         if pin.get('passed') is not True or pin.get('assigned_gpu_uuid')!=ASSIGNED_UUID or sha(table)!=pin['source']['sha256']:
             raise RuntimeError('Qualified RTX Kit table changed')
         (self.runtime/'isaac.log').write_bytes(read(table,True))

@@ -438,6 +438,14 @@ clock/startup, and runs the existing collector/export entrances. The coordinator
 rechecks every disposition before allowing that slot's next group. STOP causes
 all workers to retire their own instances; PID-file or port-based adoption is
 never used.
+The historical Kit GPU-table hint is a private SHA-bound capsule, shared by all
+four slots. Its `kit-bootstrap.log` contains the exact originally qualified bytes;
+the qualification SHA stays unchanged. A live stdout log is never the capsule's
+source during launch. The plan binds the capsule path and SHA, and startup checks
+its fixture, UUID/PCI mapping and current inventory before seeding each private
+runtime log. Fresh Kit renderer and compute/graphics audits still verify actual
+device selection after launch. Appending to an old bootstrap log cannot invalidate
+the immutable hint; changing the fixture, capsule or physical mapping refuses.
 Both filesystems are monitored every 0.5 s while production is active, including
 blocking RPC/export/backup calls. A breach publishes durable STOP and requests
 retirement through only the owned worker pidfds. Stage polling and every heavy
