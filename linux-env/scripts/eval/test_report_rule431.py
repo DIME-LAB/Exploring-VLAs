@@ -21,12 +21,30 @@ class Tests(unittest.TestCase):
    root=Path(d);ep=root/'default/ep00';ep.mkdir(parents=True)
    sealed=root/'sealed.json';sealed.write_text(json.dumps(dict(initial_physical=dict(base_world_pose=dict(position=[0,0,0],orientation=[1,0,0,0]),bodies={'red_2x3_0':dict(position=[.1,0,0]),'red_2x3_1':dict(position=[.2,0,0])}))))
    (root/'window-ledger.json').write_text(json.dumps(dict(status='policy-finished',stopped_utc='now',cleanup_exit_code=0,suite='heldout-bank-v2',bank='fixture',bank_sha256='fixture')))
-   row=dict(seed=900000,color='red',valid=True,requested_colour_success=False,requested_colour_grasp=False,rule_target_success=False,rule_target_grasp=False,wrong_color_lift=False,wrong_same_colour_target_grasp=False,rule_target_selection=dict(object='red_2x3_1',candidates=[],margin_m=.01,ambiguous=False))
+   row=dict(seed=900000,color='red',valid=True,reset_protocol='collector-sealed-postsample-v1',readiness_budget_s=60,requested_colour_success=False,requested_colour_grasp=False,rule_target_success=False,rule_target_grasp=False,wrong_color_lift=False,wrong_same_colour_target_grasp=False,rule_target_selection=dict(object='red_2x3_1',candidates=[],margin_m=.01,ambiguous=False))
    (ep/'result.json').write_text(json.dumps(row))
    with patch('native_bank.load_bank',return_value=([dict(seed=900000,source_receipt=str(sealed))],'heldout-bank-v2')):audit(root,root/'report')
    summary=json.loads((root/'report/summary.json').read_text());self.assertEqual(summary['rule_target_success_excluding_ambiguous']['denominator'],1)
    with (root/'report/episodes.csv').open() as stream:record=next(csv.DictReader(stream))
    diagnostic=json.loads(record['rule_target_selection']);self.assertFalse(diagnostic['live_matches_bank']);self.assertEqual(diagnostic['live_choice'],'red_2x3_1');self.assertEqual(diagnostic['bank_choice'],'red_2x3_0')
+ def test_native_reset_metadata_survives_csv(self):
+  import csv
+  for metadata in (dict(reset_protocol='collector-recorded-postsample-v1'),dict(matched_reset=dict(protocol='collector-recorded-postsample-v1'))):
+   with self.subTest(metadata=metadata),tempfile.TemporaryDirectory() as d:
+    root=Path(d);ep=root/'default/ep00';ep.mkdir(parents=True)
+    (root/'window-ledger.json').write_text(json.dumps(dict(scored=True,status='policy-finished',stopped_utc='now',cleanup_exit_code=0,readiness_budget_s=180,suite='rule-seen-training-home-15')))
+    row=dict(seed=530002,color='blue',valid=True,readiness_budget_s=180,requested_colour_success=False,requested_colour_grasp=False,rule_target_success=False,rule_target_grasp=False,wrong_color_lift=False,wrong_same_colour_target_grasp=False,**metadata)
+    (ep/'result.json').write_text(json.dumps(row));audit(root,root/'report')
+    with (root/'report/episodes.csv').open() as f:record=next(csv.DictReader(f))
+    self.assertEqual(record['reset_protocol'],'collector-recorded-postsample-v1');self.assertEqual(record['readiness_budget_s'],'180')
+ def test_invalid_reset_metadata_refused_before_output(self):
+  for metadata in (dict(),dict(reset_protocol='collector-matched-reset-v1',readiness_budget_s=180),dict(reset_protocol='collector-recorded-postsample-v1',matched_reset=dict(protocol='collector-matched-reset-v1'),readiness_budget_s=180),dict(reset_protocol='collector-recorded-postsample-v1',readiness_budget_s=60),dict(reset_protocol='collector-recorded-postsample-v1',readiness_budget_s=180,matched_reset=dict(readiness_budget_s=60))):
+   with self.subTest(metadata=metadata),tempfile.TemporaryDirectory() as d:
+    root=Path(d);ep=root/'default/ep00';ep.mkdir(parents=True)
+    (root/'window-ledger.json').write_text(json.dumps(dict(scored=True,status='policy-finished',stopped_utc='now',cleanup_exit_code=0,suite='rule-seen-training-home-15',readiness_budget_s=180)))
+    (ep/'result.json').write_text(json.dumps(dict(valid=True,**metadata)))
+    with self.assertRaisesRegex(ValueError,'Missing or conflicting'):audit(root,root/'report')
+    self.assertFalse((root/'report').exists())
  def test_missing_rule_fields_refused(self):
   with self.assertRaises(ValueError):summarize([dict(valid=True)])
 if __name__=='__main__':unittest.main()
