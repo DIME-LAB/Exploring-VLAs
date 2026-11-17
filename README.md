@@ -1164,6 +1164,11 @@ coordinator and its workers bind the launching supervisor's receipt/nonce/birth
 at startup and retain its original and cleanup errors separately from a workload
 exception. Production failure reports include the source-bound signal intents;
 a failed supervisor cannot become a successful already-down result.
+Coordinator and worker finalization refresh that bound evidence after local
+monitor, control and backup retirement. Earlier workload and cleanup causes stay
+separate; unreadable or inconsistent final evidence refuses publication. The
+owner's terminal receipt is checked externally after its coordinator exits;
+its latest durable state during local finalization is recorded as a snapshot.
 
 Offline validation: `python3 -m unittest discover -s linux-env/scripts/collect -p
  'test_*.py'`. This includes 1,000 randomized comparisons with frozen verified-GUI

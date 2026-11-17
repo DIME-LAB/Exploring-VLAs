@@ -12,7 +12,7 @@ sys.path.insert(0,str(REPO/'vla_SO-ARM101/src/so_arm101_control'))
 from storage import CANONICAL_ROOT,atomic_json,confined
 from host_config import profile
 from run_smoke import InstanceClaim,OwnedProcesses,frozen,identity,pidfd_ready
-from managed_process import capture_supervision,failure_report
+from managed_process import capture_supervision,failure_report,supervision_evidence
 from gpu_device import gpu_uuid
 from triplet_production_plan import initial_wave,reduce_waves,guards,POLICY
 from triplet_artifacts import read,sha,manifest,classify,selected_entry,checked_tree
@@ -124,6 +124,36 @@ def wait_workers(children,observe,scan,retired,stop,pause=time.sleep):
             if slot not in done:retired(slot);done.add(slot)
         if len(done)==len(children):return observe()
         pause(10)
+
+
+def retirement_supervision(context,previous=None):
+    """Refresh durable owner evidence after local retirement, preserving earlier causes.
+
+    The owner's terminal receipt follows its workload's exit. This read proves
+    only its latest durable state; final outer certification still must pass.
+    """
+    if context is None:return previous,None
+    execution_error=(previous or {}).get('execution_error')
+    prior_evidence=(previous or {}).get('supervision') or {}
+    prior_original=prior_evidence.get('supervision_error') or prior_evidence.get('cleanup_error')
+    try:evidence=supervision_evidence(context)
+    except BaseException as exc:
+        unavailable=dict(context=context,evidence_error=repr(exc))
+        return dict(error=(previous or {})['error'] if prior_original else 'Supervisor evidence unavailable after retirement: '+repr(exc),
+            execution_error=execution_error,supervision=unavailable,supervision_refresh_passed=False,
+            earlier_failure=previous),unavailable
+    original=evidence.get('supervision_error') or evidence.get('cleanup_error')
+    healthy=not original and evidence['state']=='running' and not evidence.get('signal_evidence_error')
+    if previous is None and healthy:return None,evidence
+    report=dict(previous or {},execution_error=execution_error,supervision=evidence,
+        supervision_refresh_passed=not bool(evidence.get('signal_evidence_error')))
+    if original:report['error']='Supervisor failure: '+original
+    elif prior_original:
+        # A partial or inconsistent later source must not erase a known cause.
+        report.update(error=previous['error'],earlier_failure=previous,supervision_refresh_passed=False,
+            supervision_refresh_error='Previously recorded supervisor error is missing from the latest receipt')
+    elif previous is None:report['error']='Supervisor retirement evidence is not healthy: '+repr(evidence)
+    return report,evidence
 
 
 def verify_sources(run,cut):
@@ -384,7 +414,7 @@ class Worker:
             atomic_json(self.root/('between-group-'+str(seed)+'.json'),restored)
         return outcome
     def run(self,jobs):
-        error=None;failure=None;backup_result=None;backup_error=None;retired=False
+        error=None;failure=None;backup_result=None;backup_error=None;retired=False;retirement_errors=[]
         try:
             for job in jobs:
                 self.active_job=job
@@ -398,13 +428,17 @@ class Worker:
         finally:
             try:self.down();retired=True
             except BaseException as exc:
-                down_failure=failure_report(self.supervision,exc);error=error or down_failure['error'];failure=failure or down_failure
+                down_failure=failure_report(self.supervision,exc);retirement_errors.append(down_failure);error=error or down_failure['error'];failure=failure or down_failure
                 publish_stop(self.global_root,dict(down_failure,slot=self.instance,source='owned-down',wall_ns=time.time_ns()))
             if error is not None and retired and self.active_job is not None:
                 try:backup_result=backup_terminal(self.plan,self.active_job,error,self.root)
                 except BaseException as exc:
-                    backup_error=repr(exc);publish_stop(self.global_root,dict(error=backup_error,source='terminal backup',slot=self.instance,wall_ns=time.time_ns()))
-            result=dict(passed=error is None,error=error,instance=self.instance,wave=self.wave,cut=self.cut,sessions=self.session+1,
+                    backup_error=repr(exc);detail=failure_report(self.supervision,exc);retirement_errors.append(detail)
+                    publish_stop(self.global_root,dict(detail,source='terminal backup',slot=self.instance,wall_ns=time.time_ns()))
+            failure,latest=retirement_supervision(self.supervision,failure)
+            if failure is not None:
+                error=failure['error'];publish_stop(self.global_root,dict(failure,source='worker retirement supervision',slot=self.instance,wall_ns=time.time_ns()))
+            result=dict(passed=error is None,error=error,retirement_errors=retirement_errors,supervision_after_retirement=latest,instance=self.instance,wave=self.wave,cut=self.cut,sessions=self.session+1,
                 terminal_backup=backup_result,terminal_backup_error=backup_error,
                 supervision_failure=failure if error is not None else None,completed_wall_ns=time.time_ns())
             atomic_json(self.root/'worker-finalization.json',result)
@@ -507,6 +541,7 @@ print(json.dumps(result))
 
 
 def coordinate(recipe,release):
+    supervision=capture_supervision()
     require_host();frozen(recipe['cut']);disk()
     release_bytes=read(release,True);release_proof=json.loads(release_bytes)
     if release_proof.get('passed') is not True:raise ValueError('Explicit training release certificate required')
@@ -521,9 +556,8 @@ def coordinate(recipe,release):
     atomic_json(root/'coordinator.json',identity(os.getpid()))
     runtime=Path(recipe['runtime_root']);runtime.mkdir(parents=True,exist_ok=False)
     if ctypes.CDLL(None,use_errno=True).prctl(36,1,0,0,0)!=0:raise OSError('Coordinator subreaper unavailable')
-    ledger=OwnedProcesses(runtime,time.time_ns());waves=[];error=None;children=[];verified={};cleanup=None;watch=None;jobs=[];terminal_backups=None;supervision=None;failure=None
+    ledger=OwnedProcesses(runtime,time.time_ns());waves=[];error=None;children=[];verified={};cleanup=None;watch=None;jobs=[];terminal_backups=None;failure=None;retirement_errors=[]
     try:
-        supervision=capture_supervision()
         def retire_workers():
             for process,_,_ in list(children):
                 if process.poll() is None and process.pid in ledger.known:ledger.send(process.pid,signal.SIGTERM)
@@ -595,7 +629,9 @@ def coordinate(recipe,release):
         if publication_cleanup['remaining']:raise RuntimeError('Publication/backup children remain alive')
         atomic_json(runtime/'publication-cleanup.json',dict(passed=True,cleanup=publication_cleanup))
         publication_gate(root,watch)
-        atomic_json(root/'PUBLICATION-COMPLETE.json',dict(passed=True,registries=read(root/'REGISTRY-SHA256.json'),
+        final_failure,latest=retirement_supervision(supervision)
+        if final_failure is not None:raise RuntimeError(final_failure['error'])
+        atomic_json(root/'PUBLICATION-COMPLETE.json',dict(passed=True,supervision_after_retirement=latest,registries=read(root/'REGISTRY-SHA256.json'),
             finalization_sha256=sha(root/'production-finalization.json'),backup_receipt_sha256=sha(Path(recipe['runtime_root'])/'registry-backup.json'),
             disk_monitor_path=str(runtime/'disk-monitor.json'),disk_monitor_sha256=sha(runtime/'disk-monitor.json'),
             publication_cleanup_path=str(runtime/'publication-cleanup.json'),publication_cleanup_sha256=sha(runtime/'publication-cleanup.json'),wall_ns=time.time_ns()))
@@ -609,19 +645,30 @@ def coordinate(recipe,release):
     finally:
         if watch is not None and not watch.closed:
             try:watch.close()
-            except BaseException as exc:error=error or repr(exc);publish_stop(root,dict(error=repr(exc),source='disk monitor retirement',wall_ns=time.time_ns()))
+            except BaseException as exc:
+                detail=failure_report(supervision,exc);retirement_errors.append(detail);error=error or detail['error'];failure=failure or detail
+                publish_stop(root,dict(detail,source='disk monitor retirement',wall_ns=time.time_ns()))
         if cleanup is None:
             try:cleanup=ledger.stop()
             except BaseException as exc:
-                error=error or repr(exc);cleanup=dict(remaining=[dict(unverified=repr(exc))])
-                publish_stop(root,dict(error=repr(exc),source='coordinator cleanup',wall_ns=time.time_ns()))
+                detail=failure_report(supervision,exc);retirement_errors.append(detail);error=error or detail['error'];failure=failure or detail
+                cleanup=dict(remaining=[dict(unverified=repr(exc))])
+                publish_stop(root,dict(detail,source='coordinator cleanup',wall_ns=time.time_ns()))
         if error is not None:
-            if not cleanup['remaining']:terminal_backups=backup_remaining_terminal(recipe,jobs,error)
+            if not cleanup['remaining']:
+                try:terminal_backups=backup_remaining_terminal(recipe,jobs,error)
+                except BaseException as exc:
+                    detail=failure_report(supervision,exc);retirement_errors.append(detail)
+                    terminal_backups=dict(errors=[detail]);publish_stop(root,dict(detail,source='terminal backup retirement',wall_ns=time.time_ns()))
             else:terminal_backups=dict(errors=[dict(error='Owned writers remain; immutable diagnostic copy is not yet possible')])
             try:
                 tail=OwnedProcesses(runtime,time.time_ns());tail.scan();tail_cleanup=tail.stop()
-            except BaseException as exc:tail_cleanup=dict(remaining=[dict(unverified=repr(exc))])
-            atomic_json(root/'production-finalization.json',dict(passed=False,error=error,supervision_failure=failure,cleanup=cleanup,terminal_backups=terminal_backups,
+            except BaseException as exc:
+                retirement_errors.append(failure_report(supervision,exc));tail_cleanup=dict(remaining=[dict(unverified=repr(exc))])
+            failure,latest=retirement_supervision(supervision,failure)
+            if failure is not None:
+                error=failure['error'];publish_stop(root,dict(failure,source='final retirement supervision',wall_ns=time.time_ns()))
+            atomic_json(root/'production-finalization.json',dict(passed=False,error=error,supervision_failure=failure,retirement_errors=retirement_errors,supervision_after_retirement=latest,cleanup=cleanup,terminal_backups=terminal_backups,
                 backup_children_cleanup=tail_cleanup,wall_ns=time.time_ns()))
     if error:raise RuntimeError(error)
 
