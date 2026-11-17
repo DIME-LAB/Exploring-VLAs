@@ -1,7 +1,7 @@
 """Counterfactual RGB episodes from one sealed layout with explicit pose agreement."""
 import argparse,copy,hashlib,itertools,json,subprocess
 from pathlib import Path
-from contract import COLORS,parameters,COUNTERFACTUAL_TRAIN_SEEDS,COUNTERFACTUAL_HELDOUT_SEEDS,VISIBLE_TARGET_RULE,apply_target_rule
+from contract import COLORS,parameters,COUNTERFACTUAL_TRAIN_SEEDS,COUNTERFACTUAL_HELDOUT_SEEDS,COUNTERFACTUAL_TRAIN_RESERVE_SEEDS,COUNTERFACTUAL_HELDOUT_RESERVE_SEEDS,VISIBLE_TARGET_RULE,apply_target_rule
 from comparisons import matches,interval
 from scene_identity import physical_state,identity,require_identical,require_pose_agreement,prior_agreements,TRIPLET_POSE_POLICY,require_observation_drift,TRIPLET_OBSERVATION_DRIFT_POLICY,verify_pose_evidence,observation_drift
 from tick_contract import STEP_NS
@@ -11,11 +11,12 @@ from tick_contract import digest
 
 TRAIN_SEEDS=COUNTERFACTUAL_TRAIN_SEEDS
 HELDOUT_SEEDS=COUNTERFACTUAL_HELDOUT_SEEDS
-POLICY=dict(version=6,kind='counterfactual-target-triplet',colors=list(COLORS),normal_only=True,
+POLICY=dict(version=7,kind='counterfactual-target-triplet',colors=list(COLORS),normal_only=True,
     order='six counterbalanced permutations by layout ordinal',
     target_rule=dict(name=VISIBLE_TARGET_RULE,frame='/World/base',refuse_margin_le_m=.005),camera_prime_ticks=20,
     initial_observation_ticks=1,state_identity='soarm101-native-physical-state-v1',pose_agreement=copy.deepcopy(TRIPLET_POSE_POLICY),
     observation_anchor_drift=copy.deepcopy(TRIPLET_OBSERVATION_DRIFT_POLICY),
+    replacement_reserves=dict(train=list(COUNTERFACTUAL_TRAIN_RESERVE_SEEDS),heldout=list(COUNTERFACTUAL_HELDOUT_RESERVE_SEEDS)),
     splits=dict(train=list(TRAIN_SEEDS),heldout=list(HELDOUT_SEEDS)))
 
 
@@ -97,6 +98,7 @@ class TripletSession:
             self.anchor=copy.deepcopy(canonical['snapshot']);physical_state(self.anchor)
             self.cup_sampler=copy.deepcopy(receipt['cup_randomization']);self.sampled=1
             self.triplet_id=hashlib.sha256(json.dumps(dict(config=self.config,state=identity(self.anchor)),sort_keys=True).encode()).hexdigest()
+            self.retain_boundary(path,receipt['episode_id'],'canonical_restore',restore=canonical)
             self.save()
         params.update(member(self.config,index,self.anchor))
         c.timeline(False)

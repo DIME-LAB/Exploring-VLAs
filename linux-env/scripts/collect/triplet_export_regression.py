@@ -143,6 +143,13 @@ def main():
         else:raise AssertionError('Changed triplet was accepted')
         finally:receipt.write_text(original)
         with patch.object(sys,'argv',argv):exporter.main()
+        # The generic collector's reviewed body tolerances remain unchanged.
+        # Production separately refuses this real three-hash/raw-video fixture.
+        import triplet_media
+        with patch('target_triplets.validate_run',lambda run:validate_run(run,base=out)):
+            media=triplet_media.inspect_run(run)
+        assert not media['passed'] and 'exact_identity' in media['reasons']
+        result['production_refuses_generic_three_hash_group']=media
     atomic_json(out/'CPU_FIXTURE_ONLY.json',dict(passed=True,real_simulation=False,fixture_training_forbidden=True,certificates=result))
     print(json.dumps(dict(passed=True,real_simulation=False,episodes=3,frames=300,decoded_frame_pairs=600)))
 

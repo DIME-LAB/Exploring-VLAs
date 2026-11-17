@@ -390,7 +390,64 @@ startup, exports, independent readbacks and shutdown it was 12.78/hour. The
 instance was verified down with zero surviving owned processes. Reports, per-body
 tables, contact sheets and short clips are in the Mac deliverable folder
 `phase3/3.1-collection/counterfactual-triplets/live-smoke-f99f4f7-v4/`.
-The 420-episode production collection remains scheduled separately by the lead.
+Production uses the separately gated four-instance runner below.
+
+The production plan has 120 requested training layouts and 20 held-out layouts.
+It reserves `720120–720199` and `730020–730049` for replacements, disjoint from
+all earlier normal, recovery and evaluation ranges. A complete base wave runs
+first. Failed logical slots are then sorted within each split and assigned the
+next ascending unused reserve seed; later waves repeat that rule. Every failure
+is retained with its source artifacts and SHA-bound disposition. Partial groups
+never count. Clock, transport, epoch, scene, reset, disk or cleanup faults stop
+the run. Only a replayed physical-quality rejection, a native-proven visible-rule
+refusal, or a completed group's production media refusal may receive a replacement.
+Three consecutive same-reason refusals on a slot stop it. Exact-identity refusals
+above 10% of attempted groups, or allocation of more than half either reserve,
+stop production before another group is admitted.
+
+The generic collector retains its reviewed pose tolerances. Production additionally
+requires the three **first-recorded physical hashes and six measured joint states
+to match exactly**, each camera's decoded original frame 0 to have pairwise
+**PSNR >= 40 dB**, and every colour pair to have different clean action labels
+within the first 50 frames. Frame 0 may be a common home hold. The gate records
+per-camera MAE/PSNR, exact identity and label-departure measurements. Images are
+never shared or replaced. The original CRF18 videos, raw frame ledgers and receipts
+remain on RTX for training; export videos are independently validated but are not
+the training video source.
+
+On the qualified RTX host, the CPU-only production plan is:
+
+```bash
+/mnt/storage3/aaugus11/exploring-vlas/export-venv/bin/python -B \
+  linux-env/scripts/collect/triplet_production.py --plan --cut FULL_REVIEWED_COMMIT
+```
+
+After the lead's GO and the explicit training-release certificate, use the same
+entry with `nice -n 10`, `--go --release-file <certificate>`. It verifies a 60 s
+GPU-clear interval, keeps the 50 GiB bulk / 20 GiB root floors, and staggers slots
+3–6 by 60 s (domains 93–96, ports 8783–8790). Every slot owns only its descendants,
+uses UUID-pinned GPU 0, CPU PhysX, four physics and six Kit threads, qualifies
+clock/startup, and runs the existing collector/export entrances. The coordinator
+rechecks every disposition before allowing that slot's next group. STOP causes
+all workers to retire their own instances; PID-file or port-based adoption is
+never used.
+
+Authoritative registries are RTX-native:
+`<host-root>/datasets/counterfactual-targets/production-v1/{train,heldout}-registry.json`.
+`REGISTRY-SHA256.json` publishes their caller seals after owned retirement.
+Each entry binds the original requested seed, actual seed, immediate predecessor,
+full replacement chain, dataset/raw/validation paths, validation SHA and all three
+members' raw-file hashes. `failed_groups` retain proof paths/SHAs and dispositions;
+`replacement_allocations` bind ordered waves to each predecessor's failure proof.
+The training consumer requires the independently published authoritative SHA.
+
+Every group is SHA-verified on dual under
+`/mnt/a4500-backup/exploring-vlas/datasets/counterfactual-production-v1/` before
+selection. The final backup retains the exact original registry bytes with RTX
+paths. Separate `*-registry.backup-projection.json` files contain backup paths,
+are labelled derived projections and record the authoritative registry path/SHA.
+They never replace the RTX registry used by training. No rolling deletion is used.
+Training and held-out registries remain separate.
 
 Preparation and the capture loop re-evaluate all three visible-target choices
 on the bootstrap and first recorded scene, requiring >5 mm margins and the same
