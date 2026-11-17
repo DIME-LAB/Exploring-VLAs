@@ -4,6 +4,18 @@ import argparse,copy,hashlib,json,math,os,signal,subprocess,sys,time
 
 from native_bank import COLLECTOR_SHA,HELPER_SHA
 
+def require_scene_source(row,suite,source):
+    from native_bank import SEEN_SUITES,SEEN15_SEEDS
+    params=source['params']
+    if not source['accepted'] or params['recovery']!='none' or params['seed']!=row['seed']:raise ValueError('Scene source is not the accepted requested episode')
+    if suite=='rule-seen-training-home-15':
+        if row['recorded_target']!=params['object'] or row['rule_target']['object']!=params['object']:raise ValueError('Rule home source target differs')
+    elif suite in SEEN_SUITES:
+        if params['seed'] not in SEEN15_SEEDS:raise ValueError('Legacy seen source is outside its cohort')
+    elif suite=='heldout-bank-v2':
+        if not source['scene_bank_only'] or params['split']!='eval' or params['seed'] not in range(900000,900030):raise ValueError('Held-out source differs')
+    else:raise ValueError('Unknown scene suite')
+
 def install_sealed_scene(collector,source):
     """Keep normal post-sampling preparation, replacing only scene sampling."""
     initial=copy.deepcopy(source['initial_physical']);calls=[]
@@ -50,8 +62,7 @@ def main():
     receipt_path=Path(row['source_receipt']);receipt_sha=row['source_receipt_sha256'];reference_path=Path(row['reference_run'])
     raw=receipt_path.read_bytes();assert hashlib.sha256(raw).hexdigest()==receipt_sha;source=json.loads(raw);reference=json.loads(reference_path.read_text())
     assert hashlib.sha256(reference_path.read_bytes()).hexdigest()==row['reference_run_sha256']
-    assert source['accepted'] and source['params']['recovery']=='none'
-    assert (suite in SEEN_SUITES and source['params']['seed'] in SEEN15_SEEDS) or (suite=='heldout-bank-v2' and source['scene_bank_only'] and source['params']['split']=='eval' and source['params']['seed'] in range(900000,900030))
+    require_scene_source(row,suite,source)
     assert os.environ['ROS_DOMAIN_ID']=='92' and os.environ['SOARM_KIT_MCP_PORT']=='8781' and os.environ['RMW_IMPLEMENTATION']=='rmw_cyclonedds_cpp'
     assert all(k not in os.environ for k in ('ROS_LOCALHOST_ONLY','ROS_AUTOMATIC_DISCOVERY_RANGE','ROS_STATIC_PEERS'))
     assert 'torch' not in sys.modules,'Scene preparation never imports a model or Torch'

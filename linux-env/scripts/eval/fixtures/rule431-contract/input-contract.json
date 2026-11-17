@@ -1,0 +1,9 @@
+{
+  "kind": "rule431-eval-input-contract-v1",
+  "checkpoint_marker": "rule431-manifest.json",
+  "normalization_stats_sha256": "df1b3f831e754a2f18f0401ae4f80bfe8a4ba7840c4122032bbf5de58c5abce7",
+  "reference_processor_proof_sha256": "5f64e6418523c3f8e78c0be3d254ed77a1e262fa70099921017b5dbb43148f32",
+  "dataset_inventory_sha256": "47b71fda6190b9a7755de567480243a459c4ff81ba2f6548396893f4f2234786",
+  "rule_selection_sha256": "bc03e3ed8f314c6dd005fcfa60167af98b39071297097cee41035d386cd812df",
+  "no_next120_normalizer_overrides": true
+}

@@ -1,0 +1,120 @@
+{
+  "fixture_only": true,
+  "source": "Independently reloaded training-written processor fixture; no model weights",
+  "proof": {
+    "passed": true,
+    "cpu_only": true,
+    "actual_training_checkpoint": false,
+    "fixture_only": true,
+    "checkpoint": "/mnt/storage3/aaugus11/smolvla-train/phase3.2/rule431-base25k/cpu-tests/processor-fixture-1794875061456137681/pretrained_model",
+    "crop_module_sha256": "024ab67a9ebc3099bccad82617264c7ebdd5908cde91a126e2f9c2fb1d7ca11f",
+    "raw_image_shapes": [
+      3,
+      480,
+      640
+    ],
+    "inference_order": [
+      "top_crop",
+      "normal_resize"
+    ],
+    "no_random_inference_augmentation": true,
+    "pixel_state_token_resize_hashes": {
+      "observation.images.top": "6077656b03bf98ae5d7b3d9b5dcba54ec5265d3c9c7c2c8fd6dd84d9f39b0897",
+      "observation.images.wrist": "f1d451d606fd19db5dcdb109f0bf0d9e1d856ee628f5695503c747a8c57aa8a8",
+      "observation.language.tokens": "f59287c0e335c4043026dc5eefe799649f7b87e13332ce04ba6b7d5a30755ace",
+      "observation.language.attention_mask": "803e5240113c6c93586d159b9e6ce1caaed862ec3b4d2f83be7ea79db62126f6",
+      "observation.state": "67b4ae5ccb952bfe94650e25cb7969d0aacbc8d5ff55a080fe8b4de3c571836d",
+      "top_after_resize": "e30a57253643fb321eb4be9c0268baf415e66b1e0f5dc9073d4ca124eadecbd9"
+    },
+    "inference_crop_only": true,
+    "loaded_processor_classes": [
+      "RenameObservationsProcessorStep",
+      "AddBatchDimensionProcessorStep",
+      "WorkspaceTopCropStep",
+      "NewLineTaskProcessorStep",
+      "TokenizerProcessorStep",
+      "DeviceProcessorStep",
+      "NormalizerProcessorStep"
+    ],
+    "normalization_stats_sha256": "df1b3f831e754a2f18f0401ae4f80bfe8a4ba7840c4122032bbf5de58c5abce7",
+    "reference_processor_proof_sha256": "5f64e6418523c3f8e78c0be3d254ed77a1e262fa70099921017b5dbb43148f32",
+    "dataset_inventory_sha256": "47b71fda6190b9a7755de567480243a459c4ff81ba2f6548396893f4f2234786",
+    "saved_normalizer_parity": {
+      "pre_state": {
+        "passed": true,
+        "feature": "observation.state",
+        "mean": [
+          16.18603515625,
+          -20.711576461791992,
+          26.507675170898438,
+          70.77467346191406,
+          -75.13153839111328,
+          4.794156551361084
+        ],
+        "std": [
+          30.4966983795166,
+          15.935686111450195,
+          17.907896041870117,
+          10.404125213623047,
+          36.71235275268555,
+          1.674918293952942
+        ]
+      },
+      "pre_action": {
+        "passed": true,
+        "feature": "action",
+        "mean": [
+          16.159801483154297,
+          -20.739789962768555,
+          26.474454879760742,
+          70.78363037109375,
+          -75.1778793334961,
+          4.7719292640686035
+        ],
+        "std": [
+          30.492280960083008,
+          15.927755355834961,
+          17.916271209716797,
+          10.403950691223145,
+          36.72098922729492,
+          1.7019233703613281
+        ]
+      },
+      "post_action": {
+        "passed": true,
+        "feature": "action",
+        "mean": [
+          16.159801483154297,
+          -20.739789962768555,
+          26.474454879760742,
+          70.78363037109375,
+          -75.1778793334961,
+          4.7719292640686035
+        ],
+        "std": [
+          30.492280960083008,
+          15.927755355834961,
+          17.916271209716797,
+          10.403950691223145,
+          36.72098922729492,
+          1.7019233703613281
+        ]
+      }
+    },
+    "saved_pre_state_stats_match": true,
+    "saved_post_action_stats_match": true,
+    "processor_state_files_sha256": {
+      "policy_preprocessor_step_6_normalizer_processor.safetensors": "5889b8c86ab640c2db90397726b21783090ae0202c4da250213a0babcc1a680f",
+      "policy_postprocessor_step_0_unnormalizer_processor.safetensors": "5889b8c86ab640c2db90397726b21783090ae0202c4da250213a0babcc1a680f"
+    },
+    "processor_config_files_sha256": {
+      "policy_preprocessor.json": "2497aabdf6081ed1462744f718c0c662b59e7e5be7c7e9ede9fbca4e8ef931b6",
+      "policy_postprocessor.json": "2b78bb742065288df2ec63b0ee35f97a1f6950171cf2272f7e34b1fe3873b17b"
+    }
+  },
+  "serialized_files": {
+    "policy_preprocessor.json": "{\n  \"name\": \"policy_preprocessor\",\n  \"steps\": [\n    {\n      \"registry_name\": \"rename_observations_processor\",\n      \"config\": {\n        \"rename_map\": {}\n      }\n    },\n    {\n      \"registry_name\": \"to_batch_processor\",\n      \"config\": {}\n    },\n    {\n      \"class\": \"workspace_crop_step.WorkspaceTopCropStep\",\n      \"config\": {\n        \"key\": \"observation.images.top\",\n        \"box_xyxy\": [\n          99,\n          128,\n          559,\n          473\n        ],\n        \"input_hw\": [\n          480,\n          640\n        ]\n      }\n    },\n    {\n      \"registry_name\": \"smolvla_new_line_processor\",\n      \"config\": {}\n    },\n    {\n      \"registry_name\": \"tokenizer_processor\",\n      \"config\": {\n        \"max_length\": 48,\n        \"task_key\": \"task\",\n        \"padding_side\": \"right\",\n        \"padding\": \"max_length\",\n        \"truncation\": true,\n        \"tokenizer_name\": \"HuggingFaceTB/SmolVLM2-500M-Video-Instruct\"\n      }\n    },\n    {\n      \"registry_name\": \"device_processor\",\n      \"config\": {\n        \"device\": \"cpu\",\n        \"float_dtype\": null\n      }\n    },\n    {\n      \"registry_name\": \"normalizer_processor\",\n      \"config\": {\n        \"eps\": 1e-08,\n        \"features\": {\n          \"observation.state\": {\n            \"type\": \"STATE\",\n            \"shape\": [\n              6\n            ]\n          },\n          \"observation.images.top\": {\n            \"type\": \"VISUAL\",\n            \"shape\": [\n              3,\n              480,\n              640\n            ]\n          },\n          \"observation.images.wrist\": {\n            \"type\": \"VISUAL\",\n            \"shape\": [\n              3,\n              480,\n              640\n            ]\n          },\n          \"action\": {\n            \"type\": \"ACTION\",\n            \"shape\": [\n              6\n            ]\n          }\n        },\n        \"norm_map\": {\n          \"VISUAL\": \"IDENTITY\",\n          \"STATE\": \"MEAN_STD\",\n          \"ACTION\": \"MEAN_STD\"\n        }\n      },\n      \"state_file\": \"policy_preprocessor_step_6_normalizer_processor.safetensors\"\n    }\n  ]\n}",
+    "policy_postprocessor.json": "{\n  \"name\": \"policy_postprocessor\",\n  \"steps\": [\n    {\n      \"registry_name\": \"unnormalizer_processor\",\n      \"config\": {\n        \"eps\": 1e-08,\n        \"features\": {\n          \"action\": {\n            \"type\": \"ACTION\",\n            \"shape\": [\n              6\n            ]\n          }\n        },\n        \"norm_map\": {\n          \"VISUAL\": \"IDENTITY\",\n          \"STATE\": \"MEAN_STD\",\n          \"ACTION\": \"MEAN_STD\"\n        }\n      },\n      \"state_file\": \"policy_postprocessor_step_0_unnormalizer_processor.safetensors\"\n    },\n    {\n      \"registry_name\": \"device_processor\",\n      \"config\": {\n        \"device\": \"cpu\",\n        \"float_dtype\": null\n      }\n    }\n  ]\n}",
+    "rule431-manifest.json": "{\n  \"status\": \"CPU_PREPARATION_ONLY\",\n  \"init_repo\": \"lerobot/smolvla_base\",\n  \"init_revision\": \"5e8d12a6e2975b0e5e5fce7c8caf47c371d257b6\",\n  \"base_weights_sha256\": \"7cd549ac2351fb069c0ddb3c34ad2d09cfc92b56a15dccdfc2e41467aaca01eb\",\n  \"base_config_sha256\": \"650584b56c104720f7a3c91d1ec6bec9e8de8ac11e60c92ba2fa82d93eda147d\",\n  \"base_path\": \"/mnt/storage3/aaugus11/smolvla-train/cache/huggingface/hub/models--lerobot--smolvla_base/snapshots/5e8d12a6e2975b0e5e5fce7c8caf47c371d257b6\",\n  \"fork_commit\": \"71676438189514dfe732fed23d7d418afeda9a7b\",\n  \"config_sha256\": \"a1f0350ed0398988e21928d180b3fcf86c21a6014045765ee8a0daf55b4838d0\",\n  \"qualification_config_sha256\": \"6f6e7024a40f95ac204ded51287c804488658b721b5874df00f738c521c2bea3\",\n  \"dataset_inventory_sha256\": \"47b71fda6190b9a7755de567480243a459c4ff81ba2f6548396893f4f2234786\",\n  \"selection_sha256\": \"bc03e3ed8f314c6dd005fcfa60167af98b39071297097cee41035d386cd812df\",\n  \"sampler_config_sha256\": \"a822aa1e7438385b50a63ace1a5fce9c8217fb69e968c4f43e4e10768d99d9c4\",\n  \"augmentation_sha256\": \"524e7bcd15772d8fde0b3ff6132602f8b8ebd40fe22d829a94d178f117eb8e14\",\n  \"runtime_code_sha256\": {\n    \"rule431_common.py\": \"1a7ddaafd74d63f3f8a4e6e7cc650f5a2a5e9680f42a825217f6701e2bc70cb9\",\n    \"rule431_sampling.py\": \"da375aaea105ec7b60462fc4355650b218da2bb0371dfe9eb3185c736ddd9f51\",\n    \"entry_rule431.py\": \"53431dafb1612a93fbfd157bef05e861afda219c2fe938302eac12c5ee9e563b\",\n    \"launch_rule431.py\": \"0f40cfeae2aa62f0c6e10e4ba1841199e2335f4bd49991ba39487f9586190859\",\n    \"prepare_rule431_dataset.py\": \"e35a27b8c340dd0f8d30e0c4fee36cb21ba5074ab819a75a93a001a44d28d9a5\",\n    \"prepare_rule431_config.py\": \"59f19b1b3798eae91277fe5d600153b013d19e788f130dae718dcee9a5e23d63\",\n    \"precision.py\": \"db04f26d9612ed1affefc710b1f9918e791f469984feaae2a2beda87d02811ca\",\n    \"workspace_crop_step.py\": \"024ab67a9ebc3099bccad82617264c7ebdd5908cde91a126e2f9c2fb1d7ca11f\",\n    \"next120_light_step.py\": \"6a401cfe548cd104058cc4e5b6c8c215130f2e2540a50c4bed8546bd304cec9f\",\n    \"crop_robustness_pipeline32.py\": \"3a5988f8a2e08e800148acad19ee024f0babb505a4c56a10cf4c1a3b3ff8ae54\",\n    \"test_rule431_cpu.py\": \"c7634c667f96173a998975754c065e9df69632d1f381b2172585f50c6c0c1c2e\"\n  },\n  \"steps\": 25000,\n  \"save_steps\": [\n    5000,\n    10000,\n    15000,\n    20000,\n    25000\n  ],\n  \"batch_size\": 32,\n  \"drop_last\": true,\n  \"param_group_peaks\": {\n    \"vlm_vision\": 1e-05,\n    \"expert_projections\": 0.0001\n  },\n  \"param_group_floors\": {\n    \"vlm_vision\": 1e-06,\n    \"expert_projections\": 1e-05\n  },\n  \"image_order\": [\n    \"observation.images.top\",\n    \"observation.images.wrist\"\n  ],\n  \"rename_map\": {},\n  \"empty_cameras\": 0,\n  \"train_preprocessing\": [\n    \"top_crop\",\n    \"one_or_no_mild_perturbation\",\n    \"native_resize512\"\n  ],\n  \"inference_preprocessing\": [\n    \"saved_top_crop\",\n    \"native_resize512\"\n  ],\n  \"normalization\": \"Fresh native processors with statistics recomputed over selected431 physical episodes; no900/base stats reuse\",\n  \"nominal_epochs\": 3.0287771690776997,\n  \"expected_wall_hours\": 5.425347222222222,\n  \"memory_reference\": {\n    \"batch_size\": 32,\n    \"peak_device_gib\": 34.97,\n    \"min_free_fraction\": 0.2714,\n    \"source\": \"Previous next120 static32 qualification; new100stepGPUqualification required AFTER GO\"\n  },\n  \"allocator_fraction\": 0.7,\n  \"nvml_guard_fraction\": 0.79,\n  \"requires_operator_go\": true,\n  \"requires_next120_released\": true\n}\n"
+  }
+}

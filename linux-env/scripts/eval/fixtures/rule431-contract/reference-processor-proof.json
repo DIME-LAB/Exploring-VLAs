@@ -1,0 +1,20 @@
+{
+  "passed": true,
+  "cpu_only": true,
+  "fixture_only": true,
+  "actual_training_checkpoint": false,
+  "processor_fixture": "/mnt/storage3/aaugus11/smolvla-train/phase3.2/rule431-base25k/cpu-tests/processor-fixture-1794875061456137681/pretrained_model",
+  "saved_crop_exactly_once": true,
+  "no_random_inference_augmentation": true,
+  "active_training_pipeline_unmodified": true,
+  "raw_pixel_state_token_mask_resize_parity": true,
+  "hashes": {
+    "observation.images.top": "6077656b03bf98ae5d7b3d9b5dcba54ec5265d3c9c7c2c8fd6dd84d9f39b0897",
+    "observation.images.wrist": "f1d451d606fd19db5dcdb109f0bf0d9e1d856ee628f5695503c747a8c57aa8a8",
+    "observation.language.tokens": "f59287c0e335c4043026dc5eefe799649f7b87e13332ce04ba6b7d5a30755ace",
+    "observation.language.attention_mask": "803e5240113c6c93586d159b9e6ce1caaed862ec3b4d2f83be7ea79db62126f6",
+    "observation.state": "67b4ae5ccb952bfe94650e25cb7969d0aacbc8d5ff55a080fe8b4de3c571836d",
+    "top_after_resize": "e30a57253643fb321eb4be9c0268baf415e66b1e0f5dc9073d4ca124eadecbd9"
+  },
+  "normalization_stats_sha256": "df1b3f831e754a2f18f0401ae4f80bfe8a4ba7840c4122032bbf5de58c5abce7"
+}

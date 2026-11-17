@@ -79,15 +79,15 @@ def require_qualification(root,host,collector_root,bank_sha256,source_dir,*,suit
     assert suite in (*SEEN_SUITES,'heldout-bank-v2')
     assert summary['status']=='PASS' and summary['suite']==suite and summary['seeds']==seeds
     assert summary['episodes']==len(seeds) and summary['commands']==10*len(seeds)
-    if suite=='seen-training-home-15':
+    if suite in ('seen-training-home-15','rule-seen-training-home-15'):
         assert reference_sha256 is None and reference_sha256_by_seed is not None,'Seen fifteen requires per-seed reference binding'
         assert set(reference_sha256_by_seed)==set(map(str,seeds))
         assert summary['reference_run_sha256'] is None and summary['reference_run_sha256_by_seed']==reference_sha256_by_seed
     else:
         assert reference_sha256_by_seed is None
         if reference_sha256 is not None:assert summary['reference_run_sha256']==reference_sha256
-    for name in ('matched_reset.py','matched_reset_client.py','native_bank.py','qualify_matched_reset.py'):
-        assert hashlib.sha256((Path(source_dir)/name).read_bytes()).hexdigest()==ledger['source_sha256'][name],'Reset source differs from live qualification'
+    from native_environment import qualification_sources
+    assert qualification_sources(source_dir)==ledger['source_sha256'],'Runtime source differs from live qualification'
     if suite=='heldout-bank-v2':
         from native_bank import SEEN_BANK_SHA
         control=summary['bootstrap_control']

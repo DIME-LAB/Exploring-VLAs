@@ -48,4 +48,34 @@ class PhysicalMetricTests(unittest.TestCase):
         s=self.Score('red',self.snapshot(0),self.fk);s.update(self.snapshot(0))
         with self.assertRaises(RuntimeError):s.update(self.snapshot(.2))
 
+    def two_blocks(self,t,far_inside=False,far_lift=0.,near_inside=False,near_lift=0.):
+        s=self.snapshot(t,inside=near_inside,lift=near_lift)
+        far=self.snapshot(t,inside=far_inside,lift=far_lift)
+        if not far_inside:far['bodies']['red_2x3_0']['position'][0]=.6
+        s['bodies']['red_2x3_1']=far['bodies']['red_2x3_0']
+        s['local_corners']['red_2x3_1']=s['local_corners']['red_2x3_0']
+        return s
+    def test_right_colour_wrong_instance_is_not_rule_success(self):
+        score=self.Score('red',self.two_blocks(0),self.fk,intended_target='red_2x3_0')
+        for n in range(31):score.update(self.two_blocks(n/30,far_lift=.04))
+        for n in range(31,62):score.update(self.two_blocks(n/30,far_inside=True))
+        result=score.result();self.assertTrue(result['requested_colour_success'])
+        self.assertFalse(result['rule_target_grasp']);self.assertFalse(result['rule_target_success'])
+        self.assertTrue(result['wrong_same_colour_target_grasp']);self.assertTrue(result['wrong_same_colour_target_placement'])
+    def test_intended_instance_places_and_old_default_keys_stay_unchanged(self):
+        score=self.Score('red',self.two_blocks(0),self.fk,intended_target='red_2x3_0')
+        for n in range(31):score.update(self.two_blocks(n/30,near_lift=.04))
+        for n in range(31,62):score.update(self.two_blocks(n/30,near_inside=True))
+        self.assertTrue(score.result()['rule_target_success'])
+        self.assertNotIn('rule_target_success',self.Score('red',self.two_blocks(0),self.fk).result())
+
+    def test_closure_distance_stays_with_intended_object_not_nearest_any(self):
+        import numpy as np
+        fk=SimpleNamespace(forward_kinematics_batch=lambda q:np.asarray([[.6,0.,.02]]))
+        first=self.two_blocks(0);first['state'][5]=1.
+        score=self.Score('red',first,fk,intended_target='red_2x3_0');score.update(first)
+        second=self.two_blocks(1/30);second['state'][5]=.9;score.update(second)
+        self.assertAlmostEqual(score.result()['closing_distance_m'],0.)
+        self.assertAlmostEqual(score.result()['rule_closing_distance_m'],.2)
+
 if __name__=='__main__':unittest.main(verbosity=2)

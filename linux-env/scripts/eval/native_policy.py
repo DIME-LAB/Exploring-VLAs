@@ -15,7 +15,7 @@ from phase3_metrics import PhysicalScore
 FEATURES=('shoulder_pan.pos','shoulder_lift.pos','elbow_flex.pos','wrist_flex.pos','wrist_roll.pos','gripper.pos')
 
 def main():
- p=argparse.ArgumentParser();p.add_argument('--grasp-telemetry',action='store_true');p.add_argument('--paired-flow-repeat',type=int);p.add_argument('--out',type=Path,required=True);p.add_argument('--checkpoint',type=Path,required=True);p.add_argument('--weights-sha256',required=True);p.add_argument('--bank',type=Path,required=True);p.add_argument('--bank-sha256',required=True);p.add_argument('--server-port',type=int,default=18092);p.add_argument('--max-actions',type=int,default=1350);p.add_argument('--rtc-off',action='store_true');p.add_argument('--check-only',action='store_true');p.add_argument('--observe-every-actions',type=int,choices=(1,5,10,25,50),default=10);p.add_argument('--evaluation-kind');p.add_argument('--queue-aggregation',choices=('weighted_average','latest_only'),default='weighted_average');p.add_argument('--eval-codec-roundtrip',action='store_true');p.add_argument('--collector-matched-reset',action='store_true');p.add_argument('--reset-collector-root',type=Path);p.add_argument('--bank-offset',type=int,default=0);p.add_argument('--bank-count',type=int);p.add_argument('--episode-seeds',type=lambda text:__import__('native_bank').parse_episode_seeds(text));a=p.parse_args();host=qualified_host(REPO);HOST=Path(host['root']);require_environment();core=validate_collector_cut();support=preflight_sources(REPO)
+ p=argparse.ArgumentParser();p.add_argument('--grasp-telemetry',action='store_true');p.add_argument('--rule-target',action='store_true');p.add_argument('--retain-wrist-before-closure',action='store_true');p.add_argument('--processor-reference',type=Path);p.add_argument('--paired-flow-repeat',type=int);p.add_argument('--out',type=Path,required=True);p.add_argument('--checkpoint',type=Path,required=True);p.add_argument('--weights-sha256',required=True);p.add_argument('--bank',type=Path,required=True);p.add_argument('--bank-sha256',required=True);p.add_argument('--server-port',type=int,default=18092);p.add_argument('--max-actions',type=int,default=1350);p.add_argument('--rtc-off',action='store_true');p.add_argument('--check-only',action='store_true');p.add_argument('--observe-every-actions',type=int,choices=(1,5,10,25,50),default=10);p.add_argument('--evaluation-kind');p.add_argument('--queue-aggregation',choices=('weighted_average','latest_only'),default='weighted_average');p.add_argument('--eval-codec-roundtrip',action='store_true');p.add_argument('--collector-matched-reset',action='store_true');p.add_argument('--reset-collector-root',type=Path);p.add_argument('--bank-offset',type=int,default=0);p.add_argument('--bank-count',type=int);p.add_argument('--episode-seeds',type=lambda text:__import__('native_bank').parse_episode_seeds(text));a=p.parse_args();host=qualified_host(REPO);HOST=Path(host['root']);require_environment();core=validate_collector_cut();support=preflight_sources(REPO)
  assert a.paired_flow_repeat is None or a.paired_flow_repeat>=0,'Repeat index must be nonnegative'
  assert not a.collector_matched_reset or a.reset_collector_root,'Matched reset requires the qualified private collector root'
  assert a.out.resolve().is_relative_to(HOST/'eval/runs') and not a.out.exists();a.out.mkdir();assert a.max_actions==1350
@@ -25,10 +25,13 @@ def main():
  assert all(checkpoint_config['input_features'][k]['shape']==[3,480,640] for k in ('observation.images.top','observation.images.wrist'))
  assert checkpoint_config['input_features']['observation.state']['shape']==[6] and checkpoint_config['output_features']['action']['shape']==[6] and checkpoint_config['chunk_size']==50
  from native_bank import load_bank,select_policy_rows,SEEN_SUITES
- all_rows,suite=load_bank(a.bank,a.bank_sha256);rows=select_policy_rows(all_rows,suite,a.bank_offset,a.bank_count,a.episode_seeds)
+ all_rows,suite=load_bank(a.bank,a.bank_sha256)
+ if suite=='rule-seen-training-home-15':assert a.rule_target and a.paired_flow_repeat is not None and a.grasp_telemetry
+ if 'rule431-manifest.json' in checkpoint_inventory:assert a.processor_reference and a.processor_reference.is_file()
+ rows=select_policy_rows(all_rows,suite,a.bank_offset,a.bank_count,a.episode_seeds)
  assert suite!='heldout-bank-v2' or a.collector_matched_reset,'Held-out scoring requires the qualified collector matched reset'
  if a.check_only:
-  proof=dict(grasp_telemetry=a.grasp_telemetry,paired_flow_repeat=a.paired_flow_repeat,resume_episode_seeds=a.episode_seeds,fixed_chunk_count=a.bank_count,checkpoint=str(a.checkpoint.resolve()),status='PASS',scope='Native policy source/model/bank/environment preflight; no GPU or simulation',source_sha256=support,weights_sha256=a.weights_sha256,bank_sha256=a.bank_sha256,suite=suite,seeds=[r['seed'] for r in rows],collector_source_sha256=core)
+  proof=dict(rule_target=a.rule_target,retain_wrist_before_closure=a.retain_wrist_before_closure,processor_reference_sha256=hashlib.sha256(a.processor_reference.read_bytes()).hexdigest() if a.processor_reference else None,grasp_telemetry=a.grasp_telemetry,paired_flow_repeat=a.paired_flow_repeat,resume_episode_seeds=a.episode_seeds,fixed_chunk_count=a.bank_count,checkpoint=str(a.checkpoint.resolve()),status='PASS',scope='Native policy source/model/bank/environment preflight; no GPU or simulation',source_sha256=support,weights_sha256=a.weights_sha256,bank_sha256=a.bank_sha256,suite=suite,seeds=[r['seed'] for r in rows],collector_source_sha256=core)
   (a.out/'preflight.json').write_text(json.dumps(proof,indent=2)+'\n');print(json.dumps(proof),flush=True);return
  fkpath=REPO/'vla_SO-ARM101/src/so_arm101_control/so_arm101_control/compute_workspace.py';spec=importlib.util.spec_from_file_location('native_policy_fk',fkpath);fk=importlib.util.module_from_spec(spec);spec.loader.exec_module(fk)
  limits_path=REPO/'vla_SO-ARM101/src/so_arm101_control';sys.path.insert(0,str(limits_path));from so_arm101_control.grasp_geometry import JOINT_LIMITS
@@ -42,7 +45,7 @@ def main():
  with os.fdopen(fd,'wb') as file:file.write(secrets.token_bytes(32))
  address=str(a.out/'rpc.sock');assert len(address.encode())<104
  processor_path=a.checkpoint/'policy_preprocessor.json';processor=json.loads(processor_path.read_text())
- config=dict(grasp_telemetry=a.grasp_telemetry,paired_flow_repeat=a.paired_flow_repeat,resume_episode_seeds=a.episode_seeds,fixed_chunk_count=a.bank_count,suite=suite,seeds=[r['seed'] for r in rows],bank_offset=a.bank_offset,bank_count=len(rows),collector_matched_reset=a.collector_matched_reset,reset_protocol=('collector-matched-reset-v1 plus one native bootstrap' if suite in SEEN_SUITES else 'collector-sealed-postsample-v1 plus one native bootstrap') if a.collector_matched_reset else 'sealed restore plus one native bootstrap',checkpoint_files=checkpoint_inventory,evaluation_kind=a.evaluation_kind,saved_preprocessor=processor,saved_preprocessor_sha256=hashlib.sha256(processor_path.read_bytes()).hexdigest(),bundled_processor_modules={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in a.checkpoint.glob('*.py')},queue_aggregation=a.queue_aggregation,eval_codec_roundtrip=a.eval_codec_roundtrip,codec_context='causal running per-camera codec with held-image filler; diagnostic temporal approximation' if a.eval_codec_roundtrip else None,model=str(a.checkpoint),weights_sha256=a.weights_sha256,bank=str(a.bank),bank_sha256=a.bank_sha256,collector_source_sha256=core,rtc=not a.rtc_off,actions_per_chunk=50,observe_every_actions=a.observe_every_actions,chunk_size_threshold=.8,execution_horizon=10,max_guidance_weight=10,inference_mode='eager',clock='collector held ticks; physics waits during inference',state='measured native radians converted to degrees',cameras=['top','wrist'],fork_commit=subprocess.check_output(['git','-C',str(REPO/'lerobot'),'rev-parse','HEAD'],text=True).strip(),host_load_start=list(os.getloadavg()))
+ config=dict(rule_target=a.rule_target,retain_wrist_before_closure=a.retain_wrist_before_closure,processor_reference_sha256=hashlib.sha256(a.processor_reference.read_bytes()).hexdigest() if a.processor_reference else None,grasp_telemetry=a.grasp_telemetry,paired_flow_repeat=a.paired_flow_repeat,resume_episode_seeds=a.episode_seeds,fixed_chunk_count=a.bank_count,suite=suite,seeds=[r['seed'] for r in rows],bank_offset=a.bank_offset,bank_count=len(rows),collector_matched_reset=a.collector_matched_reset,reset_protocol=('collector-matched-reset-v1 plus one native bootstrap' if suite in SEEN_SUITES else 'collector-sealed-postsample-v1 plus one native bootstrap') if a.collector_matched_reset else 'sealed restore plus one native bootstrap',checkpoint_files=checkpoint_inventory,evaluation_kind=a.evaluation_kind,saved_preprocessor=processor,saved_preprocessor_sha256=hashlib.sha256(processor_path.read_bytes()).hexdigest(),bundled_processor_modules={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in a.checkpoint.glob('*.py')},queue_aggregation=a.queue_aggregation,eval_codec_roundtrip=a.eval_codec_roundtrip,codec_context='causal running per-camera codec with held-image filler; diagnostic temporal approximation' if a.eval_codec_roundtrip else None,model=str(a.checkpoint),weights_sha256=a.weights_sha256,bank=str(a.bank),bank_sha256=a.bank_sha256,collector_source_sha256=core,rtc=not a.rtc_off,actions_per_chunk=50,observe_every_actions=a.observe_every_actions,chunk_size_threshold=.8,execution_horizon=10,max_guidance_weight=10,inference_mode='eager',clock='collector held ticks; physics waits during inference',state='measured native radians converted to degrees',cameras=['top','wrist'],fork_commit=subprocess.check_output(['git','-C',str(REPO/'lerobot'),'rev-parse','HEAD'],text=True).strip(),host_load_start=list(os.getloadavg()))
  assert config['fork_commit']=='e1e201098b2056827908e76f58bbf5733beb4d82'
  subprocess.run(['git','-C',str(REPO/'lerobot'),'diff','--quiet','HEAD'],check=True)
  (a.out/'run_config.json').write_text(json.dumps(config,indent=2)+'\n')
@@ -88,7 +91,15 @@ def main():
    assert identity['epoch']==current['epoch'] and abs(identity['sim_ns']-current['sim_ns'])<=1000
    return identity
   def run_actor(ep,task,actions,warm=False,layout_seed=None):
-   baseline=transport.session.current;snapshots=[baseline];commands=[];captures=[];active.clear();active.update(physical=snapshots,commands=commands,captures=captures,first_images={});scorer=PhysicalScore(color,baseline,fk);scorer.update(baseline);hold=list(baseline['state']);started=time.monotonic();actor_payload=task;actor_mode='WARM' if warm else 'RUN'
+   baseline=transport.session.current;snapshots=[baseline];commands=[];captures=[];active.clear();active.update(physical=snapshots,commands=commands,captures=captures,first_images={});target_proof=None;wrist_history=None
+   if a.retain_wrist_before_closure and not warm:
+    from wrist_retention import WristHistory
+    wrist_history=WristHistory(True,max_actions=actions)
+   if a.rule_target:
+    from rule_target import select_target
+    target_proof=select_target(baseline,color)
+    if suite=='rule-seen-training-home-15' and not warm:assert target_proof['object']==next(r for r in rows if r['seed']==layout_seed)['recorded_target']
+   scorer=PhysicalScore(color,baseline,fk,intended_target=target_proof['object'] if target_proof else None);scorer.update(baseline);hold=list(baseline['state']);started=time.monotonic();actor_payload=task;actor_mode='WARM' if warm else 'RUN'
    if not warm and a.paired_flow_repeat is not None:
     from flow_noise import episode_identity
     actor_mode='RUNSEEDED';actor_payload=dict(task=task,flow_noise=episode_identity(layout_seed,a.paired_flow_repeat))
@@ -103,12 +114,13 @@ def main():
       current=transport.session.current
       if request['op']=='capture':
        identity=native_identity()
-       observation={name:math.degrees(q) for name,q in zip(FEATURES,current['state'])};images={camera:transport.sensors.image(transport.session.entry[camera][0]).copy() for camera in ('top','wrist')};observation.update(images)
-       if not active['first_images']:active['first_images']=images
-       metadata=dict(version=1,mode='collect',held=True,sim_ns=current['sim_ns'],epoch=current['epoch'],state_degrees=[observation[n] for n in FEATURES],camera_rgb_sha256={camera:hashlib.sha256(image.tobytes()).hexdigest() for camera,image in images.items()},camera_identity={camera:transport.session.entry[camera][2] for camera in images});captures.append(metadata);connection.send(dict(observation=observation,metadata=metadata))
+       from native_policy_bridge import capture_observation
+       observation,metadata=capture_observation(transport,FEATURES,current,active['first_images'],wrist_history,len(commands))
+       captures.append(metadata);connection.send(dict(observation=observation,metadata=metadata))
       elif request['op']=='status':connection.send(native_identity())
       elif request['op']=='action':
-       values=np.asarray([request['action'][n] for n in FEATURES]);assert np.all(np.isfinite(values));rad=np.radians(values);command=hold if warm else np.clip(rad,bounds[:,0],bounds[:,1]).tolist();proof,current=transport.session.step(command);commands.append(dict(action_index=len(commands),requested_degrees=values.tolist(),warmup_hold=warm,**proof));snapshots.append(current);scorer.update(current);connection.send(dict(performed={name:math.degrees(q) for name,q in zip(FEATURES,proof['ack']['applied_command'])}))
+       from native_policy_bridge import apply_action
+       connection.send(apply_action(transport,FEATURES,bounds,hold,warm,request['action'],commands,snapshots,scorer,wrist_history))
       else:raise ValueError('Unknown native IPC operation')
      except BaseException as error:
       try:connection.send(dict(error=str(error)))
@@ -135,7 +147,10 @@ def main():
     if a.eval_codec_roundtrip:
      assert set(codec)=={'top','wrist'} and all(v['requested_codec_index']==v['returned_codec_index'] and v['mode']=='running-two-stage-held-lookahead-diagnostic' for v in codec.values())
     else:assert codec is False
-   return done,snapshots,commands,captures,scorer.result()
+   score=scorer.result()
+   if target_proof is not None:score['rule_target_selection']=target_proof
+   if wrist_history is not None:score['wrist_preclosure']=wrist_history.finish(a.out/ep/'wrist-preclosure')
+   return done,snapshots,commands,captures,score
   # Warm predictions while only the initial native home target is actuated.
   color=rows[0]['color'];done,*_=run_actor('warmup',rows[0]['task'],100,True);(a.out/'warmup.json').write_text(json.dumps(done,indent=2)+'\n')
   for index,row in enumerate(rows):

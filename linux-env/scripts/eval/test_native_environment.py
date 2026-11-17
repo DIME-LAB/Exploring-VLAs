@@ -12,7 +12,7 @@ class Tests(unittest.TestCase):
     def test_preflight_refuses_changed_source_or_wrong_collector_client(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d);folder=root/'linux-env/scripts/eval';folder.mkdir(parents=True)
-            for name in ('native_policy.py','flow_noise.py','grasp_telemetry.py','native_environment.py','native_bank.py','native_replay.py','held_tick.py','checkpoint_contract.py','run_episodes.py'):(folder/name).write_text(name)
+            for name in ('native_policy.py','flow_noise.py','grasp_telemetry.py','native_environment.py','native_bank.py','native_replay.py','held_tick.py','checkpoint_contract.py','run_episodes.py','rule_target.py','prepare_seen15_bank.py','wrist_retention.py','native_policy_bridge.py','closure_geometry.py'):(folder/name).write_text(name)
             with patch('subprocess.check_output',return_value=b'run_episodes.py'):
                 proof={'source_sha256':preflight_sources(root)}
                 require_preflight_sources(proof,root)

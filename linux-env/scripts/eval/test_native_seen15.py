@@ -1,6 +1,7 @@
 """CPU checks for per-batch seen-home provenance and qualification binding."""
 import copy,hashlib,json,tempfile,unittest
 from pathlib import Path
+from native_environment import QUALIFICATION_FILES
 from native_bank import SEEN15_SEEDS,NAMES,load_bank,reference_binding,select_policy_rows
 from matched_reset_client import require_qualification
 
@@ -43,7 +44,7 @@ class Seen15Tests(unittest.TestCase):
     def test_qualification_requires_complete_exact_per_seed_reference_map(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d);src=root/'source';src.mkdir();out=root/'qual';(out/'qualification').mkdir(parents=True)
-            names=('matched_reset.py','matched_reset_client.py','native_bank.py','qualify_matched_reset.py');shas={}
+            names=QUALIFICATION_FILES;shas={}
             for name in names:(src/name).write_text(name);shas[name]=hashlib.sha256((src/name).read_bytes()).hexdigest()
             host=dict(root=d);collector=root/'collector';collector.mkdir()
             ledger=dict(status='matched-reset-qualified',cleanup_exit_code=0,host_profile=host,source_sha256=shas)

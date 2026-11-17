@@ -1,6 +1,7 @@
 import hashlib,json,tempfile,unittest
 import collections,threading,types,sys,math,copy
 from pathlib import Path
+from native_environment import QUALIFICATION_FILES
 from matched_reset_client import require_qualification,install_fenced_boundary
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'collect'))
 from protocol import StepGeneration
@@ -51,7 +52,7 @@ class Tests(unittest.TestCase):
     def test_heldout_requires_all_ordered_seeds_and_an_unchanged_bootstrap_control(self):
         with tempfile.TemporaryDirectory() as d:
             base=Path(d);sources=base/'sources';sources.mkdir();hashes={}
-            for name in ('matched_reset.py','matched_reset_client.py','native_bank.py','qualify_matched_reset.py'):
+            for name in QUALIFICATION_FILES:
                 (sources/name).write_text(name);hashes[name]=hashlib.sha256(name.encode()).hexdigest()
             host=dict(name='dual-a4500',root='/backup');collector='/backup/collector'
             def write(root,suite,bank,control=None):
@@ -77,7 +78,7 @@ class Tests(unittest.TestCase):
     def test_changed_reset_source_cannot_use_a_previous_live_qualification(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d);(root/'qualification').mkdir();sources=root/'source';sources.mkdir();hashes={}
-            for name in ('matched_reset.py','matched_reset_client.py','native_bank.py','qualify_matched_reset.py'):
+            for name in QUALIFICATION_FILES:
                 (sources/name).write_text(name);hashes[name]=hashlib.sha256(name.encode()).hexdigest()
             host=dict(name='dual-a4500',root='/backup');collector='/backup/collector'
             ledger=dict(status='matched-reset-qualified',cleanup_exit_code=0,host_profile=host,source_sha256=hashes)
