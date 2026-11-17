@@ -12,6 +12,7 @@ sys.path.insert(0,str(REPO/'vla_SO-ARM101/src/so_arm101_control'))
 from storage import CANONICAL_ROOT,atomic_json,confined
 from host_config import profile
 from run_smoke import InstanceClaim,OwnedProcesses,frozen,identity,pidfd_ready
+from managed_process import capture_supervision,failure_report
 from gpu_device import gpu_uuid
 from triplet_production_plan import initial_wave,reduce_waves,guards,POLICY
 from triplet_artifacts import read,sha,manifest,classify,selected_entry,checked_tree
@@ -231,6 +232,7 @@ class Worker:
         self.global_root=Path(recipe['production_root']);self.wrapper=REPO/'linux-env/scripts/collect_sim.sh'
         self.session=-1;self.stop_file=self.global_root/'STOP.json';self.reason=None;self.streak=0
         self.active_job=None
+        self.supervision=capture_supervision()
         self.retirement_certified=True
     def check(self):
         frozen(self.cut)
@@ -382,7 +384,7 @@ class Worker:
             atomic_json(self.root/('between-group-'+str(seed)+'.json'),restored)
         return outcome
     def run(self,jobs):
-        error=None;backup_result=None;backup_error=None;retired=False
+        error=None;failure=None;backup_result=None;backup_error=None;retired=False
         try:
             for job in jobs:
                 self.active_job=job
@@ -391,19 +393,20 @@ class Worker:
                 self.attempt(job)
                 self.active_job=None
         except BaseException as exc:
-            error=repr(exc)
-            publish_stop(self.global_root,dict(error=error,slot=self.instance,wall_ns=time.time_ns()))
+            failure=failure_report(self.supervision,exc);error=failure['error']
+            publish_stop(self.global_root,dict(failure,slot=self.instance,wall_ns=time.time_ns()))
         finally:
             try:self.down();retired=True
             except BaseException as exc:
-                error=error or repr(exc)
-                publish_stop(self.global_root,dict(error=repr(exc),slot=self.instance,source='owned-down',wall_ns=time.time_ns()))
+                down_failure=failure_report(self.supervision,exc);error=error or down_failure['error'];failure=failure or down_failure
+                publish_stop(self.global_root,dict(down_failure,slot=self.instance,source='owned-down',wall_ns=time.time_ns()))
             if error is not None and retired and self.active_job is not None:
                 try:backup_result=backup_terminal(self.plan,self.active_job,error,self.root)
                 except BaseException as exc:
                     backup_error=repr(exc);publish_stop(self.global_root,dict(error=backup_error,source='terminal backup',slot=self.instance,wall_ns=time.time_ns()))
             result=dict(passed=error is None,error=error,instance=self.instance,wave=self.wave,cut=self.cut,sessions=self.session+1,
-                terminal_backup=backup_result,terminal_backup_error=backup_error,completed_wall_ns=time.time_ns())
+                terminal_backup=backup_result,terminal_backup_error=backup_error,
+                supervision_failure=failure if error is not None else None,completed_wall_ns=time.time_ns())
             atomic_json(self.root/'worker-finalization.json',result)
         if error:raise RuntimeError(error)
 
@@ -518,8 +521,9 @@ def coordinate(recipe,release):
     atomic_json(root/'coordinator.json',identity(os.getpid()))
     runtime=Path(recipe['runtime_root']);runtime.mkdir(parents=True,exist_ok=False)
     if ctypes.CDLL(None,use_errno=True).prctl(36,1,0,0,0)!=0:raise OSError('Coordinator subreaper unavailable')
-    ledger=OwnedProcesses(runtime,time.time_ns());waves=[];error=None;children=[];verified={};cleanup=None;watch=None;jobs=[];terminal_backups=None
+    ledger=OwnedProcesses(runtime,time.time_ns());waves=[];error=None;children=[];verified={};cleanup=None;watch=None;jobs=[];terminal_backups=None;supervision=None;failure=None
     try:
+        supervision=capture_supervision()
         def retire_workers():
             for process,_,_ in list(children):
                 if process.poll() is None and process.pid in ledger.known:ledger.send(process.pid,signal.SIGTERM)
@@ -596,8 +600,8 @@ def coordinate(recipe,release):
             disk_monitor_path=str(runtime/'disk-monitor.json'),disk_monitor_sha256=sha(runtime/'disk-monitor.json'),
             publication_cleanup_path=str(runtime/'publication-cleanup.json'),publication_cleanup_sha256=sha(runtime/'publication-cleanup.json'),wall_ns=time.time_ns()))
     except BaseException as exc:
-        error=repr(exc)
-        publish_stop(root,dict(error=error,wall_ns=time.time_ns()))
+        failure=failure_report(supervision,exc);error=failure['error']
+        publish_stop(root,dict(failure,wall_ns=time.time_ns()))
         # Let each worker certify its own shutdown; parent pidfds remain the
         # final bound cleanup if a worker cannot retire within its watchdog.
         end=time.monotonic()+150
@@ -617,7 +621,7 @@ def coordinate(recipe,release):
             try:
                 tail=OwnedProcesses(runtime,time.time_ns());tail.scan();tail_cleanup=tail.stop()
             except BaseException as exc:tail_cleanup=dict(remaining=[dict(unverified=repr(exc))])
-            atomic_json(root/'production-finalization.json',dict(passed=False,error=error,cleanup=cleanup,terminal_backups=terminal_backups,
+            atomic_json(root/'production-finalization.json',dict(passed=False,error=error,supervision_failure=failure,cleanup=cleanup,terminal_backups=terminal_backups,
                 backup_children_cleanup=tail_cleanup,wall_ns=time.time_ns()))
     if error:raise RuntimeError(error)
 

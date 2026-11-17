@@ -1156,8 +1156,14 @@ session; only verified pidfds authorize cleanup signals. Readiness uses `poll()`
 so descriptor numbers above 1023 remain valid. Exited-child handles close during
 scanning while their identity receipts remain available. Supervisor errors and
 cleanup errors are persisted separately, and a durable signal journal records
-the sender and target before each supervisor cleanup signal. A failed supervisor
-cannot certify successful retirement.
+the sender and target before each supervisor cleanup signal. Public status and
+stop distinguish process exit from successful supervision; failed or incomplete
+receipts refuse certification, even if the PID marker is missing. Descendant
+checks always include the separately recorded workload birth. The production
+coordinator and its workers bind the launching supervisor's receipt/nonce/birth
+at startup and retain its original and cleanup errors separately from a workload
+exception. Production failure reports include the source-bound signal intents;
+a failed supervisor cannot become a successful already-down result.
 
 Offline validation: `python3 -m unittest discover -s linux-env/scripts/collect -p
  'test_*.py'`. This includes 1,000 randomized comparisons with frozen verified-GUI

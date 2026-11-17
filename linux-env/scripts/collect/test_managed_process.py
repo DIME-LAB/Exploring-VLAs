@@ -32,9 +32,9 @@ class ManagedProcessTests(unittest.TestCase):
             handle.assert_not_called()
 
     def test_missing_old_pid_is_already_down_and_never_signalled(self):
-        path,record,current=self.fixture(dict(supervisor=dict(pid=41234,start_ticks='old',pgid=41234),state='stopped'))
+        path,record,current=self.fixture(dict(supervisor=dict(pid=41234,start_ticks='old',pgid=41234),state='stopped',workload=dict(pid=51234,start_ticks='child'),cleanup=dict(tracked=[],remaining=[])))
         with patch('managed_process.record_path',return_value=record),patch('managed_process.identity',return_value=None):
-            self.assertEqual(managed_process.stop(path),dict(stopped=True,already_down=True))
+            self.assertEqual(managed_process.stop(path),dict(stopped=True,already_down=True,process_exited=True,supervision_ok=True))
 
     def test_failed_cleanup_survives_missing_supervisor_and_blocks_status_stop_and_start_check(self):
         old=dict(pid=51234,start_ticks='child',pgid=777,state='S')
@@ -52,7 +52,7 @@ class ManagedProcessTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError,'Unresolved cleanup'):managed_process.start(path,Mock(),['unused'])
                 spawn.assert_not_called()
         with patch('managed_process.record_path',return_value=record),patch('managed_process.identity',return_value=None):
-            self.assertEqual(managed_process.stop(path),dict(stopped=True,already_down=True))
+            with self.assertRaises(managed_process.SupervisionFailure):managed_process.stop(path)
 
     def test_supervisor_exit_after_verification_still_checks_final_descendants(self):
         from contextlib import nullcontext

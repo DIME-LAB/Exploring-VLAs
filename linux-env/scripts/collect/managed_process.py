@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Launcher-owned process trees, with identity receipts and pidfd-only shutdown."""
-import argparse,ctypes,fcntl,json,os,signal,socket,struct,subprocess,sys,time,uuid
+import argparse,ctypes,fcntl,hashlib,json,os,signal,socket,struct,subprocess,sys,time,uuid
 from contextlib import contextmanager
 from pathlib import Path
 from run_smoke import OwnedProcesses,identity,pidfd_ready
@@ -38,7 +38,7 @@ def save(path,value):
 
 def recorded_remaining(row):
     recorded={}
-    for old in [*row.get('children',[]),*row.get('cleanup',{}).get('tracked',[]),*row.get('cleanup',{}).get('remaining',[])]:
+    for old in [*([row['workload']] if 'workload' in row else []),*row.get('children',[]),*row.get('cleanup',{}).get('tracked',[]),*row.get('cleanup',{}).get('remaining',[])]:
         if not isinstance(old,dict) or not isinstance(old.get('pid'),int) or not isinstance(old.get('start_ticks'),str):
             raise RuntimeError('Unresolved cleanup: unverified descendant evidence; see '+str(row.get('pidfile')))
         recorded[(old['pid'],old['start_ticks'])]=old
@@ -49,11 +49,45 @@ def recorded_remaining(row):
     return remaining
 
 
+class SupervisionFailure(RuntimeError):
+    """A process may have exited without completing successful supervision."""
+    def __init__(self,message,row):
+        verification_error=None
+        try:remaining=recorded_remaining(row)
+        except RuntimeError as exc:remaining=[];verification_error=str(exc)
+        supervisor=row.get('supervisor') or {};current=identity(supervisor.get('pid',-1))
+        alive=bool(current and current['start_ticks']==supervisor.get('start_ticks') and current['state']!='Z')
+        self.report=dict(stopped=False,supervision_ok=False,
+            process_exited=None if verification_error else not alive and not remaining,
+            error=message,supervision_error=row.get('supervision_error'),cleanup_error=row.get('cleanup_error'),
+            evidence_error=verification_error,state=row.get('state'),nonce=row.get('nonce'),
+            supervisor=supervisor,workload=row.get('workload'),remaining=remaining,cleanup=row.get('cleanup'),
+            receipt_path=str(record_path(Path(row['pidfile']))) if row.get('pidfile') else None,
+            signal_journal=row.get('signal_journal'))
+        super().__init__(message+': '+json.dumps(self.report,sort_keys=True))
+
+
+def require_retired(row):
+    try:remaining=recorded_remaining(row)
+    except RuntimeError as exc:raise SupervisionFailure(str(exc),row) from exc
+    if remaining:raise SupervisionFailure('Unresolved cleanup: recorded descendants still alive',row)
+    if row.get('supervision_error') or row.get('cleanup_error') or row.get('state') in ('failed','cleanup_failed'):
+        raise SupervisionFailure('Managed supervision failed; process exit is not successful supervision',row)
+    if (row.get('state')!='stopped' or not isinstance(row.get('workload'),dict) or
+        not isinstance(row.get('cleanup'),dict) or row['cleanup'].get('remaining')!=[] or
+        not isinstance(row['cleanup'].get('tracked'),list)):
+        raise SupervisionFailure('Unresolved cleanup: incomplete supervisor retirement evidence',row)
+
+
 def verified(path):
     receipt=record_path(path)
     row=json.loads(read_leaf(receipt)) if receipt.exists() else None
     if not path.exists():
-        if row and recorded_remaining(row):raise RuntimeError('Unresolved cleanup: missing supervisor marker; see '+str(receipt))
+        if row:
+            old=row.get('supervisor') or {};current=identity(old.get('pid',-1))
+            if current and current['start_ticks']==old.get('start_ticks') and current['state']!='Z':
+                raise SupervisionFailure('Unresolved cleanup: missing supervisor marker',row)
+            require_retired(row)
         return None
     pid=int(read_leaf(path));current=identity(pid)
     if row is None:
@@ -61,16 +95,24 @@ def verified(path):
         return None
     old=row['supervisor']
     if pid!=old['pid']:raise RuntimeError('PID file differs from its ownership receipt: '+str(path))
-    if row.get('state')=='cleanup_failed' or current is None or current['state']=='Z':
-        remaining=recorded_remaining(row)
-        if remaining:raise RuntimeError('Unresolved cleanup: recorded descendants still alive '+repr(remaining)+'; see '+str(receipt))
-    if current is None:return None
-    if any(current[key]!=old[key] for key in ('pid','start_ticks','pgid')):
+    if current is not None and any(current[key]!=old[key] for key in ('pid','start_ticks','pgid')):
         raise RuntimeError('Refusing foreign/reused launcher PID: '+str(path))
+    if row.get('supervision_error') or row.get('cleanup_error') or row.get('state') in ('failed','cleanup_failed'):
+        raise SupervisionFailure('Unresolved cleanup or failed supervision',row)
+    if current is None or current['state']=='Z':
+        require_retired(row);return None
     if row.get('pidfile')!=str(path.resolve()):raise RuntimeError('Ownership receipt belongs to another launcher path')
-    if current['state']=='Z':return None
-    if row.get('state') not in ('running','stopping'):return None
+    if row.get('state') not in ('running','stopping'):
+        raise SupervisionFailure('Unresolved cleanup: invalid supervisor state',row)
     return row
+
+
+def status(path):
+    try:row=verified(path)
+    except SupervisionFailure as exc:return exc.report
+    return dict(running=row is not None,stopped=row is None,process_exited=row is None,
+        supervision_ok=True if row is None else None,supervision_error=None,cleanup_error=None,
+        supervisor=row['supervisor'] if row else None)
 
 
 def start(path,log,command):
@@ -94,6 +136,8 @@ def start(path,log,command):
                 startup.scan()
                 if record_path(path).exists():
                     row=json.loads(read_leaf(record_path(path)))
+                    if row.get('nonce')==nonce and (row.get('supervision_error') or row.get('cleanup_error') or row.get('state') in ('failed','cleanup_failed')):
+                        raise SupervisionFailure('Managed process failed at startup',row)
                     if row.get('nonce')==nonce and row.get('state') in ('running','stopped'):
                         if row['state']=='running':assert verified(path)['nonce']==nonce
                         return process.pid
@@ -123,7 +167,9 @@ def supervise(path,nonce,command):
             stream.write(json.dumps(dict(event,nonce=nonce,pidfile=str(path)))+'\n');stream.flush();os.fsync(stream.fileno())
     ledger.before_signal=record_signal
     try:
-        worker=subprocess.Popen(command,start_new_session=True,close_fds=True)
+        context=dict(receipt_path=str(record_path(path)),nonce=nonce,supervisor=row['supervisor'])
+        env=dict(os.environ,SOARM_SUPERVISION_CONTEXT=json.dumps(context))
+        worker=subprocess.Popen(command,start_new_session=True,close_fds=True,env=env)
         ledger.add(worker.pid)
         row.update(workload=identity(worker.pid),state='running')
         save(path,os.getpid());save(record_path(path),row);last_count=-1
@@ -165,10 +211,9 @@ def verified_exit(path,expected):
     if final.get('nonce')!=expected['nonce'] or any(final['supervisor'][key]!=expected['supervisor'][key]
                                                   for key in ('pid','start_ticks','pgid')):
         raise RuntimeError('Final supervisor ownership differs')
-    remaining=recorded_remaining(final)
-    if remaining or final.get('state')!='stopped' or final.get('cleanup',{}).get('remaining'):
-        raise RuntimeError('Unresolved cleanup after supervisor exit: '+repr(remaining)+'; see '+str(record_path(path)))
-    return dict(stopped=True,cleanup=final['cleanup'])
+    require_retired(final)
+    return dict(stopped=True,process_exited=True,supervision_ok=True,cleanup=final['cleanup'])
+
 
 
 def stop_owned(path,expected):
@@ -200,7 +245,7 @@ def stop_owned(path,expected):
 
 def stop(path):
     row=verified(path)
-    if row is None:return dict(stopped=True,already_down=True)
+    if row is None:return dict(stopped=True,already_down=True,process_exited=True,supervision_ok=True)
     runtime=row.get('instance_root')
     if runtime is None:return stop_owned(path,row)
     runtime=Path(runtime).resolve();inherited=os.environ.get('SOARM_INSTANCE_CLAIM_FD')
@@ -213,6 +258,75 @@ def stop(path):
     owner=InstanceClaim(runtime)
     try:return stop_owned(path,row)
     finally:owner.close()
+
+
+def same_birth(a,b):
+    return isinstance(a,dict) and isinstance(b,dict) and all(a.get(k)==b.get(k) for k in ('pid','start_ticks','pgid'))
+
+
+def capture_supervision(timeout=10):
+    """Bind the caller (or its direct parent) to its launching supervisor once."""
+    encoded=os.environ.get('SOARM_SUPERVISION_CONTEXT')
+    if encoded is None:return None  # An explicitly foreground command has no supervisor.
+    context=json.loads(encoded);path=Path(context['receipt_path']);end=time.monotonic()+timeout
+    while True:
+        parent=identity(os.getppid());observer=identity(os.getpid())
+        try:row=json.loads(read_leaf(path))
+        except FileNotFoundError:row=None
+        if row is not None and row.get('nonce')==context['nonce']:
+            if (not same_birth(row.get('supervisor'),context['supervisor']) or
+                str(record_path(Path(row['pidfile'])))!=str(path)):
+                raise RuntimeError('Launching supervisor receipt differs from the immutable context')
+            if row.get('state')!='running' or row.get('supervision_error') or row.get('cleanup_error'):
+                raise SupervisionFailure('Launching supervisor is not healthy',row)
+            workload=row.get('workload')
+            if same_birth(observer,workload) and same_birth(parent,row['supervisor']):break
+            if same_birth(parent,workload):break  # The production coordinator's direct worker.
+            raise RuntimeError('Caller is not the recorded workload or its direct worker')
+        if time.monotonic()>=end:raise TimeoutError('Launching supervisor did not publish this workload birth')
+        time.sleep(.01)
+    return dict(context,workload=workload,observer=observer)
+
+
+def supervision_evidence(context):
+    path=Path(context['receipt_path']);data=read_leaf(path);row=json.loads(data)
+    if (row.get('nonce')!=context['nonce'] or not same_birth(row.get('supervisor'),context['supervisor']) or
+        not same_birth(row.get('workload'),context['workload']) or str(record_path(Path(row['pidfile'])))!=str(path)):
+        raise RuntimeError('Original supervisor receipt changed ownership')
+    # Journals can span several invocations of one managed path. Only this
+    # nonce's events are evidence for this workload; every such event is bound.
+    expected=Path(row['pidfile']+'.signals.jsonl');journal=row.get('signal_journal')
+    if journal is not None and Path(journal)!=expected:raise RuntimeError('Supervisor signal journal path changed')
+    events=[];journal_sha=None;journal_error=None
+    try:
+        if journal is not None:
+            try:text=read_leaf(expected)
+            except FileNotFoundError:text=None
+            if text is not None:
+                journal_sha=hashlib.sha256(text.encode()).hexdigest()
+                for line in text.splitlines():
+                    event=json.loads(line)
+                    if event.get('nonce')!=context['nonce']:continue
+                    if not same_birth(event.get('sender'),context['supervisor']) or event.get('pidfile')!=row['pidfile']:
+                        raise RuntimeError('Supervisor signal event changed ownership')
+                    events.append(event)
+    except (OSError,ValueError,RuntimeError) as exc:journal_error=repr(exc)
+    return dict(receipt_path=str(path),receipt_sha256=hashlib.sha256(data.encode()).hexdigest(),
+        nonce=context['nonce'],supervisor=row['supervisor'],workload=row['workload'],state=row['state'],
+        supervision_error=row.get('supervision_error'),cleanup_error=row.get('cleanup_error'),
+        signal_journal=journal,signal_journal_sha256=journal_sha,signal_intents=events,signal_evidence_error=journal_error)
+
+
+def failure_report(context,exception):
+    execution_error=repr(exception);evidence=exception.report if isinstance(exception,SupervisionFailure) else None
+    if context is not None:
+        try:evidence=supervision_evidence(context)
+        except BaseException as exc:
+            return dict(error='Supervisor evidence unavailable: '+repr(exc),execution_error=execution_error,
+                supervision=dict(context=context,evidence_error=repr(exc)))
+    original=(evidence or {}).get('supervision_error') or (evidence or {}).get('cleanup_error')
+    return dict(error='Supervisor failure: '+original if original else execution_error,
+        execution_error=execution_error,supervision=evidence)
 
 
 def main():
@@ -238,9 +352,13 @@ def main():
             except OSError:pass
         sys.exit(1)
     else:
-        row=verified(a.pidfile)
-        if row is None:sys.exit(1)
-        print(row['supervisor']['pid'])
+        result=status(a.pidfile)
+        if result['supervision_ok'] is False:print(json.dumps(result));sys.exit(2)
+        if not result['running']:sys.exit(1)
+        print(result['supervisor']['pid'])
 
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    try:main()
+    except SupervisionFailure as exc:
+        print(json.dumps(exc.report));sys.exit(2)
