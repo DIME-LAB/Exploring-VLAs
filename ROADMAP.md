@@ -362,12 +362,18 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       check of a Nov 14 bootstrap log that grew after its pin (device table identical); fix = immutable prefix capsule,
       pending review. rtx6000 old runs archived to dual (SHA-verified) and removed: next-120k, memorize, jobs,
       image-robustness (125 GB free).
-- [ ] 3.5 (new, operator 2026-11-17) Visual re-rendering of recorded episodes without re-simulation: bridge our per-tick
+- [x] 3.5 (new, operator 2026-11-17) Visual re-rendering of recorded episodes without re-simulation: bridge our per-tick
       poses (all 900 episodes carry 6-D state + 9 bodies per tick) into DroidStack take+tape+manifest on DroidStack branch
       vla-render-bands (separate clone, base dev 47bfbaac), add look bands (lights, materials, camera poses), an ego wrist
       camera and multi-camera output in droidstack.render; write datasets through our own exporter (not EmbodiedSWE).
       Task-object colours never randomised. CPU bridge + stock fake-renderer replay proof PASS; GPU probe pending.
       Lands upstream via plan47 after the DroidStack release.
+      DONE 2026-11-17 ~11:40Z (w_render): neutral re-render matches original dataset frames (policy-crop SIFT median 0.44 px,
+      wrist 0.62 px, outline offsets 0 px, wrist dark fraction 0.379% vs 0.380%); 9-episode LeRobot dataset (3 RGB sources x
+      neutral/warm/cool, 5250 ticks) via our exporter, labels/tasks byte-identical, 10500 frames exact, CRF18 single encode;
+      DroidStack default/nightly failure sets identical to clean base. Branch vla-render-bands f7bf6afc, Exploring 06125d2;
+      dataset dual /mnt/a4500-backup/exploring-vlas/rerender/dataset-render-bands-v6/; report coursework phase3/3.5-rerender/.
+      Use: re-render the triplet set under looks once a triplet model reads the colour word.
 - [ ] 3.4 (only if 3.3 paraphrases fail) Prompt-variety run: relabel each training sample's task from a set
       of templates per colour at merge time (no new collection), hold some templates out for eval, and compare
       against the fixed-string model on both exact and held-out prompts. Published SmolVLA/LeRobot guidance is
