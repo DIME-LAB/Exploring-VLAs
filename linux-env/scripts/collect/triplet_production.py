@@ -253,7 +253,9 @@ def backup_terminal(recipe,job,error,worker_root=None):
 def backup_remaining_terminal(recipe,jobs,error):
     """Coordinator fallback after every descendant has been proven gone."""
     root=Path(recipe['production_root']);records=[];errors=[]
+    inherited={(row['split'],row['layout_seed']) for row in recipe.get('inherited_outcomes',[])}
     for job in jobs:
+        if (job['split'],job['layout_seed']) in inherited:continue
         run=ROOT/f'datasets/counterfactual-targets/{job["split"]}/layout-{job["layout_seed"]}'
         if not os.path.lexists(run):continue
         try:

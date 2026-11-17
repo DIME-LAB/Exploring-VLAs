@@ -130,6 +130,24 @@ class ProductionRunnerTests(unittest.TestCase):
                 (run/'partial-evidence.json').write_text('{"partial":2}')
                 self.assertEqual(len(production.backup_remaining_terminal(recipe,[job],'late byte change')['records']),1)
             self.assertFalse((Path(recipe['production_root'])/'REGISTRY-SHA256.json').exists())
+    def test_terminal_fallback_skips_inherited_dispositions_and_preserves_own_partial(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);jobs=initial_wave()[:2]+[next(j for j in initial_wave() if j['layout_seed']==720094)]
+            recipe=dict(production_root=str(root/'production'),inherited_outcomes=[
+                dict(split=jobs[0]['split'],layout_seed=jobs[0]['layout_seed'],status='selected'),
+                dict(split=jobs[1]['split'],layout_seed=jobs[1]['layout_seed'],status='refused')])
+            self.assertEqual({(type(row['split']),type(row['layout_seed'])) for row in recipe['inherited_outcomes']+jobs},{(str,int)})
+            Path(recipe['production_root']).mkdir();calls=[]
+            for job in jobs:
+                run=root/f'datasets/counterfactual-targets/{job["split"]}/layout-{job["layout_seed"]}'
+                run.mkdir(parents=True);(run/'evidence.json').write_text('{}')
+            def backup(recipe,job,error):
+                calls.append(job['layout_seed']);return dict(passed=True)
+            with patch.object(production,'ROOT',root),patch.object(production,'backup_terminal',backup):
+                result=production.backup_remaining_terminal(recipe,jobs,'startup failed')
+            self.assertEqual(calls,[jobs[2]['layout_seed']])
+            self.assertEqual(result,dict(records=[dict(passed=True)],errors=[]))
+            self.assertFalse((Path(recipe['production_root'])/'terminal-diagnostics').exists())
     def test_standalone_help_bootstraps_own_sources_with_empty_pythonpath(self):
         env=dict(os.environ,PYTHONPATH='',CUDA_VISIBLE_DEVICES='',PYTHONDONTWRITEBYTECODE='1')
         result=subprocess.run([sys.executable,'-B',str(Path(production.__file__)),'--help'],env=env,capture_output=True,text=True)
