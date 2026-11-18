@@ -1186,6 +1186,13 @@ pinned directory descriptors. Registry projections use the same copy entrance.
 Changed directory identities, source bytes or capacity refuse certification;
 archive paths and links are never followed.
 
+Backup re-verification sends its unchanged read-only checker and manifested hashes over
+stdin, rather than embedding a variable-sized manifest in one SSH argument. A fixed-size
+receiver accepts an explicitly declared payload of at most 8 MiB, checks its exact byte count,
+SHA256 and EOF before executing the checker. Truncated, extended or altered payloads refuse
+without executing it. Destination/path, regular-file, complete-manifest and content checks
+remain the same; copy capacity floors and pinned-directory transfer rules are unchanged.
+
 Notification observers must also outlive the launching tool session. Use
 `python3 linux-env/scripts/collect/detached_observer.py start --script
 /path/to/read_only_observer.py --runtime /fresh/private/observer-runtime --

@@ -96,7 +96,7 @@ class ContinuationTests(unittest.TestCase):
             real=p.subprocess.check_output
             def remote(argv,**kwargs):
                 import shlex,sys
-                return real([sys.executable,'-c',shlex.split(argv[-1])[2]],text=True)
+                return real([sys.executable,'-c',shlex.split(argv[-1])[2]],**kwargs)
             with patch.object(p,'DUAL',root),patch.object(p.subprocess,'check_output',remote):
                 self.assertTrue(c.backup_recheck(proof)['passed'])
                 (root/'late').write_text('new')

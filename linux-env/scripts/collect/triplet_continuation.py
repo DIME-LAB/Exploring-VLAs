@@ -9,6 +9,7 @@ from pathlib import Path
 from storage import atomic_json,confined
 from triplet_artifacts import read,sha,manifest,checked_tree,retirement
 from triplet_production_plan import initial_wave,guards
+from backup_space import checked_script_payload,check_script_receiver_code
 
 COLLECTOR_CUT='503e39a692d47056ea325b7a20baa2f1d6900c91'
 INTERRUPTED_EXPORTS=(720087,720092)
@@ -50,7 +51,7 @@ def backup_recheck(proof):
     code+='\nactual=manifest(Path('+repr(str(destination))+'))\n'
     code+='assert actual=='+repr(proof['files_sha256'])+', "Backup bytes changed"\n'
     code+='print(json.dumps({"passed":True,"files":len(actual)}))\n'
-    answer=json.loads(p.subprocess.check_output([*p.SSH,'python3 -c '+shlex.quote(code)],text=True))
+    answer=json.loads(p.subprocess.check_output([*p.SSH,'python3 -c '+shlex.quote(check_script_receiver_code())],input=checked_script_payload(code)))
     if answer!={'passed':True,'files':len(proof['files_sha256'])}:raise ValueError('Backup recheck was not certified')
     return answer
 
