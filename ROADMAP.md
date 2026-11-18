@@ -369,6 +369,18 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       O_NOFOLLOW destination). Each cut independently reviewed PRODUCTION-READY. The 90e1d99 run (25 sealed groups) was
       archived by exact-path rename, not counted. Fresh production at 503e39a started 14:19Z on rtx6000 (operator approval;
       announced to plan29, PlanAnything card hold); first triplet 720000 sealed ~14:3xZ. ETA ~6-8 h.
+    - 2026-11-17 14:19Z -> 2026-11-18 05:3xZ: triplet production reached 132/140 sealed groups through one fresh run and
+      four same-run continuations. Each stop was caught by a guard before any bad data and fixed with an independently
+      reviewed cut: 503e39a stopped at 74 (start-up configure RPC raced shader compilation -> 300 s budget for that call);
+      cf298ac continuations (missing kit_mcp submodule in the deploy bundle; disk gate, operator-approved cleanup of two
+      old diagnostic trees); bfac029 stopped at 76 (arm_controller stayed 'unconfigured' at start-up -> typed bounded
+      start-up retries 3/slot, 10/run, 5eaf5ad); 5eaf5ad stopped at 113 (layout 720123: a settling cup's body velocity was
+      not bit-exact at bootstrap -> pre-writer identity failure becomes a per-layout refusal counted by the >10% guard, plus
+      completed-wave carry-forward, 972e707; preparation then hit Linux's 128 KiB single-argument limit -> stdin-framed
+      backup recheck, 0a80e4e); 0a80e4e stopped at 132 (layout 720144: scene initialisation stalled on a fresh instance
+      before any member -> typed same-seed retry, fc801b1, in review). Identity refusals 1/167 (0.6%); 2 layouts
+      (720122, 720145) were peer-stop casualties of a stop elsewhere and are replaced from reserves. Remaining: 8 groups.
+      Run history (one row per run, with evidence folders): coursework phase3/3.1-collection/counterfactual-triplets/RUN-HISTORY.md.
 - [x] 3.5 (new, operator 2026-11-17) Visual re-rendering of recorded episodes without re-simulation: bridge our per-tick
       poses (all 900 episodes carry 6-D state + 9 bodies per tick) into DroidStack take+tape+manifest on DroidStack branch
       vla-render-bands (separate clone, base dev 47bfbaac), add look bands (lights, materials, camera poses), an ego wrist
