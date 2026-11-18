@@ -60,6 +60,19 @@ def latest_fixture():
 
 
 class SceneContinuationTests(unittest.TestCase):
+    def test_plan_and_ledger_replay_ignore_process_tmpdir(self):
+        with latest_fixture() as f,patch.dict(os.environ,{'TMPDIR':'/tmp'}),patch.object(tempfile,'tempdir','/tmp'):
+            self.assertEqual(tempfile.gettempdir(),'/tmp')
+            result,_=self.prepare_case(f)
+            recipe=legacy.load_plan(result['admission_path'],result['admission_sha256'],'b'*40)
+            ledger=retries.summary(recipe['startup_retry_budget'])
+            self.assertEqual((result['inherited'],result['selected']),(170,134))
+            self.assertEqual(ledger['counts']['total'],1);self.assertEqual(ledger['pending'],{'5':['train',720144]})
+            admission=a.read(result['admission_path']);job=admission['pending_initialization_retry']['job']
+            retries.before_start(recipe['startup_retry_budget'],5,job)
+            self.assertEqual(retries.summary(recipe['startup_retry_budget'])['counts']['total'],2)
+            self.assertFalse(list((f.root/'runtime').glob('scene-init-replay-*')))
+
     def test_historical_outer_cannot_be_reinterpreted_as_its_own_new_parent(self):
         with latest_fixture() as f:
             recipe=a.read(f.parent/'plan.json');recipe['collector_repo']=str(f.root/'repo/counterfactual-production');atomic_json(f.parent/'plan.json',recipe)

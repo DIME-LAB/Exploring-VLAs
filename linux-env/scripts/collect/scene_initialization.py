@@ -28,6 +28,7 @@ def traceback_text(repo):
 def verify(evidence):
     """Replay the source-bound startup decision, including durable ledger copies."""
     import triplet_continuation as c
+    import triplet_production as p
     if evidence.get('version')!=1 or evidence.get('collector_cut')!=c.COLLECTOR_CUT:raise ValueError('Scene startup source cut differs')
     stage=evidence['stage'];stages=evidence['stages'];session=evidence['session'];job=evidence['job'];files=evidence['files']
     expected={*(('raw/'+n) for n in RAW),'worker/collect.log','worker/clock.json',
@@ -44,7 +45,7 @@ def verify(evidence):
     if [r['name'] for r in recent]!=[f'up-{session}',f'clock-{session}',stage['name']] or any(r.get('returncode')!=0 for r in recent[:2]):raise ValueError('Scene initialization was not the first collection of a qualified fresh instance')
     if not recent[0]['started_wall_ns']<recent[1]['started_wall_ns']<stage['started_wall_ns']:raise ValueError('Scene startup stage clocks differ')
     if files['worker/collect.log']!=traceback_text(evidence['collector_repo']):raise ValueError('Scene startup traceback is unknown')
-    with tempfile.TemporaryDirectory(prefix='scene-init-replay-') as d:
+    with tempfile.TemporaryDirectory(prefix='scene-init-replay-',dir=p.ROOT/'runtime') as d:
         root=Path(d)
         for name,text in files.items():
             target=root/name;target.parent.mkdir(parents=True,exist_ok=True);target.write_text(text)
@@ -95,14 +96,14 @@ def capture(worker,job,event):
         stages=copy.deepcopy(worker.stages),session=worker.session,native_identity=worker.native,files=files,
         files_sha256={n:hashlib.sha256(v.encode()).hexdigest() for n,v in files.items()})
     try:verify(evidence)
-    except (KeyError,ValueError,RuntimeError,OSError,TypeError) as exc:raise IncompleteInitialization('Unrecognized pre-provenance collection; '+str(run)+'; '+repr(exc)) from exc
+    except Exception as exc:raise IncompleteInitialization('Unrecognized pre-provenance collection; '+str(run)+'; '+repr(exc)) from exc
     return evidence
 
 
 def failure(worker,job,event):
     import startup_retries
     try:evidence=capture(worker,job,event)
-    except (OSError,ValueError,KeyError,TypeError,IncompleteInitialization) as exc:
+    except Exception as exc:
         log=worker.root/(event.get('name','unknown')+'.log')
         try:original=read(log,True).decode()
         except (OSError,ValueError,UnicodeError) as missing:original='Cannot read original collector log: '+repr(missing)

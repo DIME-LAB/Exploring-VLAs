@@ -14,6 +14,7 @@ FIXTURE=Path(__file__).with_name('test_fixtures')/'scene-init-720144.json'
 
 def retained(root):
     value=read(FIXTURE);job=value['job'];worker=object.__new__(p.Worker)
+    (root/'runtime').mkdir(exist_ok=True)
     worker.root=root/'worker';worker.root.mkdir();worker.cut=value['collector_cut'];worker.collector_repo=Path(value['collector_repo']);worker.session=0
     worker.wrapper=root/'collect_sim.sh';worker.instance=job['instance'];worker.wave=2
     worker.stages=json.loads(value['files']['worker/stages.json'])[:3];worker.native_observation_start=0
@@ -26,6 +27,19 @@ def retained(root):
 
 
 class SceneInitializationTests(unittest.TestCase):
+    def test_non_object_json_is_typed_at_real_attempt_and_keeps_native_cause(self):
+        for name,value in [('wall-profile-finalization.json',[]),('wall-profile-finalization.json',dict(ticks=[1],capture_failures=[])),
+                ('summary.json',[]),('collector-finalization.json',None),('readiness-0.json',[])]:
+            with self.subTest(name=name,value=value),tempfile.TemporaryDirectory() as d,ExitStack() as stack:
+                root=Path(d);worker,job,event=retained(root);run=root/f'datasets/counterfactual-targets/train/layout-{job["layout_seed"]}'
+                target=worker.root/name if name.startswith('readiness-') else run/name
+                atomic_json(target,value);source=root/'retained';run.rename(source)
+                def collect(*args,**kwargs):shutil.copytree(source,run);return event
+                for obj,key,answer in [(p,'ROOT',root),(p,'disk',lambda:None),(p,'data_checkout',lambda *a:None),(p.Worker,'stage',collect),
+                        (p,'verify_sources',lambda *a:self.fail('malformed startup reached provenance'))]:stack.enter_context(patch.object(obj,key,answer))
+                with self.assertRaises(init.IncompleteInitialization) as refusal:worker.attempt(job)
+                self.assertIn(init.CAUSE,str(refusal.exception));self.assertIn(str(worker.root/'collect-720144.log'),str(refusal.exception))
+
     def test_retained_720144_is_typed_before_missing_provenance_at_real_attempt(self):
         with tempfile.TemporaryDirectory() as d,ExitStack() as stack:
             root=Path(d);worker,job,event=retained(root);run=root/f'datasets/counterfactual-targets/train/layout-{job["layout_seed"]}'
