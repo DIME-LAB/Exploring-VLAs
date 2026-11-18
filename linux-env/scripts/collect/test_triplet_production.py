@@ -130,6 +130,24 @@ class ProductionRunnerTests(unittest.TestCase):
                 (run/'partial-evidence.json').write_text('{"partial":2}')
                 self.assertEqual(len(production.backup_remaining_terminal(recipe,[job],'late byte change')['records']),1)
             self.assertFalse((Path(recipe['production_root'])/'REGISTRY-SHA256.json').exists())
+    def test_terminal_fallback_skips_inherited_dispositions_and_preserves_own_partial(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);jobs=initial_wave()[:2]+[next(j for j in initial_wave() if j['layout_seed']==720094)]
+            recipe=dict(production_root=str(root/'production'),inherited_outcomes=[
+                dict(split=jobs[0]['split'],layout_seed=jobs[0]['layout_seed'],status='selected'),
+                dict(split=jobs[1]['split'],layout_seed=jobs[1]['layout_seed'],status='refused')])
+            self.assertEqual({(type(row['split']),type(row['layout_seed'])) for row in recipe['inherited_outcomes']+jobs},{(str,int)})
+            Path(recipe['production_root']).mkdir();calls=[]
+            for job in jobs:
+                run=root/f'datasets/counterfactual-targets/{job["split"]}/layout-{job["layout_seed"]}'
+                run.mkdir(parents=True);(run/'evidence.json').write_text('{}')
+            def backup(recipe,job,error):
+                calls.append(job['layout_seed']);return dict(passed=True)
+            with patch.object(production,'ROOT',root),patch.object(production,'backup_terminal',backup):
+                result=production.backup_remaining_terminal(recipe,jobs,'startup failed')
+            self.assertEqual(calls,[jobs[2]['layout_seed']])
+            self.assertEqual(result,dict(records=[dict(passed=True)],errors=[]))
+            self.assertFalse((Path(recipe['production_root'])/'terminal-diagnostics').exists())
     def test_standalone_help_bootstraps_own_sources_with_empty_pythonpath(self):
         env=dict(os.environ,PYTHONPATH='',CUDA_VISIBLE_DEVICES='',PYTHONDONTWRITEBYTECODE='1')
         result=subprocess.run([sys.executable,'-B',str(Path(production.__file__)),'--help'],env=env,capture_output=True,text=True)
@@ -168,9 +186,9 @@ class ProductionRunnerTests(unittest.TestCase):
                     else:
                         with self.assertRaises((ValueError,RuntimeError)):artifacts.classify(run,job,dict(pid=os.getpid(),started_wall_ns=start))
 
-    def fake_attempt(self,root,bad=None):
+    def fake_attempt(self,root,bad=None,production_root=None,layout_seed=720000,return_transports=False):
         """Real Worker.run -> attempt -> classify -> seal; only I/O transports fake."""
-        root=Path(root);job=initial_wave()[0];recipe=dict(cut='a'*40,production_root=str(root/'production'),runtime_root=str(root/'runtime'))
+        root=Path(root);job=next(j for j in initial_wave() if j['layout_seed']==layout_seed);recipe=dict(cut='a'*40,production_root=str(production_root or root/'production'),runtime_root=str(root/'runtime'))
         recipe_root=Path(recipe['production_root']);recipe_root.mkdir()
         source=root/'fixture_source.py';source.write_text('pass')
         rows_written=[];events=[];native_groups=[]
@@ -180,7 +198,7 @@ class ProductionRunnerTests(unittest.TestCase):
             for i in range(3):
                 states.append(json.loads((run/f'attempt-{i:04d}/frames.jsonl').read_text().splitlines()[0])['state'])
             actions=np.zeros((3,50,6));actions[:,0,0]=[0,.01,.02]
-            images={c:[np.full((480,640,3),100,np.uint8)]*3 for c in ('top','wrist')}
+            images={c:[np.full((480,640,3),100 if (run/f'attempt-{i:04d}/{c}.mp4').read_bytes()==b'fake video transport' else 200,np.uint8) for i in range(3)] for c in ('top','wrist')}
             result=measure(group['first_recorded_physical_sha256'],states,actions,images)
             files={n:h for n,h in artifacts.manifest(run).items() if n.startswith('attempt-') and n.rsplit('/',1)[1] in ('receipt.json','frames.jsonl','top.mp4','wrist.mp4','first-recorded-native.json')}
             result.update(layout_seed=job['layout_seed'],split=job['split'],triplet_id=group['triplet_id'],
@@ -200,7 +218,7 @@ class ProductionRunnerTests(unittest.TestCase):
                     return prepare(params,baseline,receipt,*args)
                 h.collector._prepare_scene_attempt=identified
                 h.complete(recorded_ticks=50)
-                config=artifacts.read(run/'run.json');config.update(normal_only=True,instance=3,git_commit='a'*40,source_sha256={'fixture_source.py':artifacts.sha(source)})
+                config=artifacts.read(run/'run.json');config.update(normal_only=True,instance=job['instance'],git_commit='a'*40,source_sha256={'fixture_source.py':artifacts.sha(source)})
                 atomic_json(run/'run.json',config)
                 for i in range(3):
                     for camera in ('top','wrist'):(run/f'attempt-{i:04d}/{camera}.mp4').write_bytes(b'fake video transport')
@@ -209,9 +227,21 @@ class ProductionRunnerTests(unittest.TestCase):
                 finish(run,cert,[]);native_groups.append(validate_run(run,base=root))
                 if bad=='source':(run/'unexpected').symlink_to(source)
             elif name.startswith('media-'):
-                media=decode(run)
-                if bad=='media':media['physical_hashes'][1]='b'*64
-                atomic_json(run/'production-media.json',media)
+                # Execute the real CLI body. Only camera/expert decoding and the
+                # fixture's filesystem root are transports supplied by this test.
+                import triplet_media,storage,io
+                from contextlib import redirect_stdout
+                def media_input(run):
+                    media=decode(run)
+                    if bad=='media':media['physical_hashes'][1]='b'*64
+                    return media
+                code=0
+                with patch.object(sys,'argv',['triplet_media.py',str(run),'--output',str(run/'production-media.json')]), \
+                        patch.object(storage,'confined',lambda value:Path(value)),patch.object(triplet_media,'inspect_run',media_input),redirect_stdout(io.StringIO()):
+                    try:triplet_media.main()
+                    except SystemExit as exc:code=exc.code
+                    except Exception:code=1
+                if code:return dict(name=name,pid=os.getpid(),started_wall_ns=start,returncode=code,wall_s=.1)
             elif name.startswith(('report-','report-validation-')):
                 report=run/('report-validation' if name.startswith('report-validation-') else 'report');report.mkdir()
                 atomic_json(report/'validation.json',dict(passed=bad!='export',loaded=True,timing_passed=True,fps=30,episodes=3,frames=150,
@@ -236,7 +266,7 @@ class ProductionRunnerTests(unittest.TestCase):
                 patch.object(production.Worker,'rpc',rpc),patch.object(production,'backup',backup),\
                 patch.object(artifacts,'destination',lambda run,config:None),patch.object(artifacts,'validate_run',lambda run:validate_run(run,base=root)),\
                 patch('triplet_media.inspect_run',decode):
-            worker=production.Worker(recipe,3,0)
+            worker=production.Worker(recipe,job['instance'],0)
             if bad:
                 with self.assertRaises(RuntimeError):worker.run([job,initial_wave()[4]])
                 self.assertTrue((recipe_root/'STOP.json').exists());self.assertFalse(artifacts.read(worker.root/'worker-finalization.json')['passed'])
@@ -255,6 +285,7 @@ class ProductionRunnerTests(unittest.TestCase):
                 self.assertEqual(len(entry['raw_files_sha256']),15);self.assertEqual(outcome['status'],'selected')
                 self.assertTrue(artifacts.read(worker.root/'worker-finalization.json')['passed'])
         self.assertEqual(events[-1],'diagnostic-backup' if bad else 'down')
+        if return_transports:return dict(stage=stage,backup=backup,decode=decode,job=job)
         return events
     def test_full_fake_group_driver_reaches_seal_backup_restore_and_owned_retirement(self):
         with tempfile.TemporaryDirectory() as d:

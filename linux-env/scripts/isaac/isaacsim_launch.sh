@@ -54,7 +54,7 @@ while [ $# -gt 0 ]; do
 done
 set -- "${launch_args[@]}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+REPO_ROOT="${SOARM_COLLECTOR_REPO:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
 host_environment="$(python3 "$SCRIPT_DIR/../collect/host_config.py" --environment)"
 [ -z "$host_environment" ] || source "$host_environment"
 if [ -n "$INSTANCE_INDEX" ]; then
@@ -515,7 +515,9 @@ source = (pathlib.Path(sys.argv[1]) / 'linux-env/scripts/collect/configure_clock
 print(json.dumps({'code': source + '\nresult = configure(' + repr(int(sys.argv[2])) + ', preset=' + repr(sys.argv[3]) + ')'}))
 PYCODE
 )"
-        client run_python "$params" --timeout 30 ;;
+        configure_timeout="${SOARM_COLLECTION_CONFIGURE_TIMEOUT:-30}"
+        case "$configure_timeout" in 30|300) ;; *) echo 'Configure timeout must be 30 or 300 seconds' >&2; exit 2 ;; esac
+        client run_python "$params" --timeout "$configure_timeout" ;;
     rate)    do_rate "${2:-$RATE_HZ}" ;;
     wait)    do_wait "${2:-$WEDGE_S}" ;;
     quick-start) do_quick_start "${2:-}" ;;

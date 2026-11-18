@@ -1,0 +1,48 @@
+Launching Isaac Sim 6.1: soarm101-dt (headless, no stream)
+  Bin:    /home/aaugus11/env_isaacsim61/bin/isaacsim
+  GPU:    0 (GPU-c2772797-ad71-f07e-0101-db0f188f3504)
+  Bridge: localhost:8789, tools soarm101_tools
+  Log:    /mnt/storage3/aaugus11/exploring-vlas/runtime/counterfactual-production-v1/continuations/continuation-admission-bfac029-v1/wave-00/slot-6/session-000/isaac.log
+2789241
+  PID:    2789241
+Waiting for the omni-kit-mcp bridge on :8789 (wedge after 120s without Kit log output, cap 900s)...
+READY (10s)
+{"passed": true, "assigned_gpu_uuid": "GPU-c2772797-ad71-f07e-0101-db0f188f3504", "kit_index": 0, "selected": {"kit_index": 0, "active": true, "uuid_prefix": "c2772797", "pci_bus": 172, "physical_uuid": "GPU-c2772797-ad71-f07e-0101-db0f188f3504", "pci_bus_id": "00000000:AC:00.0"}, "devices": [{"kit_index": 0, "active": true, "uuid_prefix": "c2772797", "pci_bus": 172, "physical_uuid": "GPU-c2772797-ad71-f07e-0101-db0f188f3504", "pci_bus_id": "00000000:AC:00.0"}], "active_verified": true, "source": {"path": "/mnt/storage3/aaugus11/exploring-vlas/runtime/counterfactual-production-v1/continuations/continuation-admission-bfac029-v1/wave-00/slot-6/session-000/isaac.log", "sha256": "312b5aa5e6b52a9f84b05f9e2b8a0a3560b7925b80b6941f01595beee2f11f8f"}}
+{"output": "", "result": {"physics_dt": 0.008333333333333333, "rendering_dt": 0.03333333333333333}}
+{
+  "status": "success",
+  "message": "Quick start complete: scene, robot, action graphs, cameras, objects, cups, publishers, simulation running."
+}
+{
+  "output": "",
+  "result": {
+    "fps": 30,
+    "physics_dt": 0.008333333333333333,
+    "min_frame_rate": 30,
+    "rendering_dt": 0.03333333333333333,
+    "rate_limit": 0,
+    "cameras": [
+      "/World/SO_ARM101/camera_mount_link/usb_camera/wrist_camera",
+      "/World/workspace_camera",
+      "/OmniverseKit_Persp",
+      "/OmniverseKit_Front",
+      "/OmniverseKit_Top",
+      "/OmniverseKit_Right"
+    ],
+    "camera_gates": [
+      "/Render/OmniverseKit/HydraTextures/Replicator",
+      "/Render/OmniverseKit/HydraTextures/omni_kit_widget_viewport_ViewportTexture_0"
+    ],
+    "time_codes_per_second": 30.0,
+    "preset": "collect",
+    "rate_cap": 0,
+    "target_rtf": null
+  }
+}
+2795471
+Traceback (most recent call last):
+  File "/mnt/storage3/aaugus11/exploring-vlas/repo/counterfactual-production/linux-env/scripts/collect/wait_control.py", line 39, in <module>
+    main()
+  File "/mnt/storage3/aaugus11/exploring-vlas/repo/counterfactual-production/linux-env/scripts/collect/wait_control.py", line 32, in main
+    raise TimeoutError(f'Instance controllers did not become active: {states}')
+TimeoutError: Instance controllers did not become active: {'arm_controller': 'unconfigured'}

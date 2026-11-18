@@ -33,10 +33,16 @@ def job(split,requested,chain,wave):
         instance=POLICY['instances'][ordinal%len(POLICY['instances'])])
 
 
-def guards(outcomes,allocations):
+def identity_counts(outcomes):
     exact=sum(r['reason']=='exact_identity' for r in outcomes)
-    if outcomes and exact/len(outcomes)>POLICY['exact_refusal_fraction_max']:
-        raise ValueError('Production stop: exact-identity refusals exceed 10%: '+str(dict(exact=exact,attempted=len(outcomes))))
+    return dict(exact_identity_refusals=exact,attempted_groups=len(outcomes),
+        exact_identity_fraction=exact/len(outcomes) if outcomes else 0.,exact_identity_fraction_max=POLICY['exact_refusal_fraction_max'])
+
+
+def guards(outcomes,allocations):
+    counts=identity_counts(outcomes)
+    if counts['exact_identity_fraction']>POLICY['exact_refusal_fraction_max']:
+        raise ValueError('Production stop: exact-identity refusals exceed 10%: '+str(dict(exact=counts['exact_identity_refusals'],attempted=counts['attempted_groups'])))
     for split in BASE:
         used=sum(r['requested_layout_seed'] in BASE[split] for r in allocations)
         if used>=len(RESERVE[split])*POLICY['reserve_fraction_max']:
@@ -46,6 +52,7 @@ def guards(outcomes,allocations):
     streak={}
     for row in outcomes:
         if 'requested_layout_seed' not in row:continue
+        if row['reason']=='operator_acknowledged_peer_stop':continue
         split=row['split'];ordinal=BASE[split].index(row['requested_layout_seed'])+(0 if split=='train' else len(BASE['train']))
         slot=POLICY['instances'][ordinal%len(POLICY['instances'])]
         previous,count=streak.get(slot,(None,0));reason=row['reason']
@@ -59,10 +66,14 @@ def initial_wave():
     return [job(split,seed,[seed],0) for split in BASE for seed in BASE[split]]
 
 
-def reduce_waves(waves):
+def reduce_waves(waves,slot5_to4=False):
     """Rebuild all memberships from complete source-verified waves, not a checkpoint."""
+    if type(slot5_to4) is not bool:raise ValueError('Slot reassignment must be explicit')
+    def assigned(jobs,number):
+        return [dict(j,instance=4) if j['instance']==5 else j for j in jobs] if slot5_to4 and number>=2 else jobs
     expected=initial_wave();selected={};failed=[];allocations=[];all_outcomes=[];consumed={s:0 for s in BASE}
     for number,wave in enumerate(waves):
+        expected=assigned(expected,number)
         if not expected:raise ValueError('Ledger continued after all requested groups were selected')
         if wave['jobs']!=expected:raise ValueError('Wave jobs differ from deterministic seed/slot plan')
         outcomes=wave['outcomes'];by_seed={}
@@ -99,5 +110,5 @@ def reduce_waves(waves):
             allocations.append(allocation)
             expected.append(job(split,planned['requested_layout_seed'],planned['replacement_chain']+[seed],number+1))
         guards(all_outcomes,allocations)
-    return dict(policy=copy.deepcopy(POLICY),next_wave=expected,selected=list(selected.values()),failed_groups=failed,
+    return dict(policy=copy.deepcopy(POLICY),next_wave=assigned(expected,len(waves)),selected=list(selected.values()),failed_groups=failed,
         replacement_allocations=allocations,attempted_groups=len(all_outcomes),complete=not expected and len(selected)==sum(map(len,BASE.values())))

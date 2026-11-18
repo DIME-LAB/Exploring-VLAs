@@ -1186,6 +1186,13 @@ pinned directory descriptors. Registry projections use the same copy entrance.
 Changed directory identities, source bytes or capacity refuse certification;
 archive paths and links are never followed.
 
+Backup re-verification sends its unchanged read-only checker and manifested hashes over
+stdin, rather than embedding a variable-sized manifest in one SSH argument. A fixed-size
+receiver accepts an explicitly declared payload of at most 8 MiB, checks its exact byte count,
+SHA256 and EOF before executing the checker. Truncated, extended or altered payloads refuse
+without executing it. Destination/path, regular-file, complete-manifest and content checks
+remain the same; copy capacity floors and pinned-directory transfer rules are unchanged.
+
 Notification observers must also outlive the launching tool session. Use
 `python3 linux-env/scripts/collect/detached_observer.py start --script
 /path/to/read_only_observer.py --runtime /fresh/private/observer-runtime --
@@ -1202,3 +1209,121 @@ rejections, storage thresholds, output confinement and deployment feedback flags
 Always validate the completed five-episode smoke before starting the pilot;
 check physical feedback, application acknowledgements, containment and dataset
 read-back, rather than relying on a scripted completion message.
+
+
+### Continuing a stopped counterfactual production invocation
+
+The continuation coordinator has its own reviewed commit and uses a separate, immutable
+`503e39a692d47056ea325b7a20baa2f1d6900c91` checkout for the collector, native runtime,
+scene assets, clock certification and exporter. The collector checkout HEAD must equal that
+cut; matching scoped files at a different HEAD is insufficient because receipts record HEAD.
+The outer `collect_sim.sh` routes those tools and assets through `SOARM_COLLECTOR_REPO`.
+Only the production continuation sets `SOARM_COLLECTION_CONFIGURE_TIMEOUT=300` for the
+post-quick-start configure RPC. The default remains 30 seconds; quick-start remains 900 seconds,
+and other RPC/watchdog budgets and collection predicates are unchanged. Each startup writes
+`startup-budget-N.json` with the budget, both cuts and the configure-source hash. This covers
+RTX PSO compilation that can still be pending after quick-start returns.
+
+Preparation is CPU-only and exclusive. The completed-wave entrance accepts only the retired
+`continuation-admission-5eaf5ad-v1` parent: 140 completed dispositions, 113 selected groups
+(96 train and 17 held-out), and its deterministic replacement wave. The original 94/76 partial-wave
+admission is not valid launch authority. Every inherited proof, raw source fingerprint and dual
+backup is re-verified; the parent STOP, finalization, wave ledger and original records stay intact.
+The native collector remains the exact cut above, with the same tolerances and exporter.
+
+First obtain the completed checkpoint from `--completed-checkpoint PARENT --cut
+FULL_REVIEWED_OUTER_COMMIT`. Its canonical manifest includes the parent JSON evidence and
+owned-down source receipts. Independently record and publish that checkpoint SHA before running
+preparation; a locally generated checkpoint alone is not authorization. The new outer checkout runs:
+
+```bash
+nice -n10 /mnt/storage3/aaugus11/exploring-vlas/export-venv/bin/python -B \
+  linux-env/scripts/collect/triplet_production.py --cut FULL_REVIEWED_OUTER_COMMIT \
+  --prepare-completed-continuation /mnt/storage3/aaugus11/exploring-vlas/datasets/counterfactual-targets/production-v1/continuations/continuation-admission-5eaf5ad-v1 \
+  --collector-repo /mnt/storage3/aaugus11/exploring-vlas/repo/counterfactual-production \
+  --checkpoint-sha256 INDEPENDENTLY_PUBLISHED_COMPLETED_CHECKPOINT_SHA \
+  --output /mnt/storage3/aaugus11/exploring-vlas/setup/continuation-admission-UNIQUE
+```
+
+Preparation carries all 140 completed dispositions and requalifies four explicitly identified
+interrupted replacement jobs. The existing Worker media/export/backup entrance completes
+720120/720121. Existing dataset, reports and `production-media.json` are renamed inside each
+raw group's `continuation-export-history/` before fresh qualification. Only a completed failed
+media check (exit 2 with a fresh failed receipt) can refuse an interrupted complete collector.
+Tool, dependency, I/O and incomplete-export errors abort preparation without creating a refusal.
+The exporter emits a finished certificate only on success; an exception or
+`VALIDATION_IN_PROGRESS` marker never authorizes a replacement.
+
+720122 gets only the explicitly approved `operator_acknowledged_peer_stop` disposition. Its
+native terminal events must all name the identified MoveIt service failure, follow the parent
+STOP and precede certified cleanup. The proof records root STOP and first fault nanoseconds;
+all its members remain diagnostic and unselected. This disposition contributes neither an
+exact-identity refusal nor a quality streak or startup retry. The earlier approved 720097
+interruption remains bound to its original stopped invocation. Neither is a generic runtime
+exception. 720123 must independently replay as a pre-writer bootstrap `exact_identity` refusal;
+all of its prefix frames remain diagnostic. No archived data is admitted.
+
+If both completed collectors pass every gate, admission contains 144 dispositions and 115
+selected groups; failed media verdicts can reduce that selected count. Preparation aborts on any
+unproven disposition. The completed wave and partial replacement outcomes stay separate in the
+admission. The coordinator continues that replacement wave and never schedules sealed members
+again. Refusals, replacement chains, retry reservations and guards carry across the boundary.
+
+The returned `admission.json` and its independently published SHA are mandatory inputs to
+`--plan --continuation PATH --continuation-sha256 SHA --cut FULL_REVIEWED_OUTER_COMMIT`.
+The whole preparation tree is sealed: do not put launch logs, notifier output or coordinator
+PID files beside admission.json; use a separate launch setup directory. A new production
+`--go --continuation ... --continuation-sha256 ... --cut ... --release-file ...` requires a new
+lead GO, fresh managed supervisor/nonce/PIDs, hostlock and detached notifier. This is not an
+automatic restart. An unapproved sibling continuation namespace or a concurrent owner refuses.
+
+The continuation publishes in `production-v1/continuations/ADMISSION_DIRECTORY_NAME/`;
+raw train/held-out layout roots stay canonical. Its registry binds the new plan/finalization
+and full wave ledger, including the inherited original dispositions exactly once. Original
+failure streaks and deterministic reserve allocation are retained. Proofs, original bound
+receipts and preparation evidence are SHA-backed up at their corresponding dual projection
+paths before final publication. Configure the notifier and training registry argument for the
+new child publication root, not the historical root's STOP. Training still requires the final
+caller-published registry SHA and its own new GO. Only the bounded startup retries below are allowed.
+
+### Bounded startup retries for a continued production run
+
+A continuation admission binds a startup budget to the original progress SHA.
+The budget lives under `runtime/counterfactual-startup-retries/ORIGINAL_PROGRESS_SHA`,
+so new invocation and continuation directories share the same counters. Its immutable
+failure/decision/ready events, captured up logs and certified retirement receipts are
+fsynced under a file lock. Each admission pins the existing event prefix; missing,
+partial, edited or rewound history refuses continuation. The limits are three retry
+reservations per slot and ten for the run. A reservation is consumed before starting
+another instance and remains pending until that operation reports ready. A crash or
+continuation cannot turn a pending retry into a free initial attempt. Ready events
+must carry their own reservation, so an older completion cannot clear a newer failure.
+
+Only identified failures during instance startup are retryable: controller activation,
+Kit bridge/startup, configure RPC timeout, the existing up-stage wall deadline, initial
+native transport and stage readiness. The classifier reads the owned up-stage receipt
+and log; missing dependencies, ownership errors and unclassified exits stop the run.
+Clock qualification failures remain terminal. There is no exception handler around
+collection or export that converts their failures into startup retries.
+
+Before a retry, the failed instance must certify all owned descendants gone and both
+private ports closed. The requested raw path must not exist, including an empty directory
+or a dangling link. The next instance uses the same job and seed. Original errors are
+recorded before cleanup; cleanup failures preserve both causes and stop the run. Existing
+budgets and predicates, including the explicit 300-second configure RPC and 60-second
+controller readiness check, are unchanged. Retry evidence and counts appear in worker
+and production finalization and are SHA-backed up with the continuation evidence.
+
+### Startup retry evidence across continuations
+
+A continuation resumes a slot's pending startup job first, preserving every other assigned job. An absent or duplicated pending job refuses; no raw episode is adopted and no completed group is imported by this ordering rule. Previously completed jobs still need the continuation's verified admission. The per-slot and run-wide reservation counts remain unchanged.
+
+The ledger has matching internal and external nonce-bearing identity receipts. New preparation reconciles prior admissions for the original checkpoint before initializing a budget. These checks refuse missing or moved directories and ordinary recreation with a different identity. Existing ledger history is checked before its identity receipt is installed. Admission and final registry bind the observed identity and history; missing or altered receipts refuse. This protection assumes locally stored history is preserved: a deliberate rebuild with copied identity receipts, or consistent in-place deletion of used retry records, can evade it. Comparison against the off-host dual backup or prior finalization snapshots is not implemented.
+
+After a stop and certified retirement, the coordinator SHA-backs up the retry ledger and its external identity receipt to the same dual projection as the run. The final failure report records the snapshot, file hashes and transfer certificates. A backup failure stays visible as a retirement error; it never certifies the ledger as backed up. The successful publication path retains the same evidence.
+
+### Pre-writer bootstrap identity refusals
+
+The outer production classifier may refuse a whole layout as `exact_identity` when a later member fails its bootstrap physical-agreement comparison before that member opens its writer. Earlier healthy recorded members remain diagnostic and unselected. The classifier replays the native restore/readback, epoch/clock/ACK/tick contracts, target rule and common-drift gate, validates preceding recorded members, and binds the exception to locally recomputed native source bits and the durable fault journals. It SHA-backs up the entire failed layout.
+
+Any writer artifact for the failing member, unrelated camera/transport/reset/clock/cleanup fault, missing evidence or contradictory source bits remains terminal. Collector terminal behavior, native dynamics and all identity tolerances are unchanged. Only complete RGB groups may be selected or exported for training. The existing deterministic reserves and greater-than-10% exact-identity refusal stop rule apply. Progress records include the exact-identity refusal numerator, attempted-group denominator, fraction and unchanged limit across all waves; progress notifications show these counts.

@@ -2,8 +2,9 @@
 # Isolated headless ROS collection: collect_sim.sh up|run|export|deploy-clock|deploy|clock-sanity|down INDEX [args...]
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-host_environment="$(python3 "$SCRIPT_DIR/collect/host_config.py" --environment)"
+REPO_ROOT="${SOARM_COLLECTOR_REPO:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+DATA_SCRIPT_DIR="$REPO_ROOT/linux-env/scripts"
+host_environment="$(python3 "$DATA_SCRIPT_DIR/collect/host_config.py" --environment)"
 [ -z "$host_environment" ] || source "$host_environment"
 command="${1:?up|run|export|deploy-clock|deploy|clock-sanity|down}"; shift
 index="${1:?instance index 0..9}"; shift
@@ -24,7 +25,7 @@ else
     export CYCLONEDDS_URI="file://$REPO_ROOT/linux-env/cyclonedds.xml"
 fi
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-export SOARM_COLLECTION_ROOT="${SOARM_COLLECTION_ROOT:-$(python3 "$SCRIPT_DIR/collect/host_config.py")}"
+export SOARM_COLLECTION_ROOT="${SOARM_COLLECTION_ROOT:-$(python3 "$DATA_SCRIPT_DIR/collect/host_config.py")}"
 export HF_LEROBOT_HOME="${HF_LEROBOT_HOME:-$SOARM_COLLECTION_ROOT/datasets}"
 export SOARM_INSTANCE_ROOT="${SOARM_INSTANCE_ROOT:-$SOARM_COLLECTION_ROOT/runtime/instance-$index}"
 export TMPDIR="$SOARM_INSTANCE_ROOT/tmp"
@@ -35,17 +36,17 @@ export HF_HOME="$XDG_CACHE_HOME/huggingface"
 export OPTIX_CACHE_PATH="$XDG_CACHE_HOME/optix"
 export PYTHONDONTWRITEBYTECODE=1
 export SOARM_GRASP_TRACE_DIR="$SOARM_INSTANCE_ROOT/grasp-traces"
-python3 "$SCRIPT_DIR/collect/storage.py" "$SOARM_COLLECTION_ROOT" "$SOARM_INSTANCE_ROOT" "$HF_LEROBOT_HOME" "$SOARM_GRASP_TRACE_DIR"
+python3 "$DATA_SCRIPT_DIR/collect/storage.py" "$SOARM_COLLECTION_ROOT" "$SOARM_INSTANCE_ROOT" "$HF_LEROBOT_HOME" "$SOARM_GRASP_TRACE_DIR"
 mkdir -p "$SOARM_INSTANCE_ROOT" "$HF_LEROBOT_HOME"
 mkdir -p "$TMPDIR" "$ROS_LOG_DIR" "$HF_HOME" "$OPTIX_CACHE_PATH"
 if [ "$command" != down ]; then
-    device_environment="$(python3 "$SCRIPT_DIR/collect/gpu_device.py" --gpu "$ISAACSIM_GPU" --kit-log "$SOARM_INSTANCE_ROOT/isaac.log")"
+    device_environment="$(python3 "$DATA_SCRIPT_DIR/collect/gpu_device.py" --gpu "$ISAACSIM_GPU" --kit-log "$SOARM_INSTANCE_ROOT/isaac.log")"
     eval "$device_environment"
 fi
 launcher="$SCRIPT_DIR/isaac/isaacsim_launch.sh"
 case "$command" in
     up)
-        source "$SCRIPT_DIR/collect/instance_claim.sh"
+        source "$DATA_SCRIPT_DIR/collect/instance_claim.sh"
         claim_collection_instance "$SOARM_INSTANCE_ROOT"
         bash "$launcher" launch --headless --instance "$index" --rate-hz 0
         scene_live="$(PYTHONPATH="$REPO_ROOT/omni-kit-mcp" python3 -m kit_mcp.client run_python \
@@ -68,7 +69,7 @@ PYWORLD
         source "$REPO_ROOT/vla_SO-ARM101/install/setup.bash"
         set -u
         pidfile="$SOARM_INSTANCE_ROOT/control.pid"
-        if python3 "$SCRIPT_DIR/collect/managed_process.py" status --pidfile "$pidfile"; then
+        if python3 "$DATA_SCRIPT_DIR/collect/managed_process.py" status --pidfile "$pidfile"; then
             echo 'This instance already has a control stack'; exit 1
         fi
         python3 - "$REPO_ROOT" "$SOARM_INSTANCE_ROOT/controllers.yaml" <<'PYCONFIG'
@@ -79,10 +80,10 @@ config = yaml.safe_load(source.read_text())
 config['controller_manager']['ros__parameters']['update_rate'] = 120
 Path(sys.argv[2]).write_text(yaml.safe_dump(config))
 PYCONFIG
-        python3 "$SCRIPT_DIR/collect/managed_process.py" start --pidfile "$pidfile" --log "$SOARM_INSTANCE_ROOT/control.log" -- \
+        python3 "$DATA_SCRIPT_DIR/collect/managed_process.py" start --pidfile "$pidfile" --log "$SOARM_INSTANCE_ROOT/control.log" -- \
             ros2 launch so_arm101_control control.launch.py gui:=false rviz:=false use_sim:=true use_sim_time:=true feedback_joint_states_topic:=/joint_states_measured feedback_publish_rate:=120.0 controllers_config:="$SOARM_INSTANCE_ROOT/controllers.yaml"
-        python3 "$SCRIPT_DIR/collect/wait_control.py"
-        python3 "$SCRIPT_DIR/collect/warm_cameras.py" --output "$SOARM_INSTANCE_ROOT/cache-warmup.json"
+        python3 "$DATA_SCRIPT_DIR/collect/wait_control.py"
+        python3 "$DATA_SCRIPT_DIR/collect/warm_cameras.py" --output "$SOARM_INSTANCE_ROOT/cache-warmup.json"
         echo "Instance $index ready: domain=$ROS_DOMAIN_ID bridge=$SOARM_KIT_MCP_PORT"
         ;;
     run)
@@ -91,26 +92,27 @@ PYCONFIG
         source "$REPO_ROOT/vla_SO-ARM101/install/setup.bash"
         set -u
         export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
-        exec python3 -u "$SCRIPT_DIR/collect/collect.py" --instance "$index" "$@"
+        exec python3 -u "$DATA_SCRIPT_DIR/collect/collect.py" --instance "$index" "$@"
         ;;
     clock-sanity)
         set +u
         source /opt/ros/humble/setup.bash
         source "$REPO_ROOT/vla_SO-ARM101/install/setup.bash"
         set -u
-        exec python3 -u "$SCRIPT_DIR/collect/clock_sanity.py" "$@"
+        exec python3 -u "$DATA_SCRIPT_DIR/collect/clock_sanity.py" "$@"
         ;;
     export)
+        if [ -n "${SOARM_COLLECTOR_REPO:-}" ]; then export CUDA_VISIBLE_DEVICES=; fi
         unset PYTHONPATH AMENT_PREFIX_PATH CMAKE_PREFIX_PATH COLCON_PREFIX_PATH ROS_DISTRO ROS_VERSION ROS_PYTHON_VERSION
         unset LD_LIBRARY_PATH
         export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
-        export_python="$(python3 "$SCRIPT_DIR/collect/host_config.py" --export-python)"
+        export_python="$(python3 "$DATA_SCRIPT_DIR/collect/host_config.py" --export-python)"
         if [ -n "$export_python" ]; then
-            export_wrapper="$(python3 "$SCRIPT_DIR/collect/host_config.py" --export-wrapper)"
-            exec "$export_python" "$export_wrapper" "$SCRIPT_DIR/collect/export.py" "$@"
+            export_wrapper="$(python3 "$DATA_SCRIPT_DIR/collect/host_config.py" --export-wrapper)"
+            exec "$export_python" "$export_wrapper" "$DATA_SCRIPT_DIR/collect/export.py" "$@"
         fi
         exec "$HOME/.pixi/bin/pixi" run --manifest-path "$REPO_ROOT/linux-env/pixi.toml" \
-            python "$SCRIPT_DIR/collect/export.py" "$@"
+            python "$DATA_SCRIPT_DIR/collect/export.py" "$@"
         ;;
     deploy-clock|deploy)
         bash "$launcher" collection-rate 30 deploy --instance "$index"
@@ -129,9 +131,9 @@ PYDEPLOY
         ;;
 
     down)
-        source "$SCRIPT_DIR/collect/instance_claim.sh"
+        source "$DATA_SCRIPT_DIR/collect/instance_claim.sh"
         claim_collection_instance "$SOARM_INSTANCE_ROOT"
-        python3 "$SCRIPT_DIR/collect/managed_process.py" stop --pidfile "$SOARM_INSTANCE_ROOT/control.pid"
+        python3 "$DATA_SCRIPT_DIR/collect/managed_process.py" stop --pidfile "$SOARM_INSTANCE_ROOT/control.pid"
         bash "$launcher" close --instance "$index"
         ;;
     *) echo 'Expected up|run|export|deploy-clock|deploy|clock-sanity|down' >&2; exit 2 ;;

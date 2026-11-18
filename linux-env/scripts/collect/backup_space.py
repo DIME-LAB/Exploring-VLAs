@@ -187,3 +187,39 @@ def serialized_copy(path):
         fcntl.flock(fd,fcntl.LOCK_EX)
         yield
     finally:os.close(fd)
+
+
+MAX_CHECK_SCRIPT_BYTES=8*1024**2
+
+
+def checked_script_payload(code):
+    """Frame a read-only verification program without putting it in argv."""
+    body=code.encode('utf-8')
+    if not body or len(body)>MAX_CHECK_SCRIPT_BYTES:raise ValueError('Backup check script exceeds bounded capacity')
+    header=dict(version=1,bytes=len(body),sha256=hashlib.sha256(body).hexdigest())
+    return json.dumps(header,separators=(',',':')).encode()+b'\n'+body
+
+
+def receive_check_script(stream):
+    header=stream.readline(513)
+    if len(header)>512 or not header.endswith(b'\n'):raise ValueError('Invalid backup check header')
+    value=json.loads(header)
+    if (not isinstance(value,dict) or set(value)!={'version','bytes','sha256'} or type(value['version']) is not int or value['version']!=1 or
+        type(value['bytes']) is not int or not 0<value['bytes']<=MAX_CHECK_SCRIPT_BYTES or
+        not isinstance(value['sha256'],str) or len(value['sha256'])!=64 or any(c not in '0123456789abcdef' for c in value['sha256'])):
+        raise ValueError('Invalid backup check declaration')
+    body=bytearray();remaining=value['bytes']
+    while remaining:
+        block=stream.read(min(1024**2,remaining))
+        if not block:raise ValueError('Backup check input truncated')
+        body.extend(block);remaining-=len(block)
+    if stream.read(1):raise ValueError('Backup check input has extra bytes')
+    if hashlib.sha256(body).hexdigest()!=value['sha256']:raise ValueError('Backup check input SHA differs')
+    return body.decode('utf-8')
+
+
+def check_script_receiver_code():
+    # This constant-sized bootstrap validates all input before executing the
+    # caller's unchanged read-only verification program.
+    return ('import hashlib,json,sys\nMAX_CHECK_SCRIPT_BYTES='+str(MAX_CHECK_SCRIPT_BYTES)+'\n'+
+        inspect.getsource(receive_check_script)+'\nexec(compile(receive_check_script(sys.stdin.buffer),"<verified-backup-check>","exec"),{})\n')
