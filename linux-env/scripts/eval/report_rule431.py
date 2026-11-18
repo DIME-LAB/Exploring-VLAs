@@ -32,10 +32,11 @@ def summarize(rows):
 def audit(root,out):
     from native_bank import reset_protocol
     ledger=json.loads((root/'window-ledger.json').read_text())
+    if ledger.get('suite')=='triplet-heldout-20x3' and ledger.get('scored') is not True:raise ValueError('Triplet window lacks an explicit scored=True admission')
     if ledger.get('scored') is False:raise ValueError('Unscored windows cannot be reported as scored results')
     if not ledger.get('stopped_utc') or ledger.get('cleanup_exit_code')!=0:raise ValueError('Window must be stopped with successful cleanup')
     episodes=[];rows=[];bank_rows={}
-    if ledger.get('suite')=='heldout-bank-v2':
+    if ledger.get('suite') in ('heldout-bank-v2','triplet-heldout-20x3'):
         import sys
         sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'collect'))
         from native_bank import load_bank
@@ -50,7 +51,7 @@ def audit(root,out):
             budgets=[v for v in (r.get('readiness_budget_s'),matched.get('readiness_budget_s')) if v is not None]
             if not budgets or any(v!=ledger.get('readiness_budget_s',60) for v in budgets):raise ValueError('Missing or conflicting readiness budget in '+str(path))
         g=r.get('rule_closure_confirmed_geometry') or {}
-        row={k:r.get(k) for k in ('seed','color','valid','outcome','requested_colour_success','requested_colour_grasp','rule_target_success','rule_target_grasp','wrong_color_lift','wrong_same_colour_target_grasp','rule_target_name','paired_flow_repeat','effective_action_fps','wall_time_s','error')}
+        row={k:r.get(k) for k in ('seed','color','valid','outcome','requested_colour_success','requested_colour_grasp','rule_target_success','rule_target_grasp','wrong_color_lift','wrong_same_colour_target_grasp','target_wrong_cup','wrong_block_placement','target_any_placement','rule_target_name','paired_flow_repeat','effective_action_fps','wall_time_s','error')}
         for prefix,success,grasp in (('outcome','requested_colour_success','requested_colour_grasp'),('rule_outcome','rule_target_success','rule_target_grasp')):
             row[prefix]='invalid' if not r.get('valid') else 'success' if r.get(success) else 'grasped-not-placed' if r.get(grasp) else 'no-grasp'
         row.update({k:r.get(k) for k in ('time_to_grasp_s','time_to_place_s','time_to_rule_grasp_s','time_to_rule_place_s','rtc_enabled','sim_time_s','missed_sim_slots','empty_sim_ticks','sim_dispatch_jitter_p95_ms','host_load_start','host_load_end')})
@@ -58,6 +59,9 @@ def audit(root,out):
         row.update({k:client.get(k) for k in ('observe_every_actions','actions_per_chunk','chunk_size_threshold','queue_aggregation')})
         waits=[q['wall_s']*1000 for q in client.get('requests',[]) if 'wall_s' in q]
         row.update(flow_noise=json.dumps(client.get('flow_noise'),sort_keys=True),inference_wall_mean_ms=statistics.mean(waits) if waits else None,video_path=video.get('output_path'),wrist_manifest=wrist.get('manifest'))
+        if ledger.get('suite')=='triplet-heldout-20x3':
+            b=bank_rows[r['seed']]
+            row.update(case_id=b['case_id'],layout_seed=b['layout_seed'],requested_layout_seed=b['requested_layout_seed'],sealed_intended_target=b['recorded_target'])
         proof=r.get('rule_target_selection') or {}
         diagnostic=dict(live_choice=proof.get('object'),live_candidates=proof.get('candidates'),live_margin_m=proof.get('margin_m'),ambiguous=proof.get('ambiguous'))
         if r.get('valid') and bank_rows:
@@ -68,13 +72,33 @@ def audit(root,out):
         row.update(readiness_budget_s=ledger.get('readiness_budget_s',60),reset_protocol=r.get('reset_protocol') or (r.get('matched_reset') or {}).get('protocol'),rule_target_selection=json.dumps(diagnostic,sort_keys=True),ambiguous=proof.get('ambiguous'),path=str(path),xy_mm=g.get('xy_mm'),yaw_deg=g.get('yaw_deg'),dz_mm=g.get('dz_mm'),closure_phase=g.get('phase'))
         rows.append(row)
     if len({r['seed'] for r in rows})!=len(rows):raise ValueError('Do not silently combine repeated attempts in one window')
+    coverage=None
+    if ledger.get('suite')=='triplet-heldout-20x3':
+        selected=ledger.get('selected_seeds')
+        offset=ledger.get('bank_offset');fixed=ledger.get('fixed_chunk_count')
+        if offset not in (0,15,30,45) or fixed!=15:raise ValueError('Triplet report requires a fixed fifteen-case chunk')
+        cohort=list(bank_rows)[offset:offset+15]
+        if not selected or len(set(selected))!=len(selected) or [seed for seed in cohort if seed in selected]!=selected:raise ValueError('Triplet report requires an ordered subset of the fixed case cohort')
+        observed=[r['seed'] for r in rows]
+        if not set(observed)<=set(selected):raise ValueError('Triplet result lies outside the selected cohort')
+        coverage=dict(status='complete' if set(observed)==set(cohort) else 'partial',selected_seeds=selected,fixed_chunk_seeds=cohort,attempted=observed,missing=[seed for seed in cohort if seed not in observed],missing_selected=[seed for seed in selected if seed not in observed],invalid=sum(not r.get('valid') for r in rows))
+        for raw,row in zip(episodes,rows):
+            if raw.get('bank_sha256')!=ledger['bank_sha256']:raise ValueError('Triplet result bank differs from its ledger')
+            planned=ledger.get('paired_flow_repeat')
+            if planned is None:raise ValueError('Triplet report requires declared paired noise repeat')
+            if raw.get('valid'):
+                from flow_noise import episode_identity
+                if raw.get('paired_flow_repeat')!=planned or (raw.get('client') or {}).get('flow_noise')!=episode_identity(row['layout_seed'],planned):raise ValueError('Triplet actual noise identity differs from its layout/repeat')
+            row.update(weights_sha256=raw.get('weights_sha256'),bank_sha256=ledger['bank_sha256'],paired_flow_repeat=planned)
     out.mkdir(parents=True,exist_ok=False)
     summary=summarize(episodes);summary.update(window=str(root),status=ledger['status'],all_attempts_included=True,readiness_budget_s=ledger.get('readiness_budget_s',60),reset_protocol_by_suite=(reset_protocol(ledger['suite']) if ledger.get('suite') else None))
+    if coverage is not None:summary['coverage']=coverage
     (out/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
     if rows:
         with (out/'episodes.csv').open('w',newline='') as f:
             w=csv.DictWriter(f,fieldnames=list(rows[0]));w.writeheader();w.writerows(rows)
     print(json.dumps(summary))
+    return summary,rows
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('root',type=Path);p.add_argument('--out',type=Path,required=True);a=p.parse_args();audit(a.root,a.out)

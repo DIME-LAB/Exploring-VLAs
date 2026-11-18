@@ -15,7 +15,7 @@ from phase3_metrics import PhysicalScore
 FEATURES=('shoulder_pan.pos','shoulder_lift.pos','elbow_flex.pos','wrist_flex.pos','wrist_roll.pos','gripper.pos')
 
 def main():
- p=argparse.ArgumentParser();p.add_argument('--readiness-budget-s',type=float,choices=(60.,180.),default=60.);p.add_argument('--grasp-telemetry',action='store_true');p.add_argument('--rule-target',action='store_true');p.add_argument('--retain-wrist-before-closure',action='store_true');p.add_argument('--processor-reference',type=Path);p.add_argument('--paired-flow-repeat',type=int);p.add_argument('--out',type=Path,required=True);p.add_argument('--checkpoint',type=Path,required=True);p.add_argument('--weights-sha256',required=True);p.add_argument('--bank',type=Path,required=True);p.add_argument('--bank-sha256',required=True);p.add_argument('--server-port',type=int,default=18092);p.add_argument('--max-actions',type=int,default=1350);p.add_argument('--rtc-off',action='store_true');p.add_argument('--check-only',action='store_true');p.add_argument('--observe-every-actions',type=int,choices=(1,5,10,25,50),default=10);p.add_argument('--evaluation-kind');p.add_argument('--queue-aggregation',choices=('weighted_average','latest_only'),default='weighted_average');p.add_argument('--eval-codec-roundtrip',action='store_true');p.add_argument('--collector-matched-reset',action='store_true');p.add_argument('--reset-collector-root',type=Path);p.add_argument('--bank-offset',type=int,default=0);p.add_argument('--bank-count',type=int);p.add_argument('--episode-seeds',type=lambda text:__import__('native_bank').parse_episode_seeds(text));a=p.parse_args();assert a.readiness_budget_s==60 or a.collector_matched_reset,'Readiness override requires opt-in collector matched reset';host=qualified_host(REPO);HOST=Path(host['root']);require_environment();core=validate_collector_cut();support=preflight_sources(REPO)
+ p=argparse.ArgumentParser();p.add_argument('--readiness-budget-s',type=float,choices=(60.,180.),default=60.);p.add_argument('--grasp-telemetry',action='store_true');p.add_argument('--rule-target',action='store_true');p.add_argument('--retain-wrist-before-closure',action='store_true');p.add_argument('--processor-reference',type=Path);p.add_argument('--paired-flow-repeat',type=int);p.add_argument('--out',type=Path,required=True);p.add_argument('--checkpoint',type=Path,required=True);p.add_argument('--weights-sha256',required=True);p.add_argument('--bank',type=Path,required=True);p.add_argument('--bank-sha256',required=True);p.add_argument('--server-port',type=int,default=18092);p.add_argument('--max-actions',type=int,default=1350);p.add_argument('--rtc-off',action='store_true');p.add_argument('--check-only',action='store_true');p.add_argument('--observe-every-actions',type=int,choices=(1,5,10,25,50),default=10);p.add_argument('--evaluation-kind');p.add_argument('--queue-aggregation',choices=('weighted_average','latest_only'),default='weighted_average');p.add_argument('--eval-codec-roundtrip',action='store_true');p.add_argument('--collector-matched-reset',action='store_true');p.add_argument('--reset-collector-root',type=Path);p.add_argument('--bank-offset',type=int,default=0);p.add_argument('--bank-count',type=int);p.add_argument('--episode-seeds',type=lambda text:__import__('native_bank').parse_episode_seeds(text));a=p.parse_args();assert a.readiness_budget_s==60 or a.collector_matched_reset,'Readiness override requires opt-in collector matched reset';host=qualified_host(REPO);HOST=Path(host['root']);require_environment();support=preflight_sources(REPO)
  assert a.paired_flow_repeat is None or a.paired_flow_repeat>=0,'Repeat index must be nonnegative'
  assert not a.collector_matched_reset or a.reset_collector_root,'Matched reset requires the qualified private collector root'
  assert a.out.resolve().is_relative_to(HOST/'eval/runs') and not a.out.exists();a.out.mkdir();assert a.max_actions==1350
@@ -26,6 +26,9 @@ def main():
  assert checkpoint_config['input_features']['observation.state']['shape']==[6] and checkpoint_config['output_features']['action']['shape']==[6] and checkpoint_config['chunk_size']==50
  from native_bank import load_bank,select_policy_rows,SEEN_SUITES
  all_rows,suite=load_bank(a.bank,a.bank_sha256)
+ from triplet_bank import COLLECTOR_CUT,SUITE
+ core=validate_collector_cut(COLLECTOR_CUT) if suite==SUITE else validate_collector_cut()
+ if suite==SUITE:assert a.collector_matched_reset and a.rule_target and a.paired_flow_repeat is not None and a.grasp_telemetry and a.processor_reference
  if suite=='rule-seen-training-home-15':assert a.rule_target and a.paired_flow_repeat is not None and a.grasp_telemetry
  if 'rule431-manifest.json' in checkpoint_inventory:assert a.processor_reference and a.processor_reference.is_file()
  rows=select_policy_rows(all_rows,suite,a.bank_offset,a.bank_count,a.episode_seeds)
@@ -41,6 +44,7 @@ def main():
  env.update(PYTHONPATH=str(REPO/'lerobot/src'),PYTHONDONTWRITEBYTECODE='1',SOARM_EVAL_NATIVE_HELD='1',OMP_NUM_THREADS='4',OPENBLAS_NUM_THREADS='1',MKL_NUM_THREADS='1',LEROBOT_RTC_ENABLED='0' if a.rtc_off else '1',LEROBOT_RTC_EXECUTION_HORIZON='10',LEROBOT_RTC_MAX_GUIDANCE_WEIGHT='10',LEROBOT_RTC_PREFIX_ATTENTION_SCHEDULE='EXP')
  for key,part in [('TMPDIR','tmp'),('XDG_CACHE_HOME','cache'),('HF_HOME','cache/huggingface'),('TORCH_HOME','cache/torch'),('TORCHINDUCTOR_CACHE_DIR','cache/inductor'),('TRITON_CACHE_DIR','cache/triton')]:
   directory=HOST/'eval'/part;directory.mkdir(parents=True,exist_ok=True);env[key]=str(directory)
+ if suite==SUITE:env.update(HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1',HF_DATASETS_OFFLINE='1',PYTHONOPTIMIZE='0',HF_HUB_CACHE=env['HF_HOME']+'/hub',HF_DATASETS_CACHE=str(HOST/'eval/cache/datasets-triplet360'))
  python=policy_python(host);rpc_key=a.out/'rpc.key';fd=os.open(rpc_key,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
  with os.fdopen(fd,'wb') as file:file.write(secrets.token_bytes(32))
  address=str(a.out/'rpc.sock');assert len(address.encode())<104
@@ -90,7 +94,7 @@ def main():
    assert identity['mode']=='collect' and identity['held'] and not identity['busy'] and identity['failure'] is None
    assert identity['epoch']==current['epoch'] and abs(identity['sim_ns']-current['sim_ns'])<=1000
    return identity
-  def run_actor(ep,task,actions,warm=False,layout_seed=None):
+  def run_actor(ep,task,actions,warm=False,layout_seed=None,case_key=None):
    baseline=transport.session.current;snapshots=[baseline];commands=[];captures=[];active.clear();active.update(physical=snapshots,commands=commands,captures=captures,first_images={});target_proof=None;wrist_history=None
    if a.retain_wrist_before_closure and not warm:
     from wrist_retention import WristHistory
@@ -98,7 +102,7 @@ def main():
    if a.rule_target:
     from rule_target import select_target
     target_proof=select_target(baseline,color)
-    if suite=='rule-seen-training-home-15' and not warm:assert target_proof['object']==next(r for r in rows if r['seed']==layout_seed)['recorded_target']
+    if suite in ('rule-seen-training-home-15',SUITE) and not warm:assert target_proof['object']==next(r for r in rows if r['seed']==(case_key if case_key is not None else layout_seed))['recorded_target']
    scorer=PhysicalScore(color,baseline,fk,intended_target=target_proof['object'] if target_proof else None);scorer.update(baseline);hold=list(baseline['state']);started=time.monotonic();actor_payload=task;actor_mode='WARM' if warm else 'RUN'
    if not warm and a.paired_flow_repeat is not None:
     from flow_noise import episode_identity
@@ -163,21 +167,22 @@ def main():
      reset=mcp('run_python',{'code':'import collection_runtime as c\nresult=c.runtime().restore('+repr(dict(state=row['state'],drive_targets=row['recorded_drive_targets'],bodies=row['bodies']))+',arm=True,restore_drives=True)'})
      transport.generation.install(reset);transport.sensors.prune_durable_camera_history();mcp('run_python',{'code':'import collection_runtime as c\nresult=c.runtime().advance()'});transport.session.read()
    except BaseException as error:
-    (out/'result.json').write_text(json.dumps(dict(seed=row['seed'],color=color,task=row['task'],valid=False,outcome='invalid_reset',collector_matched_reset=a.collector_matched_reset,error=f'{type(error).__name__}: {error}',kind=a.evaluation_kind or 'native held-tick policy evaluation',weights_sha256=a.weights_sha256,bank_sha256=a.bank_sha256),indent=2)+'\n')
+    (out/'result.json').write_text(json.dumps(dict(seed=row['seed'],layout_seed=row.get('layout_seed',row['seed']),case_id=row.get('case_id'),requested_layout_seed=row.get('requested_layout_seed'),color=color,task=row['task'],valid=False,outcome='invalid_reset',collector_matched_reset=a.collector_matched_reset,error=f'{type(error).__name__}: {error}',kind=a.evaluation_kind or 'native held-tick policy evaluation',weights_sha256=a.weights_sha256,bank_sha256=a.bank_sha256),indent=2)+'\n')
     raise
    actual_base=transport.session.current['robot_base_world_pose'];expected_base=row['robot_base_world_pose']
    assert max(abs(x-y) for x,y in zip(actual_base['position'],expected_base['position']))<=1e-6
    assert min(max(abs(x-y) for x,y in zip(actual_base['orientation'],expected_base['orientation'])),max(abs(x+y) for x,y in zip(actual_base['orientation'],expected_base['orientation'])))<=1e-6
    mcp('soarm101.start_recording',{'file_name':str(out/'viewport_capture.mp4')});recording=True
    try:
-    done,snapshots,commands,captures,score=run_actor(out.name,row['task'],a.max_actions,layout_seed=row['seed'])
+    done,snapshots,commands,captures,score=run_actor(out.name,row['task'],a.max_actions,layout_seed=row.get('layout_seed',row['seed']),case_key=row['seed'])
    except BaseException as error:
-    (out/'result.json').write_text(json.dumps(dict(seed=row['seed'],color=color,task=row['task'],valid=False,outcome='invalid',error=f'{type(error).__name__}: {error}',kind=a.evaluation_kind or (f'DIAGNOSTIC replacement-only cadence{a.observe_every_actions}' if a.queue_aggregation=='latest_only' else 'DIAGNOSTIC causal codec held-lookahead' if a.eval_codec_roundtrip else f'DIAGNOSTIC native held-tick RTC-off cadence{a.observe_every_actions}' if a.rtc_off or a.observe_every_actions!=10 else 'PRIMARY native held-tick policy evaluation'),weights_sha256=a.weights_sha256,bank_sha256=a.bank_sha256),indent=2)+'\n')
+    (out/'result.json').write_text(json.dumps(dict(seed=row['seed'],layout_seed=row.get('layout_seed',row['seed']),case_id=row.get('case_id'),requested_layout_seed=row.get('requested_layout_seed'),color=color,task=row['task'],valid=False,outcome='invalid',error=f'{type(error).__name__}: {error}',kind=a.evaluation_kind or (f'DIAGNOSTIC replacement-only cadence{a.observe_every_actions}' if a.queue_aggregation=='latest_only' else 'DIAGNOSTIC causal codec held-lookahead' if a.eval_codec_roundtrip else f'DIAGNOSTIC native held-tick RTC-off cadence{a.observe_every_actions}' if a.rtc_off or a.observe_every_actions!=10 else 'PRIMARY native held-tick policy evaluation'),weights_sha256=a.weights_sha256,bank_sha256=a.bank_sha256),indent=2)+'\n')
     for key,filename in (('physical','physical.jsonl'),('commands','commands.jsonl'),('captures','captures.jsonl')):(out/filename).write_text(''.join(json.dumps(v)+'\n' for v in active.get(key,[])))
     raise
    video=mcp('soarm101.stop_recording');recording=False
    stamps=np.asarray([s['sim_ns'] for s in snapshots]);jitter=(stamps[:-1]-stamps[0]-np.arange(len(commands))*1e9/30)/1e6
    result=dict(readiness_budget_s=a.readiness_budget_s,reset_protocol=__import__('native_bank').reset_protocol(suite) if a.collector_matched_reset else 'sealed restore plus one native bootstrap',grasp_telemetry=a.grasp_telemetry,paired_flow_repeat=a.paired_flow_repeat,collector_matched_reset=a.collector_matched_reset,matched_reset=matched_reset,queue_aggregation=a.queue_aggregation,eval_codec_roundtrip=a.eval_codec_roundtrip,seed=row['seed'],color=color,task=row['task'],kind=a.evaluation_kind or (f'DIAGNOSTIC replacement-only cadence{a.observe_every_actions}' if a.queue_aggregation=='latest_only' else 'DIAGNOSTIC causal codec held-lookahead' if a.eval_codec_roundtrip else f'DIAGNOSTIC native held-tick RTC-off cadence{a.observe_every_actions}' if a.rtc_off or a.observe_every_actions!=10 else 'PRIMARY native held-tick policy evaluation'),suite=suite,**score,client=done,reset=reset,video=video,requested_fps=30,effective_action_fps=len(commands)/((stamps[-1]-stamps[0])/1e9),sim_time_s=(stamps[-1]-stamps[0])/1e9,wall_time_s=time.monotonic()-started,sim_dispatch_jitter_p95_ms=float(np.quantile(np.abs(jitter),.95)),missed_sim_slots=0,empty_sim_ticks=0,empty_sim_tick_semantics='Physics waits while inference runs; report wall inference waits separately',host_load_start=load,host_load_end=list(os.getloadavg()),bank_sha256=a.bank_sha256,weights_sha256=a.weights_sha256,rtc_enabled=not a.rtc_off,actuation='native held tick',valid=True)
+   if suite==SUITE:result.update(case_id=row['case_id'],layout_seed=row['layout_seed'],requested_layout_seed=row['requested_layout_seed'],intended_target=row['recorded_target'])
    np.savez_compressed(out/'first-cameras.npz',**active['first_images'])
    (out/'result.json').write_text(json.dumps(result,indent=2)+'\n');(out/'physical.jsonl').write_text(''.join(json.dumps(s)+'\n' for s in snapshots));(out/'commands.jsonl').write_text(''.join(json.dumps(s)+'\n' for s in commands));(out/'captures.jsonl').write_text(''.join(json.dumps(s)+'\n' for s in captures));print(json.dumps(dict(event='native-policy',seed=row['seed'],color=color,success=result['success'],grasp=result['grasp_success'],closest_m=result['closest_target_distance_m'])),flush=True)
  finally:

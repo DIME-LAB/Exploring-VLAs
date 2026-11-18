@@ -10,6 +10,7 @@ SEEN_SUITES=('seen-training-home','seen-training-home-15','rule-seen-training-ho
 SEEN_BANK_SHA='dbae9bdc10cc5755d6aeba9a6038de3b778614572c6950afa5d258f61502b2d6'
 
 def reset_protocol(suite):
+    if suite=='triplet-heldout-20x3':return 'collector-recorded-triplet-v1'
     if suite=='rule-seen-training-home-15':return 'collector-recorded-postsample-v1'
     if suite in SEEN_SUITES:return 'collector-matched-reset-v1'
     if suite=='heldout-bank-v2':return 'collector-sealed-postsample-v1'
@@ -46,6 +47,8 @@ def select_policy_rows(rows,suite,offset=0,count=None,episode_seeds=None):
         if offset!=0 or count not in (None,5):raise ValueError('Seen suite must keep all five layouts')
     elif suite in ('seen-training-home-15','rule-seen-training-home-15'):
         if offset!=0 or count not in (None,15):raise ValueError('Seen fifteen suite must keep all fifteen layouts')
+    elif suite=='triplet-heldout-20x3':
+        if len(rows)!=60 or offset not in (0,15,30,45) or count!=15:raise ValueError('Triplet scoring requires a fixed fifteen-case/five-layout RGB chunk')
     elif suite=='heldout-bank-v2':
         if offset not in (0,15) or count!=15:raise ValueError('Held-out scoring requires a fixed fifteen-seed chunk')
     else:raise ValueError('Unknown policy suite')
@@ -63,6 +66,9 @@ def load_bank(root,expected_sha256):
     root=Path(root).resolve();path=root/'bank-manifest.json';raw=path.read_bytes()
     if hashlib.sha256(raw).hexdigest()!=expected_sha256:raise ValueError('Bank manifest SHA differs')
     bank=json.loads(raw)
+    if bank.get('kind')=='triplet-heldout-20x3':
+        from triplet_bank import load
+        return load(root,expected_sha256)
     def checked(name,sha):
         path=(root/name).resolve()
         if not path.is_relative_to(root) or hashlib.sha256(path.read_bytes()).hexdigest()!=sha:raise ValueError('Bank file SHA/path differs: '+name)
@@ -142,6 +148,9 @@ def load_bank(root,expected_sha256):
 
 def reference_binding(rows,suite):
     mapping={str(row['seed']):row['reference_run_sha256'] for row in rows}
+    if suite=='triplet-heldout-20x3':
+        if len(rows)!=60 or len(mapping)!=60:raise ValueError('Triplet reference map requires all sixty cases')
+        return dict(reference_sha256_by_seed=mapping)
     if suite in ('seen-training-home-15','rule-seen-training-home-15'):
         if suite=='seen-training-home-15' and [row['seed'] for row in rows]!=list(SEEN15_SEEDS):raise ValueError('Reference binding requires the complete seen fifteen cohort')
         if suite=='rule-seen-training-home-15' and (len(rows)!=15 or len(set(row['seed'] for row in rows))!=15):raise ValueError('Rule reference binding requires fifteen unique layouts')

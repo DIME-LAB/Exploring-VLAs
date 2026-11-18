@@ -22,12 +22,15 @@ def require_environment():
  assert os.environ.get('CUDA_VISIBLE_DEVICES')=='','Replay client must remain CPU-only'
 
 
-def validate_collector_cut():
+def validate_collector_cut(expected_cut=CUT):
  import subprocess
- assert subprocess.check_output(['git','-C',str(REPO),'rev-parse','HEAD'],text=True).strip()==CUT
+ from triplet_bank import COLLECTOR_CUT
+ if expected_cut not in (CUT,COLLECTOR_CUT):raise ValueError('Unqualified collector cut')
+ assert subprocess.check_output(['git','-C',str(REPO),'rev-parse','HEAD'],text=True).strip()==expected_cut
+ if expected_cut==COLLECTOR_CUT:subprocess.run(['git','-C',str(REPO),'diff','--exit-code','HEAD','--','linux-env/scripts/collect'],check=True)
  core={}
  for name in ('collection_runtime.py','protocol.py','collect.py','frame_join.py','tick_contract.py','image_transport.py','image_take.c','contract.py','success.py','pose_math.py','cup_geometry.py'):
-  path=REPO/'linux-env/scripts/collect'/name;original=subprocess.check_output(['git','-C',str(REPO),'show',CUT+':linux-env/scripts/collect/'+name]);assert path.read_bytes()==original,'Collector cut differs: '+name;core[name]=hashlib.sha256(original).hexdigest()
+  path=REPO/'linux-env/scripts/collect'/name;original=subprocess.check_output(['git','-C',str(REPO),'show',expected_cut+':linux-env/scripts/collect/'+name]);assert path.read_bytes()==original,'Collector cut differs: '+name;core[name]=hashlib.sha256(original).hexdigest()
  return core
 
 

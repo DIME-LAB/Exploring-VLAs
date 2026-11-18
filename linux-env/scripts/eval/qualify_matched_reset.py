@@ -11,7 +11,9 @@ from native_environment import qualified_host
 
 def main():
     p=argparse.ArgumentParser();p.add_argument('--readiness-budget-s',type=float,choices=(60.,180.),default=60.);p.add_argument('--bank',type=Path,required=True);p.add_argument('--bank-sha256',required=True);p.add_argument('--collector-root',type=Path,required=True);p.add_argument('--out',type=Path,required=True);p.add_argument('--bootstrap-control',type=Path);a=p.parse_args()
-    require_environment();sources=validate_collector_cut();rows,suite=load_bank(a.bank,a.bank_sha256)
+    require_environment();rows,suite=load_bank(a.bank,a.bank_sha256)
+    from triplet_bank import COLLECTOR_CUT,SUITE
+    sources=validate_collector_cut(COLLECTOR_CUT) if suite==SUITE else validate_collector_cut()
     host=qualified_host(REPO);binding=reference_binding(rows,suite);reference_sha=binding.get('reference_sha256');reference_map=binding.get('reference_sha256_by_seed')
     bootstrap_control=None
     if suite=='heldout-bank-v2':

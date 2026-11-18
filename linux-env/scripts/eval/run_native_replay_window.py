@@ -31,7 +31,7 @@ def main():
   bank_rows,suite=load_bank(a.bank,a.bank_sha256)
   if a.checkpoint:
    selected_rows=select_policy_rows(bank_rows,suite,a.bank_offset,a.bank_count,a.episode_seeds)
-   if suite=='heldout-bank-v2':assert a.matched_reset_diagnostic and a.matched_reset_arms!='both','Held-out scoring is one arm and one fixed15-seed chunk per window'
+   if suite in ('heldout-bank-v2','triplet-heldout-20x3'):assert a.matched_reset_diagnostic and a.matched_reset_arms!='both','Held-out scoring is one arm and one fixed15-seed chunk per window'
    if suite in ('seen-training-home-15','rule-seen-training-home-15'):assert a.matched_reset_diagnostic and a.matched_reset_arms=='default','Next120 seen fifteen uses the default arm'
   else:
    assert a.bank_offset==0 and a.bank_count is None and a.episode_seeds is None,'Qualification must visit the entire sealed bank'
@@ -52,7 +52,7 @@ def main():
  reset_qualification=None
  if a.matched_reset_qualification or a.matched_reset_diagnostic:
   from matched_reset import validate_collector_root
-  assert a.reset_collector_root;validate_collector_root(a.reset_collector_root)
+  assert a.reset_collector_root;validate_collector_root(a.reset_collector_root,suite)
  bootstrap_control_proof=None
  if a.matched_reset_qualification and suite=='heldout-bank-v2':
   from native_bank import SEEN_BANK_SHA
@@ -81,7 +81,7 @@ def main():
   if a.matched_reset_diagnostic:assert a.reset_collector_root
   handoff=require_handoff(a.checkpoint,a.checkpoint_handoff,a.weights_sha256,published=a.matched_reset_diagnostic)
   preprocessor=json.loads((a.checkpoint/'policy_preprocessor.json').read_text())
-  if any('class' in step for step in preprocessor['steps']):
+  if any('class' in step for step in preprocessor['steps']) or 'triplet360-manifest.json' in handoff['files']:
    assert a.processor_proof,'Custom saved processor requires actual checkpoint parity proof'
    processor_directory=json.loads(a.checkpoint_handoff.read_text())['source_before']['model'] if a.matched_reset_diagnostic else a.checkpoint
    processor_proof=require_processor_proof(processor_directory,a.processor_proof,handoff['files'],published_handoff=a.checkpoint_handoff,reference_path=a.processor_reference)
@@ -112,7 +112,8 @@ def main():
  root.mkdir(parents=True)
  from native_gpu_audit import RegisteredGPUAudit
  registered_audit=RegisteredGPUAudit(instance,root/'gpu-ownership-registry.json') if guarded else None
- ledger=dict(readiness_budget_s=a.readiness_budget_s,rule_target=a.rule_target,retain_wrist_before_closure=a.retain_wrist_before_closure,processor_reference_sha256=hashlib.sha256(a.processor_reference.read_bytes()).hexdigest() if a.processor_reference else None,grasp_telemetry=a.grasp_telemetry,paired_flow_repeat=a.paired_flow_repeat,resume_episode_seeds=a.episode_seeds,fixed_chunk_count=a.bank_count,support_source_sha256=support,external_graphics_baseline=None,bootstrap_control_proof=bootstrap_control_proof,suite=suite,selected_seeds=[r['seed'] for r in selected_rows],bank_offset=a.bank_offset,bank_count=len(selected_rows) if selected_rows else None,bootstrap_control=str(a.bootstrap_control) if a.bootstrap_control else None,bank=str(a.bank) if a.bank else None,bank_sha256=a.bank_sha256,reset_collector_root=str(a.reset_collector_root) if a.reset_collector_root else None,interpreter_metadata=interpreter_metadata,policy_python_sha256=hashlib.sha256(Path(interpreter).read_bytes()).hexdigest() if interpreter else None,reset_qualification=reset_qualification,host_profile=host,policy_python=interpreter,processor_proof=processor_proof,checkpoint_handoff=handoff,replacement_selection=selection,gpu_budget_gib=7 if guarded else None,global_memory_ceiling=.79 if guarded else None,started_utc=time.strftime('%FT%TZ',time.gmtime()),kind='UNSCORED matched collector reset qualification' if a.matched_reset_qualification else ('PRIMARY native held-tick heldout-bank-v2' if suite=='heldout-bank-v2' else 'PRIMARY next120 seen15 training-layout' if suite=='seen-training-home-15' else 'PRIMARY rule431 seen15 training-layout' if suite=='rule-seen-training-home-15' else 'DIAGNOSTIC matched collector reset seen-layout') if a.matched_reset_diagnostic else 'DIAGNOSTIC native memorisation default and replacement' if a.memorisation_diagnostic else 'DIAGNOSTIC native replacement-only RTC off' if a.replacement_diagnostic else 'DIAGNOSTIC native codec held-filler' if a.codec_diagnostic else 'DIAGNOSTIC native cadence RTC off' if a.cadence_diagnostic else 'PRIMARY native held-tick training-home policy test' if a.checkpoint else 'native held-tick actuation qualification',root=str(root),status='starting',arms=[],source_sha256=qualification_sources(Path(__file__).parent))
+ ledger=dict(readiness_budget_s=a.readiness_budget_s,rule_target=a.rule_target,retain_wrist_before_closure=a.retain_wrist_before_closure,processor_reference_sha256=hashlib.sha256(a.processor_reference.read_bytes()).hexdigest() if a.processor_reference else None,grasp_telemetry=a.grasp_telemetry,paired_flow_repeat=a.paired_flow_repeat,resume_episode_seeds=a.episode_seeds,fixed_chunk_count=a.bank_count,support_source_sha256=support,external_graphics_baseline=None,bootstrap_control_proof=bootstrap_control_proof,suite=suite,selected_seeds=[r['seed'] for r in selected_rows],bank_offset=a.bank_offset,bank_count=len(selected_rows) if selected_rows else None,bootstrap_control=str(a.bootstrap_control) if a.bootstrap_control else None,bank=str(a.bank) if a.bank else None,bank_sha256=a.bank_sha256,reset_collector_root=str(a.reset_collector_root) if a.reset_collector_root else None,interpreter_metadata=interpreter_metadata,policy_python_sha256=hashlib.sha256(Path(interpreter).read_bytes()).hexdigest() if interpreter else None,reset_qualification=reset_qualification,host_profile=host,policy_python=interpreter,processor_proof=processor_proof,checkpoint_handoff=handoff,replacement_selection=selection,gpu_budget_gib=7 if guarded else None,global_memory_ceiling=.79 if guarded else None,started_utc=time.strftime('%FT%TZ',time.gmtime()),kind='UNSCORED matched collector reset qualification' if a.matched_reset_qualification else ('PRIMARY native held-tick triplet heldout' if suite=='triplet-heldout-20x3' else 'PRIMARY native held-tick heldout-bank-v2' if suite=='heldout-bank-v2' else 'PRIMARY next120 seen15 training-layout' if suite=='seen-training-home-15' else 'PRIMARY rule431 seen15 training-layout' if suite=='rule-seen-training-home-15' else 'DIAGNOSTIC matched collector reset seen-layout') if a.matched_reset_diagnostic else 'DIAGNOSTIC native memorisation default and replacement' if a.memorisation_diagnostic else 'DIAGNOSTIC native replacement-only RTC off' if a.replacement_diagnostic else 'DIAGNOSTIC native codec held-filler' if a.codec_diagnostic else 'DIAGNOSTIC native cadence RTC off' if a.cadence_diagnostic else 'PRIMARY native held-tick training-home policy test' if a.checkpoint else 'native held-tick actuation qualification',root=str(root),status='starting',arms=[],source_sha256=qualification_sources(Path(__file__).parent))
+ if suite=='triplet-heldout-20x3':ledger['scored']=bool(a.checkpoint and not a.unscored_policy_smoke)
  if a.unscored_policy_smoke:ledger['kind']='UNSCORED rule431 policy plumbing';ledger['scored']=False
  def save():
   tmp=root/'window-ledger.tmp';tmp.write_text(json.dumps(ledger,indent=2)+'\n');os.replace(tmp,root/'window-ledger.json')
@@ -189,7 +190,7 @@ def main():
     if arm['codec']:argv.append('--eval-codec-roundtrip')
     if a.memorisation_diagnostic:argv.extend(['--evaluation-kind','DIAGNOSTIC memorisation seen-layout'])
     if a.matched_reset_diagnostic:
-     kind='UNSCORED rule431 policy plumbing' if a.unscored_policy_smoke else 'PRIMARY native held-tick heldout-bank-v2' if suite=='heldout-bank-v2' else 'PRIMARY rule431 seen15 training-layout' if suite=='rule-seen-training-home-15' else 'PRIMARY next120 seen15 training-layout' if suite=='seen-training-home-15' else 'DIAGNOSTIC matched collector reset seen-layout'
+     kind='UNSCORED rule431 policy plumbing' if a.unscored_policy_smoke else 'PRIMARY native held-tick triplet heldout' if suite=='triplet-heldout-20x3' else 'PRIMARY native held-tick heldout-bank-v2' if suite=='heldout-bank-v2' else 'PRIMARY rule431 seen15 training-layout' if suite=='rule-seen-training-home-15' else 'PRIMARY next120 seen15 training-layout' if suite=='seen-training-home-15' else 'DIAGNOSTIC matched collector reset seen-layout'
      argv.extend(['--collector-matched-reset','--reset-collector-root',str(a.reset_collector_root),'--evaluation-kind',kind])
     shell='source /opt/ros/humble/setup.bash && source '+shlex.quote(str(REPO/'vla_SO-ARM101/install/setup.bash'))+host_source+' && unset ROS_LOCALHOST_ONLY ROS_AUTOMATIC_DISCOVERY_RANGE ROS_STATIC_PEERS && exec '+shlex.join(argv)
     ledger['status']='scoring-'+folder.name;ledger['arms'].append(dict(arm));save();rc=run(['bash','-c',shell],folder.name+'.log');assert rc==0,'Native policy window failed; preserve evidence, no retry'

@@ -7,8 +7,10 @@ from native_bank import COLLECTOR_SHA,HELPER_SHA
 def require_scene_source(row,suite,source):
     from native_bank import SEEN_SUITES,SEEN15_SEEDS
     params=source['params']
-    if not source['accepted'] or params['recovery']!='none' or params['seed']!=row['seed']:raise ValueError('Scene source is not the accepted requested episode')
-    if suite=='rule-seen-training-home-15':
+    if not source['accepted'] or params['recovery']!='none' or params['seed']!=row.get('layout_seed',row['seed']):raise ValueError('Scene source is not the accepted requested episode')
+    if suite=='triplet-heldout-20x3':
+        if params['split']!='heldout' or params['object']!=row['recorded_target'] or params['color']!=row['color']:raise ValueError('Triplet source member differs')
+    elif suite=='rule-seen-training-home-15':
         if row['recorded_target']!=params['object'] or row['rule_target']['object']!=params['object']:raise ValueError('Rule home source target differs')
     elif suite in SEEN_SUITES:
         if params['seed'] not in SEEN15_SEEDS:raise ValueError('Legacy seen source is outside its cohort')
@@ -44,8 +46,18 @@ def orientation_errors(actual,expected):
         else:lego[name]=component
     return dict(cup_geodesic_degrees=cup,lego_quaternion_component=lego,passed=max(cup.values())<=.1 and max(lego.values())<=1e-4)
 
-def validate_collector_root(root):
+def validate_collector_root(root,suite=None):
     root=Path(root).resolve();folder=root/'linux-env/scripts/collect'
+    if suite=='triplet-heldout-20x3':
+        from triplet_bank import COLLECTOR_CUT
+        assert subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip()==COLLECTOR_CUT
+        subprocess.run(['git','-C',str(root),'diff','--exit-code','HEAD','--','linux-env/scripts/collect','isaac/exts','linux-env/scripts/collect_sim.sh','linux-env/scripts/isaac'],check=True)
+        bridge=root/'omni-kit-mcp'
+        expected_bridge=subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD:omni-kit-mcp'],text=True).strip()
+        if subprocess.check_output(['git','-C',str(bridge),'rev-parse','HEAD'],text=True).strip()!=expected_bridge:raise ValueError('MCP bridge gitlink differs')
+        subprocess.run(['git','-C',str(bridge),'diff','--exit-code','HEAD'],check=True)
+        paths=subprocess.check_output(['git','-C',str(root),'ls-files','linux-env/scripts/collect'],text=True).splitlines()
+        return dict(root=str(root),cut=COLLECTOR_CUT,bridge_git_commit=expected_bridge,source_sha256={name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in paths if (root/name).is_file()})
     assert hashlib.sha256((folder/'collect.py').read_bytes()).hexdigest()==COLLECTOR_SHA
     assert hashlib.sha256((folder/'scene_bank.py').read_bytes()).hexdigest()==HELPER_SHA
     assert subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip()=='bf7336d93d5ba054c5edc66cea685725eb30eb40'
@@ -55,9 +67,9 @@ def validate_collector_root(root):
 def main():
     p=argparse.ArgumentParser();p.add_argument('--readiness-budget-s',type=float,choices=(60.,180.),default=60.);p.add_argument('--collector-root',type=Path,required=True);p.add_argument('--bank',type=Path,required=True);p.add_argument('--bank-sha256',required=True);p.add_argument('--seed',type=int,required=True);p.add_argument('--out',type=Path,required=True);a=p.parse_args()
     root=a.collector_root.resolve();folder=root/'linux-env/scripts/collect'
-    source_validation=validate_collector_root(root)
     from native_bank import load_bank,SEEN_SUITES,SEEN15_SEEDS,reset_protocol as protocol_for_suite
     rows,suite=load_bank(a.bank,a.bank_sha256);row=next(r for r in rows if r['seed']==a.seed)
+    source_validation=validate_collector_root(root,suite)
     reset_protocol=protocol_for_suite(suite)
     receipt_path=Path(row['source_receipt']);receipt_sha=row['source_receipt_sha256'];reference_path=Path(row['reference_run'])
     raw=receipt_path.read_bytes();assert hashlib.sha256(raw).hexdigest()==receipt_sha;source=json.loads(raw);reference=json.loads(reference_path.read_text())
@@ -85,9 +97,13 @@ def main():
         # itself restores CUP_LAYOUT before sampling, exactly as in one normal
         # multi-episode collector run; a prior policy episode is not a baseline.
         collector.baseline_cup_layout=copy.deepcopy(reference['baseline_cup_layout']);baseline=copy.deepcopy(reference['baseline'])
-        sealed_calls=install_sealed_scene(collector,source) if reset_protocol!='collector-matched-reset-v1' else None
+        triplet=suite=='triplet-heldout-20x3'
+        sealed_calls=install_sealed_scene(collector,source) if not triplet and reset_protocol!='collector-matched-reset-v1' else None
         atomic_json(a.out/'run.json',dict(protocol=reset_protocol,baseline=baseline,baseline_cup_layout=collector.baseline_cup_layout,live_startup_baseline=live_baseline,collector_source_sha256=sources,source_reference_run=str(reference_path),source_reference_sha256=hashlib.sha256(reference_path.read_bytes()).hexdigest()))
         path=a.out/'attempt-0000';path.mkdir();receipt=dict(params=copy.deepcopy(source['params']),accepted=False,scene_only=True,episode_id=hashlib.sha256(str(a.out).encode()).hexdigest());epochs=set()
+        if triplet:
+            from triplet_reset import install_recorded_session
+            receipt['params']=install_recorded_session(collector,row,a.out)
         collector._prepare_scene_attempt(receipt['params'],baseline,receipt,epochs,a.out,path)
         receipt['retirement']=collector.workers.retire();receipt['camera_boundary']=collector.sensors.require_camera_boundary(collector.generation.floor_ns);receipt['gpu_isolation_after']=collector.gpu_footprint()
         actual=collector.last_snapshot;expected=source['episode_start_physical']
@@ -101,10 +117,14 @@ def main():
         q_error=float(np.max(abs(np.degrees(np.array(actual['state'])-expected['state']))))
         position_error=max(abs(x-y) for name in expected['bodies'] for x,y in zip(actual['bodies'][name]['position'],expected['bodies'][name]['position']))
         quaternion_error=max(min(max(abs(x-y) for x,y in zip(actual['bodies'][name]['orientation'],expected['bodies'][name]['orientation'])),max(abs(x+y) for x,y in zip(actual['bodies'][name]['orientation'],expected['bodies'][name]['orientation']))) for name in expected['bodies'])
-        sampler_equal=receipt['cup_randomization']==source['cup_randomization'] if sealed_calls is None else None
+        sampler_equal=receipt['cup_randomization']==source['cup_randomization'] if sealed_calls is None and not triplet else None
         if sealed_calls is not None:assert sealed_calls==[dict(mode='sealed-body-restore',sampler_invocations=0)]
         orientation=orientation_errors(actual,expected)
-        validation=dict(passed=q_error<=.01 and position_error<=1e-4 and orientation['passed'] and (sampler_equal if sealed_calls is None else True),orientation_rule='Lead-approved cups geodesic<=0.1deg; LEGO quaternion component<=1e-4',orientation_errors=orientation,joint_max_error_deg=q_error,body_max_position_error_m=position_error,body_max_quaternion_error=quaternion_error,exact_cup_sampler=sampler_equal,scene_application='normal-sampler' if sealed_calls is None else 'sealed-body-restore',sampler_invocations=1 if sealed_calls is None else 0,cup_metadata_role='sampler result' if sealed_calls is None else 'sealed source provenance; not resampled',joint_error_deg=np.degrees(np.array(actual['state'])-expected['state']).tolist(),body_position_errors_m={n:(np.array(actual['bodies'][n]['position'])-expected['bodies'][n]['position']).tolist() for n in expected['bodies']},actual=actual,expected=expected,actual_cup_sampler=receipt['cup_randomization'] if sealed_calls is None else None,sealed_cup_provenance=receipt['cup_randomization'] if sealed_calls is not None else None,expected_cup_sampler=source['cup_randomization'])
+        validation=dict(passed=q_error<=.01 and position_error<=1e-4 and orientation['passed'] and (sampler_equal if sealed_calls is None and not triplet else True),orientation_rule='Lead-approved cups geodesic<=0.1deg; LEGO quaternion component<=1e-4',orientation_errors=orientation,joint_max_error_deg=q_error,body_max_position_error_m=position_error,body_max_quaternion_error=quaternion_error,exact_cup_sampler=sampler_equal,scene_application='normal-sampler' if sealed_calls is None else 'sealed-body-restore',sampler_invocations=1 if sealed_calls is None else 0,cup_metadata_role='sampler result' if sealed_calls is None else 'sealed source provenance; not resampled',joint_error_deg=np.degrees(np.array(actual['state'])-expected['state']).tolist(),body_position_errors_m={n:(np.array(actual['bodies'][n]['position'])-expected['bodies'][n]['position']).tolist() for n in expected['bodies']},actual=actual,expected=expected,actual_cup_sampler=receipt['cup_randomization'] if sealed_calls is None else None,sealed_cup_provenance=receipt['cup_randomization'] if sealed_calls is not None else None,expected_cup_sampler=source['cup_randomization'])
+        if triplet:
+            from triplet_reset import require_bootstrap
+            validation['triplet_pose_agreement']=require_bootstrap(actual,expected)
+            validation.update(scene_application='recorded-triplet-anchor-restore',sampler_invocations=0,exact_cup_sampler=None,actual_cup_sampler=None)
         atomic_json(a.out/'pose-validation.json',validation)
         receipt.update(prepared_snapshot=actual,pose_validation=validation)
         atomic_json(path/'receipt.json',receipt)
@@ -112,6 +132,8 @@ def main():
         assert validation['passed'],'Prepared physical pose differs from source; see pose-validation.json'
         assert receipt['retirement']['passed'] and receipt['camera_boundary']['passed'] and receipt['gpu_isolation_after']['passed']
         receipt.update(accepted=True,matched_reset_protocol=reset_protocol,source_receipt=str(receipt_path),source_receipt_sha256=receipt_sha,training_first_frame_offset_ns=training_offset,first_frame_offset_basis='measured training first frame' if training_offset is not None else 'inherited one-tick from same-source seen qualification',suite=suite,reference_run_sha256=row['reference_run_sha256'],prepared_joint_max_error_deg=q_error,prepared_body_max_position_error_m=position_error,prepared_body_max_quaternion_error=quaternion_error,prepared_snapshot=actual,sequence=('normal sampler; ' if sealed_calls is None else 'sealed initial bodies (no sampler), reset velocities, advance6, restore current; ')+'Collector._prepare_scene_attempt: reset_release,request_home,settle_home(before),scene(randomize6+barrier2),settle_home(after),restore_velocity,verification6,sync_scene',camera_priming='Exact normal collector functions; no fixed-N or render-only replacement' if sealed_calls is None else 'Sealed bodies followed by collector six-tick sample tail and normal scene/home/velocity/verification sequence; no sampler',wall_s=time.monotonic()-started)
+        if triplet:
+            receipt.update(matched_reset_protocol=reset_protocol,sequence='Producer TripletSession.prepare: recorded anchor restore; advance20 camera-prime ticks; exact anchor restore; advance1 bootstrap; native parent advances1 to first recorded observation',camera_priming='Unmodified training triplet producer, no scene sampling',sampler_invocations=0)
         atomic_json(path/'receipt.json',receipt);atomic_json(a.out/'summary.json',dict(producer_invocation=collector.finalization_certificate['invocation'],complete=True,scene_only=True,prepared=1,end_marker='COLLECTION_FINISHED'));ok=True
     except BaseException as error:
         atomic_json(a.out/'reset-error.json',dict(error=repr(error),scored=False))
@@ -123,6 +145,6 @@ def main():
     if ok:
         certificate=c.collection_status.require_finalized(a.out)
         assert 'torch' not in sys.modules,'Scene preparation imported Torch unexpectedly'
-        atomic_json(a.out/'matched-reset-proof.json',dict(status='PASS',readiness_budget_s=a.readiness_budget_s,protocol=reset_protocol,seed=source['params']['seed'],suite=suite,bank_sha256=a.bank_sha256,reference_run_sha256=row['reference_run_sha256'],source_receipt_sha256=receipt_sha,source_validation=source_validation,collector_sha256=COLLECTOR_SHA,scene_helper_sha256=HELPER_SHA,torch_imported=False,cyclonedds_uri=uri,cyclonedds_sha256=hashlib.sha256(Path(uri[7:]).read_bytes()).hexdigest(),finalization=certificate,receipt_sha256=hashlib.sha256((a.out/'attempt-0000/receipt.json').read_bytes()).hexdigest(),post_cleanup_semantics='Collector closes with native cancellation; caller must join a fresh epoch without re-teleporting'))
+        atomic_json(a.out/'matched-reset-proof.json',dict(status='PASS',readiness_budget_s=a.readiness_budget_s,protocol=reset_protocol,seed=row['seed'],layout_seed=row.get('layout_seed',row['seed']),suite=suite,bank_sha256=a.bank_sha256,reference_run_sha256=row['reference_run_sha256'],source_receipt_sha256=receipt_sha,source_validation=source_validation,collector_sha256=hashlib.sha256((folder/'collect.py').read_bytes()).hexdigest(),scene_helper_sha256=hashlib.sha256((folder/'scene_bank.py').read_bytes()).hexdigest(),torch_imported=False,cyclonedds_uri=uri,cyclonedds_sha256=hashlib.sha256(Path(uri[7:]).read_bytes()).hexdigest(),finalization=certificate,receipt_sha256=hashlib.sha256((a.out/'attempt-0000/receipt.json').read_bytes()).hexdigest(),post_cleanup_semantics='Collector closes with native cancellation; caller must join a fresh epoch without re-teleporting'))
         print(json.dumps(dict(status='PASS',protocol=reset_protocol,seed=source['params']['seed'])),flush=True)
 if __name__=='__main__':main()

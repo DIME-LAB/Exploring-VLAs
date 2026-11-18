@@ -105,7 +105,11 @@ def source_probe(request):
                 if value not in files or not files[value]['size']:
                     raise ValueError('Missing processor state: '+value)
         check_refs(json.loads((model/name).read_text()))
-    return dict(ready=True, step=step, model=str(model), files=files,
+    documents={}
+    if request.get('processor_documents'):
+        if not marker:raise ValueError('Processor document transfer gate needs a family marker')
+        documents={name:json.loads((model/name).read_text()) for name in ('policy_preprocessor.json','policy_postprocessor.json',marker)}
+    return dict(ready=True, step=step, model=str(model), files=files,processor_documents=documents,
                 completion=dict(marker=str(last), target=target,
                     meaning='native trainer updates last only after save_checkpoint returns',
                     training_step_present=training_step.exists(),artifact_marker=marker_proof))
@@ -123,7 +127,7 @@ def prepare_target(request):
         if not receipt.is_file():
             raise FileExistsError('Existing target has no handoff receipt; will not overwrite')
         return dict(existing=True, directory=str(final),receipt=json.loads(receipt.read_text()))
-    if shutil.disk_usage(root).free < request['bytes']+512*1024**2:
+    if shutil.disk_usage(root).free < request['bytes']+100*1024**3:
         raise RuntimeError('Insufficient backup space for verified checkpoint staging')
     pending = root/f".{request['step']:06d}.incoming-{request['transfer_id']}"
     pending.mkdir()
@@ -182,17 +186,25 @@ def same_files(left, right):
 
 
 def transfer(args, snapshot):
+    if args.completion_marker=='triplet360-manifest.json' and (not getattr(args,'processor_proof_directory',None) or getattr(args,'processor_family',None)!='triplet360' or not getattr(args,'processor_reference',None)):
+        raise ValueError('Triplet360 requires the pre-transfer processor gate')
     step = snapshot['step']
     expected = remote(args.source_host, 'source_probe', dict(
-        source_checkpoints=args.source_checkpoints, step=step, hashes=True, completion_marker=args.completion_marker))
+        source_checkpoints=args.source_checkpoints, step=step, hashes=True, completion_marker=args.completion_marker,processor_documents=bool(getattr(args,'processor_proof_directory',None))))
     if not expected['ready'] or any(
         {k:v for k,v in expected['files'][name].items() if k!='sha256'} != row
         for name,row in snapshot['files'].items()) or set(expected['files'])!=set(snapshot['files']):
         raise RuntimeError('Checkpoint changed after its stability gate')
+    processor_admission=None
+    if getattr(args,'processor_proof_directory',None):
+        from checkpoint_contract import require_transfer_processor_proof
+        processor_admission=require_transfer_processor_proof(expected,Path(args.processor_proof_directory)/f'saved-crop-{step:06d}-proof.json',args.processor_reference,args.processor_family)
     prepared = remote(args.target_host, 'prepare_target', dict(destination=args.destination,
         step=step, bytes=sum(r['size'] for r in expected['files'].values()), transfer_id=uuid.uuid4().hex))
     if prepared['existing']:
         prior=prepared['receipt']
+        if args.completion_marker=='triplet360-manifest.json' and (prior.get('processor_admission') or {}).get('sha256')!=(processor_admission or {}).get('sha256'):
+            raise ValueError('Existing immutable triplet target lacks matching pre-transfer admission')
         if prior['step']!=step or prior['source']!=expected['model'] or prior['source_before']['files']!=expected['files']:
             raise ValueError('Existing immutable checkpoint receipt differs')
     if not prepared['existing']:
@@ -210,7 +222,7 @@ def transfer(args, snapshot):
     if not after['ready'] or after['files']!=expected['files']:
         raise RuntimeError('Source changed during transfer; target remains unpublished')
     receipt = dict(step=step, published_model=str(Path(args.destination)/f'{step:06d}'/'pretrained_model'), source_host=args.source_host, source=expected['model'],
-        source_before=expected, source_after=after, verified=verified,
+        source_before=expected, source_after=after, verified=verified,processor_admission=processor_admission,
         stable_seconds=args.stable_seconds, published_utc=time.strftime('%FT%TZ',time.gmtime()))
     if prepared['existing']:
         return dict(model=prepared['directory']+'/pretrained_model', receipt=receipt, already_staged=True)
@@ -235,15 +247,22 @@ def main():
     p.add_argument('--notify-command-json',help='argv that accepts a final --prompt-file argument')
     p.add_argument('--completion-marker',help='Required JSON marker in pretrained_model, in addition to native last')
     p.add_argument('--notification-context',default='Waiting for your GPU0 GO before scored main30RTC-on.')
+    p.add_argument('--processor-proof-directory',type=Path,help='Optional actual-save proofs; copying waits for saved-crop-NNNNNN-proof.json')
+    p.add_argument('--processor-reference',type=Path)
+    p.add_argument('--processor-family',choices=('rule431','triplet360'))
     p.add_argument('--once',action='store_true')
     args=p.parse_args();steps=[int(s) for s in args.steps.split(',')]
     if min(args.poll_seconds,args.stable_seconds)<=0 or any(s<=0 for s in steps):p.error('Positive polling/stability/steps required')
     args.state_dir.mkdir(parents=True,exist_ok=True)
+    if args.completion_marker=='triplet360-manifest.json' and (not args.processor_proof_directory or args.processor_family!='triplet360' or not args.processor_reference):raise ValueError('Triplet360 requires the pre-transfer processor gate')
     lock=(args.state_dir/'watch.lock').open('a');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     state_path=args.state_dir/'status.json'
     state=json.loads(state_path.read_text()) if state_path.exists() else dict(staged={},observed={})
     configuration=dict(source_host=args.source_host,target_host=args.target_host,source_checkpoints=args.source_checkpoints,destination=args.destination,steps=steps,stable_seconds=args.stable_seconds)
     if args.completion_marker:configuration['completion_marker']=args.completion_marker
+    if args.processor_proof_directory:
+        if not args.processor_reference or not args.processor_family:raise ValueError('Processor transfer gate requires family and sealed reference')
+        configuration.update(processor_proof_directory=str(args.processor_proof_directory.resolve()),processor_reference=str(args.processor_reference.resolve()),processor_family=args.processor_family)
     if state.get('configuration',configuration)!=configuration:raise ValueError('Watcher state belongs to another transfer configuration')
     state.update(configuration=configuration,pid=os.getpid(),source=args.source_checkpoints,destination=args.destination,status='watching')
     print(json.dumps(dict(event='WATCHING',pid=os.getpid(),steps=steps,source=args.source_checkpoints,destination=args.destination)),flush=True)
@@ -259,6 +278,10 @@ def main():
                         if previous is None or not same_files(previous[0],snap['files']):
                             observed[key]=(snap['files'],now)
                         elif now-previous[1]>=args.stable_seconds:
+                            if args.processor_proof_directory and not (args.processor_proof_directory/f'saved-crop-{step:06d}-proof.json').is_file():
+                                state['observed'][key]=dict(ready=False,reason='actual-processor-proof-pending',checked_utc=time.strftime('%FT%TZ',time.gmtime()))
+                                write_status(state_path,state)
+                                continue
                             result=transfer(args,snap)
                             state['staged'][key]=dict(model=result['model'],receipt_file=f'{key}.json',notified=False)
                             write_status(args.state_dir/f'{key}.json',result['receipt'])
