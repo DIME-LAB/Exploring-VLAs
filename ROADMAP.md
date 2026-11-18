@@ -381,6 +381,14 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       before any member -> typed same-seed retry, fc801b1, in review). Identity refusals 1/167 (0.6%); visible-margin refusals 30; peer-stop casualties
       inside the 167 are 720097 and 720122 (720145 joins in the next admission), replaced from reserves. Remaining: 8 groups.
       Run history (one row per run, with evidence folders): coursework phase3/3.1-collection/counterfactual-triplets/RUN-HISTORY.md.
+    - 2026-11-18 ~14:0xZ: TRIPLET PRODUCTION COMPLETE: 140/140 groups sealed (120 train + 20 held-out layouts, 420 episodes)
+      at outer 9faa27e / native 503e39a. After the 0a80e4e stop, 68334cc stopped at 136 when physical slot 5 hit its retry cap
+      on three pre-layout first-join stalls of 720144 (a bounded probe showed slot 5 can start cleanly; RPC showed physics
+      advancing, so the stall is collector-side first-observation delivery); 9faa27e routed slot 5's pending jobs to slot 4
+      and 720144 then sealed on the first try. Final: exact-identity refusals 1/176 (0.57%), startup retries 3/10.
+      Registries: train 05f93c2b..., held-out ae7165f2...; finalization 978988be...; SHA backups on dual.
+      Next: w_train CPU qualification of the sealed train registry, then triplet training on rtx6000 (lead GO, after phail's
+      run releases the card), then the colour-word probe and held-out evaluation.
 - [x] 3.5 (new, operator 2026-11-17) Visual re-rendering of recorded episodes without re-simulation: bridge our per-tick
       poses (all 900 episodes carry 6-D state + 9 bodies per tick) into DroidStack take+tape+manifest on DroidStack branch
       vla-render-bands (separate clone, base dev 47bfbaac), add look bands (lights, materials, camera poses), an ego wrist
