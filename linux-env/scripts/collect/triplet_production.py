@@ -163,12 +163,15 @@ def retirement_supervision(context,previous=None):
 
 def verify_sources(run,cut,repo=None):
     repo=REPO if repo is None else Path(repo)
-    config=read(run/'run.json')
+    try:config=read(run/'run.json')
+    except FileNotFoundError as exc:raise ValueError('Collector provenance file is missing: '+str(run/'run.json')) from exc
     if config.get('git_commit')!=cut or config.get('cpu_fixture_only'):raise ValueError('Collector checkout/provenance differs')
     if not config.get('source_sha256'):raise ValueError('Loaded source manifest is missing')
     for name,value in config['source_sha256'].items():
         path=Path(name)
-        if path.is_absolute() or '..' in path.parts or sha(repo/path)!=value:raise ValueError('Loaded collector source differs: '+name)
+        try:valid=not path.is_absolute() and '..' not in path.parts and sha(repo/path)==value
+        except FileNotFoundError as exc:raise ValueError('Loaded collector source file is missing: '+str(repo/path)) from exc
+        if not valid:raise ValueError('Loaded collector source differs: '+name)
 
 
 def backup(source,files,destination,log):
@@ -373,6 +376,8 @@ class Worker:
         return result['answer']
     def up(self):
         self.session+=1;self.native=None
+        observations=self.root/'native-observations.jsonl'
+        self.native_observation_start=observations.stat().st_size if observations.exists() else 0
         self.runtime=confined(Path(self.plan['runtime_root'])/f'wave-{self.wave:02d}/slot-{self.instance}/session-{self.session:03d}')
         self.runtime.mkdir(parents=True,exist_ok=False);self.claim=InstanceClaim(self.runtime)
         self.retirement_certified=False
@@ -447,19 +452,29 @@ class Worker:
                 self.startup_retries.append(reservation)
             try:self.up()
             except startup_retries.StartupFailure as exc:
-                atomic_json(self.root/f'startup-up-error-{self.session}.json',dict(kind=exc.kind,error=exc.cause,stage=exc.stage,up_log=str(exc.log),phase='before_retirement',wall_ns=time.time_ns()))
-                try:self.down()
-                except BaseException as cleanup:
-                    raise RuntimeError('Startup cleanup failed; original '+repr(exc)+'; cleanup '+repr(cleanup)) from cleanup
-                if not self.retirement_certified:raise RuntimeError('Startup retry lacks certified retirement')
-                if os.path.lexists(run):raise RuntimeError('Startup retry refuses episode artefacts: '+str(run))
-                record=startup_retries.failed(budget,self.instance,job,exc,self.root/f'owned-down-{self.session}.json',self.supervision)
-                atomic_json(self.root/f'startup-failure-{self.session}.json',record)
-                self.startup_retries.append(record)
+                self.retire_startup(job,exc)
                 continue
             completed=startup_retries.ready(budget,self.instance,job,reservation)
             if completed is not None:self.startup_retries.append(completed)
             return
+    def raw_path(self,job):
+        return ROOT/f'datasets/counterfactual-targets/{job["split"]}/layout-{job["layout_seed"]}'
+    def retire_startup(self,job,exc):
+        budget=self.plan.get('startup_retry_budget')
+        if budget is None:raise RuntimeError('Typed startup failure has no durable retry budget: '+str(exc))
+        atomic_json(self.root/f'startup-up-error-{self.session}.json',dict(kind=exc.kind,error=exc.cause,stage=exc.stage,up_log=str(exc.log),phase='before_retirement',wall_ns=time.time_ns()))
+        try:self.down()
+        except BaseException as cleanup:
+            raise RuntimeError('Startup cleanup failed; original '+repr(exc)+'; cleanup '+repr(cleanup)) from cleanup
+        if not self.retirement_certified:raise RuntimeError('Startup retry lacks certified retirement')
+        run=self.raw_path(job)
+        if exc.kind=='scene_initialization':
+            import scene_initialization
+            target=self.root/f'scene-init-{job["layout_seed"]}-session-{self.session}'
+            scene_initialization.archive(run,target,exc,self.root/f'scene-init-backup-{self.session}.log')
+        elif os.path.lexists(run):raise RuntimeError('Startup retry refuses episode artefacts: '+str(run))
+        record=startup_retries.failed(budget,self.instance,job,exc,self.root/f'owned-down-{self.session}.json',self.supervision)
+        atomic_json(self.root/f'startup-failure-{self.session}.json',record);self.startup_retries.append(record)
     def down(self):
         if self.claim is None:
             if not self.retirement_certified:raise RuntimeError('Previous owned cleanup remains unresolved')
@@ -485,8 +500,14 @@ class Worker:
     def attempt(self,job):
         disk();seed=job['layout_seed'];run=ROOT/f'datasets/counterfactual-targets/{job["split"]}/layout-{seed}'
         if run.exists():raise FileExistsError('Fresh layout required; never adopt output: '+str(run))
-        event=self.stage('collect-'+str(seed),['bash',str(self.wrapper),'run',str(self.instance),'--counterfactual-layout-seed',str(seed),
+        name='collect-'+str(seed)
+        if (self.root/(name+'.log')).exists():name+='-startup-'+str(self.session)
+        event=self.stage(name,['bash',str(self.wrapper),'run',str(self.instance),'--counterfactual-layout-seed',str(seed),
             '--counterfactual-split',job['split'],'--normal-only','--output',str(run)],timeout=1800)
+        if not os.path.lexists(run/'run.json'):
+            import scene_initialization
+            data_checkout(self.collector_repo,self.cut)
+            raise scene_initialization.failure(self,job,event)
         outcome=self.qualify(job,event)
         status,reason=outcome['status'],outcome['reason']
         self.await_admission(seed,outcome)
@@ -537,9 +558,13 @@ class Worker:
             if self.plan.get('startup_retry_budget'):jobs=startup_retries.resume_jobs(self.plan['startup_retry_budget'],self.instance,jobs)
             for job in jobs:
                 self.active_job=job
-                self.check()
-                self.ensure_ready(job)
-                self.attempt(job)
+                while True:
+                    self.check();self.ensure_ready(job)
+                    try:self.attempt(job)
+                    except startup_retries.StartupFailure as exc:
+                        if exc.kind!='scene_initialization':raise
+                        self.retire_startup(job,exc);continue
+                    break
                 self.active_job=None
         except BaseException as exc:
             failure=failure_report(self.supervision,exc);error=failure['error']

@@ -25,8 +25,10 @@ def claim_run(prior_production_root=None):
     try:
         previous=p.ROOT/'datasets/counterfactual-targets/production-v1/continuations'
         allowed=set() if prior_production_root is None else {Path(prior_production_root)}
-        if allowed and allowed!={p.ROOT/'datasets/counterfactual-targets/production-v1/continuations/continuation-admission-5eaf5ad-v1'}:
-            raise ValueError('Unapproved completed continuation parent')
+        if allowed:
+            from completed_continuation import profile,parent_root
+            profile(next(iter(allowed)))
+            if next(iter(allowed))!=parent_root():allowed.add(parent_root())
         if previous.exists() and set(previous.iterdir())-allowed:raise FileExistsError('A continuation already exists; a new recovery decision is required')
         yield
     finally:claim.close()
@@ -374,7 +376,7 @@ def reverify_legacy(recipe):
 
 def load_plan(path,digest,runner_cut):
     if read(regular(path)).get('kind')!='completed-wave-continuation':
-        raise ValueError('This run requires the completed 5eaf wave; the original 94/76 admission is forbidden')
+        raise ValueError('This run requires source-bound completed waves; the original 94/76 admission is forbidden')
     from completed_continuation import load_plan as load
     return load(path,digest,runner_cut)
 

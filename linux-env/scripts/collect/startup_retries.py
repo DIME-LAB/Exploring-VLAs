@@ -1,12 +1,12 @@
 """Typed pre-writer startup retries, with one persistent budget per original run."""
-import copy,fcntl,json,os,stat,time,uuid
+import copy,fcntl,hashlib,json,os,stat,time,uuid
 from contextlib import contextmanager
 from pathlib import Path
 from storage import atomic_json
 from triplet_artifacts import read,sha,checked_tree
 
 POLICY=dict(version=1,slot_retries=3,run_retries=10)
-KINDS={'controller_activation','kit_start','configure_rpc','up_deadline','bootstrap_rpc','scene_readiness'}
+KINDS={'controller_activation','kit_start','configure_rpc','up_deadline','bootstrap_rpc','scene_readiness','scene_initialization'}
 
 class StartupFailure(RuntimeError):
     def __init__(self,kind,cause,stage,log):
@@ -106,11 +106,23 @@ def validated(spec):
         key=(job['split'],job['layout_seed']);kind=event.get('event')
         if kind=='failed':
             if event.get('kind') not in KINDS:raise ValueError('Unknown startup retry reason')
-            if {p.name for p in (root/name).iterdir()}!={'event.json','up.log','owned-down.json'}:raise ValueError('Incomplete startup retry evidence')
+            required={'event.json','up.log','owned-down.json'}
+            if event['kind']=='scene_initialization':required.add('scene-init-evidence.json')
+            if {p.name for p in (root/name).iterdir()}!=required:raise ValueError('Incomplete startup retry evidence')
             if sha(root/name/'up.log')!=event['up_log_sha256'] or sha(root/name/'owned-down.json')!=event['owned_down_sha256']:raise ValueError('Startup retry evidence changed')
             stage=event.get('stage',{})
-            if not stage.get('name','').startswith('up-') or type(stage.get('pid')) is not int or stage['pid']<=0 or type(stage.get('started_wall_ns')) is not int or stage['started_wall_ns']<=0:raise ValueError('Startup retry lacks an up-stage receipt')
-            if event['kind'] in ('controller_activation','kit_start','configure_rpc'):
+            prefix='collect-' if event['kind']=='scene_initialization' else 'up-'
+            if not stage.get('name','').startswith(prefix) or type(stage.get('pid')) is not int or stage['pid']<=0 or type(stage.get('started_wall_ns')) is not int or stage['started_wall_ns']<=0:raise ValueError('Startup retry lacks a producing-stage receipt')
+            if event['kind']=='scene_initialization':
+                import scene_initialization as init
+                evidence=read(root/name/'scene-init-evidence.json')
+                if (sha(root/name/'scene-init-evidence.json')!=event.get('scene_evidence_sha256') or init.verify(evidence)!=event['error'] or
+                    evidence['stage']!=stage or evidence['job']!=job or read(root/name/'up.log',True).decode()!=evidence['files']['worker/collect.log']):raise ValueError('Scene initialization retry evidence differs')
+                archive=evidence['archive'];backup=archive['backup'];files={n.removeprefix('raw/'):v for n,v in evidence['files_sha256'].items() if n.startswith('raw/')}
+                import triplet_production as p
+                path=Path(archive['path'])
+                if not path.is_relative_to(p.ROOT) or backup.get('destination')!=str(p.DUAL/path.relative_to(p.ROOT)) or backup.get('passed') is not True or backup.get('files_sha256')!=files or manifest_archive(path)!=files:raise ValueError('Scene initialization archive/backup is unverified')
+            elif event['kind'] in ('controller_activation','kit_start','configure_rpc'):
                 failure=failed_exit(stage,root/name/'up.log')
                 if failure is None or failure.kind!=event['kind'] or failure.cause!=event['error']:raise ValueError('Startup failure classification differs from its log')
             elif event['kind']=='up_deadline':
@@ -141,7 +153,7 @@ def _append(spec,state,event,evidence=None):
     root=Path(spec['root']);number=len(state['events'])+1;path=root/f'event-{number:04d}';path.mkdir()
     if evidence:
         for name,source in evidence.items():
-            with (path/name).open('xb') as stream:stream.write(read(source,True));stream.flush();os.fsync(stream.fileno())
+            with (path/name).open('xb') as stream:stream.write(source if isinstance(source,bytes) else read(source,True));stream.flush();os.fsync(stream.fileno())
     atomic_json(path/'event.json',dict(event,id=number))
     item=dict(id=number,sha256=sha(path/'event.json'))
     fd=os.open(root/'journal.jsonl',os.O_WRONLY|os.O_APPEND|os.O_NOFOLLOW)
@@ -157,7 +169,16 @@ def failed(spec,slot,job,error,down,context):
         state,_,_=validated(spec)
         event=dict(event='failed',slot=slot,job=job,kind=error.kind,error=error.cause,stage=error.stage,context=context,
             up_log_sha256=sha(error.log),owned_down_sha256=sha(down),wall_ns=time.time_ns())
-        return _append(spec,state,event,{'up.log':error.log,'owned-down.json':down})
+        evidence={'up.log':error.log,'owned-down.json':down}
+        if error.kind=='scene_initialization':
+            source=(json.dumps(error.evidence,indent=2)+'\n').encode()
+            event['scene_evidence_sha256']=hashlib.sha256(source).hexdigest();evidence['scene-init-evidence.json']=source
+        return _append(spec,state,event,evidence)
+
+
+def manifest_archive(path):
+    from triplet_artifacts import manifest
+    return manifest(Path(path))
 
 
 def before_start(spec,slot,job):
