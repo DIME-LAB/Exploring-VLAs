@@ -94,7 +94,7 @@ class SceneContinuationTests(unittest.TestCase):
                 else:
                     with self.assertRaises((ValueError,KeyError)):c.parent_state(f.parent,digest)
 
-    def prepare_case(self,f,bad=None):
+    def prepare_case(self,f,bad=None,return_transports=False):
         transports={};extended=f.waves[0]['jobs']+f.waves[1]['jobs']+f.state['next_wave'];d=c.profile(f.parent)
         with patch.object(runner_tests,'initial_wave',lambda:extended):
             for seed in d['exports']:
@@ -132,7 +132,8 @@ class SceneContinuationTests(unittest.TestCase):
             return dict(passed=True,files_sha256=files,destination=str(destination))
         output=f.root/'setup/continuation-admission-new-v1'
         with patch('triplet_media.inspect_run',lambda run:transports[int(run.name.split('-')[1])]['decode'](run)),patch.object(p.Worker,'stage',stage),patch.object(p,'backup',backup),patch.object(p,'profile',lambda:dict(export_python=sys.executable)),patch.object(p,'load_bootstrap_capsule',lambda *a:dict(pin=dict(source=dict(path=str(table))))):
-            return c.prepare(f.parent,f.root,'b'*40,output,c.checkpoint(f.parent)[1]),output
+            result=c.prepare(f.parent,f.root,'b'*40,output,c.checkpoint(f.parent)[1])
+            return (result,output,transports) if return_transports else (result,output)
 
     def test_real_prepare_carries_167_132_qualifies_peers_and_records_one_pending_start(self):
         with latest_fixture() as f:

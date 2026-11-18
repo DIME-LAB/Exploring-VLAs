@@ -312,6 +312,7 @@ def qualified_recipe(recipe):
 
 class Worker:
     def __init__(self,recipe,instance,wave):
+        if recipe.get('slot5_to4') and instance==5:raise ValueError('Slot 5 is retired for this continuation')
         self.plan=recipe;self.instance=instance;self.wave=wave;self.cut=recipe['cut'];self.port=8777+2*instance
         self.root=confined(Path(recipe['production_root'])/f'wave-{wave:02d}/slot-{instance}')
         self.root.mkdir(parents=True,exist_ok=False);self.runtime=None;self.ledger=None;self.claim=None;self.stages=[];self.native=None
@@ -621,11 +622,15 @@ def verify_outcome(outcome,recipe):
     return proof
 
 
+def planned_state(recipe,waves):
+    return reduce_waves(waves,slot5_to4=True) if recipe.get('slot5_to4') else reduce_waves(waves)
+
+
 def registries(recipe,state):
     if not state['complete']:raise ValueError('Incomplete production cannot publish a registry')
     root=Path(recipe['production_root']);result={}
     publication_gate(root,None)
-    rebuilt=reduce_waves(read(root/'wave-ledger.json'))
+    rebuilt=planned_state(recipe,read(root/'wave-ledger.json'))
     if state!=rebuilt:raise ValueError('Registry state differs from the deterministic source-bound wave ledger')
     for split in ('train','heldout'):
         layouts=[];failed=[]
@@ -730,7 +735,7 @@ def coordinate(recipe,release):
                 from triplet_continuation import reverify
                 reverify(recipe)
             while True:
-                state=reduce_waves(waves)
+                state=planned_state(recipe,waves)
                 if state['complete']:break
                 jobs=state['next_wave'];number=len(waves);path=root/f'wave-{number:02d}.json'
                 inherited=recipe.get('inherited_outcomes',[]) if number==base_wave else []
@@ -782,7 +787,7 @@ def coordinate(recipe,release):
                             raise RuntimeError('Owned instance cleanup is unresolved: '+str(slot))
                 outcomes=wait_workers(children,observe,ledger.scan,retired,root/'STOP.json')
                 for _,log,_ in children:log.close()
-                wave=dict(jobs=jobs,outcomes=outcomes);reduce_waves(waves+[wave]);waves.append(wave)
+                wave=dict(jobs=jobs,outcomes=outcomes);planned_state(recipe,waves+[wave]);waves.append(wave)
                 atomic_json(path,wave);atomic_json(root/'wave-ledger.json',waves)
             cleanup=ledger.stop()
             if cleanup['remaining']:raise RuntimeError('Coordinator descendants remain alive')
@@ -872,8 +877,9 @@ def main():
         signal.signal(signal.SIGTERM,lambda *_:(_ for _ in ()).throw(KeyboardInterrupt('Owned worker stop')))
         inherited=recipe.get('inherited_outcomes',[]) if args.wave==len(recipe.get('inherited_waves',[])) else []
         inherited_keys={(r['split'],r['layout_seed']) for r in inherited}
-        prior=[r for old in recipe.get('inherited_waves',[]) for j in old['jobs'] for r in old['outcomes'] if (r['split'],r['layout_seed'])==(j['split'],j['layout_seed']) and j['instance']==args.worker]
-        prior += [r for j in wave['jobs'] for r in inherited if (r['split'],r['layout_seed'])==(j['split'],j['layout_seed']) and j['instance']==args.worker]
+        history_slot=5 if recipe.get('slot5_to4') and args.worker==4 else args.worker
+        prior=[r for old in recipe.get('inherited_waves',[]) for j in old['jobs'] for r in old['outcomes'] if (r['split'],r['layout_seed'])==(j['split'],j['layout_seed']) and j['instance']==history_slot]
+        prior += [r for j in wave['jobs'] for r in inherited if (r['split'],r['layout_seed'])==(j['split'],j['layout_seed']) and j['instance']==history_slot]
         for row in prior:
             if row['reason']=='operator_acknowledged_peer_stop':continue
             if row['status']=='selected':worker.reason=None;worker.streak=0

@@ -29,6 +29,8 @@ def claim_run(prior_production_root=None):
             from completed_continuation import profile,parent_root
             profile(next(iter(allowed)))
             if next(iter(allowed))!=parent_root():allowed.add(parent_root())
+            if any(profile(one).get('partial') for one in allowed):
+                allowed.add(p.ROOT/'datasets/counterfactual-targets/production-v1/continuations/continuation-admission-0a80e4e-v1')
         if previous.exists() and set(previous.iterdir())-allowed:raise FileExistsError('A continuation already exists; a new recovery decision is required')
         yield
     finally:claim.close()

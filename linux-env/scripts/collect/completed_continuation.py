@@ -16,22 +16,27 @@ PRIOR_RUNNER='5eaf5add4c86e42481a3273ce9b84cfa35457da3'
 EXPORTS=(720120,720121)
 PEER=720122
 IDENTITY=720123
+RETIRED_RUNNER='68334ccb1fc76c0e36b538ac0fd3a9a6a96f0446'
 
 
 def profile(root):
-    """Only the two explicitly reviewed retired parents are admissible."""
+    """Only the explicitly reviewed retired parents are admissible."""
     import triplet_production as p
     if Path(root)==parent_root():
         return dict(runner=PRIOR_RUNNER,wave=1,dispositions=140,selected=113,exports=EXPORTS,peer=PEER,identity=IDENTITY,startup=None,slot=6,peer_error='MoveIt state validity service is unavailable')
     if Path(root)==p.ROOT/'datasets/counterfactual-targets/production-v1/continuations/continuation-admission-0a80e4e-v1':
         return dict(runner='0a80e4e867a58f1fec48ea3a9b85d179cc70343c',wave=2,dispositions=167,selected=132,exports=(720147,720149),peer=720145,identity=None,startup=720144,slot=5,peer_error='MoveIt state validity query did not complete')
+    if Path(root)==p.ROOT/'datasets/counterfactual-targets/production-v1/continuations/continuation-admission-68334cc-v1':
+        return dict(runner=RETIRED_RUNNER,wave=2,dispositions=172,selected=136,base_dispositions=167,base_selected=132,
+            exports=(),peer=None,identity=None,startup=None,slot=5,partial=True)
     raise ValueError('Unapproved completed continuation parent')
 
 
 def parent_owner(root):
     import triplet_production as p
     d=profile(root)
-    return owner_path() if d['runner']==PRIOR_RUNNER else p.ROOT/'setup/counterfactual-continuation-0a80e4e/coordinator.pid.identity.json'
+    name='68334cc' if d['runner']==RETIRED_RUNNER else '0a80e4e'
+    return owner_path() if d['runner']==PRIOR_RUNNER else p.ROOT/('setup/counterfactual-continuation-'+name+'/coordinator.pid.identity.json')
 
 
 def parent_root():
@@ -71,7 +76,8 @@ def historical_parent(root):
     if prior==PRIOR_RUNNER:expected=legacy.legacy_recipe(old['continuation_admission_path'],old['continuation_admission_sha256'],prior,hashlib.sha256(source).hexdigest())
     else:
         admission=read(old['continuation_admission_path'])
-        if admission.get('prior_production_root')!=str(parent_root()):raise ValueError('Historical 0a80 authority must retain its approved 5eaf parent')
+        expected_parent=parent_root() if prior!=RETIRED_RUNNER else p.ROOT/'datasets/counterfactual-targets/production-v1/continuations/continuation-admission-0a80e4e-v1'
+        if admission.get('prior_production_root')!=str(expected_parent):raise ValueError('Historical authority must retain its approved 5eaf parent/0a80 ancestry')
         expected=load_plan(old['continuation_admission_path'],old['continuation_admission_sha256'],prior,_historical_source=hashlib.sha256(source).hexdigest())
         ancestor,digest=checkpoint(Path(admission['prior_production_root']))
         if ancestor!=admission['parent_checkpoint'] or digest!=admission['parent_checkpoint_sha256']:raise ValueError('Historical parent checkpoint changed')
@@ -106,9 +112,11 @@ def parent_state(root,digest,allow_retry_extension=False):
     for pid,birth in identities:
         current=p.identity(pid)
         if current and str(current['start_ticks'])==birth and current['state']!='Z':raise ValueError('Completed parent workload/descendant survives')
-    ledger=read(root/'wave-ledger.json');state=reduce_waves(ledger);progress=read(root/'progress.json')
-    if (len(ledger)!=d['wave'] or sum(len(w['outcomes']) for w in ledger)!=d['dispositions'] or len(state['selected'])!=d['selected'] or
-        progress.get('wave')!=d['wave'] or progress.get('prior_selected')!=d['selected'] or progress.get('outcomes')!=[]):
+    ledger=recipe['inherited_waves'] if d.get('partial') else read(root/'wave-ledger.json')
+    if d.get('partial') and (root/'wave-ledger.json').exists():raise ValueError('Stopped partial parent has an unexpected completed ledger')
+    state=reduce_waves(ledger);progress=read(root/'progress.json')
+    if (len(ledger)!=d['wave'] or sum(len(w['outcomes']) for w in ledger)!=d.get('base_dispositions',d['dispositions']) or len(state['selected'])!=d.get('base_selected',d['selected']) or
+        progress.get('wave')!=d['wave'] or progress.get('prior_selected')!=d.get('base_selected',d['selected']) or not d.get('partial') and progress.get('outcomes')!=[]):
         raise ValueError('Completed continuation requires the source-bound completed waves, never the original 94/76 base')
     for i,wave in enumerate(ledger):
         own=root/f'wave-{i:02d}.json';inherited_waves=recipe.get('inherited_waves',[])
@@ -128,12 +136,39 @@ def parent_state(root,digest,allow_retry_extension=False):
             if proof['job']!=job:raise ValueError('Parent proof belongs to another job')
             legacy.backup_recheck(proof)
     partial=read(root/f'wave-{d["wave"]:02d}.json')
-    if partial['jobs']!=state['next_wave'] or partial['outcomes']!=[]:
+    if partial['jobs']!=state['next_wave'] or partial['outcomes']!=(recipe['inherited_outcomes'] if d.get('partial') else []):
         raise ValueError('Parent partial replacement wave changed')
+    pending=[]
+    if d.get('partial'):
+        pending=progress['outcomes'];by_key={(j['split'],j['layout_seed']):j for j in state['next_wave']}
+        if (len(pending)!=5 or len({(r['split'],r['layout_seed']) for r in pending})!=5 or
+            {r['layout_seed'] for r in pending}!={720145,720147,720148,720149,730023} or
+            any(r not in pending for r in recipe['inherited_outcomes'])):raise ValueError('Stopped partial parent membership differs')
+        inherited={(r['split'],r['layout_seed']):r for r in recipe['inherited_outcomes']}
+        for row in pending:
+            key=(row['split'],row['layout_seed']);job=by_key.get(key)
+            if job is None:raise ValueError('Orphan partial parent disposition')
+            if key in inherited:
+                if row!=inherited[key]:raise ValueError('Partial parent changed an inherited disposition')
+            else:
+                folder=root/f'wave-{d["wave"]:02d}/slot-{job["instance"]}'
+                if any(read(folder/(prefix+str(job['layout_seed'])+'.json'))!=row for prefix in ('outcome-','admitted-')):raise ValueError('Partial outcome/admission differs')
+            proof=p.verify_outcome(row,recipe);legacy.backup_recheck(proof)
+            if proof['job']!=job:raise ValueError('Partial proof belongs to another job')
+            if key not in inherited:
+                stage=next((s for s in read(folder/'stages.json') if s['name']=='collect-'+str(job['layout_seed'])),None)
+                if proof['stage']!=stage:raise ValueError('Partial proof changed its producing stage')
+        all_rows=[r for w in ledger for r in w['outcomes']]+pending
+        if len(all_rows)!=d['dispositions'] or sum(r['status']=='selected' for r in all_rows)!=d['selected']:raise ValueError('Stopped parent 172/136 membership differs')
+        guards(all_rows,state['replacement_allocations'])
     # A worker may finish backup while the coordinator is retiring. This is
     # not an admitted disposition. Keep its proof immutable, verify it before
     # re-export, and qualify the collector afresh in the child namespace.
     unadmitted=list((root/f'wave-{d["wave"]:02d}').glob('slot-*/outcome-*.json'))
+    if d.get('partial'):
+        expected_worker={root/f'wave-02/slot-{by_key[(r["split"],r["layout_seed"])]["instance"]}/outcome-{r["layout_seed"]}.json' for r in pending if (r['split'],r['layout_seed']) not in inherited}
+        if set(unadmitted)!=expected_worker:raise ValueError('Orphan/missing partial worker disposition')
+        unadmitted=[]
     if d['startup'] is None and unadmitted:raise ValueError('Unexpected unadmitted parent outcome')
     for path in unadmitted:
         row=read(path);job=next((j for j in state['next_wave'] if j['layout_seed']==720147),None)
@@ -146,6 +181,7 @@ def parent_state(root,digest,allow_retry_extension=False):
             p.verify_outcome(row,recipe);legacy.require_completed_checks(proof);legacy.backup_recheck(proof)
     expected_proofs={Path(r['proof_path']) for w in ledger for r in w['outcomes'] if Path(r['proof_path']).is_relative_to(root/'proofs')}
     expected_proofs.update(Path(read(path)['proof_path']) for path in unadmitted)
+    expected_proofs.update(Path(r['proof_path']) for r in pending if Path(r['proof_path']).is_relative_to(root/'proofs'))
     if set((root/'proofs').glob('*/*.json'))!=expected_proofs:raise ValueError('Orphan/missing completed parent proof')
     current=startup_retries.summary(recipe['startup_retry_budget']);saved=final.get('startup_retries')
     if not isinstance(saved,dict):raise ValueError('Parent retry finalization is missing')
@@ -153,7 +189,10 @@ def parent_state(root,digest,allow_retry_extension=False):
         if (current['policy']!=saved['policy'] or current['root']!=saved['root'] or
             current['events'][:len(saved['events'])]!=saved['events']):raise ValueError('Parent retry history was removed or replaced')
     elif any(current.get(k)!=v for k,v in saved.items()):raise ValueError('Retry ledger differs from the retired parent finalization')
-    return dict(recipe=recipe,waves=ledger,state=state,checkpoint=cp,stop=stop)
+    if d.get('partial'):
+        if (saved['counts']!=dict(total=3,slots={'3':0,'4':0,'5':3,'6':0}) or saved['pending']!={'5':['train',720144]} or
+            len(saved['events'])!=10 or not str(stop.get('error','')).startswith('RuntimeError("Startup retry cap reached:')):raise ValueError('Stopped parent retry cap/history differs')
+    return dict(recipe=recipe,waves=ledger,state=state,checkpoint=cp,stop=stop,pending_outcomes=pending)
 
 
 def peer_source(run,job,stage,stop_ns,collector_repo,parent=None):
@@ -282,9 +321,9 @@ def prepare(root,data_repo,cut,output,digest):
         def retire():
             worker.ledger.scan()
             for pid in list(worker.ledger.handles):worker.ledger.send(pid,signal.SIGTERM)
-        watch=p.DiskWatch(worker.root,retire,report=output/'preparation-disk-monitor.json');watch.start();pending=[]
+        watch=p.DiskWatch(worker.root,retire,report=output/'preparation-disk-monitor.json');watch.start();pending=copy.deepcopy(state['pending_outcomes'])
         try:
-            for seed in (*d['exports'],*([d['identity']] if d['identity'] is not None else []),d['peer']):
+            for seed in [s for s in (*d['exports'],d['identity'],d['peer']) if s is not None]:
                 watch.require();job=next(j for j in state['state']['next_wave'] if j['layout_seed']==seed);worker.instance=job['instance']
                 stage=next(e for e in read(root/f'wave-{d["wave"]:02d}/slot-{job["instance"]}/stages.json') if e['name']=='collect-'+str(seed))
                 run=p.ROOT/f'datasets/counterfactual-targets/train/layout-{seed}'
@@ -325,6 +364,7 @@ def prepare(root,data_repo,cut,output,digest):
             preparation_cleanup_path=str(output/'preparation-cleanup.json'),preparation_cleanup_sha256=sha(output/'preparation-cleanup.json'),
             preparation_disk_path=str(output/'preparation-disk-monitor.json'),preparation_disk_sha256=sha(output/'preparation-disk-monitor.json'))
         if startup is not None:value['pending_initialization_retry']=startup
+        if d.get('partial'):value['slot5_to4']=True
         value['preparation_files_sha256']=manifest(output);admission=output/'admission.json';atomic_json(admission,value)
         recipe=load_plan(admission,sha(admission),cut);reverify(recipe)
         return dict(passed=True,admission_path=str(admission),admission_sha256=sha(admission),inherited=len(inherited),selected=sum(r['status']=='selected' for r in inherited))
@@ -337,7 +377,7 @@ def load_plan(path,digest,cut,_historical_source=None):
         raise ValueError('Caller-bound completed continuation source differs')
     if manifest(path.parent)!={**a['preparation_files_sha256'],path.name:digest}:raise ValueError('Completed admission evidence changed')
     parent=Path(a['prior_production_root']);d=profile(parent)
-    if len(a['inherited_waves'])!=d['wave'] or sum(len(w['outcomes']) for w in a['inherited_waves'])!=d['dispositions'] or len(reduce_waves(a['inherited_waves'])['selected'])!=d['selected']:
+    if len(a['inherited_waves'])!=d['wave'] or sum(len(w['outcomes']) for w in a['inherited_waves'])!=d.get('base_dispositions',d['dispositions']) or len(reduce_waves(a['inherited_waves'])['selected'])!=d.get('base_selected',d['selected']):
         raise ValueError('Completed parent waves are missing; original 94/76 is forbidden')
     original=read(parent/'plan.json');recipe=copy.deepcopy(original)
     budget=a['startup_retry_budget'];prior=original['startup_retry_budget']
@@ -349,6 +389,12 @@ def load_plan(path,digest,cut,_historical_source=None):
         expected_prefix.append(pending['event']['sha256'])
     if budget.get('prefix')!=expected_prefix or not budget.get('identity_receipt_path') or not budget.get('identity_receipt_sha256'):
         raise ValueError('Completed continuation lost its parent retry prefix/identity receipt')
+    if d.get('partial'):
+        if a.get('slot5_to4') is not True or len(a['inherited_outcomes'])!=172 or sum(r['status']=='selected' for r in a['inherited_outcomes'])!=136:
+            raise ValueError('Final continuation must preserve 172/136 and exclude slot 5')
+        recipe['slot5_to4']=True
+        recipe['slots']=[s for s in recipe['slots'] if s['instance']!=5]
+    elif 'slot5_to4' in a:raise ValueError('Slot reassignment is not authorized for this parent')
     recipe.update(runner_cut=cut,source_sha256=_historical_source or sha(p.SELF),continuation_kind=KIND,prior_production_root=a['prior_production_root'],
         production_root=a['next_production_root'],runtime_root=a['next_runtime_root'],continuation_admission_path=str(path),continuation_admission_sha256=digest,
         inherited_waves=a['inherited_waves'],inherited_outcomes=a['pending_wave_outcomes'],startup_retry_budget=a['startup_retry_budget'])
@@ -371,8 +417,10 @@ def reverify(recipe):
         raise ValueError('Completed parent snapshot differs')
     if [r for w in a['inherited_waves'] for r in w['outcomes']]+a['pending_wave_outcomes']!=a['inherited_outcomes']:
         raise ValueError('Completed inherited membership differs')
-    seeds=(*d['exports'],d['peer'],*([d['identity']] if d['identity'] is not None else []))
-    if {(r['layout_seed'],r['split']) for r in a['pending_wave_outcomes']}!={(s,'train') for s in seeds} or len(a['pending_wave_outcomes'])!=len(seeds):
+    seeds=tuple(s for s in (*d['exports'],d['peer'],d['identity']) if s is not None)
+    if d.get('partial'):
+        if a['pending_wave_outcomes']!=state['pending_outcomes']:raise ValueError('Final continuation changed its parent partial outcomes')
+    elif {(r['layout_seed'],r['split']) for r in a['pending_wave_outcomes']}!={(s,'train') for s in seeds} or len(a['pending_wave_outcomes'])!=len(seeds):
         raise ValueError('Missing/orphan interrupted wave disposition')
     expected={(j['split'],j['layout_seed']):j for w in state['waves'] for j in w['jobs']}
     expected.update({(j['split'],j['layout_seed']):j for j in state['state']['next_wave']})
