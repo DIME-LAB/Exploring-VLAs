@@ -378,8 +378,8 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       not bit-exact at bootstrap -> pre-writer identity failure becomes a per-layout refusal counted by the >10% guard, plus
       completed-wave carry-forward, 972e707; preparation then hit Linux's 128 KiB single-argument limit -> stdin-framed
       backup recheck, 0a80e4e); 0a80e4e stopped at 132 (layout 720144: scene initialisation stalled on a fresh instance
-      before any member -> typed same-seed retry, fc801b1, in review). Identity refusals 1/167 (0.6%); 2 layouts
-      (720122, 720145) were peer-stop casualties of a stop elsewhere and are replaced from reserves. Remaining: 8 groups.
+      before any member -> typed same-seed retry, fc801b1, in review). Identity refusals 1/167 (0.6%); visible-margin refusals 30; peer-stop casualties
+      inside the 167 are 720097 and 720122 (720145 joins in the next admission), replaced from reserves. Remaining: 8 groups.
       Run history (one row per run, with evidence folders): coursework phase3/3.1-collection/counterfactual-triplets/RUN-HISTORY.md.
 - [x] 3.5 (new, operator 2026-11-17) Visual re-rendering of recorded episodes without re-simulation: bridge our per-tick
       poses (all 900 episodes carry 6-D state + 9 bodies per tick) into DroidStack take+tape+manifest on DroidStack branch
