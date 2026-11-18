@@ -16,14 +16,17 @@ PEER_INTERRUPTION=720097
 
 
 @contextmanager
-def claim_run():
+def claim_run(prior_production_root=None):
     """One preparation/coordinator owns the original run; a second invocation refuses."""
     import triplet_production as p
     root=p.confined(p.ROOT/'runtime/counterfactual-continuation-claim');root.mkdir(parents=True,exist_ok=True)
     claim=p.InstanceClaim(root)
     try:
         previous=p.ROOT/'datasets/counterfactual-targets/production-v1/continuations'
-        if previous.exists() and any(previous.iterdir()):raise FileExistsError('A continuation already exists; a new recovery decision is required')
+        allowed=set() if prior_production_root is None else {Path(prior_production_root)}
+        if allowed and allowed!={p.ROOT/'datasets/counterfactual-targets/production-v1/continuations/continuation-admission-5eaf5ad-v1'}:
+            raise ValueError('Unapproved completed continuation parent')
+        if previous.exists() and set(previous.iterdir())-allowed:raise FileExistsError('A continuation already exists; a new recovery decision is required')
         yield
     finally:claim.close()
 
@@ -196,10 +199,10 @@ def snapshot_origin(origin,target):
     return files
 
 
-def backup_evidence(recipe,log):
+def backup_legacy_evidence(recipe,log):
     """Keep projected proof paths readable, including proofs from the stopped invocation."""
     import triplet_production as p
-    if load_plan(recipe['continuation_admission_path'],recipe['continuation_admission_sha256'],recipe['runner_cut'])!=recipe:raise ValueError('Continuation admission changed before backup')
+    if load_legacy_plan(recipe['continuation_admission_path'],recipe['continuation_admission_sha256'],recipe['runner_cut'])!=recipe:raise ValueError('Continuation admission changed before backup')
     admission=read(recipe['continuation_admission_path'])
     source=Path(admission['origin_snapshot_path']);files=admission['origin_snapshot_files_sha256']
     original=p.backup(source,files,p.DUAL/Path(admission['origin_root']).relative_to(p.ROOT),log)
@@ -303,12 +306,12 @@ def prepare(origin,collector_repo,runner_cut,output,checkpoint_sha):
             preparation_cleanup_path=str(output/'preparation-cleanup.json'),preparation_cleanup_sha256=sha(output/'preparation-cleanup.json'))
         value['preparation_files_sha256']=manifest(output)
         admission=output/'admission.json';atomic_json(admission,value)
-        recipe=load_plan(admission,sha(admission),runner_cut)
-        reverify(recipe)
+        recipe=load_legacy_plan(admission,sha(admission),runner_cut)
+        reverify_legacy(recipe)
         return dict(passed=True,admission_path=str(admission),admission_sha256=sha(admission),inherited=len(inherited),selected=sum(r['status']=='selected' for r in inherited))
 
 
-def load_plan(path,digest,runner_cut):
+def legacy_recipe(path,digest,runner_cut,source_sha256):
     import triplet_production as p
     path=regular(path)
     raw=read(path,True)
@@ -325,19 +328,24 @@ def load_plan(path,digest,runner_cut):
         if sha(regular(name))!=value:raise ValueError('Original history changed')
     origin=Path(a['origin_root']);original=read(origin/'plan.json')
     recipe=copy.deepcopy(original)
-    recipe.update(collector_repo=a['collector_repo'],runner_cut=runner_cut,source_sha256=sha(p.SELF),
+    recipe.update(collector_repo=a['collector_repo'],runner_cut=runner_cut,source_sha256=source_sha256,
         production_root=a['next_production_root'],runtime_root=a['next_runtime_root'],startup_configure_timeout_s=300,
         continuation_admission_path=str(path),continuation_admission_sha256=digest,inherited_outcomes=a['inherited_outcomes'],startup_retry_budget=retry_budget)
     root=Path(recipe['production_root'])
     if root.parent!=origin/'continuations' or Path(recipe['runtime_root']).parent!=Path(original['runtime_root'])/'continuations':raise ValueError('Continuation namespace differs')
     recipe['authoritative_registries']={s:str(root/(s+'-registry.json')) for s in ('train','heldout')}
-    p.qualified_recipe(recipe)
     return recipe
 
 
-def reverify(recipe):
+def load_legacy_plan(path,digest,runner_cut):
     import triplet_production as p
-    if load_plan(recipe['continuation_admission_path'],recipe['continuation_admission_sha256'],recipe['runner_cut'])!=recipe:raise ValueError('Continuation recipe changed')
+    recipe=legacy_recipe(path,digest,runner_cut,sha(p.SELF));p.qualified_recipe(recipe)
+    return recipe
+
+
+def reverify_legacy(recipe):
+    import triplet_production as p
+    if load_legacy_plan(recipe['continuation_admission_path'],recipe['continuation_admission_sha256'],recipe['runner_cut'])!=recipe:raise ValueError('Continuation recipe changed')
     a=read(recipe['continuation_admission_path'])
     if manifest(Path(a['origin_snapshot_path']))!=a['origin_snapshot_files_sha256']:raise ValueError('Original evidence snapshot changed')
     if manifest(Path(a['bound_evidence_path']))!=a['bound_evidence_files_sha256']:raise ValueError('Bound evidence snapshot changed')
@@ -361,3 +369,20 @@ def reverify(recipe):
     if seen!=expected:raise ValueError('Missing original or interrupted group disposition')
     guards([r for j in initial_wave() for r in actual if (r['split'],r['layout_seed'])==(j['split'],j['layout_seed'])],[])
     return dict(passed=True,outcomes=len(actual))
+
+
+def load_plan(path,digest,runner_cut):
+    if read(regular(path)).get('kind')!='completed-wave-continuation':
+        raise ValueError('This run requires the completed 5eaf wave; the original 94/76 admission is forbidden')
+    from completed_continuation import load_plan as load
+    return load(path,digest,runner_cut)
+
+
+def reverify(recipe):
+    from completed_continuation import reverify as check
+    return check(recipe)
+
+
+def backup_evidence(recipe,log):
+    from completed_continuation import backup_evidence as save
+    return save(recipe,log)

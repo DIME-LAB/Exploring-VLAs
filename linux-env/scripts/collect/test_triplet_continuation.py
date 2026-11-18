@@ -81,15 +81,15 @@ class ContinuationTests(unittest.TestCase):
             value['startup_retry_budget']=startup_retries.initialize(f.root/'runtime/counterfactual-startup-retries'/f.checkpoint,f.checkpoint)
             value['preparation_files_sha256']={}
             atomic_json(admission,value)
-            recipe=c.load_plan(admission,a.sha(admission),'b'*40)
+            recipe=c.load_legacy_plan(admission,a.sha(admission),'b'*40)
             self.assertEqual(recipe['cut'],'a'*40);self.assertEqual(recipe['runner_cut'],'b'*40);self.assertEqual(recipe['startup_configure_timeout_s'],300)
             missing=copy.deepcopy(value);missing.pop('startup_retry_budget');atomic_json(admission,missing)
-            with self.assertRaisesRegex(ValueError,'retry budget is missing'):c.load_plan(admission,a.sha(admission),'b'*40)
+            with self.assertRaisesRegex(ValueError,'retry budget is missing'):c.load_legacy_plan(admission,a.sha(admission),'b'*40)
             atomic_json(admission,value)
             for digest in (None,'0'*64):
-                with self.assertRaisesRegex(ValueError,'Caller-published'):c.load_plan(admission,digest,'b'*40)
+                with self.assertRaisesRegex(ValueError,'Caller-published'):c.load_legacy_plan(admission,digest,'b'*40)
             digest=a.sha(admission);atomic_json(f.origin/'STOP.json',dict(error='changed'))
-            with self.assertRaisesRegex(ValueError,'history changed'):c.load_plan(admission,digest,'b'*40)
+            with self.assertRaisesRegex(ValueError,'history changed'):c.load_legacy_plan(admission,digest,'b'*40)
     def test_actual_backup_recheck_refuses_added_or_changed_files(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d);(root/'file').write_text('source');proof=dict(files_sha256=a.manifest(root),backup=dict(destination=str(root)))
@@ -169,6 +169,9 @@ class ContinuationTests(unittest.TestCase):
             p.coordinate(recipe,release)
             wave=a.read(Path(recipe['production_root'])/'wave-ledger.json')[0]
             self.assertEqual(len(wave['outcomes']),140);self.assertEqual(spawned,[3])
+            progress=a.read(Path(recipe['production_root'])/'progress.json')
+            self.assertEqual(progress['exact_identity_refusals'],0);self.assertEqual(progress['attempted_groups'],140)
+            self.assertEqual(progress['exact_identity_fraction'],0.);self.assertEqual(progress['exact_identity_fraction_max'],.1)
             self.assertEqual(a.sha(old/'STOP.json'),old_sha)
             self.assertTrue(a.read(Path(recipe['production_root'])/'PUBLICATION-COMPLETE.json')['passed'])
             with self.assertRaises(FileExistsError):p.coordinate(recipe,release)
@@ -219,7 +222,7 @@ class ContinuationTests(unittest.TestCase):
             self.assertTrue(result['passed']);self.assertEqual(result['inherited'],4);self.assertEqual(result['selected'],2 if failure=='media_verdict' else 3)
             admission=a.read(result['admission_path']);self.assertEqual(admission['completed_exports'],list(c.INTERRUPTED_EXPORTS))
             self.assertTrue((f.origin/'STOP.json').exists());self.assertFalse(a.read(f.origin/'production-finalization.json')['passed'])
-            recipe=c.load_plan(result['admission_path'],result['admission_sha256'],'b'*40)
+            recipe=c.load_legacy_plan(result['admission_path'],result['admission_sha256'],'b'*40)
             peer=next(r for r in recipe['inherited_outcomes'] if r['layout_seed']==seed)
             self.assertEqual(peer['reason'],'operator_acknowledged_peer_stop')
             self.assertTrue(p.verify_outcome(peer,recipe)['original_terminal'])
@@ -236,7 +239,7 @@ class ContinuationTests(unittest.TestCase):
             obsolete=f.root/'obsolete-interruption.json';badproof=dict(kind='interrupted_export_rejected',qualification_failure='tool error',export_stages={})
             atomic_json(obsolete,badproof);oldrow=dict(peer,proof_path=str(obsolete),proof_sha256=a.sha(obsolete))
             with self.assertRaisesRegex(ValueError,'not completed gate verdicts'):p.verify_outcome(oldrow,recipe)
-            with (f.root/'evidence-backup.log').open('w') as log:c.backup_evidence(recipe,log)
+            with (f.root/'evidence-backup.log').open('w') as log:c.backup_legacy_evidence(recipe,log)
             self.assertTrue((p.DUAL/f.origin.relative_to(f.root)/'proofs/train/720000.json').exists())
             self.assertTrue((p.DUAL/Path(peer['proof_path']).relative_to(f.root)).exists())
             for kind in ('duplicate','missing-original','edited-requested-slot','edited-proof-sha'):
@@ -248,7 +251,7 @@ class ContinuationTests(unittest.TestCase):
                 candidate_root=f.root/('candidate-'+kind);shutil.copytree(Path(result['admission_path']).parent,candidate_root)
                 candidate=candidate_root/'admission.json';atomic_json(candidate,changed)
                 with self.subTest(kind=kind),self.assertRaises((ValueError,RuntimeError)):
-                    c.reverify(c.load_plan(candidate,a.sha(candidate),'b'*40))
+                    c.reverify_legacy(c.load_legacy_plan(candidate,a.sha(candidate),'b'*40))
             marker=run/'terminal-fault.json';fault=a.read(marker);fault['events'][0]['wall_ns']=99;atomic_json(marker,fault)
             with self.assertRaises(ValueError):p.verify_outcome(peer,recipe)
 

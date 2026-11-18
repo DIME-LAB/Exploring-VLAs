@@ -142,6 +142,10 @@ def classify(run,job,stage,media=None,export_stages=None):
         if verdict!=failed['disposition'] or verdict['kind']!='quality_reject':raise ValueError('Physical rejection contract differs')
         if rows and not timing_audit(rows,30).get('contract_passed',False):raise ValueError('Failing episode tick contract failed')
         return 'refused','quality:'+verdict['reason'],None
+    from bootstrap_refusal import physical_error,verify as verify_bootstrap_refusal
+    if physical_error(failed.get('error')) is not None:
+        retirement(run,stage,terminal=True)
+        return 'refused','exact_identity',verify_bootstrap_refusal(run,config['counterfactual_triplet'],receipts)
     # This pre-writer admission refusal has native numerical evidence. Other
     # terminal collector faults are never eligible for a replacement.
     if index!=0 or visible_error(failed.get('error')) is None:

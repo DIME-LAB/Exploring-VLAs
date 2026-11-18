@@ -15,7 +15,7 @@ from host_config import profile
 from run_smoke import InstanceClaim,OwnedProcesses,frozen,identity,pidfd_ready
 from managed_process import capture_supervision,failure_report,supervision_evidence
 from gpu_device import gpu_uuid
-from triplet_production_plan import initial_wave,reduce_waves,guards,POLICY
+from triplet_production_plan import initial_wave,reduce_waves,guards,POLICY,identity_counts
 from triplet_artifacts import read,sha,manifest,classify,selected_entry,checked_tree
 from bootstrap_capsule import ASSIGNED_UUID,load as load_bootstrap_capsule
 from backup_space import probe_code as backup_probe_code,serialized_copy,sealed_payload,receiver_code,validate_admission
@@ -574,11 +574,17 @@ def verify_outcome(outcome,recipe):
     if proof.get('kind')=='acknowledged_peer_interruption':
         from triplet_continuation import verify_interruption
         return verify_interruption(outcome,proof,recipe)
+    if proof.get('kind')=='completed_wave_peer_interruption':
+        from completed_continuation import verify_peer
+        return verify_peer(outcome,proof,recipe)
     job=proof['job'];run=Path(proof['raw_root'])
     if proof['cut']!=recipe['cut'] or manifest(run)!=proof['files_sha256']:raise ValueError('Sealed group bytes/source cut changed')
     verify_sources(run,recipe['cut'],recipe.get('collector_repo'))
     actual=classify(run,job,proof['stage'],proof['media'],proof['export_stages'])
     if (actual[0],actual[1])!=(outcome['status'],outcome['reason']):raise ValueError('Outcome differs from verified raw disposition')
+    if actual[2] and actual[2].get('kind')=='bootstrap_identity_refusal':
+        from bootstrap_refusal import verify_evidence
+        verify_evidence(proof['group'],actual[2])
     if any(outcome[k]!=job[k] for k in ('split','layout_seed','requested_layout_seed')):raise ValueError('Disposition changed membership')
     if recipe.get('continuation_admission_path') and job['layout_seed'] in (720087,720092):
         from triplet_continuation import require_completed_checks
@@ -673,7 +679,7 @@ def backup_registries(recipe):
 
 def coordinate(recipe,release):
     from triplet_continuation import claim_run
-    with claim_run() if recipe.get('continuation_admission_path') else nullcontext():
+    with claim_run(recipe.get('prior_production_root')) if recipe.get('continuation_admission_path') else nullcontext():
         supervision=capture_supervision()
         require_host();qualified_recipe(recipe);disk()
         release_bytes=read(release,True);release_proof=json.loads(release_bytes)
@@ -689,7 +695,7 @@ def coordinate(recipe,release):
         atomic_json(root/'coordinator.json',identity(os.getpid()))
         runtime=Path(recipe['runtime_root']);runtime.mkdir(parents=True,exist_ok=False)
         if ctypes.CDLL(None,use_errno=True).prctl(36,1,0,0,0)!=0:raise OSError('Coordinator subreaper unavailable')
-        ledger=OwnedProcesses(runtime,time.time_ns());waves=[];error=None;children=[];verified={};cleanup=None;watch=None;jobs=[];terminal_backups=None;failure=None;retirement_errors=[];retry_report=None
+        ledger=OwnedProcesses(runtime,time.time_ns());waves=list(recipe.get('inherited_waves',[]));base_wave=len(waves);error=None;children=[];verified={};cleanup=None;watch=None;jobs=[];terminal_backups=None;failure=None;retirement_errors=[];retry_report=None
         try:
             def retire_workers():
                 for process,_,_ in list(children):
@@ -702,7 +708,7 @@ def coordinate(recipe,release):
                 state=reduce_waves(waves)
                 if state['complete']:break
                 jobs=state['next_wave'];number=len(waves);path=root/f'wave-{number:02d}.json'
-                inherited=recipe.get('inherited_outcomes',[]) if number==0 else []
+                inherited=recipe.get('inherited_outcomes',[]) if number==base_wave else []
                 inherited_keys={(r['split'],r['layout_seed']) for r in inherited}
                 atomic_json(path,dict(jobs=jobs,outcomes=inherited));begun=time.monotonic();children=[]
                 def observe():
@@ -727,7 +733,8 @@ def coordinate(recipe,release):
                         if planned is None:raise ValueError('Unplanned worker outcome')
                         target=root/f'wave-{number:02d}/slot-{planned["instance"]}'/('admitted-'+str(outcome['layout_seed'])+'.json')
                         if not target.exists():atomic_json(target,outcome)
-                    atomic_json(root/'progress.json',dict(wave=number,outcomes=outcomes,prior_selected=len(state['selected']),wall_ns=time.time_ns()))
+                    counts=identity_counts([r for w in waves for r in w['outcomes']]+outcomes)
+                    atomic_json(root/'progress.json',dict(wave=number,outcomes=outcomes,prior_selected=len(state['selected']),**counts,wall_ns=time.time_ns()))
                     return outcomes
                 for ordinal,slot in enumerate((3,4,5,6)):
                     if not any(j['instance']==slot and (j['split'],j['layout_seed']) not in inherited_keys for j in jobs):continue
@@ -821,6 +828,7 @@ def main():
     parser.add_argument('--wave',type=int);parser.add_argument('--worker',type=int,choices=(3,4,5,6));parser.add_argument('--release-file',type=Path)
     parser.add_argument('--continuation',type=Path);parser.add_argument('--continuation-sha256')
     parser.add_argument('--prepare-continuation',type=Path);parser.add_argument('--collector-repo',type=Path);parser.add_argument('--output',type=Path);parser.add_argument('--checkpoint-sha256')
+    parser.add_argument('--prepare-completed-continuation',type=Path);parser.add_argument('--completed-checkpoint',type=Path)
     parser.add_argument('--plan',action='store_true');parser.add_argument('--go',action='store_true');args=parser.parse_args()
     require_host()
     if args.worker is not None:
@@ -837,18 +845,26 @@ def main():
         wave=read(Path(recipe['production_root'])/f'wave-{args.wave:02d}.json')
         worker=Worker(recipe,args.worker,args.wave)
         signal.signal(signal.SIGTERM,lambda *_:(_ for _ in ()).throw(KeyboardInterrupt('Owned worker stop')))
-        inherited=recipe.get('inherited_outcomes',[]) if args.wave==0 else []
+        inherited=recipe.get('inherited_outcomes',[]) if args.wave==len(recipe.get('inherited_waves',[])) else []
         inherited_keys={(r['split'],r['layout_seed']) for r in inherited}
-        prior=[r for j in wave['jobs'] for r in inherited if (r['split'],r['layout_seed'])==(j['split'],j['layout_seed']) and j['instance']==args.worker]
+        prior=[r for old in recipe.get('inherited_waves',[]) for j in old['jobs'] for r in old['outcomes'] if (r['split'],r['layout_seed'])==(j['split'],j['layout_seed']) and j['instance']==args.worker]
+        prior += [r for j in wave['jobs'] for r in inherited if (r['split'],r['layout_seed'])==(j['split'],j['layout_seed']) and j['instance']==args.worker]
         for row in prior:
+            if row['reason']=='operator_acknowledged_peer_stop':continue
             if row['status']=='selected':worker.reason=None;worker.streak=0
             else:worker.streak=worker.streak+1 if worker.reason==row['reason'] else 1;worker.reason=row['reason']
         worker.run([j for j in wave['jobs'] if j['instance']==args.worker and (j['split'],j['layout_seed']) not in inherited_keys]);return
     if args.cut is None:parser.error('--cut is required')
     if args.prepare_continuation:
-        if args.collector_repo is None or args.output is None:parser.error('Preparation requires --collector-repo and --output')
-        from triplet_continuation import prepare
-        print(json.dumps(prepare(args.prepare_continuation,args.collector_repo,args.cut,args.output,args.checkpoint_sha256),indent=2));return
+        parser.error('The original 94/76 preparation is forbidden; use --prepare-completed-continuation')
+    if args.completed_checkpoint:
+        from completed_continuation import checkpoint
+        value,digest=checkpoint(args.completed_checkpoint)
+        print(json.dumps(dict(checkpoint=value,checkpoint_sha256=digest),indent=2));return
+    if args.prepare_completed_continuation:
+        if args.collector_repo is None or args.output is None or args.checkpoint_sha256 is None:parser.error('Completed preparation requires --collector-repo, --output and --checkpoint-sha256')
+        from completed_continuation import prepare
+        print(json.dumps(prepare(args.prepare_completed_continuation,args.collector_repo,args.cut,args.output,args.checkpoint_sha256),indent=2));return
     if args.continuation:
         from triplet_continuation import load_plan
         recipe=load_plan(args.continuation,args.continuation_sha256,args.cut)
