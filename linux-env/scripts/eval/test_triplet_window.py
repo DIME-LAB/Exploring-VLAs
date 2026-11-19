@@ -16,7 +16,7 @@ w=importlib.util.module_from_spec(spec);spec.loader.exec_module(w)
 
 def fixtures():
     context={'supervisor':{'pid':123,'start_ticks':'456'},'host':'fake-host'}
-    plan={'mode':'qualify','step':None,'root':str(w.BASE/'eval/runs/t360-q-test'),
+    plan={'mode':'qualify','step':5000,'root':str(w.BASE/'eval/runs/t360-q-test'),
           'gpu':0,'domain':92,'ports':[8781,8782,18092],
           'argv':['python3','-B','-u',str(w.REPO/'linux-env/scripts/eval/run_native_replay_window.py'),
                   '--bank',str(w.ROOT/'held20-v2'),'--bank-sha256','0ac0d8928a960ce0aa22670f2d75c33bbc9a2b6717ba3f0fc076bec652abab0d',
@@ -28,7 +28,7 @@ def fixtures():
           docker_checked=True,host_workflows_checked=True,plananything_checked=True,other_side_obligation_clear=True),
           'notifier':dict(ready=True,plan_sha256='plan',checked_unix=1000),
           'probe':dict(passed=True,step=5000,layouts=20,queries=61,weights_sha256='a'*64,bank_sha256='0ac0d8928a960ce0aa22670f2d75c33bbc9a2b6717ba3f0fc076bec652abab0d'),
-          'authority':dict(gpu_step=5000,cpu_all_steps=True,approved_by='so-arm-101-vla')}
+          'authority':dict(gpu_step=5000,cpu_all_steps=True,approved_by='so-arm-101-vla',gpu_start_authorised=True,source_message='fixture-only explicit selection')}
     hashes={k:k for k in docs};hashes['controller']='controller'
     start=dict(approved_by='so-arm-101-vla',preauthorised=True,**{k+'_sha256':v for k,v in hashes.items()})
     return docs,hashes,start,context
@@ -37,6 +37,23 @@ def fixtures():
 class Barrier(unittest.TestCase):
     def test_qualified_scope(self):
         d,h,s,c=fixtures();w.validate_start(s,d,h,c,1001)
+
+    def test_every_selected_checkpoint_requires_matching_probe(self):
+        for step in w.STEPS:
+            for mode in ('qualify','score'):
+                with self.subTest(step=step,mode=mode):
+                    d,h,s,c=fixtures();d['authority']['gpu_step']=step;d['plan']['step']=step;d['probe']['step']=step
+                    if mode=='score':
+                        d['plan'].update(mode=mode,offset=0);a=d['plan']['argv'];a.remove('--matched-reset-qualification')
+                        a+=['--matched-reset-diagnostic','--matched-reset-arms','default','--checkpoint',str(w.BASE/f'eval/checkpoints/triplet360-base3ep/{step:06d}/pretrained_model'),'--paired-flow-repeat','0','--bank-offset','0','--bank-count','15','--weights-sha256','a'*64]
+                    w.validate_start(s,d,h,c,1001)
+                    d['probe']['step']=step+1
+                    with self.assertRaises(ValueError):w.validate_start(s,d,h,c,1001)
+
+    def test_legacy_and_revoked_gpu_authority_refused(self):
+        for value in (None,False):
+            d,h,s,c=fixtures();d['authority']['gpu_start_authorised']=value
+            with self.assertRaisesRegex(ValueError,'Explicit selected-checkpoint'):w.validate_start(s,d,h,c,1001)
 
     def test_tampered_receipts(self):
         for key in ('plan','hold','free_card','notifier','probe','authority','controller'):
@@ -61,9 +78,9 @@ class Barrier(unittest.TestCase):
 
     def worker_fixture(self,folder):
         d,h,s,c=fixtures();names={'plan':'plan','hold':'card-hold','free_card':'free-card','notifier':'notifier-ready','probe':'probe-gate','authority':'authority'}
-        report=folder/'fake-cpu-report.json';w.write(report,dict(status='complete',predictions=61,expected_observations=20,weights_sha256='a'*64))
+        report=folder/'fake-cpu-report.json';w.write(report,dict(status='complete',label='t005000',predictions=61,expected_observations=20,weights_sha256='a'*64))
         d['probe'].update(result_path=str(report),result_sha256=w.digest(report))
-        audit=folder/'fake-cpu-audit.json';w.write(audit,dict(status='PASS',weights_sha256='a'*64,layouts=20,queries=60,actual_loaded_normalization_verified=True,raw_inputs_and_actual_noise_paired=True,cuda_initialized=False))
+        audit=folder/'fake-cpu-audit.json';w.write(audit,dict(status='PASS',step=5000,family='triplet360',cohort='held20',weights_sha256='a'*64,layouts=20,queries=60,actual_loaded_normalization_verified=True,raw_inputs_and_actual_noise_paired=True,cuda_initialized=False))
         d['probe'].update(validation_path=str(audit),validation_sha256=w.digest(audit))
         d['notifier']['plan_sha256']=None
         for key,name in names.items():w.write(folder/(name+'.json'),d[key])
@@ -94,6 +111,16 @@ class Barrier(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,'primary model proof refusal'):w.worker(folder)
             launch.assert_not_called();self.assertFalse(w.read(folder/'failure.json')['gpu_start_attempted'])
             self.assertIn('primary model proof refusal',w.read(folder/'failure.json')['error'])
+
+    def test_seen_audit_cannot_admit_held_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder=Path(directory);d,modules,manager=self.worker_fixture(folder)
+            gate=w.read(folder/'probe-gate.json');audit=Path(gate['validation_path']);value=w.read(audit);value['cohort']='seen20';w.write(audit,value)
+            gate['validation_sha256']=w.digest(audit);w.write(folder/'probe-gate.json',gate)
+            start=w.read(folder/'START.json');start['probe_sha256']=w.digest(folder/'probe-gate.json');w.write(folder/'START.json',start)
+            with patch.object(w,'owned_ops',lambda x:Path(x)),patch.object(w,'managed',lambda:manager),patch.object(w.socket,'gethostname',lambda:'fake-host'),patch.object(w.time,'time',lambda:1001),patch.dict(sys.modules,modules),patch.object(w.subprocess,'run') as launch:
+                with self.assertRaisesRegex(ValueError,'family/cohort differs'):w.worker(folder)
+            launch.assert_not_called()
 
     def test_cleanup_failure_alerts_both_recipients(self):
         with tempfile.TemporaryDirectory() as directory:

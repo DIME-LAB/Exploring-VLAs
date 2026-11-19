@@ -18,6 +18,7 @@ ROOT=BASE/'eval/triplet360'
 GPU='GPU-108a1a60-bca3-abe5-812c-dfd1f2b2a1ba'
 OWNER='w_eval (so-arm-101-vla) 01a1d4af'
 CUT='503e39a692d47056ea325b7a20baa2f1d6900c91'
+STEPS=(5000,10000,15000,20000,20825)
 
 
 def require(ok,message):
@@ -56,8 +57,9 @@ def validate_start(start,documents,hashes,context,now):
         require(start.get(key+'_sha256')==hashes[key],'Start artifact changed: '+key)
     require(start.get('controller_sha256')==hashes['controller'],'Controller source changed')
     plan,hold,check,note,probe,authority=(documents[k] for k in ('plan','hold','free_card','notifier','probe','authority'))
-    require(authority.get('gpu_step')==5000 and authority.get('cpu_all_steps') is True and authority.get('approved_by')=='so-arm-101-vla','Wrong preauthorised scope')
-    require(plan.get('mode') in ('qualify','score') and (plan['mode']=='qualify' or plan.get('step')==5000),'Later checkpoint requires separate lead authority')
+    step=authority.get('gpu_step')
+    require(type(step) is int and step in STEPS and authority.get('gpu_start_authorised') is True and authority.get('cpu_all_steps') is True and authority.get('approved_by')=='so-arm-101-vla' and bool(authority.get('source_message')),'Explicit selected-checkpoint lead authority required')
+    require(plan.get('mode') in ('qualify','score') and plan.get('step')==step,'Plan differs from selected checkpoint authority')
     require(plan.get('gpu')==0 and plan.get('domain')==92 and plan.get('ports')==[8781,8782,18092],'Wrong GPU/domain/ports')
     require(plan['argv'][:4]==['python3','-B','-u',str(REPO/'linux-env/scripts/eval/run_native_replay_window.py')],'Unexpected owner entrypoint')
     require(Path(plan['root']).is_relative_to(BASE/'eval/runs') and '--check-only' not in plan['argv'],'Invalid owner plan')
@@ -72,7 +74,7 @@ def validate_start(start,documents,hashes,context,now):
         require(argv.count('--matched-reset-qualification')==1 and '--checkpoint' not in argv and '--matched-reset-diagnostic' not in argv,'Qualification metadata differs from owner mode')
     else:
         require(argv.count('--matched-reset-diagnostic')==1 and '--matched-reset-qualification' not in argv and flag('--matched-reset-arms')=='default','Wrong scoring arm')
-        require(flag('--checkpoint')==str(BASE/'eval/checkpoints/triplet360-base3ep/005000/pretrained_model'),'Only 5k is preauthorised')
+        require(flag('--checkpoint')==str(BASE/f'eval/checkpoints/triplet360-base3ep/{step:06d}/pretrained_model'),'Wrong selected checkpoint')
         require(flag('--paired-flow-repeat')=='0' and int(flag('--bank-offset'))==plan['offset'] and flag('--bank-count')=='15','Wrong paired chunk')
         require(not any(k in argv for k in ('--cadence-diagnostic','--codec-diagnostic','--replacement-diagnostic','--memorisation-diagnostic')),'Unapproved diagnostic')
     require(hold.get('state')=='held' and hold.get('card')==GPU and hold.get('by')==OWNER and hold.get('slot')=='default','Wrong hold')
@@ -84,7 +86,7 @@ def validate_start(start,documents,hashes,context,now):
     require(check.get('passed') is True and check.get('gpu_uuid')==GPU and 0<=now-check['checked_unix']<=120,'Free-card check absent/stale')
     require(all(check.get(k) is True for k in ('docker_checked','host_workflows_checked','plananything_checked','other_side_obligation_clear')) and check.get('nvml_clear_seconds',0)>=60,'Extended free-card views incomplete')
     require(note.get('ready') is True and note.get('plan_sha256')==hashes['plan'] and 0<=now-note['checked_unix']<=120,'Detached notifier not ready')
-    require(probe.get('passed') is True and probe.get('step')==5000 and probe.get('layouts')==20 and probe.get('queries')==61,'5k CPU probe not complete')
+    require(probe.get('passed') is True and probe.get('step')==step and probe.get('layouts')==20 and probe.get('queries')==61,'Selected checkpoint CPU probe not complete')
     require(len(probe.get('weights_sha256',''))==64 and probe.get('bank_sha256')=='0ac0d8928a960ce0aa22670f2d75c33bbc9a2b6717ba3f0fc076bec652abab0d','Wrong CPU probe binding')
     if plan['mode']=='score':require(plan['argv'][plan['argv'].index('--weights-sha256')+1]==probe['weights_sha256'],'Probe/score checkpoint differs')
 
@@ -123,9 +125,11 @@ def worker(ops):
         require(digest(probe['result_path'])==probe['result_sha256'] and report.get('status')=='complete' and report.get('predictions')==61 and report.get('expected_observations')==20 and report.get('weights_sha256')==probe['weights_sha256'],'CPU probe result differs')
         audit=read(probe['validation_path'])
         require(digest(probe['validation_path'])==probe['validation_sha256'] and audit.get('status')=='PASS' and audit.get('weights_sha256')==probe['weights_sha256'] and audit.get('layouts')==20 and audit.get('queries')==60 and audit.get('actual_loaded_normalization_verified') is True and audit.get('raw_inputs_and_actual_noise_paired') is True and audit.get('cuda_initialized') is False,'CPU probe audit differs')
+        step=documents['authority']['gpu_step']
+        require(audit.get('step')==step and audit.get('family')=='triplet360' and audit.get('cohort')=='held20' and report.get('label')==f't{step:06d}','CPU probe checkpoint family/cohort differs')
         from triplet_eval import paths,REFERENCE
         from checkpoint_contract import require_handoff,require_processor_proof
-        p=paths(5000);handoff=require_handoff(p['model'],p['handoff'],probe['weights_sha256'],published=True)
+        p=paths(documents['authority']['gpu_step']);handoff=require_handoff(p['model'],p['handoff'],probe['weights_sha256'],published=True)
         require_processor_proof(read(p['handoff'])['source_before']['model'],p['proof'],handoff['files'],published_handoff=p['handoff'],reference_path=REFERENCE)
         # Reuse all source/model/reset/processor guards immediately before launch.
         with (ops/'owner-final-preflight.json').open('w') as out:subprocess.run(plan['argv']+['--check-only'],stdout=out,check=True)
