@@ -102,9 +102,10 @@ def main():
         atomic_json(a.out/'run.json',dict(protocol=reset_protocol,baseline=baseline,baseline_cup_layout=collector.baseline_cup_layout,live_startup_baseline=live_baseline,collector_source_sha256=sources,source_reference_run=str(reference_path),source_reference_sha256=hashlib.sha256(reference_path.read_bytes()).hexdigest()))
         path=a.out/'attempt-0000';path.mkdir();receipt=dict(params=copy.deepcopy(source['params']),accepted=False,scene_only=True,episode_id=hashlib.sha256(str(a.out).encode()).hexdigest());epochs=set()
         if triplet:
-            from triplet_reset import install_recorded_session
-            receipt['params']=install_recorded_session(collector,row,a.out)
-        collector._prepare_scene_attempt(receipt['params'],baseline,receipt,epochs,a.out,path)
+            from triplet_reset import prepare_recorded_scene
+            prepare_recorded_scene(collector,row,baseline,receipt,epochs,a.out,path)
+        else:
+            collector._prepare_scene_attempt(receipt['params'],baseline,receipt,epochs,a.out,path)
         receipt['retirement']=collector.workers.retire();receipt['camera_boundary']=collector.sensors.require_camera_boundary(collector.generation.floor_ns);receipt['gpu_isolation_after']=collector.gpu_footprint()
         actual=collector.last_snapshot;expected=source['episode_start_physical']
         assert actual['sim_ns']==collector.episode_start_physical['sim_ns']
@@ -133,7 +134,7 @@ def main():
         assert receipt['retirement']['passed'] and receipt['camera_boundary']['passed'] and receipt['gpu_isolation_after']['passed']
         receipt.update(accepted=True,matched_reset_protocol=reset_protocol,source_receipt=str(receipt_path),source_receipt_sha256=receipt_sha,training_first_frame_offset_ns=training_offset,first_frame_offset_basis='measured training first frame' if training_offset is not None else 'inherited one-tick from same-source seen qualification',suite=suite,reference_run_sha256=row['reference_run_sha256'],prepared_joint_max_error_deg=q_error,prepared_body_max_position_error_m=position_error,prepared_body_max_quaternion_error=quaternion_error,prepared_snapshot=actual,sequence=('normal sampler; ' if sealed_calls is None else 'sealed initial bodies (no sampler), reset velocities, advance6, restore current; ')+'Collector._prepare_scene_attempt: reset_release,request_home,settle_home(before),scene(randomize6+barrier2),settle_home(after),restore_velocity,verification6,sync_scene',camera_priming='Exact normal collector functions; no fixed-N or render-only replacement' if sealed_calls is None else 'Sealed bodies followed by collector six-tick sample tail and normal scene/home/velocity/verification sequence; no sampler',wall_s=time.monotonic()-started)
         if triplet:
-            receipt.update(matched_reset_protocol=reset_protocol,sequence='Producer TripletSession.prepare: recorded anchor restore; advance20 camera-prime ticks; exact anchor restore; advance1 bootstrap; native parent advances1 to first recorded observation',camera_priming='Unmodified training triplet producer, no scene sampling',sampler_invocations=0)
+            receipt.update(matched_reset_protocol=reset_protocol,sequence='Collector.scene recorded replay initializes the planning scene with its2 unrecorded barrier ticks; Producer TripletSession.prepare: recorded anchor restore; advance20 camera-prime ticks; exact anchor restore; advance1 bootstrap; native parent advances1 to first recorded observation',camera_priming='Unmodified training triplet producer after recorded replay scene initialization, no scene sampling',sampler_invocations=0)
         atomic_json(path/'receipt.json',receipt);atomic_json(a.out/'summary.json',dict(producer_invocation=collector.finalization_certificate['invocation'],complete=True,scene_only=True,prepared=1,end_marker='COLLECTION_FINISHED'));ok=True
     except BaseException as error:
         atomic_json(a.out/'reset-error.json',dict(error=repr(error),scored=False))
