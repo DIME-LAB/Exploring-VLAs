@@ -165,7 +165,42 @@ def publish_target(request):
     return dict(published=str(final), model=str(final/'pretrained_model'))
 
 
-REMOTE_FUNCTIONS = (inventory, source_probe, prepare_target, verify_target, publish_target)
+def publish_processor_proof(request):
+    """Publish admitted proof bytes atomically before exposing their handoff."""
+    import shutil
+    root=Path(request['root'])
+    if not root.is_absolute() or root.resolve()!=root.absolute() or not root.is_relative_to(TARGET_ROOT):
+        raise ValueError('Processor proof root must be confined without symlinks')
+    raw=request['text'].encode('utf-8')
+    if not 0<int(request['step'])<1000000 or re.fullmatch('[0-9a-f]{32}',request['transfer_id']) is None:
+        raise ValueError('Invalid proof step/transfer identity')
+    if hashlib.sha256(raw).hexdigest()!=request['sha256']:
+        raise ValueError('Admitted processor proof bytes changed')
+    json.loads(raw)
+    root.mkdir(parents=True,exist_ok=True)
+    if shutil.disk_usage(root).free < len(raw)+100*1024**3:
+        raise RuntimeError('Processor proof backup free-space floor')
+    folder=root/f"{int(request['step']):06d}"
+    folder.mkdir(exist_ok=True)
+    if folder.resolve()!=folder.absolute():raise ValueError('Processor proof folder symlink')
+    final=folder/'processor-proof.json'
+    if final.is_symlink():raise ValueError('Processor proof file symlink')
+    if final.exists():
+        if final.read_bytes()!=raw:raise FileExistsError('Immutable processor proof differs')
+    else:
+        temporary=folder/('.processor-proof-'+request['transfer_id']+'.tmp')
+        descriptor=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        try:
+            with os.fdopen(descriptor,'wb') as stream:stream.write(raw);stream.flush();os.fsync(stream.fileno())
+            os.link(temporary,final)
+            descriptor=os.open(folder,os.O_RDONLY|os.O_DIRECTORY)
+            try:os.fsync(descriptor)
+            finally:os.close(descriptor)
+        finally:temporary.unlink(missing_ok=True)
+    return dict(path=str(final),sha256=request['sha256'],published=True)
+
+
+REMOTE_FUNCTIONS = (inventory, source_probe, prepare_target, verify_target, publish_target, publish_processor_proof)
 
 
 def remote(host, function, request):
@@ -199,6 +234,12 @@ def transfer(args, snapshot):
     if getattr(args,'processor_proof_directory',None):
         from checkpoint_contract import require_transfer_processor_proof
         processor_admission=require_transfer_processor_proof(expected,Path(args.processor_proof_directory)/f'saved-crop-{step:06d}-proof.json',args.processor_reference,args.processor_family)
+    proof_root=getattr(args,'published_processor_proof_root',None)
+    proof_publication=None
+    if proof_root:
+        if processor_admission is None:raise ValueError('Proof publication requires actual pre-transfer admission')
+        proof_publication=remote(args.target_host,'publish_processor_proof',dict(root=str(proof_root),step=step,
+            text=Path(processor_admission['path']).read_bytes().decode('utf-8'),sha256=processor_admission['sha256'],transfer_id=uuid.uuid4().hex))
     prepared = remote(args.target_host, 'prepare_target', dict(destination=args.destination,
         step=step, bytes=sum(r['size'] for r in expected['files'].values()), transfer_id=uuid.uuid4().hex))
     if prepared['existing']:
@@ -224,6 +265,7 @@ def transfer(args, snapshot):
     receipt = dict(step=step, published_model=str(Path(args.destination)/f'{step:06d}'/'pretrained_model'), source_host=args.source_host, source=expected['model'],
         source_before=expected, source_after=after, verified=verified,processor_admission=processor_admission,
         stable_seconds=args.stable_seconds, published_utc=time.strftime('%FT%TZ',time.gmtime()))
+    if proof_publication:receipt['processor_proof_publication']=proof_publication
     if prepared['existing']:
         return dict(model=prepared['directory']+'/pretrained_model', receipt=receipt, already_staged=True)
     published = remote(args.target_host,'publish_target',dict(directory=prepared['directory'],
@@ -248,6 +290,7 @@ def main():
     p.add_argument('--completion-marker',help='Required JSON marker in pretrained_model, in addition to native last')
     p.add_argument('--notification-context',default='Waiting for your GPU0 GO before scored main30RTC-on.')
     p.add_argument('--processor-proof-directory',type=Path,help='Optional actual-save proofs; copying waits for saved-crop-NNNNNN-proof.json')
+    p.add_argument('--published-processor-proof-root',type=Path,help='Opt-in atomic target proof publication before checkpoint handoff')
     p.add_argument('--processor-reference',type=Path)
     p.add_argument('--processor-family',choices=('rule431','triplet360'))
     p.add_argument('--once',action='store_true')
@@ -263,6 +306,7 @@ def main():
     if args.processor_proof_directory:
         if not args.processor_reference or not args.processor_family:raise ValueError('Processor transfer gate requires family and sealed reference')
         configuration.update(processor_proof_directory=str(args.processor_proof_directory.resolve()),processor_reference=str(args.processor_reference.resolve()),processor_family=args.processor_family)
+    if args.published_processor_proof_root:configuration['published_processor_proof_root']=str(args.published_processor_proof_root)
     if state.get('configuration',configuration)!=configuration:raise ValueError('Watcher state belongs to another transfer configuration')
     state.update(configuration=configuration,pid=os.getpid(),source=args.source_checkpoints,destination=args.destination,status='watching')
     print(json.dumps(dict(event='WATCHING',pid=os.getpid(),steps=steps,source=args.source_checkpoints,destination=args.destination)),flush=True)
