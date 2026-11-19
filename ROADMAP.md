@@ -389,6 +389,15 @@ LR and trainable layers. The harness comparison evaluates the combined recipe, r
       Registries: train 05f93c2b..., held-out ae7165f2...; finalization 978988be...; SHA backups on dual.
       Next: w_train CPU qualification of the sealed train registry, then triplet training on rtx6000 (lead GO, after phail's
       run releases the card), then the colour-word probe and held-out evaluation.
+    - 2026-11-19 07:20-11:52Z: triplet360-base3ep trained on rtx6000 (fresh smolvla_base, 120 train layouts / 360 episodes,
+      batch 32, 20825 updates; idle owner jobs stopped with operator approval; launch gate fixed for idle desktop graphics).
+      Result: NO colour-word use. CPU colour probe held20/seen20: 5k 22/60 & 21/60, 10k 20/60 & 19/60, 15k 21/60 & 19/60
+      (chance 20/60; experts 56-59/60); prompt shift falls 5.4 -> 1.2 mm vs ~100 mm block spacing; first-chunk confusion
+      rows identical across prompts. Diagnosis (independently reviewed): colour tokens reach the expert intact (96/96 training
+      token rows exact; colour KV differs 3.2x more than layout), but fine-tuning made the action expert 8.6x LESS prompt-
+      sensitive than smolvla_base (colour attention 6.9% -> 2.3%); early (decision) frames carry ~2-2.5x the loss yet are only
+      8.1% of training frames. Scored GPU eval skipped (colour-blind policy). Next: triplet360-early50 (same data/model, ~54%
+      of each batch from frames 0-49; reviewed, launch after parent retirement + storage); if still flat, pi0.5 on the same set.
 - [x] 3.5 (new, operator 2026-11-17) Visual re-rendering of recorded episodes without re-simulation: bridge our per-tick
       poses (all 900 episodes carry 6-D state + 9 bodies per tick) into DroidStack take+tape+manifest on DroidStack branch
       vla-render-bands (separate clone, base dev 47bfbaac), add look bands (lights, materials, camera poses), an ego wrist
