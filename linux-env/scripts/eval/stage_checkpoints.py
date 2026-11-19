@@ -279,6 +279,30 @@ def write_status(path, value):
     os.replace(temporary,path)
 
 
+def notify_entry(args,state,key,state_path,message):
+    """One attempt per checkpoint; a messaging outage must not stop staging."""
+    entry=state['staged'][key]
+    if entry.get('notified') or entry.get('notification_status'):return
+    entry['notification_status']='attempted';state['notification_in_progress']=key;write_status(state_path,state)
+    try:
+        subprocess.run(json.loads(args.notify_command_json)+['--prompt-file',str(message)],check=True,timeout=120)
+    except Exception as error:
+        entry.update(notification_status='unknown' if isinstance(error,subprocess.TimeoutExpired) else 'failed',notification_error=repr(error))
+        print(json.dumps(dict(event='NOTIFICATION_FAILED_NO_RETRY',step=key,error=repr(error))),flush=True)
+    else:entry.update(notified=True,notification_status='delivered')
+    finally:
+        state.pop('notification_in_progress',None);write_status(state_path,state)
+
+
+def preserve_interrupted_notification(state):
+    key=state.get('notification_in_progress')
+    if key is not None:
+        entry=state['staged'][key]
+        if entry.get('notification_status') in (None,'attempted'):entry['notification_status']='unknown'
+        entry.setdefault('notification_error',state.get('error','Prior notification interrupted; delivery unknown; no retry'))
+        state.pop('notification_in_progress',None)
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--source-host',default='rtx6000');p.add_argument('--target-host',default='dual-a4500')
@@ -301,6 +325,7 @@ def main():
     lock=(args.state_dir/'watch.lock').open('a');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     state_path=args.state_dir/'status.json'
     state=json.loads(state_path.read_text()) if state_path.exists() else dict(staged={},observed={})
+    preserve_interrupted_notification(state)
     configuration=dict(source_host=args.source_host,target_host=args.target_host,source_checkpoints=args.source_checkpoints,destination=args.destination,steps=steps,stable_seconds=args.stable_seconds)
     if args.completion_marker:configuration['completion_marker']=args.completion_marker
     if args.processor_proof_directory:
@@ -339,9 +364,7 @@ def main():
                     digest=receipt['source_before']['files']['model.safetensors']['sha256']
                     message=args.state_dir/f'notify-{key}.txt'
                     message.write_text(f'Checkpoint {key} STAGED and SHA256-VERIFIED CPU-only at dual-a4500:{entry["model"]}. Weights SHA256 {digest}. Native trainer last marker + >={args.stable_seconds:g}s stable sizes/mtimes + source before/after SHA and target hashes checked. Complete processors/config included; optimizer stays on RTX. Receipt: {args.destination}/{key}/handoff.json. No GPU job started. {args.notification_context}\n')
-                    state['notification_in_progress']=key;write_status(state_path,state)
-                    subprocess.run(json.loads(args.notify_command_json)+['--prompt-file',str(message)],check=True,timeout=120)
-                    entry['notified']=True;state.pop('notification_in_progress',None);write_status(state_path,state)
+                    notify_entry(args,state,key,state_path,message)
             if all(f'{step:06d}' in state['staged'] for step in steps):
                 state['status']='complete';write_status(state_path,state);return
             if args.once:return

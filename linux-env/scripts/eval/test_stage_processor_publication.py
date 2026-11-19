@@ -49,5 +49,24 @@ class Publication(unittest.TestCase):
     with patch.dict(sys.modules,{'checkpoint_contract':fake}),patch.object(m,'remote',remote):
      with self.assertRaises(StopBeforeTransfer):m.transfer(args,dict(step=5000,files={}))
     self.assertEqual(calls,['source_probe']+(['publish_processor_proof'] if enabled else [])+['prepare_target'])
+ def test_failed_notification_never_retried_next_checkpoint_delivered(self):
+  import subprocess
+  with tempfile.TemporaryDirectory() as t:
+   root=Path(t);state={'staged':{'005000':{'notified':False},'010000':{'notified':False}}};args=argparse.Namespace(notify_command_json='["fixture-no-send"]');path=root/'state.json'
+   with patch.object(m.subprocess,'run',side_effect=subprocess.CalledProcessError(1,['fixture'])):m.notify_entry(args,state,'005000',path,root/'message')
+   self.assertEqual(state['staged']['005000']['notification_status'],'failed')
+   with patch.object(m.subprocess,'run') as run:
+    m.notify_entry(args,state,'005000',path,root/'message');run.assert_not_called()
+    m.notify_entry(args,state,'010000',path,root/'message');run.assert_called_once()
+   self.assertTrue(state['staged']['010000']['notified']);self.assertNotIn('notification_in_progress',state)
+ def test_legacy_in_progress_and_timeout_are_unknown_no_retry(self):
+  import subprocess
+  state={'staged':{'005000':{'notified':False}},'notification_in_progress':'005000','error':'prior failed call'};m.preserve_interrupted_notification(state)
+  self.assertEqual(state['staged']['005000']['notification_status'],'unknown')
+  with tempfile.TemporaryDirectory() as t,patch.object(m.subprocess,'run') as run:
+   args=argparse.Namespace(notify_command_json='["fixture-no-send"]');m.notify_entry(args,state,'005000',Path(t)/'state.json',Path(t)/'message');run.assert_not_called()
+   state={'staged':{'005000':{'notified':False}}};run.side_effect=subprocess.TimeoutExpired(['fixture'],120)
+   m.notify_entry(args,state,'005000',Path(t)/'state.json',Path(t)/'message')
+   self.assertEqual(state['staged']['005000']['notification_status'],'unknown')
 
 if __name__=='__main__':unittest.main()
