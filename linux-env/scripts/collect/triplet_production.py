@@ -24,7 +24,7 @@ import clock_status
 import startup_retries
 
 ROOT=Path('/mnt/storage3/aaugus11/exploring-vlas')
-DUAL=Path('/mnt/a4500-backup/exploring-vlas/datasets/counterfactual-production-v1')
+DUAL=Path('/mnt/extreme4tb/aaugus11/exploring-vlas/datasets/counterfactual-production-v1')
 SELF=Path(__file__).resolve()
 SSH=['ssh','-oBatchMode=yes','-oConnectTimeout=15','-oStrictHostKeyChecking=yes','-oHostKeyAlias=dual-a4500',
     '-oControlMaster=no','-oControlPath=none','-oControlPersist=no',

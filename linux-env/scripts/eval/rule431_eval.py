@@ -8,8 +8,8 @@ import shlex
 import subprocess
 import sys
 
-ROOT='/mnt/a4500-backup/exploring-vlas/eval'
-REPO='/mnt/a4500-backup/exploring-vlas/eval-native-rule431'
+ROOT='/mnt/extreme4tb/aaugus11/exploring-vlas/eval'
+REPO='/mnt/extreme4tb/aaugus11/exploring-vlas/eval-native-rule431'
 SOURCE='/mnt/storage3/aaugus11/smolvla-train/phase3.2/rule431-base25k/training/checkpoints'
 STEPS=(5000,10000,15000,20000,25000)
 REFERENCE=ROOT+'/rule431/contracts/input-contract.json'
@@ -108,7 +108,7 @@ print(json.dumps(dict(status='PASS',schema=proof['schema'],weights_sha256=WEIGHT
     with (local_state/'rpc.log').open('w') as log:subprocess.run(['ssh','dual-a4500',shlex.join(cmd)],stdout=log,stderr=subprocess.STDOUT,check=True)
     for suite in ('rule15','held0','held1','smoke'):
         argv=source_preflight_args(step,'rule15' if suite=='smoke' else suite,p['prep']+'/'+suite,revision,smoke=suite=='smoke',readiness_budget_s=readiness_budget_s)+['--weights-sha256',weights]
-        shell='source /opt/ros/humble/setup.bash && source '+shlex.quote(REPO+'/vla_SO-ARM101/install/setup.bash')+' && unset ROS_LOCALHOST_ONLY ROS_AUTOMATIC_DISCOVERY_RANGE ROS_STATIC_PEERS && '+shlex.join(['env','CUDA_VISIBLE_DEVICES=','PYTHONDONTWRITEBYTECODE=1','ROS_DOMAIN_ID=92','SOARM_KIT_MCP_PORT=8781','SOARM_COLLECTION_ROOT=/mnt/a4500-backup/exploring-vlas','RMW_IMPLEMENTATION=rmw_cyclonedds_cpp','CYCLONEDDS_URI=file://'+REPO+'/linux-env/cyclonedds.xml','ROS_LOG_DIR='+ROOT+'/ros-logs','TMPDIR='+ROOT+'/tmp',*argv])
+        shell='source /opt/ros/humble/setup.bash && source '+shlex.quote(REPO+'/vla_SO-ARM101/install/setup.bash')+' && unset ROS_LOCALHOST_ONLY ROS_AUTOMATIC_DISCOVERY_RANGE ROS_STATIC_PEERS && '+shlex.join(['env','CUDA_VISIBLE_DEVICES=','PYTHONDONTWRITEBYTECODE=1','ROS_DOMAIN_ID=92','SOARM_KIT_MCP_PORT=8781','SOARM_COLLECTION_ROOT=/mnt/extreme4tb/aaugus11/exploring-vlas','RMW_IMPLEMENTATION=rmw_cyclonedds_cpp','CYCLONEDDS_URI=file://'+REPO+'/linux-env/cyclonedds.xml','ROS_LOG_DIR='+ROOT+'/ros-logs','TMPDIR='+ROOT+'/tmp',*argv])
         with (local_state/(suite+'.log')).open('w') as log:subprocess.run(['ssh','dual-a4500','bash -c '+shlex.quote(shell)],stdout=log,stderr=subprocess.STDOUT,check=True)
     summary=dict(status='CPU_READY_NOT_LIVE_QUALIFIED',step=step,weights_sha256=weights,paths=p,
                  readiness_budget_s=readiness_budget_s,processor_reference=REFERENCE,preset=(p['model'],'','{}'),preset_name=f'rule431-{step//1000}k')

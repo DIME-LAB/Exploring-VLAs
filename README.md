@@ -462,7 +462,7 @@ members' raw-file hashes. `failed_groups` retain proof paths/SHAs and dispositio
 The training consumer requires the independently published authoritative SHA.
 
 Every group is SHA-verified on dual under
-`/mnt/a4500-backup/exploring-vlas/datasets/counterfactual-production-v1/` before
+`/mnt/extreme4tb/aaugus11/exploring-vlas/datasets/counterfactual-production-v1/` before
 selection. The final backup retains the exact original registry bytes with RTX
 paths. Separate `*-registry.backup-projection.json` files contain backup paths,
 are labelled derived projections and record the authoritative registry path/SHA.
@@ -493,7 +493,7 @@ Generate a CPU-only four-instance plan, without starting any simulator:
 ```bash
 python3 -B linux-env/scripts/collect/target_triplets.py --plan \
   --target-host rtx6000 --instances 3,4,5,6 \
-  --output /mnt/a4500-backup/exploring-vlas/runtime/counterfactual-plan.json
+  --output /mnt/extreme4tb/aaugus11/exploring-vlas/runtime/counterfactual-plan.json
 ```
 
 After the lead grants a live window, each planned command uses the existing
@@ -521,11 +521,11 @@ cd linux-env/scripts/collect
 CUDA_VISIBLE_DEVICES='' python3 -B -m unittest test_scene_identity test_target_triplets test_triplet_pose_policy test_triplet_interpreters
 CUDA_VISIBLE_DEVICES='' python3 -B interpreter_pose_regression.py \
   --native-python /home/aaugus11/env_isaacsim61/bin/python \
-  --output /mnt/a4500-backup/exploring-vlas/tmp/collection-codex/interpreter-pose-replay.json
+  --output /mnt/extreme4tb/aaugus11/exploring-vlas/tmp/collection-codex/interpreter-pose-replay.json
 # Run in the existing LeRobot environment (PyArrow, PyAV and the pinned fork).
 CUDA_VISIBLE_DEVICES='' python3 -B export_content_regression.py
 CUDA_VISIBLE_DEVICES='' python3 -B triplet_export_regression.py \
-  --out /mnt/a4500-backup/exploring-vlas/tmp/collection-codex/triplet-export-fixture
+  --out /mnt/extreme4tb/aaugus11/exploring-vlas/tmp/collection-codex/triplet-export-fixture
 ```
 
 Analyze the finalized 900 normal episodes from their sealed index and recorded
@@ -533,7 +533,7 @@ initial physical poses, without opening videos or a simulator:
 
 ```bash
 CUDA_VISIBLE_DEVICES='' nice -n 10 python3 -B linux-env/scripts/collect/analyze_target_rule.py \
-  --output /mnt/a4500-backup/exploring-vlas/analysis/target-rule/normal-900
+  --output /mnt/extreme4tb/aaugus11/exploring-vlas/analysis/target-rule/normal-900
 ```
 
 The report includes per-colour/per-batch counts, distance-margin distributions,
@@ -547,7 +547,7 @@ The normal-only pilot passed at frozen `ef42c1b`: **50/50 accepted**, 17 red /
 17 green /16 blue, 30,134 frames at 30 fps. LeRobotDataset load, timing, clean
 expert labels, native scene resets and owned cleanup pass. Collection achieved
 30.85 accepted episodes/hour (export excluded); median episode RTF was 0.1975.
-Bulk data: `/mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1-v4/normal/dataset`.
+Bulk data: `/mnt/extreme4tb/aaugus11/exploring-vlas/datasets/pilot-3.1-v4/normal/dataset`.
 Mac evidence: `coursework-eee598/roadmap-2026-11/phase3/3.1-collection/pilot-3.1-v4/`
 contains the README, audit, parameters, contact sheet and three colour videos.
 Re-grasp episodes are excluded pending their separate physical-clearance review
@@ -865,7 +865,7 @@ export ROS_DOMAIN_ID=90 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export CYCLONEDDS_URI="file://$PWD/linux-env/cyclonedds.xml"
 unset ROS_LOCALHOST_ONLY
 PYTHONDONTWRITEBYTECODE=1 python3 -B linux-env/scripts/collect/gui_scene_regression.py \
-  --output /mnt/a4500-backup/exploring-vlas/runtime/instance-0/gui-async-scene-regression.json
+  --output /mnt/extreme4tb/aaugus11/exploring-vlas/runtime/instance-0/gui-async-scene-regression.json
 ```
 Pose-cache subscribers recheck bypass under the map lock;
 controller-reference diagnostics carry source time/epoch validity and are never
@@ -958,7 +958,7 @@ do not also set ROS_LOCALHOST_ONLY. World timing is set before scene creation,
 including the 30 Hz frame-rate clamp. Never change World timing on a live scene.
 
 All run/export/runtime paths resolve beneath the canonical
-`/mnt/a4500-backup/exploring-vlas/`; environment overrides stay within it.
+`/mnt/extreme4tb/aaugus11/exploring-vlas/`; environment overrides stay within it.
 ROS logs, temp, HF/OptiX caches, portable roots and per-instance grasp traces
 are directed there. The indexed launcher overrides inherited
 `MCP_CLIENT_OUTPUT_DIR` with its confined instance resources directory and validates
@@ -1022,7 +1022,7 @@ remain separate from collection completion:
 
 ```bash
 python3 -B linux-env/scripts/collect/run_smoke.py --cut <full-commit> \
-  --output /mnt/a4500-backup/exploring-vlas/datasets/smoke-clock-restore-v5 --plan
+  --output /mnt/extreme4tb/aaugus11/exploring-vlas/datasets/smoke-clock-restore-v5 --plan
 # In the granted window, use the identical command with --go instead of --plan.
 ```
 
@@ -1062,9 +1062,9 @@ system Humble and the control workspace sourced:
 
 ```bash
 ROS_DOMAIN_ID=90 python3 -B linux-env/scripts/collect/collector_boot_regression.py \
-  --output /mnt/a4500-backup/exploring-vlas/runtime/instance-0/bootstrap-check
+  --output /mnt/extreme4tb/aaugus11/exploring-vlas/runtime/instance-0/bootstrap-check
 python3 -B linux-env/scripts/collect/process_ownership_regression.py \
-  --output /mnt/a4500-backup/exploring-vlas/runtime/instance-0/process-ownership-check
+  --output /mnt/extreme4tb/aaugus11/exploring-vlas/runtime/instance-0/process-ownership-check
 ```
 
 ```bash
@@ -1073,23 +1073,23 @@ python3 -B linux-env/scripts/collect/process_ownership_regression.py \
 ISAACSIM_GPU=0 bash linux-env/scripts/collect_sim.sh up 0
 
 bash linux-env/scripts/collect_sim.sh clock-sanity 0 \
-  --output /mnt/a4500-backup/exploring-vlas/runtime/instance-0/clock-sanity.json
+  --output /mnt/extreme4tb/aaugus11/exploring-vlas/runtime/instance-0/clock-sanity.json
 
 bash linux-env/scripts/collect_sim.sh run 0 --episodes 5 --seed 330000 --diagnostic --regrasp-only \
-  --output /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-smooth-regrasp-v1
+  --output /mnt/extreme4tb/aaugus11/exploring-vlas/datasets/smoke-3.1-smooth-regrasp-v1
 bash linux-env/scripts/collect_sim.sh export 0 \
-  /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-smooth-regrasp-v1 \
+  /mnt/extreme4tb/aaugus11/exploring-vlas/datasets/smoke-3.1-smooth-regrasp-v1 \
   --repo-id local/soarm101_headless_smoke \
-  --report-dir /mnt/a4500-backup/exploring-vlas/datasets/smoke-3.1-smooth-regrasp-v1/report
+  --report-dir /mnt/extreme4tb/aaugus11/exploring-vlas/datasets/smoke-3.1-smooth-regrasp-v1/report
 
 # Normal-only pilot: explicit mode disables the mixed recovery quota; resume requires the same mode.
 # Accepted colours rotate 17/17/16. Recovery smoke and later recovery collection are separate.
 bash linux-env/scripts/collect_sim.sh run 0 --episodes 50 --seed 350000 --normal-only \
-  --output /mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1-v4
+  --output /mnt/extreme4tb/aaugus11/exploring-vlas/datasets/pilot-3.1-v4
 bash linux-env/scripts/collect_sim.sh export 0 \
-  /mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1-v4 \
+  /mnt/extreme4tb/aaugus11/exploring-vlas/datasets/pilot-3.1-v4 \
   --repo-id local/soarm101_headless_pilot \
-  --report-dir /mnt/a4500-backup/exploring-vlas/datasets/pilot-3.1-v4/report
+  --report-dir /mnt/extreme4tb/aaugus11/exploring-vlas/datasets/pilot-3.1-v4/report
 
 # Optional: policy deployment using the same measured state and 30 Hz preset.
 bash linux-env/scripts/collect_sim.sh deploy 0 --pretrained /path/to/model

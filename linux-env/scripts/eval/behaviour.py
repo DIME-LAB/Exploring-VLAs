@@ -69,7 +69,7 @@ def main():
         r=json.loads(file.with_name('result.json').read_text());snaps=[json.loads(l) for l in file.open()];d,arr=diagnostics(snaps,r['color']);d.update(seed=r['seed'],color=r['color'],source='scored',raw_outcome=r['outcome'],timing_valid=r['client']['missed_action_ticks_after_startup']==0);rows.append(d);np.savez_compressed(out/f"eval-{r['seed']}.npz",**arr)
         if r.get('closing_distance_m') is None:assert d.get('closing_distance_m') is None
         else:assert d.get('closing_distance_m') is not None and abs(d['closing_distance_m']-r['closing_distance_m'])<1e-6,(r['seed'],d.get('closing_distance_m'),r['closing_distance_m'])
-    base=Path('/mnt/a4500-backup/exploring-vlas/datasets')
+    base=Path('/mnt/extreme4tb/aaugus11/exploring-vlas/datasets')
     for batch,indices,kind,dest in [('rtx6000-normal-i3-b00',range(5),'seen-training',experts),('pilot-3.1-v4',range(3),'held-out-pilot',holdouts)]:
         normal=base/batch/'normal';receipts=[json.loads(l) for l in (normal/'episodes.jsonl').open()]
         for idx in indices:

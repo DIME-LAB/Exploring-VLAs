@@ -10,7 +10,7 @@ import sys
 from triplet_bank import sha, load, SUITE, write_json
 from native_bank import select_policy_rows,parse_episode_seeds
 
-BASE = Path('/mnt/a4500-backup/exploring-vlas')
+BASE = Path('/mnt/extreme4tb/aaugus11/exploring-vlas')
 ROOT = BASE/'eval/triplet360'
 REPO = BASE/'eval-native-triplet360'
 BANK = ROOT/'held20-v2'
@@ -131,7 +131,7 @@ def main():
             from native_bank import reference_binding
             from native_environment import qualified_host
             rows=all_rows
-            require_qualification(Path('/mnt/a4500-backup/exploring-vlas/eval/runs')/f't360-q-v{a.qualification_attempt}',qualified_host(REPO),REPO,BANK_SHA,REPO/'linux-env/scripts/eval',suite=suite,**reference_binding(rows,suite))
+            require_qualification(Path('/mnt/extreme4tb/aaugus11/exploring-vlas/eval/runs')/f't360-q-v{a.qualification_attempt}',qualified_host(REPO),REPO,BANK_SHA,REPO/'linux-env/scripts/eval',suite=suite,**reference_binding(rows,suite))
         result=plan(a.mode,a.step,a.offset,a.stop_by_utc,weights,a.attempt,a.qualification_attempt,a.cpu_revision,a.episode_seeds)
     print(json.dumps(result,indent=2))
 

@@ -10,9 +10,9 @@ import unittest
 
 import triplet_bank as bank
 
-ROOT = Path('/mnt/a4500-backup/exploring-vlas/eval/triplet360/held20-v2')
+ROOT = Path('/mnt/extreme4tb/aaugus11/exploring-vlas/eval/triplet360/held20-v2')
 BANK_SHA = '0ac0d8928a960ce0aa22670f2d75c33bbc9a2b6717ba3f0fc076bec652abab0d'
-COLLECTOR = Path('/mnt/a4500-backup/exploring-vlas/eval-native-triplet360')
+COLLECTOR = Path('/mnt/extreme4tb/aaugus11/exploring-vlas/eval-native-triplet360')
 
 
 @unittest.skipUnless(ROOT.exists(), 'actual sealed dual triplet bank required')
@@ -65,11 +65,15 @@ class TripletAdmission(unittest.TestCase):
 
     def test_private_runtime_matches_candidate_qualification_sources(self):
         from native_environment import qualification_sources
-        dev=Path('/mnt/a4500-backup/exploring-vlas/eval-triplet360-dev/linux-env/scripts/eval')
+        dev=Path('/mnt/extreme4tb/aaugus11/exploring-vlas/eval-triplet360-dev/linux-env/scripts/eval')
         self.assertEqual(qualification_sources(dev),qualification_sources(COLLECTOR/'linux-env/scripts/eval'))
 
     def test_producer_reset_exact_sequence_no_sampler(self):
         """Real producer preparation; fake native RPC returns recorded proof shapes."""
+        frozen_root=Path(json.loads((COLLECTOR/'linux-env/scripts/collect/hosts/dual-a4500.json').read_text())['root'])
+        if not ROOT.is_relative_to(frozen_root):
+            self.skipTest(f'frozen native collector {COLLECTOR} confines writes to {frozen_root}, but the held bank is {ROOT} '
+                          '(2026-11-25 storage switch; the old root is read-only). Needs a re-cut collector on the new root.')
         from triplet_reset import install_recorded_session,require_bootstrap
         from target_triplets import restore_code
         row=self.rows[0];source=bank.document(row['source_receipt']);anchor=bank.document(row['anchor_path'])

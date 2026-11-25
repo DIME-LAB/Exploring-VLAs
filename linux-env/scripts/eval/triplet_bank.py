@@ -141,7 +141,7 @@ def source_rows(entry, root, certified):
 def build(held, train, projection, collector_root, out):
     import numpy as np
     out = Path(out).resolve()
-    owned = Path('/mnt/a4500-backup/exploring-vlas/eval')
+    owned = Path('/mnt/extreme4tb/aaugus11/exploring-vlas/eval')
     if not out.is_relative_to(owned) or shutil.disk_usage(owned).free < 100 * 1024**3 + 64 * 1024**2:
         raise ValueError('Bank output must preserve the owned backup root and 100 GiB floor')
     if out.exists():

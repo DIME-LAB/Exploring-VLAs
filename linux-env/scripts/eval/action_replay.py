@@ -9,7 +9,7 @@ from rclpy.qos import qos_profile_sensor_data
 from control_msgs.msg import JointTrajectoryControllerState
 from trajectory_msgs.msg import JointTrajectory
 from sensor_msgs.msg import JointState
-REPO=Path.home()/'Downloads/Exploring-VLAs';BASE=Path('/mnt/a4500-backup/exploring-vlas/eval')
+REPO=Path.home()/'Downloads/Exploring-VLAs';BASE=Path('/mnt/extreme4tb/aaugus11/exploring-vlas/eval')
 
 def main():
  p=argparse.ArgumentParser();p.add_argument('--out',type=Path,required=True);p.add_argument('--starts',type=Path,required=True);p.add_argument('--recorded-replay',type=Path,required=True);p.add_argument('--actuation-mode',choices=('native','immediate'),required=True);p.add_argument('--calibration',action='store_true');a=p.parse_args();root=a.out.resolve();assert root.is_relative_to(BASE/'runs') and not root.exists();root.mkdir()

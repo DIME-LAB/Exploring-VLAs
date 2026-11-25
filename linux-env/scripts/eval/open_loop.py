@@ -35,7 +35,7 @@ weights_sha256=hashlib.sha256((model/'model.safetensors').read_bytes()).hexdiges
 print(json.dumps(dict(stage='loading-model',device=config.device,checkpoint_path=str(model),checkpoint_label=checkpoint_label(model),weights_sha256=weights_sha256)),flush=True)
 policy=SmolVLAPolicy.from_pretrained(model,config=config).to('cpu').eval()
 pre,post=make_pre_post_processors(policy.config,pretrained_path=model,preprocessor_overrides={'device_processor':{'device':'cpu'},'rename_observations_processor':{'rename_map':{}}},postprocessor_overrides={'device_processor':{'device':'cpu'}})
-job=Path('/mnt/a4500-backup/exploring-vlas/train-data/phase3.2/jobs/smolvla-phase3-normal-60k-s42-20261114')
+job=Path('/mnt/extreme4tb/aaugus11/exploring-vlas/train-data/phase3.2/jobs/smolvla-phase3-normal-60k-s42-20261114')
 manifest=json.loads((job/'batch-manifest.json').read_text());source_roots={b['root'] for b in manifest['batches']};assert all(c['dataset'] in source_roots for c in cases if c['kind']=='seen-training');assert all(c['dataset'] not in source_roots for c in cases if c['kind']=='held-out-pilot')
 train_seeds=set()
 for b in manifest['batches']:

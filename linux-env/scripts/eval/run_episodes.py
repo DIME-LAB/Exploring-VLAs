@@ -494,7 +494,7 @@ def main():
     args.seeds = [int(s) for s in args.seeds.split(",")] if args.seeds else list(range(900000, 900000 + args.episodes))
     if len(args.seeds) != args.episodes or (not args.episode_manifest and len(set(args.seeds)) != args.episodes):
         p.error("Provide exactly one unique seed per episode")
-    args.scene_bank = (args.scene_bank or (Path("/mnt/a4500-backup/exploring-vlas/eval/scene-bank-v1") if args.sim_time else Path.home() / "w_policy_phase1/1.9/scene-bank")).expanduser().resolve()
+    args.scene_bank = (args.scene_bank or (Path("/mnt/extreme4tb/aaugus11/exploring-vlas/eval/scene-bank-v1") if args.sim_time else Path.home() / "w_policy_phase1/1.9/scene-bank")).expanduser().resolve()
     episode_rows = json.loads(args.episode_manifest.read_text()) if args.episode_manifest else None
     if episode_rows is not None:
         if len(episode_rows) != args.episodes or [r["seed"] for r in episode_rows] != args.seeds:

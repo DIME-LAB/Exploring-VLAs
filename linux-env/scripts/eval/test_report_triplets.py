@@ -12,7 +12,7 @@ from report_rule431 import audit
 from report_triplets import aggregate,paired
 from triplet_bank import load,document,SUITE,RESET
 
-ROOT=Path('/mnt/a4500-backup/exploring-vlas/eval/triplet360')
+ROOT=Path('/mnt/extreme4tb/aaugus11/exploring-vlas/eval/triplet360')
 BANK=ROOT/'held20-v2'
 SHA='0ac0d8928a960ce0aa22670f2d75c33bbc9a2b6717ba3f0fc076bec652abab0d'
 
@@ -22,7 +22,7 @@ class Reports(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.rows,_=load(BANK,SHA)
-        sys.path.insert(0,'/mnt/a4500-backup/exploring-vlas/eval-native-triplet360/linux-env/scripts/collect')
+        sys.path.insert(0,'/mnt/extreme4tb/aaugus11/exploring-vlas/eval-native-triplet360/linux-env/scripts/collect')
 
     def window(self,path,offset,count,invalid=False,success=False,started='2026-11-18T00:00:00Z',selected=None):
         from rule_target import select_target

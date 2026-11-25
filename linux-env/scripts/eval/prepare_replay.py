@@ -1,7 +1,7 @@
 """Extract exact recorded label actions and states for one episode per colour."""
 from pathlib import Path
 import hashlib,json,math,argparse
-BASE=Path('/mnt/a4500-backup/exploring-vlas/eval')
+BASE=Path('/mnt/extreme4tb/aaugus11/exploring-vlas/eval')
 p=argparse.ArgumentParser();p.add_argument('--starts',type=Path,required=True);p.add_argument('--out',type=Path,required=True);a=p.parse_args();assert a.out.resolve().is_relative_to(BASE) and not a.out.exists()
 plan=json.loads((a.starts/'home-plan.json').read_text());episodes={}
 for index,row in enumerate(plan['rows'][:3]):

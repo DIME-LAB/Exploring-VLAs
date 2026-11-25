@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 
-BASE=Path('/mnt/a4500-backup/exploring-vlas')
+BASE=Path('/mnt/extreme4tb/aaugus11/exploring-vlas')
 REPO=BASE/'eval-native-triplet360'
 ROOT=BASE/'eval/triplet360'
 GPU='GPU-108a1a60-bca3-abe5-812c-dfd1f2b2a1ba'

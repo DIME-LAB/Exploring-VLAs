@@ -3,7 +3,7 @@ The execution-cadence diagnostic is a separate 24-episode experiment on bank-v1'
 After an explicit GPU0 GO and START announcement, run:
 
     PYTHONDONTWRITEBYTECODE=1 python3 linux-env/scripts/eval/run_execution_diagnostic.py \
-      --out /mnt/a4500-backup/exploring-vlas/eval/runs/execution-horizon-diagnostic-v1
+      --out /mnt/extreme4tb/aaugus11/exploring-vlas/eval/runs/execution-horizon-diagnostic-v1
 
 The runner requires a new output, pins bank/model SHA, launches only instance2/domain92 with CycloneDDS loopback, and uses GPU0 for both Isaac and policy. It warms100 non-actuating actions per arm, saves all four manifests/configs/results/videos, applies a74-minute watchdog, stops its own child process groups on timeout, and runs instance-scoped cleanup in finally. Send STOP after checking the release receipt and GPU table. A failed arm stops the diagnostic without retrying an attempted scene.
 
@@ -14,7 +14,7 @@ The runner requires a new output, pins bank/model SHA, launches only instance2/d
 Keep the original Phase3 deployment rate, camera/normalization/RPC paths, eager backend,50-action chunks, RTC horizon10/weight10 and measured feedback. Cadence is the diagnostic intervention; queue starvation remains an outcome. Use the normal validity checks with the explicitly requested diagnostic cadence, rather than the frozen MAIN reporter's hardcoded10 requirement. Run the short timing checks with no GPUs visible and TMPDIR on backup:
 
     CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 ROS_DOMAIN_ID=100 \
-      TMPDIR=/mnt/a4500-backup/exploring-vlas/eval/cache/tmp \
+      TMPDIR=/mnt/extreme4tb/aaugus11/exploring-vlas/eval/cache/tmp \
       python3 -m unittest discover -s linux-env/scripts/eval -p test_sim_time.py
 
 Ten CPU timing tests pass, including fake clocks at RTF0.3/1 and a real paced-loop test with13-tick inference latency that executes sequential50-step chunks without retries or blending. Independent review verified the adapter and telemetry placement. Live diagnostic execution and endpoint-switching analysis remain pending.

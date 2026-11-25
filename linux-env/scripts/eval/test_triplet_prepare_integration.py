@@ -8,8 +8,8 @@ from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
-REPO=Path('/mnt/a4500-backup/exploring-vlas/eval-native-triplet360')
-BASE=Path('/mnt/a4500-backup/exploring-vlas')
+REPO=Path('/mnt/extreme4tb/aaugus11/exploring-vlas/eval-native-triplet360')
+BASE=Path('/mnt/extreme4tb/aaugus11/exploring-vlas')
 sys.dont_write_bytecode=True
 sys.path[:0]=[str(REPO/'linux-env/scripts/eval'),str(REPO/'linux-env/scripts/collect')]
 assert os.environ.get('CUDA_VISIBLE_DEVICES')==''
@@ -118,6 +118,11 @@ class Kit:
         return copy.deepcopy(self.source['counterfactual']['visibility'])
 
 
+FROZEN_ROOT=Path(json.loads((REPO/'linux-env/scripts/collect/hosts/dual-a4500.json').read_text())['root'])
+
+
+@unittest.skipUnless(BASE.is_relative_to(FROZEN_ROOT),f'frozen native collector {REPO} confines writes to {FROZEN_ROOT}, '
+    f'but the project root is {BASE} (2026-11-25 storage switch; the old root is read-only). Needs a re-cut collector on the new root.')
 class Integration(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

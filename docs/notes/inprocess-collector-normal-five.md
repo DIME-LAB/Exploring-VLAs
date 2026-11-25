@@ -45,7 +45,7 @@ The held scene preserves the verified production fixed base and runtime-derived 
 Sim released **2026-11-14T15:04:53.113004Z**. Worker exit 0 and owner finalization completed/passed with cleanup_errors[]. Seventeen owned PIDs retired, remaining[], ports 8793/8794 closed, NVML compute+graphics verified with no owned contexts/errors. A post-interruption check reconfirmed no owned process/GPU context alive; foreign processes were left alone.
 
 - Original raw run: `rtx6000:/mnt/storage3/aaugus11/exploring-vlas/inproc/datasets/normal-five-v2`.
-- Exported dataset: `dual-a4500:/mnt/a4500-backup/exploring-vlas/inproc/rtx-normal-five-v2-transfer/datasets/normal-five-v2/dataset`.
+- Exported dataset: `dual-a4500:/mnt/extreme4tb/aaugus11/exploring-vlas/inproc/rtx-normal-five-v2-transfer/datasets/normal-five-v2/dataset`.
 - Export/readback report and five comparisons: siblings `export-report` and `compare-seed-*` under the same transfer root.
 - Mac deliverable: `coursework-eee598/roadmap-2026-11/phase 3/3.1f-inprocess-collector/rtx-normal-window/`, including raw evidence, exported dataset archive, validation reports, sample videos, comparisons, qualification and cleanup proof.
 

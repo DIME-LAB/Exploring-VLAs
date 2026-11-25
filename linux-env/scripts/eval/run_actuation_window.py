@@ -1,7 +1,7 @@
 """Own a SIM-only deployment-realism window with immediate native targets."""
 from pathlib import Path
 import argparse,datetime,hashlib,json,os,signal,subprocess,time,sys
-BASE=Path('/mnt/a4500-backup/exploring-vlas/eval');REPO=Path.home()/'Downloads/Exploring-VLAs'
+BASE=Path('/mnt/extreme4tb/aaugus11/exploring-vlas/eval');REPO=Path.home()/'Downloads/Exploring-VLAs'
 sys.path.insert(0,str(REPO/'linux-env/scripts/eval'))
 from phase3 import command,manifest,validate_checkpoint,validate_bank
 

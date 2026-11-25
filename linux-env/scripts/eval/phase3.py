@@ -17,7 +17,7 @@ BANK_SHA256 = '3b3569389d3301cc26fc0b9ed892c032888b2b4531f97156296f20f079648387'
 CHECKPOINTS = (10000,20000,40000,60000)
 PARAPHRASES = ('put the {c} brick in the {c} cup', 'move the {c} block to the {c} bin', '{c} lego into the {c} cup please')
 REPO = Path(__file__).resolve().parents[3]
-CHECKPOINT_ROOT = Path('/mnt/a4500-backup/exploring-vlas/eval/checkpoints/smolvla-phase3-normal-60k-s42-20261114')
+CHECKPOINT_ROOT = Path('/mnt/extreme4tb/aaugus11/exploring-vlas/eval/checkpoints/smolvla-phase3-normal-60k-s42-20261114')
 
 
 def task(color):
@@ -124,7 +124,7 @@ def main():
     p.add_argument('operation',choices=('plan','check','run','freeze-bank'))
     p.add_argument('--checkpoint',type=Path)
     p.add_argument('--out',type=Path,required=True)
-    p.add_argument('--scene-bank',type=Path,default=Path('/mnt/a4500-backup/exploring-vlas/eval/scene-bank-v1'))
+    p.add_argument('--scene-bank',type=Path,default=Path('/mnt/extreme4tb/aaugus11/exploring-vlas/eval/scene-bank-v1'))
     p.add_argument('--suite',choices=('main','main-rtc-off','colour-swap','paraphrase'),default='main')
     p.add_argument('--index',type=int,default=0)
     p.add_argument('--count',type=int,default=1,help='Consecutive manifest rows in this announced window')
@@ -173,7 +173,7 @@ def main():
     cmd[cmd.index('--episodes')+1]=str(len(selected))
     cmd[cmd.index('--seeds')+1]=','.join(str(row['seed']) for row in selected)
     cmd+=['--episode-manifest',str(receipt)]
-    cache=Path('/mnt/a4500-backup/exploring-vlas/eval/cache')
+    cache=Path('/mnt/extreme4tb/aaugus11/exploring-vlas/eval/cache')
     for name,part in [('TORCHINDUCTOR_CACHE_DIR','inductor'),('TRITON_CACHE_DIR','triton'),('TORCH_HOME','torch'),('TMPDIR','tmp'),('HF_HOME','huggingface'),('ROS_LOG_DIR','ros-logs')]:
         directory=cache/part;directory.mkdir(parents=True,exist_ok=True);env[name]=str(directory)
     for name in ('ROS_LOCALHOST_ONLY','ROS_AUTOMATIC_DISCOVERY_RANGE','ROS_STATIC_PEERS'):env.pop(name,None)

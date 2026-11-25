@@ -4,7 +4,7 @@ import argparse,collections,hashlib,json,math,os,tempfile
 CUT='bf7336d93d5ba054c5edc66cea685725eb30eb40'
 COLLECTOR_SHA='b74cced3bca9425b55bc033d6803489685b71832d22cec5ab2828e6dda307e31'
 SELECTION=tuple((batch,index,seed) for batch,count,start in (('b00',6,530000),('b01',6,530500),('b02',3,531000)) for index,seed in enumerate(range(start,start+count)))
-ROOT=Path('/mnt/a4500-backup/exploring-vlas')
+ROOT=Path('/mnt/extreme4tb/aaugus11/exploring-vlas')
 
 def digest(path):
     before=path.stat();h=hashlib.sha256()

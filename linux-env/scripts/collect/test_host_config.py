@@ -8,7 +8,7 @@ import host_config
 class HostConfigTests(unittest.TestCase):
     def test_known_hosts_and_aliases_select_only_their_root(self):
         for hostname in ('dual-a4500', 'en4226769-l'):
-            self.assertEqual(host_config.profile(hostname)['root'], '/mnt/a4500-backup/exploring-vlas')
+            self.assertEqual(host_config.profile(hostname)['root'], '/mnt/extreme4tb/aaugus11/exploring-vlas')
         for hostname in ('rtx6000', 'EN4226747L'):
             self.assertEqual(host_config.profile(hostname)['root'], '/mnt/storage3/aaugus11/exploring-vlas')
 

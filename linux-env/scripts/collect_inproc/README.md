@@ -34,7 +34,7 @@ CPU checks do not prove physical grasp/recovery yield or native exit.
 ## Held scene and fixtures
 
 The current fixed-base export is
-`/mnt/a4500-backup/exploring-vlas/inproc/scene-fixed-root-20261114/`.
+`/mnt/extreme4tb/aaugus11/exploring-vlas/inproc/scene-fixed-root-20261114/`.
 Its manifest contains the native articulation audit, physics baseline, joint/box
 geometry, asset digests and actual cameras resolved from the collector's own
 render-product configuration. Scene/geometry digest mismatches refuse startup.
@@ -47,7 +47,7 @@ call this through its own bridge:
 import sys
 sys.path.insert(0, '/home/aaugus11/Downloads/Exploring-VLAs/linux-env/scripts/collect_inproc')
 from snapshot_scene import export_scene
-result = export_scene('/mnt/a4500-backup/exploring-vlas/inproc/NEW_SCENE_EXPORT')
+result = export_scene('/mnt/extreme4tb/aaugus11/exploring-vlas/inproc/NEW_SCENE_EXPORT')
 ```
 
 It requires an initialized, held `collection_runtime`. It never launches/stops a
@@ -59,7 +59,7 @@ composed schema placement without changing the stage.
 The prototype uses exact ROS receipts (`params`, `initial_physical`) for seeded
 layout reproduction; it has no autonomous layout generator. Fresh read-only
 fixed-base fixtures appear under
-`/mnt/a4500-backup/exploring-vlas/datasets/smoke-descent-clearance-fixed-v1/`.
+`/mnt/extreme4tb/aaugus11/exploring-vlas/datasets/smoke-descent-clearance-fixed-v1/`.
 The final normal set has five accepted receipts, attempts 0000–0004,
 seeds 330000–330004. Re-grasp fixtures are pending. Supply at least five distinct accepted comparison seeds per kind for the
 combined acceptance experiment. Earlier floating-base receipts do not fulfill it.
@@ -72,12 +72,12 @@ prints the reviewed command and input/GPU readiness; it never starts Isaac:
 
 ```bash
 python3 linux-env/scripts/collect_inproc/launch.py preflight --probe \
-  --runtime /mnt/a4500-backup/exploring-vlas/runtime/inproc-final-native-next \
+  --runtime /mnt/extreme4tb/aaugus11/exploring-vlas/runtime/inproc-final-native-next \
   --gpu 0 \
-  --renderer-log /mnt/a4500-backup/exploring-vlas/runtime/inproc-camera-params-20261114-v1/kit.log -- \
-  --scene /mnt/a4500-backup/exploring-vlas/inproc/scene-fixed-root-20261114/scene.usdc \
-  --manifest /mnt/a4500-backup/exploring-vlas/inproc/scene-fixed-root-20261114/manifest.json \
-  --output /mnt/a4500-backup/exploring-vlas/inproc/probe-final-native-next \
+  --renderer-log /mnt/extreme4tb/aaugus11/exploring-vlas/runtime/inproc-camera-params-20261114-v1/kit.log -- \
+  --scene /mnt/extreme4tb/aaugus11/exploring-vlas/inproc/scene-fixed-root-20261114/scene.usdc \
+  --manifest /mnt/extreme4tb/aaugus11/exploring-vlas/inproc/scene-fixed-root-20261114/manifest.json \
+  --output /mnt/extreme4tb/aaugus11/exploring-vlas/inproc/probe-final-native-next \
   --instance 2 --frames 30 --step-mode playing --motion-check
 ```
 
@@ -129,13 +129,13 @@ five re-grasp receipts; accepted seeds are excluded from retries. Example pilot:
 
 ```bash
 python3 linux-env/scripts/collect_inproc/launch.py preflight \
-  --runtime /mnt/a4500-backup/exploring-vlas/runtime/inproc-normal-fixed-next \
-  --gpu 0 --renderer-log /mnt/a4500-backup/exploring-vlas/runtime/inproc-final-native-20261114-v1/kit.log -- \
-  --scene /mnt/a4500-backup/exploring-vlas/inproc/scene-fixed-root-20261114/scene.usdc \
-  --manifest /mnt/a4500-backup/exploring-vlas/inproc/scene-fixed-root-20261114/manifest.json \
-  --fixture /mnt/a4500-backup/exploring-vlas/datasets/smoke-descent-clearance-fixed-v1/normal/attempt-0000/receipt.json \
-  --fixture /mnt/a4500-backup/exploring-vlas/datasets/smoke-descent-clearance-fixed-v1/normal/attempt-0001/receipt.json \
-  --output /mnt/a4500-backup/exploring-vlas/datasets/inproc-normal-fixed-next \
+  --runtime /mnt/extreme4tb/aaugus11/exploring-vlas/runtime/inproc-normal-fixed-next \
+  --gpu 0 --renderer-log /mnt/extreme4tb/aaugus11/exploring-vlas/runtime/inproc-final-native-20261114-v1/kit.log -- \
+  --scene /mnt/extreme4tb/aaugus11/exploring-vlas/inproc/scene-fixed-root-20261114/scene.usdc \
+  --manifest /mnt/extreme4tb/aaugus11/exploring-vlas/inproc/scene-fixed-root-20261114/manifest.json \
+  --fixture /mnt/extreme4tb/aaugus11/exploring-vlas/datasets/smoke-descent-clearance-fixed-v1/normal/attempt-0000/receipt.json \
+  --fixture /mnt/extreme4tb/aaugus11/exploring-vlas/datasets/smoke-descent-clearance-fixed-v1/normal/attempt-0001/receipt.json \
+  --output /mnt/extreme4tb/aaugus11/exploring-vlas/datasets/inproc-normal-fixed-next \
   --kind normal --per-kind 2 --max-attempts 6 --step-mode playing --instance 2
 ```
 
@@ -143,9 +143,9 @@ Only finalized accepted runs go through the existing export entrance:
 
 ```bash
 pixi run --manifest-path linux-env/pixi.toml python linux-env/scripts/collect_inproc/validate.py \
-  /mnt/a4500-backup/exploring-vlas/datasets/inproc-normal-fixed-next \
+  /mnt/extreme4tb/aaugus11/exploring-vlas/datasets/inproc-normal-fixed-next \
   --repo-id local/soarm101_inproc_normal_fixed_next \
-  --report-dir /mnt/a4500-backup/exploring-vlas/reports/inproc-normal-fixed-next
+  --report-dir /mnt/extreme4tb/aaugus11/exploring-vlas/reports/inproc-normal-fixed-next
 ```
 
 This calls `collect/export.py` unchanged, then reads back every numeric state,
@@ -173,9 +173,9 @@ Run the comparison in pixi (the Isaac venv's OpenCV cannot decode H.264 here):
 
 ```bash
 pixi run --manifest-path linux-env/pixi.toml python linux-env/scripts/collect_inproc/compare.py \
-  --reference /mnt/a4500-backup/exploring-vlas/datasets/smoke-descent-clearance-fixed-v1/normal/attempt-0000 \
-  --candidate /mnt/a4500-backup/exploring-vlas/datasets/inproc-normal-fixed-next/attempt-0000 \
-  --output /mnt/a4500-backup/exploring-vlas/reports/inproc-normal-fixed-next-comparison
+  --reference /mnt/extreme4tb/aaugus11/exploring-vlas/datasets/smoke-descent-clearance-fixed-v1/normal/attempt-0000 \
+  --candidate /mnt/extreme4tb/aaugus11/exploring-vlas/datasets/inproc-normal-fixed-next/attempt-0000 \
+  --output /mnt/extreme4tb/aaugus11/exploring-vlas/reports/inproc-normal-fixed-next-comparison
 ```
 
 Both inputs are single attempt directories containing receipt.json, frames.jsonl
@@ -188,6 +188,6 @@ physical rows and reports PSNR/SSIM/RGB errors. Five same-seed trajectory compar
 
 
 Boot logs are written to `<runtime>/kit.log`. The completed owned boot used
-`/mnt/a4500-backup/exploring-vlas/runtime/inproc-final-native-20261114-v1/kit.log`.
+`/mnt/extreme4tb/aaugus11/exploring-vlas/runtime/inproc-final-native-20261114-v1/kit.log`.
 A future boot using the preflight example's new runtime will write its log beneath
 that new runtime instead. Runtime/output/report directories are always fresh.

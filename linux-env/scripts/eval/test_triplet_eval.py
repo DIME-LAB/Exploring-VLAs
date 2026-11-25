@@ -10,11 +10,11 @@ from triplet_bank import document, sha
 from triplet_eval import plan, STEPS, paths, prepare
 from checkpoint_contract import require_rule431_reference,require_transfer_processor_proof,checkpoint_files
 
-ROOT=Path('/mnt/a4500-backup/exploring-vlas/eval/triplet360')
+ROOT=Path('/mnt/extreme4tb/aaugus11/exploring-vlas/eval/triplet360')
 
 
 class Plans(unittest.TestCase):
-    @unittest.skipUnless(Path('/mnt/a4500-backup/exploring-vlas/eval/runs').exists(), 'owned dual integration output root required')
+    @unittest.skipUnless(Path('/mnt/extreme4tb/aaugus11/exploring-vlas/eval/runs').exists(), 'owned dual integration output root required')
     def test_prepare_uses_real_native_out_contract(self):
         from triplet_eval import BASE
         self.assertTrue(paths(5000)['prep'].is_relative_to(BASE/'eval/runs'))
@@ -49,7 +49,7 @@ class Plans(unittest.TestCase):
 
     def test_qualification_attempt_independent_of_score_attempt(self):
         result=plan('score',5000,0,'2026-11-20T00:00:00Z','a'*64,attempt=3,qualification_attempt=2)
-        self.assertEqual(result['argv'][result['argv'].index('--reset-qualification')+1],'/mnt/a4500-backup/exploring-vlas/eval/runs/t360-q-v2')
+        self.assertEqual(result['argv'][result['argv'].index('--reset-qualification')+1],'/mnt/extreme4tb/aaugus11/exploring-vlas/eval/runs/t360-q-v2')
 
     def test_five_checkpoints_four_complete_chunks(self):
         for step in STEPS:

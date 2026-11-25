@@ -3,7 +3,7 @@ from pathlib import Path
 import argparse,hashlib,json,math,os
 COLORS=('red','green','blue');SEEDS=tuple(range(530000,530005))
 NAMES={f'{c}_2x3_{i}' for c in COLORS for i in range(2)}|{f'cup_{c}' for c in COLORS}
-BASE=Path('/mnt/a4500-backup/exploring-vlas')
+BASE=Path('/mnt/extreme4tb/aaugus11/exploring-vlas')
 
 def digest(p):return hashlib.sha256(Path(p).read_bytes()).hexdigest()
 def write(p,value):p.write_text(json.dumps(value,indent=2)+'\n')

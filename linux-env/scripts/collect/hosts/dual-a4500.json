@@ -1,5 +1,5 @@
 {
   "hostnames": ["dual-a4500", "en4226769-l"],
-  "root": "/mnt/a4500-backup/exploring-vlas",
+  "root": "/mnt/extreme4tb/aaugus11/exploring-vlas",
   "image_abi_manifest": "image_transport_abi.json"
 }

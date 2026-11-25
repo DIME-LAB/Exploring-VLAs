@@ -3,7 +3,7 @@ import fcntl,hashlib,inspect,json,os,stat,tempfile,uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-BASE=Path('/mnt/a4500-backup/exploring-vlas')
+BASE=Path('/mnt/extreme4tb/aaugus11/exploring-vlas')
 PROJECTION=BASE/'datasets/counterfactual-production-v1'
 
 
@@ -14,7 +14,7 @@ def require_capacity(free_bytes,incoming_bytes,file_count):
     overhead=64*1024**2+file_count*16*1024
     required=floor+incoming_bytes+overhead
     if free_bytes<required:
-        raise RuntimeError('Dual /mnt/a4500-backup would cross 100 GiB floor: free_GiB='+format(free_bytes/1024**3,'.3f')+', free_bytes='+str(free_bytes)+
+        raise RuntimeError('Dual /mnt/extreme4tb would cross 100 GiB floor: free_GiB='+format(free_bytes/1024**3,'.3f')+', free_bytes='+str(free_bytes)+
             ', incoming='+str(incoming_bytes)+', overhead='+str(overhead)+', required='+str(required))
     return dict(passed=True,free_bytes=free_bytes,incoming_bytes=incoming_bytes,file_count=file_count,
         floor_bytes=floor,overhead_bytes=overhead,required_free_bytes=required,

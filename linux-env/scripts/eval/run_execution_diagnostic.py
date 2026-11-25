@@ -1,7 +1,7 @@
 """Own one announced execution-cadence or seen-training-start diagnostic."""
 from pathlib import Path
 import argparse,datetime,hashlib,json,os,signal,subprocess,sys,time,shlex
-BASE=Path('/mnt/a4500-backup/exploring-vlas/eval');REPO=Path.home()/'Downloads/Exploring-VLAs'
+BASE=Path('/mnt/extreme4tb/aaugus11/exploring-vlas/eval');REPO=Path.home()/'Downloads/Exploring-VLAs'
 sys.path.insert(0,str(REPO/'linux-env/scripts/eval'))
 from phase3 import command,task,COLORS,validate_checkpoint,validate_bank
 

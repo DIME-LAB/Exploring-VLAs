@@ -218,7 +218,7 @@ windows; policy and sim share GPU0, never GPU1. Set
 `SOARM_EVAL_LOCALHOST_ONLY=1` for `collect_sim.sh up/deploy-clock/down 2` so its
 DDS participants remain on loopback. Preserve its own-process cleanup rules.
 All weights, caches and results belong under
-`/mnt/a4500-backup/exploring-vlas/eval/`. `sim_time.py` is eval-only; ordinary
+`/mnt/extreme4tb/aaugus11/exploring-vlas/eval/`. `sim_time.py` is eval-only; ordinary
 Phase1 launch defaults and the installed lerobot fork are unchanged. The
 adapter's `--eval-clock=wall` episode-client mode keeps wall pacing for real
 hardware. Run CPU regressions with `CUDA_VISIBLE_DEVICES='' ~/.pixi/bin/pixi run --manifest-path linux-env/pixi.toml
@@ -254,7 +254,7 @@ Default steps are10000,20000,40000,60000; poll/stability are60s. Optional
 published target's `handoff.json` preserve the full file hashes. A state lock
 prevents duplicate watchers, and failures preserve unpublished incoming data.
 Source reads stay under our RTX storage root; all target writes are confined
-to `/mnt/a4500-backup/exploring-vlas/eval/`. GPU use still requires a separate
+to `/mnt/extreme4tb/aaugus11/exploring-vlas/eval/`. GPU use still requires a separate
 announced GO after staging.
 
 
@@ -330,7 +330,7 @@ checkpoint watcher, and CPU model diagnostics run outside scored GPU windows.
 
 Use the existing pixi Python with `CUDA_VISIBLE_DEVICES=''`,
 `HF_HUB_OFFLINE=1`, `PYTHONDONTWRITEBYTECODE=1` and caches/TMPDIR beneath
-`/mnt/a4500-backup/exploring-vlas/eval/cache/`. The checkpoint's camera order
+`/mnt/extreme4tb/aaugus11/exploring-vlas/eval/cache/`. The checkpoint's camera order
 and processors remain native; RTC and compilation are disabled only for these
 unscored open-loop probes. Raw image/state tensor hashes are checked before and
 after every prompt, native source-prompt controls are repeated, and tokens,
@@ -364,7 +364,7 @@ deliveries are protected against report overwrites.
 
 The separate unfreeze trial uses the same validated `stage_checkpoints.py`
 with `--steps 2500,5000,7500,10000`, a separate local state/lock directory and
-destination `/mnt/a4500-backup/exploring-vlas/eval/checkpoints/unfreeze30k`.
+destination `/mnt/extreme4tb/aaugus11/exploring-vlas/eval/checkpoints/unfreeze30k`.
 Its source is the job's `unfreeze-10k/training/checkpoints`. CPU-only stable
 save/marker/hash gates are unchanged. Distinct presets `unfreeze30k+2500`,
 `unfreeze30k+5000`, `unfreeze30k+7500` and `unfreeze30k+10000` refer to additional

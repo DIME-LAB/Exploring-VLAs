@@ -1,6 +1,6 @@
 # Rule431 evaluation operator
 
-The operator prepares CPU evidence and prints inert, reviewable window plans. It never starts a GPU window automatically. All inputs and outputs on dual live under `/mnt/a4500-backup/exploring-vlas/eval/`; the private runtime is `/mnt/a4500-backup/exploring-vlas/eval-native-rule431`. The collector implementation remains the exact bf7336d cut. Use dual GPU0 only and domain92 loopback. Announce START/STOP through the lead after ABI verification and at least 60 seconds without foreign GPU0 compute. Existing own7GiB/global79% thresholds and foreign-process guards apply.
+The operator prepares CPU evidence and prints inert, reviewable window plans. It never starts a GPU window automatically. All inputs and outputs on dual live under `/mnt/extreme4tb/aaugus11/exploring-vlas/eval/`; the private runtime is `/mnt/extreme4tb/aaugus11/exploring-vlas/eval-native-rule431`. The collector implementation remains the exact bf7336d cut. Use dual GPU0 only and domain92 loopback. Announce START/STOP through the lead after ABI verification and at least 60 seconds without foreign GPU0 compute. Existing own7GiB/global79% thresholds and foreign-process guards apply.
 
 ## Checkpoint preparation (Mac)
 

@@ -16,7 +16,7 @@ import time
 import uuid
 
 SOURCE_ROOT = '/mnt/storage3/aaugus11'
-TARGET_ROOT = '/mnt/a4500-backup/exploring-vlas/eval'
+TARGET_ROOT = '/mnt/extreme4tb/aaugus11/exploring-vlas/eval'
 
 REQUIRED = ('config.json', 'model.safetensors', 'train_config.json',
             'policy_preprocessor.json', 'policy_postprocessor.json')
